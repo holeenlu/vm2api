@@ -1,3 +1,5 @@
+import { t as translate } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 /**
@@ -15,6 +17,8 @@ export function HealthDonut({
   label: string
   size?: number
 }) {
+  useTranslation('overview')
+
   const p = Math.max(0, Math.min(100, Number(score) || 0))
   const r = 30
   const c = 2 * Math.PI * r
@@ -76,12 +80,42 @@ export function HealthDonut({
   )
 }
 
-export const HEALTH_SEGMENTS = [
-  { key: 'ok', label: '可用', color: 'var(--status-ok)' },
-  { key: 'caution', label: '警告', color: 'var(--status-caution)' },
-  { key: 'warn', label: '限制', color: 'var(--status-warn)' },
-  { key: 'bad', label: '无效凭证', color: 'var(--status-bad)' },
-  { key: 'none', label: '未使用', color: 'var(--status-none)' },
+const HEALTH_SEGMENTS = [
+  {
+    key: 'ok',
+    get label() {
+      return translate('overview:available')
+    },
+    color: 'var(--status-ok)',
+  },
+  {
+    key: 'caution',
+    get label() {
+      return translate('overview:warning')
+    },
+    color: 'var(--status-caution)',
+  },
+  {
+    key: 'warn',
+    get label() {
+      return translate('overview:limited')
+    },
+    color: 'var(--status-warn)',
+  },
+  {
+    key: 'bad',
+    get label() {
+      return translate('overview:invalidCredentials')
+    },
+    color: 'var(--status-bad)',
+  },
+  {
+    key: 'none',
+    get label() {
+      return translate('overview:unused')
+    },
+    color: 'var(--status-none)',
+  },
 ] as const
 
 export type HealthBuckets = Record<
@@ -97,6 +131,8 @@ export function HealthBar({
   buckets: HealthBuckets
   total: number
 }) {
+  useTranslation('overview')
+
   const segs = HEALTH_SEGMENTS.filter((s) => buckets[s.key] > 0)
   return (
     <div className='flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-muted'>
@@ -125,6 +161,8 @@ export function HealthBar({
 
 /** 分段图例。对齐 index.html 的 `healthLegend(buckets)`。 */
 export function HealthLegend({ buckets }: { buckets: HealthBuckets }) {
+  useTranslation('overview')
+
   return (
     <div className='flex flex-wrap gap-x-4 gap-y-1.5'>
       {HEALTH_SEGMENTS.map((s) => (

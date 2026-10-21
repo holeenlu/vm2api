@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { t } from '@/i18n'
 import type { Price, PricingEntry } from '@/types/panel-pricing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -36,9 +38,10 @@ type Draft = FieldDraft & {
 }
 
 const MODE_LABEL: Record<ModeKey, string> = {
-  fast: 'fast',
-  flex: 'flex',
-  priority: 'priority',
+  fast: /* i18n-exempt "fast" -- OpenAI service_tier wire identifier; price mode keys are not translated. */ 'fast',
+  flex: /* i18n-exempt "flex" -- OpenAI service_tier wire identifier; price mode keys are not translated. */ 'flex',
+  priority:
+    /* i18n-exempt "priority" -- OpenAI service_tier wire identifier; price mode keys are not translated. */ 'priority',
 }
 
 function emptyFields(): FieldDraft {
@@ -88,10 +91,11 @@ function fromEntry(entry: PricingEntry): Draft {
 }
 
 function parseReq(raw: string, label: string): number | { error: string } {
-  const t = raw.trim()
-  if (!t) return { error: `请填写${label}` }
-  const n = Number(t)
-  if (!Number.isFinite(n) || n < 0) return { error: `${label} 必须是 ≥ 0 的数` }
+  const trimmed = raw.trim()
+  if (!trimmed) return { error: t('models:fieldRequired', { label }) }
+  const n = Number(trimmed)
+  if (!Number.isFinite(n) || n < 0)
+    return { error: t('models:fieldNonnegative', { label }) }
   return n
 }
 
@@ -99,11 +103,11 @@ function parseOpt(
   raw: string,
   label: string
 ): number | undefined | { error: string } {
-  const t = raw.trim()
-  if (!t) return undefined
-  const n = Number(t)
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  const n = Number(trimmed)
   if (!Number.isFinite(n) || n < 0) {
-    return { error: `${label} 必须是 ≥ 0 的数` }
+    return { error: t('models:fieldNonnegative', { label }) }
   }
   return n
 }
@@ -127,17 +131,23 @@ type OverridePrice = {
 
 function assembleFields(
   d: FieldDraft,
-  prefix: string
+  context: { tier?: number; mode?: ModeKey }
 ): OverridePrice | { error: string } {
-  const input = parseReq(d.input, `${prefix}input`)
+  const label = (field: keyof FieldDraft) =>
+    context.tier != null
+      ? t('models:tierField', { tier: context.tier, field })
+      : context.mode
+        ? t('models:modeField', { mode: context.mode, field })
+        : field
+  const input = parseReq(d.input, label('input'))
   if (typeof input === 'object') return input
-  const output = parseReq(d.output, `${prefix}output`)
+  const output = parseReq(d.output, label('output'))
   if (typeof output === 'object') return output
-  const cache_read = parseReq(d.cache_read, `${prefix}cache_read`)
+  const cache_read = parseReq(d.cache_read, label('cache_read'))
   if (typeof cache_read === 'object') return cache_read
-  const cache_5m = parseOpt(d.cache_5m, `${prefix}cache_5m`)
+  const cache_5m = parseOpt(d.cache_5m, label('cache_5m'))
   if (typeof cache_5m === 'object') return cache_5m
-  const cache_1h = parseOpt(d.cache_1h, `${prefix}cache_1h`)
+  const cache_1h = parseOpt(d.cache_1h, label('cache_1h'))
   if (typeof cache_1h === 'object') return cache_1h
   const price: OverridePrice = { input, output, cache_read }
   if (cache_5m != null) price.cache_5m = cache_5m
@@ -146,18 +156,21 @@ function assembleFields(
 }
 
 function assemblePrice(d: Draft): OverridePrice | { error: string } {
-  const base = assembleFields(d, '')
+  const base = assembleFields(d, {})
   if ('error' in base) return base
   if (d.tiers.length) {
     const tiers: NonNullable<OverridePrice['tiers']> = []
     for (const [i, tier] of d.tiers.entries()) {
-      const above = parseReq(tier.above, `档 ${i + 1} above`)
+      const above = parseReq(
+        tier.above,
+        t('models:tierField', { tier: i + 1, field: 'above' })
+      )
       if (typeof above === 'object') return above
       if (tier.unpriced) {
         tiers.push({ above, unpriced: true })
         continue
       }
-      const body = assembleFields(tier, `档 ${i + 1} `)
+      const body = assembleFields(tier, { tier: i + 1 })
       if ('error' in body) return body
       tiers.push({ above, ...body })
     }
@@ -167,7 +180,7 @@ function assemblePrice(d: Draft): OverridePrice | { error: string } {
   for (const key of ['fast', 'flex', 'priority'] as const) {
     const mode = d.modes[key]
     if (!mode) continue
-    const body = assembleFields(mode, `${key} `)
+    const body = assembleFields(mode, { mode: key })
     if ('error' in body) return body
     modes[key] = body
   }
@@ -186,6 +199,8 @@ function FieldGrid({
   platform: 'anthropic' | 'openai'
   idPrefix: string
 }) {
+  const { t } = useTranslation('models')
+
   function set(key: keyof FieldDraft, raw: string) {
     onChange({ ...value, [key]: raw })
   }
@@ -193,17 +208,16 @@ function FieldGrid({
     <div className='grid gap-2 sm:grid-cols-5'>
       {(
         [
-          ['input', 'input', true],
-          ['output', 'output', true],
-          ['cache_read', 'cache read', true],
-          ['cache_5m', '5m write', false],
-          ['cache_1h', '1h write', false],
+          ['input', t('models:inputPrice'), true],
+          ['output', t('models:outputPrice'), true],
+          ['cache_read', t('models:cacheReadPrice'), true],
+          ['cache_5m', t('models:cache5mPrice'), false],
+          ['cache_1h', t('models:cache1hPrice'), false],
         ] as const
       ).map(([key, label, required]) => (
         <div key={key} className='space-y-1'>
           <Label htmlFor={`${idPrefix}-${key}`} className='text-xs'>
-            {label}
-            {required ? '' : ' · 可空'}
+            {required ? label : t('models:optionalField', { label })}
           </Label>
           <Input
             id={`${idPrefix}-${key}`}
@@ -231,6 +245,8 @@ export function PriceOverrideDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  const { t } = useTranslation('models')
+
   const qc = useQueryClient()
   const [draft, setDraft] = useState<Draft>(() =>
     entry ? fromEntry(entry) : { ...emptyFields(), tiers: [], modes: {} }
@@ -250,7 +266,7 @@ export function PriceOverrideDialog({
         body: JSON.stringify({ key, price }),
       }),
     onSuccess: async () => {
-      toast.success('覆盖已保存')
+      toast.success(t('models:overrideSaved'))
       await invalidatePricing(qc)
       onOpenChange(false)
     },
@@ -264,7 +280,7 @@ export function PriceOverrideDialog({
         body: JSON.stringify({ key, price: null }),
       }),
     onSuccess: async () => {
-      toast.success('已清除覆盖')
+      toast.success(t('models:overrideCleared'))
       await invalidatePricing(qc)
       onOpenChange(false)
     },
@@ -287,16 +303,17 @@ export function PriceOverrideDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='max-h-[min(92svh,760px)] overflow-y-auto sm:max-w-3xl'>
         <DialogHeader>
-          <DialogTitle>覆盖价格 · {entry.id}</DialogTitle>
+          <DialogTitle>
+            {t('models:overrideTitle', { model: entry.id })}
+          </DialogTitle>
           <DialogDescription>
-            input / output / cache_read 必填（USD / 1M）。cache_5m / cache_1h
-            可空，按平台补全。key {key}
+            {t('models:overrideDescription', { key })}
           </DialogDescription>
         </DialogHeader>
 
         <div className='space-y-5'>
           <section className='space-y-2'>
-            <h4 className='text-sm font-medium'>基础价</h4>
+            <h4 className='text-sm font-medium'>{t('models:basePrice')}</h4>
             <FieldGrid
               idPrefix='base'
               platform={platform}
@@ -307,7 +324,9 @@ export function PriceOverrideDialog({
 
           <section className='space-y-2'>
             <div className='flex items-center justify-between gap-2'>
-              <h4 className='text-sm font-medium'>长上下文档</h4>
+              <h4 className='text-sm font-medium'>
+                {t('models:contextTiers')}
+              </h4>
               <Button
                 type='button'
                 size='sm'
@@ -322,12 +341,12 @@ export function PriceOverrideDialog({
                   })
                 }
               >
-                添加档位
+                {t('models:addTier')}
               </Button>
             </div>
             {draft.tiers.length === 0 ? (
               <p className='text-xs text-muted-foreground'>
-                无档位时整单按基础价。prompt = input + cache_read + 写入。
+                {t('models:tierHint')}
               </p>
             ) : (
               <div className='space-y-3'>
@@ -338,7 +357,7 @@ export function PriceOverrideDialog({
                   >
                     <div className='flex flex-wrap items-center gap-3'>
                       <Label className='text-xs' htmlFor={`tier-${i}-above`}>
-                        above
+                        {t('common:pricingThreshold')}
                       </Label>
                       <Input
                         id={`tier-${i}-above`}
@@ -361,7 +380,7 @@ export function PriceOverrideDialog({
                             setDraft({ ...draft, tiers })
                           }}
                         />
-                        该档未定价
+                        {t('models:tierUnpriced')}
                       </label>
                       <Button
                         type='button'
@@ -375,7 +394,7 @@ export function PriceOverrideDialog({
                           })
                         }
                       >
-                        删除
+                        {t('models:delete')}
                       </Button>
                     </div>
                     {tier.unpriced ? null : (
@@ -397,9 +416,7 @@ export function PriceOverrideDialog({
           </section>
 
           <section className='space-y-3'>
-            <h4 className='text-sm font-medium'>
-              档位价（fast / flex / priority）
-            </h4>
+            <h4 className='text-sm font-medium'>{t('models:modePrices')}</h4>
             {(['fast', 'flex', 'priority'] as const).map((mode) => {
               const modeDraft = draft.modes[mode]
               return (
@@ -445,7 +462,7 @@ export function PriceOverrideDialog({
             disabled={!entry.override || reset.isPending}
             onClick={() => reset.mutate()}
           >
-            {reset.isPending ? '清除中…' : '重置覆盖'}
+            {reset.isPending ? t('models:clearing') : t('models:resetOverride')}
           </Button>
           <div className='flex gap-2'>
             <Button
@@ -453,10 +470,10 @@ export function PriceOverrideDialog({
               variant='outline'
               onClick={() => onOpenChange(false)}
             >
-              取消
+              {t('models:cancel')}
             </Button>
             <Button type='button' disabled={save.isPending} onClick={submit}>
-              {save.isPending ? '保存中…' : '保存覆盖'}
+              {save.isPending ? t('models:saving') : t('models:saveOverride')}
             </Button>
           </div>
         </DialogFooter>

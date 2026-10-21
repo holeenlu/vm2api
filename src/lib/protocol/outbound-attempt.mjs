@@ -9,15 +9,12 @@ import {
   rewriteToolNames,
   sanitizeAnthropicBodyForBetaTokens,
   ensureFastModeBeta,
-  ensureClearThinkingContextManagement,
   stripInvalidThinkingBlocks,
-  alignSamplingWithThinking,
   modelSupportsMidConversationSystem,
 } from './anthropic-policy.mjs'
-import { liftMidConversationSystemMessages, promoteContentToBlocks } from './sanitize.mjs'
+import { liftMidConversationSystemMessages } from './sanitize.mjs'
 import {
   applyThinkingDisplay,
-  ensureUnofficialAdaptiveThinking,
   ensureUnofficialEffortHigh,
   normalizeThinkingForModel,
   thinkingDisplayMode,
@@ -50,7 +47,6 @@ import {
 } from '../identity/official-cc-system-2.1.241.mjs'
 import {
   applyCacheTtlToBody,
-  applyMessageBreakpoints,
   DEFAULT_CACHE_TTL,
   enforceCacheTtlOrder,
   normalizeCacheTtl,

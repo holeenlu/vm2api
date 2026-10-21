@@ -1,3 +1,4 @@
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -134,20 +135,19 @@ test('API backend applies the global official_full persona setting', async () =>
     assert.ok(received)
     const outbound = JSON.parse(received.body)
     assert.equal(outbound.system.length, 5)
-    assert.ok(
-      outbound.system.some((block) => String(block.text || '').includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 80))),
-    )
+    assert.equal(outbound.system[3].text, `${DEFAULT_AGENT_STANDING}\n${CRS_OFFICIAL_AGENT_PROMPT}`)
   } finally {
     await new Promise((resolve) => kernel.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('OAuth cli-hop applies the resolved Protocol custom persona template', async () => {
+test('OAuth cli-hop applies the custom persona and panel TTL despite a conflicting inbound TTL', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-persona-'))
   const routingFile = path.join(root, 'routing.json')
   const compatibility = {
     persona_preset: 'custom',
+    cache_ttl: '1h',
     persona_inject: 'rewrite',
     persona_templates: {
       custom: [{ id: 'custom', type: 'text', text: 'CUSTOM_PERSONA {{timezone}}' }],
@@ -190,7 +190,7 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     requestLog: { start: () => ({ request_id: 'slot-persona-test' }), finish() {} },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: { db: createDatabase({ dbPath: path.join(root, 'protocol.db') }) },
     apiScheduler: {},
     apiEndpointStore: {},
     stats,
@@ -212,7 +212,7 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
   const req = {
     method: 'POST',
     url: '/v1/messages',
-    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0' },
+    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0', 'x-kin-cache-ttl': '5m' },
     apiKeyKind: 'master',
     once() {},
     off() {},
@@ -222,7 +222,9 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
     assert.equal(response.status, 503)
     assert.ok(prepared?.body)
-    assert.equal(prepared.body.system.length, 2)
+    assert.equal(prepared.body.system.length, 1)
+    assert.ok(prepared.body.system.every((block) => block.cache_control?.ttl === '1h'))
+    assert.equal(prepared.body.messages.at(-1).content.at(-1).cache_control.ttl, '1h')
     assert.ok(prepared.body.system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA UTC')))
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -270,7 +272,7 @@ test('logs the session id actually sent upstream, not the caller one', async () 
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: { db: createDatabase({ dbPath: path.join(root, 'protocol.db') }) },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -377,7 +379,7 @@ for (const previousVm of [null, 'vm-01']) {
       },
       stickyRouter: sticky,
       accountQuota: {},
-      apiKeyStore: {},
+      apiKeyStore: { db: createDatabase({ dbPath: path.join(root, 'protocol.db') }) },
       apiScheduler: {},
       apiEndpointStore: {},
       stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -482,6 +484,7 @@ async function runManagedKeyHop(root, result) {
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
     apiKeyStore: {
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
       acquire: () => ({ ok: true }),
       release() {},
       recordUsage: (key, usage, opts) => charges.push({ key, usage, opts }),
@@ -504,7 +507,7 @@ async function runManagedKeyHop(root, result) {
     url: '/v1/messages',
     headers: { authorization: 'Bearer sk-vm-x', 'user-agent': 'claude-cli/2.1.241 (external, cli)' },
     apiKeyKind: 'managed',
-    apiKeyRecord: { id: 'key-1', group_id: 1 },
+    apiKeyRecord: { id: 'key-1', group_id: null },
     once() {},
     off() {},
   }
@@ -525,7 +528,7 @@ test('a managed key is charged exactly once for a hop billed inline', async () =
       body: { error: { type: 'server_error', code: 'x', message: 'stop' } },
     })
     assert.equal(charges.length, 1)
-    assert.equal(charges[0].opts.rateMultiplier, 2)
+    assert.equal(charges[0].opts.rateMultiplier, 1)
     assert.equal(charges[0].opts.officialCost, logged[0].total_cost)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -588,7 +591,7 @@ test('OpenAI chat carrying claude-opus-4-8 uses the Claude pool', async () => {
     requestLog: { start: () => ({ request_id: 'opus-platform-test' }), finish() {} },
     stickyRouter: { extractPoolKey: () => 'opus-session', collectPoolKeys: () => ['opus-session'] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: { db: createDatabase({ dbPath: path.join(root, 'protocol.db') }) },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -679,6 +682,7 @@ function protocolHarness({ body, stickyRouter, failoverRunner, apiKeyRecord = nu
     stickyRouter,
     accountQuota: {},
     apiKeyStore: {
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
       acquire: () => {
         apiKeyCalls.acquire += 1
         return { ok: true }
@@ -700,7 +704,7 @@ function protocolHarness({ body, stickyRouter, failoverRunner, apiKeyRecord = nu
     url: '/v1/messages',
     headers: { authorization: 'Bearer test', 'user-agent': 'Go-http-client/2.0', ...headers },
     apiKeyKind: apiKeyRecord ? 'managed' : 'master',
-    apiKeyRecord,
+    apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     once() {},
     off() {},
   }
@@ -800,7 +804,7 @@ async function captureRunOpts({ body, stickyRouter, apiKeyRecord, headers }) {
   const harness = protocolHarness({
     body,
     stickyRouter,
-    apiKeyRecord,
+    apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     headers,
     failoverRunner: {
       async run(opts) {
@@ -894,12 +898,12 @@ test('shared API key keeps different devices apart at the protocol entry', async
     const a = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-one', session_id: 'sess-one' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     const b = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-two', session_id: 'sess-two' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     assert.notEqual(a.stickyKey, b.stickyKey)
     assert.notEqual(a.deviceKey, b.deviceKey)
@@ -934,7 +938,7 @@ test('legacy API-key-scoped session row migrates lazily at the protocol entry', 
     const opts = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-legacy', session_id: 'sess-legacy' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     assert.equal(opts.stickyKey, 'sess:sess-legacy')
     assert.deepEqual(opts.stickyKeys, ['sess:sess-legacy', legacyKey])
@@ -994,7 +998,7 @@ test('Claude Code sub-agent hops run as child sessions of the main session', asy
       captureRunOpts({
         body,
         stickyRouter: router,
-        apiKeyRecord,
+        apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
         headers: {
           'x-claude-code-session-id': 'main-sess',
           'x-claude-code-agent-id': agentId,

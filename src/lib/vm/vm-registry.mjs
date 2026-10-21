@@ -1,3 +1,5 @@
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
+import { isDbOpen, getDb } from '../db/database.mjs'
 /**
  * Multi-VM registry — load all vms/*.json (except active.json)
  * Writes go through atomicWriteJson so the DB credential mirror
@@ -141,6 +143,12 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     schedule_disabled_reason: vm.schedule_disabled_reason || null,
     temp_unschedulable_until: vm.claude?.temp_unschedulable_until || vm.temp_unschedulable_until || null,
     temp_unschedulable_reason: vm.claude?.temp_unschedulable_reason || vm.temp_unschedulable_reason || null,
+    groups: isDbOpen()
+      ? new GroupsRepo(getDb())
+          .forResource('vm', vm.id)
+          .map(({ id, name, platform, status }) => ({ id, name, platform, status }))
+      : [],
+    groups_version: isDbOpen() ? new GroupsRepo(getDb()).resourceVersion('vm', vm.id) : 0,
     owner_user_id: normalizeOwnerId(vm.owner_user_id),
     origin: vmOriginOf(vm),
     proxy_id: vm.proxy?.id || null,
@@ -580,6 +588,7 @@ export function bindVmProxy(projectRoot, id, proxyInfo) {
         host: proxyInfo.host,
         port: proxyInfo.port,
         scheme: proxyInfo.scheme || proxyInfo.kind || 'socks5',
+        expires_at: proxyInfo.expires_at || null,
         url: proxyInfo.url || null,
         username: proxyInfo.username || null,
         password: proxyInfo.password == null ? null : proxyInfo.password,
@@ -693,35 +702,4 @@ export function persistVmTimezone(projectRoot, id, timezone, { source = 'manual'
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(file, vm)
   return summarizeVm(vm)
-}
-
-export function persistVmOwner(projectRoot, id, { ownerUserId = null, origin = null } = {}) {
-  const file = path.join(projectRoot, 'vms', `${id}.json`)
-  if (!fs.existsSync(file)) return null
-  const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
-  vm.owner_user_id = normalizeOwnerId(ownerUserId)
-  vm.origin = origin || vmOriginOf({ ...vm, owner_user_id: vm.owner_user_id })
-  vm.updated_at = new Date().toISOString()
-  atomicWriteJson(file, vm, { mode: 0o600 })
-  return vm
-}
-
-/** Return administrator-assigned slots to the platform when their tenant is removed. */
-export function reclaimAssignedVms(projectRoot, ownerIds, { onError = null } = {}) {
-  const reclaimed = []
-  if (!ownerIds.size) return reclaimed
-  const dir = path.join(projectRoot, 'vms')
-  for (const name of listVmRecordFiles(dir)) {
-    try {
-      const vm = readJsonCached(path.join(dir, name))
-      if (!vm?.id || !ownerIds.has(vmOwnerId(vm)) || vmOriginOf(vm) !== VM_ORIGIN.adminAssigned) continue
-      // Keep credentials, quota cooldowns and the operator's scheduling switch intact.
-      persistVmOwner(projectRoot, vm.id, { ownerUserId: null, origin: VM_ORIGIN.platform })
-      reclaimed.push(vm.id)
-    } catch (error) {
-      if (!onError) throw error
-      onError(error, name)
-    }
-  }
-  return reclaimed
 }

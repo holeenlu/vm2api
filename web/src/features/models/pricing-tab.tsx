@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t } from '@/i18n'
 import type { PricingEntry } from '@/types/panel-pricing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
-import { fmtAgo, fmtNum } from '@/lib/format'
+import { fmtAgo } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -45,34 +47,41 @@ function modelsDevCopy(status: {
   models: number
 }): { title: string; detail: string } {
   if (status.status === 'never') {
-    return { title: '从未同步', detail: '尚未拉过 models.dev，计价走内置表。' }
+    return {
+      title: t('models:neverSynced'),
+      detail: t('models:neverSyncedHint'),
+    }
   }
   const when = status.fetched_at
     ? fmtAgo(status.fetched_at) || status.fetched_at
-    : '未知时间'
+    : t('models:unknownTime')
   if (status.status === 'ok') {
     return {
-      title: `已同步 · ${when}`,
-      detail: `${fmtNum(status.models)} 个模型`,
+      title: t('models:syncedAt', { when }),
+      detail: t('models:modelCount', { count: status.models }),
     }
   }
   return {
-    title: `失败 · ${when}`,
-    detail: status.error || '拉取失败，保留上一份快照。',
+    title: t('models:failedAt', { when }),
+    detail: status.error || t('models:fetchFailedHint'),
   }
 }
 
 function DiffMark({ entry }: { entry: PricingEntry }) {
+  const { t } = useTranslation('models')
+
   if (!entry.diff) return null
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Badge variant='outline' className='cursor-default font-mono'>
-          差异
+          {t('models:difference')}
         </Badge>
       </TooltipTrigger>
       <TooltipContent className='max-w-xs space-y-1'>
-        <p>内置 {fmtBaseRates(entry.builtin)}</p>
+        <p>
+          {t('models:builtinRates', { rates: fmtBaseRates(entry.builtin) })}
+        </p>
         <p>models.dev {fmtBaseRates(entry.models_dev)}</p>
       </TooltipContent>
     </Tooltip>
@@ -88,6 +97,8 @@ function CatalogTable({
   rows: PricingEntry[]
   onEdit: (entry: PricingEntry) => void
 }) {
+  const { t } = useTranslation('models')
+
   const [inPolicyOnly, setInPolicyOnly] = useState(true)
   const visible = inPolicyOnly ? rows.filter((r) => r.in_policy) : rows
   return (
@@ -97,31 +108,44 @@ function CatalogTable({
           <h3 className='text-lg font-semibold tracking-tight'>{title}</h3>
           <p className='text-xs text-muted-foreground'>
             {inPolicyOnly
-              ? `策略内 ${visible.length} / 目录 ${rows.length}`
-              : `全部 ${visible.length}`}
+              ? t('models:policyCount', {
+                  count: visible.length,
+                  total: rows.length,
+                })
+              : t('models:allCount', { count: visible.length })}
           </p>
         </div>
         <label className='flex items-center gap-2 text-sm'>
           <Switch checked={inPolicyOnly} onCheckedChange={setInPolicyOnly} />
-          仅策略内
+          {t('models:inPolicyOnly')}
         </label>
       </div>
       {visible.length === 0 ? (
-        <EmptyState reason='没有符合筛选的模型。' />
+        <EmptyState reason={t('models:noFilteredModels')} />
       ) : (
         <Table density='compact'>
           <TableHeader>
             <TableRow>
               <TableHead>id</TableHead>
-              <TableHead>名称</TableHead>
-              <TableHead className='text-end'>input</TableHead>
-              <TableHead className='text-end'>output</TableHead>
-              <TableHead className='text-end'>cache read</TableHead>
-              <TableHead className='text-end'>5m write</TableHead>
-              <TableHead className='text-end'>1h write</TableHead>
-              <TableHead>档位</TableHead>
-              <TableHead>modes</TableHead>
-              <TableHead>来源</TableHead>
+              <TableHead>{t('models:name')}</TableHead>
+              <TableHead className='text-end'>
+                {t('models:inputPrice')}
+              </TableHead>
+              <TableHead className='text-end'>
+                {t('models:outputPrice')}
+              </TableHead>
+              <TableHead className='text-end'>
+                {t('models:cacheReadPrice')}
+              </TableHead>
+              <TableHead className='text-end'>
+                {t('models:cache5mPrice')}
+              </TableHead>
+              <TableHead className='text-end'>
+                {t('models:cache1hPrice')}
+              </TableHead>
+              <TableHead>{t('models:tiers')}</TableHead>
+              <TableHead>{t('models:pricingModes')}</TableHead>
+              <TableHead>{t('models:source')}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -194,7 +218,7 @@ function CatalogTable({
                         onEdit(row)
                       }}
                     >
-                      覆盖
+                      {t('models:override')}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -208,6 +232,8 @@ function CatalogTable({
 }
 
 export function PricingTab() {
+  const { t } = useTranslation('models')
+
   const qc = useQueryClient()
   const q = useQuery(pricingQueryOptions())
   const [edit, setEdit] = useState<PricingEntry | null>(null)
@@ -263,7 +289,9 @@ export function PricingTab() {
                 disabled={sync.isPending}
                 onClick={() => sync.mutate()}
               >
-                {sync.isPending ? '同步中…' : '同步 models.dev'}
+                {sync.isPending
+                  ? t('models:syncing')
+                  : t('models:syncModelsDev')}
               </Button>
             </div>
           </div>
@@ -273,16 +301,16 @@ export function PricingTab() {
               className='cursor-pointer'
               onClick={() => setRepriceOpen(true)}
             >
-              按当前价重算
+              {t('models:reprice')}
             </Button>
           </div>
         </section>
 
         {unpriced.length ? (
           <section className='rounded-2xl border border-[color:var(--status-caution)]/40 bg-card p-4 shadow-sm'>
-            <h3 className='font-semibold'>未定价模型</h3>
+            <h3 className='font-semibold'>{t('models:unpricedModels')}</h3>
             <p className='mt-1 text-xs text-muted-foreground'>
-              窗口估算遇到这些请求会标 unpriced，不出总量。
+              {t('models:unpricedHint')}
             </p>
             <ul className='mt-3 space-y-1.5 text-sm'>
               {unpriced.map((row) => (
@@ -290,9 +318,9 @@ export function PricingTab() {
                   key={row.model}
                   className='flex flex-wrap items-baseline justify-between gap-2 font-mono text-xs'
                 >
-                  <span>{row.model || '（空）'}</span>
+                  <span>{row.model || t('models:empty')}</span>
                   <span className='text-muted-foreground'>
-                    {fmtNum(row.requests)} 次
+                    {t('models:requestCount', { count: row.requests })}
                     {row.last_seen
                       ? ` · ${fmtAgo(row.last_seen) || row.last_seen}`
                       : ''}

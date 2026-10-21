@@ -38,7 +38,7 @@ test('PUBLIC_HOST builds http URL with port; https omits default port suffix', (
 
 test('loadConfig keeps bind host separate from public base_url', () => {
   const saved = {
-    VM2API_API_KEY: process.env.VM2API_API_KEY,
+    TAPMODELS_API_KEY: process.env.TAPMODELS_API_KEY,
     KIN_API_KEY: process.env.KIN_API_KEY,
     HOST: process.env.HOST,
     PUBLIC_HOST: process.env.PUBLIC_HOST,
@@ -47,7 +47,7 @@ test('loadConfig keeps bind host separate from public base_url', () => {
     PORT: process.env.PORT,
   }
   try {
-    process.env.VM2API_API_KEY = 'unit-test-public-url-key'
+    process.env.TAPMODELS_API_KEY = 'unit-test-public-url-key'
     delete process.env.KIN_API_KEY
     process.env.HOST = '0.0.0.0'
     process.env.PORT = '8787'

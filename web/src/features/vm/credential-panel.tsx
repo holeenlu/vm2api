@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { AuthScheme, Vm } from '@/types/panel-vm'
 import { Copy, ExternalLink } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import {
@@ -71,6 +72,8 @@ const EMPTY_LINK: Link = {
 }
 
 function useCountdown(expiresAt: number) {
+  const { t: tVm } = useTranslation('vm')
+
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!expiresAt) return
@@ -80,7 +83,7 @@ function useCountdown(expiresAt: number) {
   }, [expiresAt])
   if (!expiresAt) return ''
   const left = Math.floor((expiresAt - now) / 1000)
-  if (left <= 0) return '已过期'
+  if (left <= 0) return tVm('vm:credentialPanel.expired')
   const m = Math.floor(left / 60)
   return `${m}:${String(left % 60).padStart(2, '0')}`
 }
@@ -98,6 +101,8 @@ function Seg<T extends string>({
   onChange: (next: T) => void
   disabled?: boolean
 }) {
+  useTranslation('vm')
+
   return (
     <div
       role='tablist'
@@ -123,6 +128,8 @@ function Seg<T extends string>({
 }
 
 function Hint({ children }: { children: React.ReactNode }) {
+  useTranslation('vm')
+
   return <p className='text-xs text-muted-foreground'>{children}</p>
 }
 
@@ -136,6 +143,8 @@ export function CredentialPanel({
   onCommitted?: (data: CommitResult, vmId: string, what: string) => void
   showConvert?: boolean
 }) {
+  useTranslation('vm')
+
   if (importSurfaceFor(vm) === 'codex') {
     return <CodexCredentialPanel vm={vm} onCommitted={onCommitted} />
   }
@@ -157,6 +166,8 @@ function ClaudeCredentialPanel({
   onCommitted?: (data: CommitResult, vmId: string, what: string) => void
   showConvert?: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const vmId = vm.id
 
@@ -235,7 +246,7 @@ function ClaudeCredentialPanel({
         sig,
       })
       setCode('')
-      toast.success('授权链接已生成')
+      toast.success(tVm('vm:codexCredentialPanel.authorizationLinkGenerated'))
     },
     onError: (e: Error) => toast.error(importErrorMessage(e)),
   })
@@ -258,7 +269,7 @@ function ClaudeCredentialPanel({
       setCode('')
       setLink(EMPTY_LINK)
       await invalidate()
-      onCommitted?.(d, vmId, '换票完成')
+      onCommitted?.(d, vmId, tVm('vm:credentialPanel.tokenExchangeCompleted'))
     },
     onError: (e: Error) => toast.error(importErrorMessage(e)),
   })
@@ -293,7 +304,7 @@ function ClaudeCredentialPanel({
       setApiKey('')
       setSessionKey('')
       await invalidate()
-      onCommitted?.(d, vmId, '已导入')
+      onCommitted?.(d, vmId, tVm('vm:credentialPanel.imported'))
     },
     onError: (e: Error) => toast.error(importErrorMessage(e)),
   })
@@ -305,7 +316,7 @@ function ClaudeCredentialPanel({
   return (
     <div className='space-y-3'>
       <Seg
-        label='凭证类型'
+        label={tVm('vm:credentialPanel.credentialType')}
         value={kind}
         options={IMPORT_KINDS}
         onChange={switchKind}
@@ -314,7 +325,7 @@ function ClaudeCredentialPanel({
 
       {methods.length ? (
         <Seg
-          label='导入方式'
+          label={tVm('vm:credentialPanel.importMethod')}
           value={activeMethod}
           options={methods}
           onChange={switchMethod}
@@ -328,7 +339,12 @@ function ClaudeCredentialPanel({
 
       {kind !== 'oauth' ? (
         <div className='space-y-1'>
-          <Label htmlFor='cred-auth-scheme'>上游认证</Label>
+          <Label htmlFor='cred-auth-scheme'>
+            <Trans
+              ns='vm'
+              i18nKey='credentialPanel.upstreamAuthenticationHeader'
+            />
+          </Label>
           <Select
             value={authScheme}
             onValueChange={(v) => setAuthScheme(v as AuthScheme)}
@@ -347,8 +363,10 @@ function ClaudeCredentialPanel({
             </SelectContent>
           </Select>
           <Hint>
-            Claude Console 可用 Authorization: Bearer 调用 Setup Token。兼容上游
-            也可改回 x-api-key。
+            <Trans
+              ns='vm'
+              i18nKey='credentialPanel.claudeConsoleSupportsAuthorizationBearerForSetupTokensYou'
+            />
           </Hint>
         </div>
       ) : null}
@@ -366,8 +384,10 @@ function ClaudeCredentialPanel({
             placeholder='sk-ant-api03-…'
           />
           <Hint>
-            console.anthropic.com 静态密钥，提交后立即从表单清除、不回显。
-            不刷新、不跑官方初装。
+            <Trans
+              ns='vm'
+              i18nKey='credentialPanel.staticKeyFromConsoleAnthropicComClearedFromThe'
+            />
           </Hint>
           <Button
             size='sm'
@@ -375,10 +395,17 @@ function ClaudeCredentialPanel({
             loading={importCred.isPending}
             onClick={() => importCred.mutate()}
           >
-            {importCred.isPending ? '写入中…' : '导入'}
+            {importCred.isPending
+              ? tVm('vm:codexCredentialPanel.writing')
+              : tVm('vm:credentialPanel.import')}
           </Button>
           {apiKey.trim() && !CONSOLE_KEY_PREFIX.test(apiKey.trim()) ? (
-            <Hint>需要 sk-ant-api03- 开头的 Console API Key。</Hint>
+            <Hint>
+              <Trans
+                ns='vm'
+                i18nKey='credentialPanel.aConsoleAPIKeyStartingWithSkAntApi03'
+              />
+            </Hint>
           ) : null}
         </div>
       ) : activeMethod === 'session' ? (
@@ -391,20 +418,34 @@ function ClaudeCredentialPanel({
             value={sessionKey}
             disabled={busy}
             onChange={(e) => setSessionKey(e.target.value)}
-            placeholder='sk-ant-sid01-… 或 access token，不会回显'
+            placeholder={tVm(
+              'vm:credentialPanel.skAntSid01OrAccessTokenNeverDisplayedAgain'
+            )}
           />
           <Hint>
             {kind === 'setup-token'
               ? !sessionKey.trim()
-                ? 'sessionKey 经槽出口申请完整 OAuth 权限（含 profile、inference、sessions），换票后采集身份。以 Setup Token 模式运行，不跑官方初装；直接粘贴 access token 不增加权限。'
+                ? tVm(
+                    'vm:credentialPanel.sessionKeyRequestsFullOAuthScopesProfileInferenceSessionsThrough'
+                  )
                 : SESSION_KEY_PREFIX.test(sessionKey.trim())
-                  ? '识别为 sessionKey，将申请完整 OAuth 权限、换票后采集身份，以 Setup Token 模式运行。'
-                  : '识别为 access token，将按 Setup Token 直接落盘，不增加权限。'
+                  ? tVm(
+                      'vm:credentialPanel.detectedSessionKeyRequestsFullOAuthScopesCollectsIdentityAfter'
+                    )
+                  : tVm(
+                      'vm:credentialPanel.detectedAccessTokenSavesDirectlyAsASetupToken'
+                    )
               : !sessionKey.trim()
-                ? 'sk-ant-sid 经槽出口申请完整 OAuth 权限、换票后采集身份；其它值按 access token 直接落盘，不增加权限。'
+                ? tVm(
+                    'vm:credentialPanel.skAntSidRequestsFullOAuthScopesThroughThe'
+                  )
                 : SESSION_KEY_PREFIX.test(sessionKey.trim())
-                  ? '识别为 sessionKey，将申请完整 OAuth 权限、换票后采集身份。'
-                  : '识别为 access token，将直接落盘，不增加权限。'}
+                  ? tVm(
+                      'vm:credentialPanel.detectedSessionKeyRequestsFullOAuthScopesAndCollectsIdentity'
+                    )
+                  : tVm(
+                      'vm:credentialPanel.detectedAccessTokenSavesDirectlyWithoutAddingPermissions'
+                    )}
           </Hint>
           <Button
             size='sm'
@@ -412,23 +453,36 @@ function ClaudeCredentialPanel({
             loading={importCred.isPending}
             onClick={() => importCred.mutate()}
           >
-            {importCred.isPending ? '换票中…' : '导入'}
+            {importCred.isPending
+              ? tVm('vm:credentialPanel.exchangingToken')
+              : tVm('vm:credentialPanel.import')}
           </Button>
         </div>
       ) : activeMethod === 'cc' ? (
         <div className='space-y-2'>
           <Hint>
-            打开终端启动 claude。授权链接提取后显示在这里，复制后把授权码回填。
+            <Trans
+              ns='vm'
+              i18nKey='credentialPanel.openATerminalToStartClaudeTheAuthorizationLink'
+            />
           </Hint>
           <Button size='sm' onClick={() => setLoginOpen(true)}>
-            打开官方登录终端
+            <Trans
+              ns='vm'
+              i18nKey='credentialPanel.openOfficialLoginTerminal'
+            />
           </Button>
           <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
             <DialogContent className='flex h-[min(760px,90vh)] max-w-4xl flex-col gap-3'>
               <DialogHeader>
-                <DialogTitle>官方登录</DialogTitle>
+                <DialogTitle>
+                  <Trans ns='vm' i18nKey='credentialPanel.officialLogin' />
+                </DialogTitle>
                 <DialogDescription>
-                  终端里按两次回车确认主题。链接提取后可复制，授权码回填到终端。
+                  <Trans
+                    ns='vm'
+                    i18nKey='credentialPanel.pressEnterTwiceInTheTerminalToConfirmThe'
+                  />
                 </DialogDescription>
               </DialogHeader>
               <div className='space-y-2'>
@@ -440,12 +494,29 @@ function ClaudeCredentialPanel({
                     onClick={() => {
                       void navigator.clipboard
                         ?.writeText(loginUrl)
-                        .then(() => toast.success('已复制授权链接'))
-                        .catch(() => toast.error('复制失败，请手动选中链接'))
+                        .then(() =>
+                          toast.success(
+                            tVm(
+                              'vm:codexCredentialPanel.authorizationLinkCopied'
+                            )
+                          )
+                        )
+                        .catch(() =>
+                          toast.error(
+                            tVm(
+                              'vm:codexCredentialPanel.copyFailedSelectTheLinkManually'
+                            )
+                          )
+                        )
                     }}
                   >
-                    <Copy className='size-3.5' aria-hidden='true' />
-                    复制链接
+                    <Trans
+                      ns='vm'
+                      i18nKey='codexCredentialPanel.copyLink'
+                      components={{
+                        part0: <Copy className='size-3.5' aria-hidden='true' />,
+                      }}
+                    />
                   </Button>
                   {loginUrl ? (
                     <a
@@ -454,23 +525,43 @@ function ClaudeCredentialPanel({
                       target='_blank'
                       rel='noreferrer'
                     >
-                      打开授权页
-                      <ExternalLink className='size-3' aria-hidden='true' />
+                      <Trans
+                        ns='vm'
+                        i18nKey='codexCredentialPanel.openAuthorizationPage'
+                        components={{
+                          part0: (
+                            <ExternalLink
+                              className='size-3'
+                              aria-hidden='true'
+                            />
+                          ),
+                        }}
+                      />
                     </a>
                   ) : null}
                 </div>
                 <p className='text-xs break-all text-muted-foreground'>
-                  {loginUrl || '等待终端显示授权链接'}
+                  {loginUrl ||
+                    tVm(
+                      'vm:credentialPanel.waitingForTheAuthorizationLinkInTheTerminal'
+                    )}
                 </p>
                 <div className='space-y-1'>
-                  <Label htmlFor='login-auth-code'>授权码</Label>
+                  <Label htmlFor='login-auth-code'>
+                    <Trans
+                      ns='vm'
+                      i18nKey='credentialPanel.authorizationCode'
+                    />
+                  </Label>
                   <Textarea
                     id='login-auth-code'
                     rows={2}
                     value={loginCode}
                     autoComplete='off'
                     spellCheck={false}
-                    placeholder='完整授权码，含 # 后半段'
+                    placeholder={tVm(
+                      'vm:credentialPanel.fullAuthorizationCodeIncludingThePartAfter'
+                    )}
                     onChange={(event) => setLoginCode(event.target.value)}
                   />
                 </div>
@@ -482,7 +573,10 @@ function ClaudeCredentialPanel({
                     setLoginCode('')
                   }}
                 >
-                  回填授权码
+                  <Trans
+                    ns='vm'
+                    i18nKey='credentialPanel.enterAuthorizationCode'
+                  />
                 </Button>
               </div>
               <div className='min-h-0 flex-1'>
@@ -495,7 +589,11 @@ function ClaudeCredentialPanel({
                     onAuthUrl={setLoginUrl}
                     onLogin={() => {
                       void invalidate()
-                      toast.success('官方登录已写入槽凭证')
+                      toast.success(
+                        tVm(
+                          'vm:credentialPanel.officialLoginSavedToSlotCredentials'
+                        )
+                      )
                     }}
                   />
                 ) : null}
@@ -512,12 +610,27 @@ function ClaudeCredentialPanel({
               onClick={() => {
                 void navigator.clipboard
                   ?.writeText(link.authUrl)
-                  .then(() => toast.success('已复制授权链接'))
-                  .catch(() => toast.error('复制失败，请手动选中链接'))
+                  .then(() =>
+                    toast.success(
+                      tVm('vm:codexCredentialPanel.authorizationLinkCopied')
+                    )
+                  )
+                  .catch(() =>
+                    toast.error(
+                      tVm(
+                        'vm:codexCredentialPanel.copyFailedSelectTheLinkManually'
+                      )
+                    )
+                  )
               }}
             >
-              <Copy className='size-3.5' aria-hidden='true' />
-              复制链接
+              <Trans
+                ns='vm'
+                i18nKey='codexCredentialPanel.copyLink'
+                components={{
+                  part0: <Copy className='size-3.5' aria-hidden='true' />,
+                }}
+              />
             </Button>
             <a
               className='inline-flex items-center gap-1 text-xs underline'
@@ -525,26 +638,43 @@ function ClaudeCredentialPanel({
               target='_blank'
               rel='noreferrer'
             >
-              打开授权页
-              <ExternalLink className='size-3' aria-hidden='true' />
+              <Trans
+                ns='vm'
+                i18nKey='codexCredentialPanel.openAuthorizationPage'
+                components={{
+                  part0: <ExternalLink className='size-3' aria-hidden='true' />,
+                }}
+              />
             </a>
           </div>
           <p className='text-xs break-all text-muted-foreground'>
             {link.authUrl}
           </p>
           <p className='text-xs text-muted-foreground tabular-nums'>
-            剩余有效 {remaining}
-            {proxyHint ? ` · 经 ${proxyHint}` : ''}
+            <Trans
+              ns='vm'
+              i18nKey='codexCredentialPanel.validFor'
+              values={{
+                remaining: remaining,
+                value: proxyHint
+                  ? tVm('vm:codexCredentialPanel.via', { proxyHint: proxyHint })
+                  : '',
+              }}
+            />
           </p>
           <div className='space-y-1'>
-            <Label htmlFor='cred-code'>授权码</Label>
+            <Label htmlFor='cred-code'>
+              <Trans ns='vm' i18nKey='credentialPanel.authorizationCode' />
+            </Label>
             <Textarea
               id='cred-code'
               rows={2}
               value={code}
               disabled={busy}
               onChange={(e) => setCode(e.target.value)}
-              placeholder='完整授权码，含 # 后半段'
+              placeholder={tVm(
+                'vm:credentialPanel.fullAuthorizationCodeIncludingThePartAfter'
+              )}
             />
           </div>
           <div className='flex flex-wrap items-center gap-2'>
@@ -554,7 +684,9 @@ function ClaudeCredentialPanel({
               loading={exchange.isPending}
               onClick={() => exchange.mutate()}
             >
-              {exchange.isPending ? '验证中…' : '完成授权'}
+              {exchange.isPending
+                ? tVm('vm:codexCredentialPanel.verifying')
+                : tVm('vm:codexCredentialPanel.completeAuthorization')}
             </Button>
             <Button
               size='sm'
@@ -563,21 +695,45 @@ function ClaudeCredentialPanel({
               loading={gen.isPending}
               onClick={() => gen.mutate(true)}
             >
-              重新生成
+              <Trans ns='vm' i18nKey='codexCredentialPanel.regenerate' />
             </Button>
           </div>
           <Hint>
             {kind === 'setup-token'
-              ? `申请完整 OAuth 权限，换票后采集身份。浏览器须走 ${proxyHint || '同一槽出口'}，授权码须含 # 后半段。以 Setup Token 模式运行，不跑官方初装。`
-              : `浏览器须走 ${proxyHint || '同一槽出口'}，授权码须含 # 后半段。换票后采集身份。`}
+              ? tVm(
+                  'vm:credentialPanel.requestsFullOAuthScopesAndCollectsIdentityAfterExchange',
+                  {
+                    value1:
+                      proxyHint || tVm('vm:credentialPanel.theSameSlotEgress'),
+                  }
+                )
+              : tVm(
+                  'vm:credentialPanel.routeTheBrowserThroughAndIncludeThePartAfter',
+                  {
+                    value1:
+                      proxyHint || tVm('vm:credentialPanel.theSameSlotEgress'),
+                  }
+                )}
           </Hint>
         </div>
       ) : (
         <div className='space-y-2'>
           <Hint>
             {kind === 'setup-token'
-              ? `连接形式：生成完整 OAuth 权限授权链接。换票经槽 SOCKS5，浏览器须走 ${proxyHint || '同一槽出口'}；落盘后仍以 Setup Token 模式运行。`
-              : `换票经槽 SOCKS5，浏览器须走 ${proxyHint || '同一 SOCKS5'}。`}
+              ? tVm(
+                  'vm:credentialPanel.generatesAnAuthorizationLinkForFullOAuthScopesToken',
+                  {
+                    value1:
+                      proxyHint || tVm('vm:credentialPanel.theSameSlotEgress'),
+                  }
+                )
+              : tVm(
+                  'vm:credentialPanel.tokenExchangeUsesTheSlotSOCKS5RouteTheBrowser',
+                  {
+                    value1:
+                      proxyHint || tVm('vm:credentialPanel.theSameSOCKS5Proxy'),
+                  }
+                )}
           </Hint>
           <Button
             size='sm'
@@ -585,7 +741,9 @@ function ClaudeCredentialPanel({
             loading={gen.isPending}
             onClick={() => gen.mutate(false)}
           >
-            {gen.isPending ? '生成中…' : '生成授权链接'}
+            {gen.isPending
+              ? tVm('vm:codexCredentialPanel.generating')
+              : tVm('vm:codexCredentialPanel.generateAuthorizationLink')}
           </Button>
         </div>
       )}

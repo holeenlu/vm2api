@@ -31,12 +31,8 @@ export function totalTokens(row = {}) {
   )
 }
 
-/** Rows a panel `user` owns: own user_id, one of their live keys, or served by a slot they owned at the time. */
+/** Customer visibility is the immutable authenticated caller snapshot. */
 export function ownerPred(ownerUserId) {
   const id = String(ownerUserId || '').trim()
-  if (!id) return { sql: '', params: [] }
-  return {
-    sql: `(user_id = ? OR IFNULL(api_key_id, '') IN (SELECT id FROM api_keys WHERE user_id = ? AND deleted_at IS NULL) OR vm_owner_user_id = ?)`,
-    params: [id, id, id],
-  }
+  return id ? { sql: 'user_id = ?', params: [id] } : { sql: '', params: [] }
 }

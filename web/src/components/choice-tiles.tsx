@@ -115,7 +115,7 @@ export function Segmented<T extends string>({
           key={o.value}
           value={o.value}
           className={cn(
-            'h-7 min-w-11 rounded-md px-2 text-sm text-muted-foreground tabular-nums transition-colors duration-150 outline-none sm:px-2.5',
+            'h-7 min-w-11 shrink-0 rounded-md px-2 text-sm whitespace-nowrap text-muted-foreground tabular-nums transition-colors duration-150 outline-none sm:px-2.5',
             'hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-select-border/40',
             'data-[state=checked]:bg-select-surface data-[state=checked]:font-medium data-[state=checked]:text-select-fg data-[state=checked]:shadow-[inset_0_0_0_1px_var(--select-border)]'
           )}

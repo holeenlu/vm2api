@@ -1,3 +1,4 @@
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -139,7 +140,8 @@ test('user concurrency caps regular users but never the admin operator', () => {
     store.users.insert({ id, username: id, password_hash: 'x', role, concurrency: 1, created_at: now, updated_at: now })
   }
   const admin = store.create({ name: 'admin-key', max_concurrency: 0, user_id: 'u-admin' })
-  const user = store.create({ name: 'user-key', max_concurrency: 0, user_id: 'u-user' })
+  new GroupsRepo(store.db).setGrants('u-user', [1])
+  const user = store.create({ name: 'user-key', group_id: 1, max_concurrency: 0, user_id: 'u-user' })
 
   for (let i = 0; i < 3; i++) assert.equal(store.acquire(admin).ok, true)
 
@@ -202,24 +204,10 @@ test('keys persist in sqlite across store re-open (same dataDir)', () => {
   assert.ok(fs.existsSync(path.join(dir, 'kin.db')), 'kin.db file exists')
 })
 
-test('group_type all is the default and a platform group keeps its VM list', () => {
+test('new key writes no legacy VM pool selection fields', () => {
   const store = tmpStore()
-  const open = store.create({ name: 'global' })
-  assert.equal(store.list()[0].group_type, 'all')
-  assert.deepEqual(store.list()[0].allowed_vms, [])
-  const scoped = store.create({ name: 'claude', group_type: 'anthropic', allowed_vms: ['vm-01', 'vm-03'] })
-  assert.equal(store.getById(scoped.id).group_type, 'anthropic')
-  assert.equal(
-    store
-      .list()
-      .find((k) => k.id === scoped.id)
-      .allowed_vms.join(','),
-    'vm-01,vm-03',
-  )
-  const widened = store.update(scoped.id, { group_type: 'all' })
-  assert.equal(widened.group_type, 'all')
-  assert.equal(widened.allowed_vms, '[]')
-  assert.throws(() => store.create({ name: 'bare', group_type: 'openai' }), /至少勾选一台 VM/)
-  store.update(open.id, { status: 'disabled' })
-  assert.equal(store.getById(open.id).group_type, 'all')
+  const key = store.create({ name: 'modern', group_id: 1, allowed_vms: ['vm-1'], vm_pool_id: 'old' })
+  assert.equal(key.group_id, 1)
+  assert.equal(key.vm_pool_id, undefined)
+  assert.equal(key.allowed_vms, undefined)
 })

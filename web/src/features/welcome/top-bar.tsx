@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { DOCS_URL, REPO_URL } from '@/config/repo'
 import { ArrowRight } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { IconGithub } from '@/assets/brand-icons'
 import { Logo } from '@/assets/logo'
 import { cn } from '@/lib/utils'
+import { useBranding } from '@/context/branding-provider'
 import { Button } from '@/components/ui/button'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { scrollToSection } from './scroll'
@@ -19,6 +21,9 @@ export function WelcomeTopBar({
   signedIn: boolean
   username: string
 }) {
+  const { t } = useTranslation('welcome')
+
+  const brand = useBranding()
   const [scrolled, setScrolled] = useState(false)
 
   useEffect(() => {
@@ -29,10 +34,12 @@ export function WelcomeTopBar({
   }, [])
 
   const sections = [
-    ...(signedIn ? [{ id: 'welcome-setup', label: '首配清单' }] : []),
-    { id: 'welcome-features', label: '能力' },
-    { id: 'welcome-quick-start', label: '快速开始' },
-    { id: 'welcome-clients', label: '客户端接入' },
+    ...(signedIn
+      ? [{ id: 'welcome-setup', label: t('welcome:checklist') }]
+      : []),
+    { id: 'welcome-features', label: t('welcome:navCapabilities') },
+    { id: 'welcome-quick-start', label: t('welcome:quickStart') },
+    { id: 'welcome-clients', label: t('welcome:clientIntegration') },
   ]
 
   return (
@@ -44,7 +51,7 @@ export function WelcomeTopBar({
         )}
       >
         <nav
-          aria-label='欢迎页导航'
+          aria-label={t('welcome:navigation')}
           className={cn(
             'flex items-center justify-between transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none',
             scrolled
@@ -60,7 +67,9 @@ export function WelcomeTopBar({
             <span className='grid size-7 place-items-center rounded-lg bg-foreground text-background transition-transform duration-300 group-hover:scale-105'>
               <Logo aria-hidden className='size-4' />
             </span>
-            <span className='text-sm font-semibold tracking-tight'>vm2api</span>
+            <span className='text-sm font-semibold tracking-tight'>
+              {brand.name}
+            </span>
           </button>
 
           <div className='flex items-center gap-0.5'>
@@ -81,7 +90,7 @@ export function WelcomeTopBar({
                 rel='noreferrer'
                 className={NAV_LINK}
               >
-                文档
+                {t('welcome:docs')}
               </a>
               <div className='mx-2 h-4 w-px bg-border' />
             </div>
@@ -106,8 +115,8 @@ export function WelcomeTopBar({
                   size='sm'
                   className='group h-8 rounded-lg px-3.5 text-xs font-medium'
                 >
-                  <Link to='/overview'>
-                    进入控制台
+                  <Link to='/'>
+                    {t('welcome:openConsole')}
                     <ArrowRight
                       aria-hidden
                       className='size-3.5 transition-transform duration-200 group-hover:translate-x-0.5'
@@ -121,7 +130,7 @@ export function WelcomeTopBar({
                 size='sm'
                 className='h-8 rounded-lg px-3.5 text-xs font-medium'
               >
-                <Link to='/login'>登录</Link>
+                <Link to='/login'>{t('welcome:signIn')}</Link>
               </Button>
             )}
           </div>

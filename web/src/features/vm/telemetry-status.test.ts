@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { telemetryStatusLabel } from './telemetry-status'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('telemetry status distinguishes configuration from process observations', () => {
   it('does not report missing legacy status as disabled or running', () => {

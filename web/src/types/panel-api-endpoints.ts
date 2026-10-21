@@ -31,6 +31,8 @@ export type ApiEndpointPreset = {
 }
 
 export type ApiEndpoint = {
+  groups?: { id: number; name: string }[]
+  groups_version?: number
   id: string
   name?: string
   base_url?: string

@@ -1,17 +1,18 @@
+import { t } from '@/i18n'
 import type { Price, PriceSource } from '@/types/panel-pricing'
 import { fmtUsd } from '@/lib/format'
 
-export const PRICE_SOURCE_LABEL: Record<PriceSource, string> = {
-  override: '覆盖',
-  'models.dev': 'models.dev',
-  builtin: '内置',
+const PRICE_SOURCE_KEYS: Record<PriceSource, string> = {
+  override: 'models:override',
+  'models.dev': 'models:modelsDevName',
+  builtin: 'models:builtin',
 }
 
 export function priceSourceLabel(
   source: PriceSource | null | undefined
 ): string {
-  if (!source) return '未定价'
-  return PRICE_SOURCE_LABEL[source]
+  if (!source) return t('models:unpriced')
+  return t(PRICE_SOURCE_KEYS[source])
 }
 
 export function priceSourceVariant(
@@ -29,7 +30,7 @@ export function fmtPerM(n: number | null | undefined): string {
 
 /** input / output / cache read per 1M. */
 export function fmtBaseRates(price: Price | null | undefined): string {
-  if (!price) return '未定价'
+  if (!price) return t('models:unpriced')
   return [
     fmtPerM(price.input),
     fmtPerM(price.output),
@@ -46,12 +47,19 @@ export function cacheFillHint(
   const has = input.trim() !== '' && Number.isFinite(n) && n >= 0
   if (platform === 'anthropic') {
     if (field === 'cache_5m') {
-      return has ? `缺省 ${fmtPerM(n * 1.25)}（1.25×input）` : '缺省 1.25×input'
+      return has
+        ? t('models:cacheDefaultValue', {
+            price: fmtPerM(n * 1.25),
+            multiplier: 1.25,
+          })
+        : t('models:cache5mDefault')
     }
-    return has ? `缺省 ${fmtPerM(n * 2)}（2×input）` : '缺省 2×input'
+    return has
+      ? t('models:cacheDefaultValue', { price: fmtPerM(n * 2), multiplier: 2 })
+      : t('models:cache1hDefault')
   }
-  if (field === 'cache_5m') return '缺省 0（无 cache_write）'
-  return '缺省与 5m 写入相同'
+  if (field === 'cache_5m') return t('models:noCacheWrite')
+  return t('models:cache1hSameAs5m')
 }
 
 export function tiersSummary(price: Price | null | undefined): string {
@@ -63,7 +71,8 @@ export function tiersSummary(price: Price | null | undefined): string {
         tier.above >= 1000
           ? `>${Math.round(tier.above / 1000)}k`
           : `>${tier.above}`
-      if ('unpriced' in tier && tier.unpriced) return `${above} 未定价`
+      if ('unpriced' in tier && tier.unpriced)
+        return t('models:unpricedTier', { above })
       return above
     })
     .join(' · ')

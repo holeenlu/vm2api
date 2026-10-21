@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { Copy, ExternalLink, Upload } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { proxyNamedLabel } from '@/lib/vm-status'
@@ -16,7 +18,12 @@ type CodexImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
 
 const MODES: { id: CodexImportMode; label: string }[] = [
   { id: 'oauth', label: 'OAuth' },
-  { id: 'json', label: '账号文件' },
+  {
+    id: 'json',
+    get label() {
+      return tVm('vm:codexCredentialPanel.accountFile')
+    },
+  },
 ]
 
 type Link = {
@@ -42,10 +49,12 @@ function Seg({
   onChange: (next: CodexImportMode) => void
   disabled?: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <div
       role='tablist'
-      aria-label='账号添加方式'
+      aria-label={tVm('vm:codexCredentialPanel.addAccountUsing')}
       className='flex flex-wrap items-center gap-1.5'
     >
       {MODES.map((option) => (
@@ -67,6 +76,8 @@ function Seg({
 }
 
 function Hint({ children }: { children: React.ReactNode }) {
+  useTranslation('vm')
+
   return <p className='text-xs text-muted-foreground'>{children}</p>
 }
 
@@ -95,6 +106,8 @@ export function CodexCredentialPanel({
   vm: Vm
   onCommitted?: (data: CommitResult, vmId: string, what: string) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [mode, setMode] = useState<CodexImportMode>('oauth')
@@ -142,8 +155,12 @@ export function CodexCredentialPanel({
       setFileError('')
       setPickedFile(null)
       await invalidate()
-      toast.success('已导入 GPT OAuth')
-      onCommitted?.(data, vm.id, '已导入 GPT OAuth')
+      toast.success(tVm('vm:codexCredentialPanel.gPTOAuthImported'))
+      onCommitted?.(
+        data,
+        vm.id,
+        tVm('vm:codexCredentialPanel.gPTOAuthImported')
+      )
     },
     onError: (error: Error) => toast.error(error.message),
   })
@@ -170,7 +187,7 @@ export function CodexCredentialPanel({
         proxyHint: String(data.proxy_hint || ''),
       })
       setCode('')
-      toast.success('授权链接已生成')
+      toast.success(tVm('vm:codexCredentialPanel.authorizationLinkGenerated'))
     },
     onError: (error: Error) => toast.error(error.message),
   })
@@ -192,15 +209,20 @@ export function CodexCredentialPanel({
       setCode('')
       setLink(EMPTY_LINK)
       await invalidate()
-      toast.success('已完成 Codex OAuth')
-      onCommitted?.(data, vm.id, '已完成 Codex OAuth')
+      toast.success(tVm('vm:codexCredentialPanel.codexOAuthCompleted'))
+      onCommitted?.(
+        data,
+        vm.id,
+        tVm('vm:codexCredentialPanel.codexOAuthCompleted')
+      )
     },
     onError: (error: Error) => toast.error(error.message),
   })
 
   const busy = importCred.isPending || gen.isPending || exchange.isPending
-  const placeholder =
-    '粘贴或上传 Codex CLI ~/.codex/auth.json、CPR 账号文件，或含 accessToken/refreshToken 的 JSON'
+  const placeholder = tVm(
+    'vm:codexCredentialPanel.pasteOrUploadCodexCLICodexAuthJsonA'
+  )
 
   async function onPickFile(file: File | undefined) {
     setFileError('')
@@ -211,15 +233,17 @@ export function CodexCredentialPanel({
       setPickedFile({ name: file.name, size: file.size })
     } catch {
       setPickedFile(null)
-      setFileError('文件读取失败')
+      setFileError('vm:codexCredentialPanel.failedToReadFile')
     }
   }
 
   return (
     <div className='space-y-3'>
       <Hint>
-        对齐 Codex Desktop：OAuth 授权或账号文件（auth.json）。不要用 Claude
-        sessionKey、Setup Token 或 Console Key。一槽一号。
+        <Trans
+          ns='vm'
+          i18nKey='codexCredentialPanel.useCodexDesktopOAuthOrAnAccountFileAuth'
+        />
       </Hint>
       <Seg value={mode} onChange={setMode} disabled={busy} />
       {mode === 'oauth' ? (
@@ -232,12 +256,27 @@ export function CodexCredentialPanel({
                 onClick={() => {
                   void navigator.clipboard
                     ?.writeText(link.authUrl)
-                    .then(() => toast.success('已复制授权链接'))
-                    .catch(() => toast.error('复制失败，请手动选中链接'))
+                    .then(() =>
+                      toast.success(
+                        tVm('vm:codexCredentialPanel.authorizationLinkCopied')
+                      )
+                    )
+                    .catch(() =>
+                      toast.error(
+                        tVm(
+                          'vm:codexCredentialPanel.copyFailedSelectTheLinkManually'
+                        )
+                      )
+                    )
                 }}
               >
-                <Copy className='size-3.5' aria-hidden='true' />
-                复制链接
+                <Trans
+                  ns='vm'
+                  i18nKey='codexCredentialPanel.copyLink'
+                  components={{
+                    part0: <Copy className='size-3.5' aria-hidden='true' />,
+                  }}
+                />
               </Button>
               <a
                 className='inline-flex items-center gap-1 text-xs underline'
@@ -245,19 +284,38 @@ export function CodexCredentialPanel({
                 target='_blank'
                 rel='noreferrer'
               >
-                打开授权页
-                <ExternalLink className='size-3' aria-hidden='true' />
+                <Trans
+                  ns='vm'
+                  i18nKey='codexCredentialPanel.openAuthorizationPage'
+                  components={{
+                    part0: (
+                      <ExternalLink className='size-3' aria-hidden='true' />
+                    ),
+                  }}
+                />
               </a>
             </div>
             <p className='text-xs break-all text-muted-foreground'>
               {link.authUrl}
             </p>
             <p className='text-xs text-muted-foreground tabular-nums'>
-              剩余有效 {remaining}
-              {proxyHint ? ` · 经 ${proxyHint}` : ''}
+              <Trans
+                ns='vm'
+                i18nKey='codexCredentialPanel.validFor'
+                values={{
+                  remaining: remaining,
+                  value: proxyHint
+                    ? tVm('vm:codexCredentialPanel.via', {
+                        proxyHint: proxyHint,
+                      })
+                    : '',
+                }}
+              />
             </p>
             <div className='space-y-1'>
-              <Label htmlFor='codex-oauth-callback'>回调 URL</Label>
+              <Label htmlFor='codex-oauth-callback'>
+                <Trans ns='vm' i18nKey='codexCredentialPanel.callbackURL' />
+              </Label>
               <Textarea
                 id='codex-oauth-callback'
                 rows={3}
@@ -274,7 +332,9 @@ export function CodexCredentialPanel({
                 loading={exchange.isPending}
                 onClick={() => exchange.mutate()}
               >
-                {exchange.isPending ? '验证中…' : '完成授权'}
+                {exchange.isPending
+                  ? tVm('vm:codexCredentialPanel.verifying')
+                  : tVm('vm:codexCredentialPanel.completeAuthorization')}
               </Button>
               <Button
                 size='sm'
@@ -283,19 +343,26 @@ export function CodexCredentialPanel({
                 loading={gen.isPending}
                 onClick={() => gen.mutate()}
               >
-                重新生成
+                <Trans ns='vm' i18nKey='codexCredentialPanel.regenerate' />
               </Button>
             </div>
             <Hint>
-              浏览器走 {proxyHint || '槽 SOCKS5'}。授权完成后把 localhost:1455
-              回调整段贴回来。
+              <Trans
+                ns='vm'
+                i18nKey='codexCredentialPanel.routeTheBrowserThroughAfterAuthorizationPasteTheEntire'
+                values={{
+                  value: proxyHint || tVm('vm:codexCredentialPanel.slotSOCKS5'),
+                }}
+              />
             </Hint>
           </div>
         ) : (
           <div className='space-y-2'>
             <Hint>
-              生成官方 Codex Desktop 授权链接。换票经槽
-              SOCKS5，打开链接仍是本机浏览器。
+              <Trans
+                ns='vm'
+                i18nKey='codexCredentialPanel.generateAnOfficialCodexDesktopAuthorizationLinkTokenExchange'
+              />
             </Hint>
             <Button
               size='sm'
@@ -303,7 +370,9 @@ export function CodexCredentialPanel({
               loading={gen.isPending}
               onClick={() => gen.mutate()}
             >
-              {gen.isPending ? '生成中…' : '生成授权链接'}
+              {gen.isPending
+                ? tVm('vm:codexCredentialPanel.generating')
+                : tVm('vm:codexCredentialPanel.generateAuthorizationLink')}
             </Button>
           </div>
         )
@@ -312,10 +381,10 @@ export function CodexCredentialPanel({
           <div className='flex flex-wrap items-center justify-between gap-2'>
             <Label htmlFor='codex-import-text'>
               {mode === 'access_token'
-                ? 'Access Token'
+                ? tVm('common:accessToken')
                 : mode === 'refresh_token'
-                  ? 'Refresh Token'
-                  : '账号文件'}
+                  ? tVm('common:refreshToken')
+                  : tVm('vm:codexCredentialPanel.accountFile')}
             </Label>
             {mode === 'json' ? (
               <>
@@ -337,8 +406,13 @@ export function CodexCredentialPanel({
                   disabled={busy}
                   onClick={() => fileRef.current?.click()}
                 >
-                  <Upload className='size-3.5' aria-hidden='true' />
-                  上传文件
+                  <Trans
+                    ns='vm'
+                    i18nKey='codexCredentialPanel.uploadFile'
+                    components={{
+                      part0: <Upload className='size-3.5' aria-hidden='true' />,
+                    }}
+                  />
                 </Button>
               </>
             ) : null}
@@ -348,7 +422,11 @@ export function CodexCredentialPanel({
               <div className='min-w-0'>
                 <p className='truncate text-sm'>{pickedFile.name}</p>
                 <p className='text-xs text-muted-foreground'>
-                  {fileSizeLabel(pickedFile.size)} · 已读取，不展示原文
+                  <Trans
+                    ns='vm'
+                    i18nKey='codexCredentialPanel.loadedOriginalContentHidden'
+                    values={{ fileSizeLabel: fileSizeLabel(pickedFile.size) }}
+                  />
                 </p>
               </div>
               <Button
@@ -362,7 +440,7 @@ export function CodexCredentialPanel({
                   setFileError('')
                 }}
               >
-                清除
+                <Trans ns='vm' i18nKey='codexCredentialPanel.clear' />
               </Button>
             </div>
           ) : (
@@ -379,11 +457,15 @@ export function CodexCredentialPanel({
             />
           )}
           {fileError ? (
-            <p className='text-xs text-destructive'>{fileError}</p>
+            <p className='text-xs text-destructive'>
+              {fileError.startsWith('vm:') ? tVm(fileError) : fileError}
+            </p>
           ) : null}
           <Hint>
-            支持 Codex CLI ~/.codex/auth.json、kernel accounts、CPR openai
-            文档。仅 OPENAI_API_KEY 的客户端配置不能当 OAuth 导入。
+            <Trans
+              ns='vm'
+              i18nKey='codexCredentialPanel.supportsCodexCLICodexAuthJsonKernelAccountsAnd'
+            />
           </Hint>
           <Button
             size='sm'
@@ -391,7 +473,9 @@ export function CodexCredentialPanel({
             loading={importCred.isPending}
             onClick={() => importCred.mutate()}
           >
-            {importCred.isPending ? '写入中…' : '导入 GPT OAuth'}
+            {importCred.isPending
+              ? tVm('vm:codexCredentialPanel.writing')
+              : tVm('vm:codexCredentialPanel.importGPTOAuth')}
           </Button>
         </div>
       )}

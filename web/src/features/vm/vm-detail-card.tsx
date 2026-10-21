@@ -10,9 +10,9 @@ import {
   Play,
   RefreshCw,
   RotateCcw,
-  Undo2,
   UserRoundPlus,
 } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { credTypeLabel, credTypeOf } from '@/lib/cred-type'
 import { fmtExpiresAt, fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -43,7 +43,6 @@ import {
 import { StatusMark } from '@/components/status-mark'
 import { meQueryOptions } from '@/features/auth/queries'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
-import { usersQueryOptions } from '@/features/users/queries'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { Field } from '@/features/vm/detail-section-primitives'
 import { NodeChip } from '@/features/vm/node-chip'
@@ -56,12 +55,8 @@ import {
 import { VmUsagePanel } from '@/features/vm/usage-windows'
 import { refreshBlockedReason } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
+import { VmGroupLabels } from '@/features/vm/vm-groups'
 import { VmMemoryBlock } from '@/features/vm/vm-memory-block'
-import {
-  canReclaimVm,
-  resolveOwnerUsername,
-  vmOriginLabel,
-} from '@/features/vm/vm-owner'
 import { useVmPerms } from '@/features/vm/vm-perms'
 import { VmSchedulingBlock } from '@/features/vm/vm-scheduling'
 
@@ -72,6 +67,8 @@ function Section({
   title: string
   children: React.ReactNode
 }) {
+  useTranslation('vm')
+
   return (
     <section className='min-w-0 rounded-lg border px-3 py-2.5'>
       <h3 className='mb-1 text-xs font-medium text-muted-foreground'>
@@ -83,15 +80,13 @@ function Section({
 }
 
 function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
+  const { t: tVm } = useTranslation('vm')
+
   const actions = useVmActions()
   const me = useQuery(meQueryOptions())
   const admin = me.data?.role === 'admin'
   const perms = useVmPerms()
-  const users = useQuery({
-    ...usersQueryOptions(),
-    enabled: admin,
-    staleTime: 60_000,
-  })
+
   const today = vmTodayStats(vm, accounts)
   const week = vmWeekOutcome(vm, accounts)
   const codex = isCodexVm(vm)
@@ -111,8 +106,12 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
           <StatusMark tone={poolStatus(vm)} variant='pill' />
         ) : null}
         <span className='text-xs text-muted-foreground'>
-          {vmRunning(vm) ? '运行' : '停止'}
-          {inflight > 0 ? ` · 在飞 ${inflight}` : ''}
+          {vmRunning(vm)
+            ? tVm('vm:detailPage.running')
+            : tVm('vm:detailPage.stop')}
+          {inflight > 0
+            ? tVm('vm:vmDetailCard.inFlight', { inflight: inflight })
+            : ''}
         </span>
         {vm.seats_max != null ? (
           <span
@@ -122,13 +121,28 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
             )}
             title={seatTitle(vm)}
           >
-            席位 {Number(vm.seats_used) || 0}/{vm.seats_max}
-            {queued > 0 ? ` · 排队 ${queued}` : ''}
+            <Trans
+              ns='vm'
+              i18nKey='vmDetailCard.seats'
+              values={{
+                value: Number(vm.seats_used) || 0,
+                seats_max: vm.seats_max,
+                value1:
+                  queued > 0
+                    ? tVm('vm:vmDetailCard.queued', { queued: queued })
+                    : '',
+              }}
+            />
           </span>
         ) : null}
         <div className='ms-auto flex items-center gap-1.5 text-xs text-muted-foreground'>
-          调度
-          <SchedulableSwitch {...vmSchedulableProps(vm)} />
+          <Trans
+            ns='vm'
+            i18nKey='detailPage.scheduling'
+            components={{
+              part0: <SchedulableSwitch {...vmSchedulableProps(vm)} />,
+            }}
+          />
         </div>
       </div>
       <p className='text-xs text-muted-foreground'>{restrictionCopy(vm)}</p>
@@ -141,22 +155,32 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
       <VmMemoryBlock vm={vm} />
 
       <div className='grid gap-2 sm:grid-cols-2'>
-        <Section title='今日'>
+        <Section title={tVm('vm:detailAccountTab.today')}>
           <div className='flex items-baseline justify-between'>
             <span className='text-lg leading-tight font-semibold tabular-nums'>
               {fmtUsd(today.today, 2)}
             </span>
             <span className='font-mono text-xs text-muted-foreground tabular-nums'>
-              {fmtNum(today.req)} req · {fmtNum(today.tok)} tok
+              {fmtNum(today.req)}{' '}
+              <Trans ns='vm' i18nKey='units.requestsShort' /> ·{' '}
+              {fmtNum(today.tok)} <Trans ns='vm' i18nKey='units.tokensShort' />
             </span>
           </div>
           <div className='mt-1 font-mono text-[11px] text-muted-foreground tabular-nums'>
-            入 {fmtNum(today.inn)} · 出 {fmtNum(today.out)} · 缓存{' '}
-            {fmtNum(today.read)}/{fmtNum(today.write)} · 命中{' '}
-            {fmtHitPct(today.hit)}
+            <Trans
+              ns='vm'
+              i18nKey='vmDetailCard.inputOutputCacheHit'
+              values={{
+                formattedNum: fmtNum(today.inn),
+                formattedNum1: fmtNum(today.out),
+                formattedNum2: fmtNum(today.read),
+                formattedNum3: fmtNum(today.write),
+                formattedHitPct: fmtHitPct(today.hit),
+              }}
+            />
           </div>
         </Section>
-        <Section title='7D 请求'>
+        <Section title={tVm('vm:vmDetailCard.7DayRequests')}>
           <div className='flex items-baseline justify-between'>
             <span className='text-lg leading-tight font-semibold tabular-nums'>
               {fmtNum(week.known ? week.success + week.fail : week.req)}
@@ -172,66 +196,70 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
             </span>
           </div>
           <div className='mt-1 text-[11px] text-muted-foreground'>
-            7D 窗口 · 成功 / 失败
+            <Trans ns='vm' i18nKey='vmDetailCard.7DayWindowSucceededFailed' />
           </div>
         </Section>
       </div>
 
       <div className='grid gap-2 sm:grid-cols-2'>
-        <Section title='账号'>
+        <Section title={tVm('vm:detailAccountTab.account')}>
           <div className='divide-y'>
-            <Field label='类型' compact>
+            <Field label={tVm('vm:detailAccountTab.type')} compact>
               {credType === 'none' ? (
                 '-'
               ) : (
                 <span className='flex flex-wrap items-center gap-1.5'>
                   <CredLaneChip vm={vm} />
                   <span className='text-xs text-muted-foreground'>
-                    凭证 {credTypeLabel(credType)}
+                    <Trans
+                      ns='vm'
+                      i18nKey='vmDetailCard.credentials'
+                      values={{ credTypeLabel: credTypeLabel(credType) }}
+                    />
                   </span>
                   {codex ? <OpenaiPlanBadge vm={vm} /> : null}
                 </span>
               )}
             </Field>
-            <Field label='邮箱' compact>
+            <Field label={tVm('vm:detailStatusBoard.email')} compact>
               <span className='text-xs' title={String(vm.email || '')}>
                 {vm.email ? compactEmail(String(vm.email), 30) : '-'}
               </span>
             </Field>
-            <Field label='过期' compact>
+            <Field label={tVm('vm:detailAccountTab.expiry')} compact>
               <StatusMark tone={credExpiry(vm)} variant='pill' />{' '}
               <span className='text-xs text-muted-foreground'>
                 {fmtExpiresAt(vm.expires_at)}
               </span>
             </Field>
-            <Field label='令牌' compact>
+            <Field label={tVm('vm:vmDetailCard.token')} compact>
               <span className='text-xs'>
-                Access {vm.has_token ? '已写入' : '-'} · Refresh{' '}
-                {vm.has_refresh ? '已绑定' : '-'}
+                {tVm('vm:messages.credentialPresence', {
+                  access: vm.has_token
+                    ? tVm('vm:detailAccountTab.written')
+                    : '—',
+                  refresh: vm.has_refresh
+                    ? tVm('vm:detailAccountTab.bound')
+                    : '—',
+                })}
               </span>
             </Field>
           </div>
         </Section>
-        <Section title='槽位'>
+        <Section title={tVm('vm:testChatTypes.slot')}>
           <div className='divide-y'>
-            <Field label='名称' compact>
+            <Field label={tVm('vm:createVmForm.name')} compact>
               <span className='text-xs'>{slotNameLabel(vm)}</span>
             </Field>
             <Field label='ID' compact>
               <span className='font-mono text-xs'>{vm.id}</span>
             </Field>
-            <Field label='代理' compact>
+            <Field label={tVm('vm:detailPage.proxy')} compact>
               <ProxyChip vm={vm} compact />
             </Field>
             {admin ? (
-              <Field label='租户属主' compact>
-                <span className='text-xs'>
-                  {resolveOwnerUsername(vm.owner_user_id, users.data?.items)}
-                  <span className='text-muted-foreground'>
-                    {' '}
-                    · {vmOriginLabel(vm.origin)}
-                  </span>
-                </span>
+              <Field label={tVm('vm:vmDetailCard.assignedGroups')} compact>
+                <VmGroupLabels vm={vm} />
               </Field>
             ) : null}
           </div>
@@ -245,7 +273,11 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
             variant='outline'
             onClick={() => actions.openTest(vm)}
           >
-            <Play /> 测试链接
+            <Trans
+              ns='vm'
+              i18nKey='vmDetailCard.testConnection'
+              components={{ part0: <Play /> }}
+            />
           </Button>
         ) : null}
         <Button
@@ -253,7 +285,11 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
           variant='outline'
           onClick={() => actions.openStats(vm)}
         >
-          <BarChart3 /> 查看统计
+          <Trans
+            ns='vm'
+            i18nKey='vmDetailCard.viewStatistics'
+            components={{ part0: <BarChart3 /> }}
+          />
         </Button>
         {perms.credential ? (
           <>
@@ -262,7 +298,11 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
               variant='outline'
               onClick={() => actions.openReauth(vm)}
             >
-              <Link2 /> 重新授权
+              <Trans
+                ns='vm'
+                i18nKey='vmDetailCard.reauthorize'
+                components={{ part0: <Link2 /> }}
+              />
             </Button>
             <Button
               size='sm'
@@ -271,7 +311,11 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
               title={blocked || undefined}
               onClick={() => actions.refreshToken(vm)}
             >
-              <RefreshCw /> 刷新令牌
+              <Trans
+                ns='vm'
+                i18nKey='vmDetailCard.refreshToken'
+                components={{ part0: <RefreshCw /> }}
+              />
             </Button>
           </>
         ) : null}
@@ -279,34 +323,37 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
           size='sm'
           variant='outline'
           disabled={!restricted || actions.recoveringId === vm.id}
-          title={restricted ?? '当前没有冷却或熔断'}
+          title={restricted ?? tVm('vm:vmActionMenu.noCooldownOrOpenCircuit')}
           onClick={() => actions.recover(vm)}
         >
-          <RotateCcw /> 恢复状态
+          <Trans
+            ns='vm'
+            i18nKey='vmDetailCard.restoreStatus'
+            components={{ part0: <RotateCcw /> }}
+          />
         </Button>
-        {admin && actions.openAssignOwner ? (
+        {actions.openAssignGroups ? (
           <Button
             size='sm'
             variant='outline'
-            disabled={actions.ownerBusyId === vm.id}
-            onClick={() => actions.openAssignOwner?.(vm)}
+            disabled={actions.groupsBusyId === vm.id}
+            onClick={() => actions.openAssignGroups?.(vm)}
           >
-            <UserRoundPlus /> 分配给租户
+            <Trans
+              ns='vm'
+              i18nKey='vmDetailCard.assignGroups'
+              components={{ part0: <UserRoundPlus /> }}
+            />
           </Button>
         ) : null}
-        {admin && actions.reclaimOwner && canReclaimVm(vm) ? (
-          <Button
-            size='sm'
-            variant='outline'
-            disabled={actions.ownerBusyId === vm.id}
-            onClick={() => actions.reclaimOwner?.(vm)}
-          >
-            <Undo2 /> 收回
-          </Button>
-        ) : null}
+
         <Button size='sm' variant='ghost' className='ms-auto' asChild>
           <Link to='/vm/$id' params={{ id: vm.id }}>
-            <ExternalLink /> 完整页面
+            <Trans
+              ns='vm'
+              i18nKey='vmDetailCard.fullPage'
+              components={{ part0: <ExternalLink /> }}
+            />
           </Link>
         </Button>
       </div>
@@ -324,6 +371,8 @@ export function VmDetailCard({
   accounts?: UsageAccountRow[]
   onOpenChange: (open: boolean) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const contentRef = useRef<HTMLDivElement>(null)
   return (
     <Dialog open={vm != null} onOpenChange={onOpenChange}>
@@ -339,11 +388,17 @@ export function VmDetailCard({
       >
         <DialogHeader>
           <DialogTitle className='flex min-w-0 items-center gap-1.5 text-base'>
-            {vm ? <SlotIdentity vm={vm} compact /> : '槽位详情'}
+            {vm ? (
+              <SlotIdentity vm={vm} compact />
+            ) : (
+              tVm('vm:vmDetailCard.slotDetails')
+            )}
             {vm ? <RuntimeChip vm={vm} /> : null}
             {vm ? <NodeChip nodeId={vm.node_id} /> : null}
           </DialogTitle>
-          <DialogDescription className='sr-only'>槽位详情</DialogDescription>
+          <DialogDescription className='sr-only'>
+            <Trans ns='vm' i18nKey='vmDetailCard.slotDetails' />
+          </DialogDescription>
         </DialogHeader>
         <div className='-me-3 min-h-0 flex-1 overflow-y-auto pe-3'>
           <div className='space-y-2.5 pb-1'>

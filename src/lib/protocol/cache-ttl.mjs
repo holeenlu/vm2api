@@ -1,13 +1,12 @@
 /**
  * Anthropic cache_control ttl for unofficial OAuth.
- * Default 1h (2× input). Customers may request 5m (1.25× input);
+ * Default 1h (2× input). The settings panel may select 5m (1.25× input);
  * billing must use the TTL we actually sent.
  */
 import fs from 'node:fs'
 import { isAnthropicServerTool } from './web-search.mjs'
 
 export const DEFAULT_CACHE_TTL = '1h'
-export const CACHE_TTL_HEADER = 'x-kin-cache-ttl'
 
 export function normalizeCacheTtl(value) {
   const raw = String(value ?? '')
@@ -67,21 +66,7 @@ export function bodyRequestsHourCache(body) {
   return bodyCacheTtl(body) === '1h'
 }
 
-/**
- * Header, then an explicit 5m/1h on any inbound marker, then the settings menu.
- * Official Claude Code is included: its ttl-less markers mean "not chosen", so
- * they take the menu value instead of Anthropic's implicit 5m.
- */
-export function resolveCacheTtl({ headers = {}, body, routing, routingFile } = {}) {
-  const hdr = headers[CACHE_TTL_HEADER] || headers['X-Kin-Cache-Ttl']
-  if (hdr != null && String(hdr).trim()) return normalizeCacheTtl(hdr)
-  const requested = bodyCacheTtl(body)
-  if (requested) return requested
-  if (routing) return cacheTtlFromRouting(routing)
-  return cacheTtlFromRoutingFile(routingFile)
-}
-
-/** Native passthrough validates caller markers; it never repairs their budget or TTL. */
+/** Validate the final owned layout before dispatch. */
 export function validateCacheBreakpoints(body) {
   let count = 0
   let short = false
@@ -111,44 +96,6 @@ export function validateCacheBreakpoints(body) {
   }
   // Automatic caching applies at the message tail, after explicit block markers.
   check(body)
-}
-
-/** Only call for a rewritten native body: every surviving marker is Node-owned. */
-export function fillMissingCacheTtl(body, ttl = DEFAULT_CACHE_TTL) {
-  const target = normalizeCacheTtl(ttl)
-  return walkCacheNodes(body, (node) => {
-    const control = node?.cache_control
-    if (!control || control.type !== 'ephemeral' || control.ttl != null) return node
-    return { ...node, cache_control: { ...control, ttl: target } }
-  })
-}
-
-const CACHE_TTL_MS = Object.freeze({ '5m': 5 * 60_000, '1h': 60 * 60_000 })
-const CONVERSATION_TTL_LIMIT = 10_000
-const conversationTtls = new Map()
-
-/**
- * One conversation writes one TTL. Switching mid-conversation re-prices the
- * whole prefix and Anthropic rejects 1h after 5m, so the first resolved value
- * wins until the conversation is idle past that TTL; by then its cache is gone
- * and nothing is lost by re-resolving.
- */
-export function pinConversationCacheTtl(conversationKey, ttl, now = Date.now()) {
-  const wanted = normalizeCacheTtl(ttl)
-  const key = String(conversationKey || '').trim()
-  if (!key) return wanted
-  const hit = conversationTtls.get(key)
-  const pinned = hit && now - hit.at < CACHE_TTL_MS[hit.ttl] ? hit.ttl : wanted
-  conversationTtls.delete(key)
-  conversationTtls.set(key, { ttl: pinned, at: now })
-  if (conversationTtls.size > CONVERSATION_TTL_LIMIT) {
-    conversationTtls.delete(conversationTtls.keys().next().value)
-  }
-  return pinned
-}
-
-export function clearConversationCacheTtls() {
-  conversationTtls.clear()
 }
 
 /**

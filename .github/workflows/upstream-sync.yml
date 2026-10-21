@@ -1,0 +1,111 @@
+name: Upstream sync preview
+run-name: Upstream preview · ${{ inputs.mode || 'upstream' }}
+
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'upstream: inspect upstream changes; baseline: validate current main only'
+        type: choice
+        options: [upstream, baseline]
+        default: upstream
+      force:
+        description: 'Recheck an upstream/base pair that already has a completed report'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tapmodels-upstream-preview
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      status: ${{ steps.preview.outputs.status }}
+      has_candidate: ${{ steps.preview.outputs.has_candidate }}
+      candidate_sha: ${{ steps.preview.outputs.candidate_sha }}
+      source_sha: ${{ steps.preview.outputs.source_sha }}
+      record: ${{ steps.preview.outputs.record }}
+      result_artifact: ${{ steps.preview.outputs.result_artifact }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Freeze inputs, inspect contracts and prepare an isolated candidate
+        id: preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode || 'upstream' }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          args=(prepare --output "$RUNNER_TEMP/upstream-preview" --mode "$MODE")
+          if [ "$FORCE" = true ]; then args+=(--force); fi
+          python3 scripts/upstream-sync/preview.py "${args[@]}"
+      - name: Preserve exact candidate or conflict inputs
+        if: always() && steps.preview.outputs.record == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: upstream-preview-inputs-${{ github.run_id }}
+          path: ${{ runner.temp }}/upstream-preview/
+          if-no-files-found: error
+          retention-days: 14
+
+  validation:
+    needs: prepare
+    if: needs.prepare.outputs.has_candidate == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+    with:
+      preview_artifact: upstream-preview-inputs-${{ github.run_id }}
+      preview_sha: ${{ needs.prepare.outputs.candidate_sha }}
+      preview_source: ${{ needs.prepare.outputs.source_sha }}
+
+  report:
+    needs: [prepare, validation]
+    if: always() && !cancelled() && needs.prepare.outputs.record == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Reporting runs trusted baseline code, never scripts from the candidate.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: upstream-preview-inputs-${{ github.run_id }}
+          path: ${{ runner.temp }}/upstream-preview/
+      - name: Record verification result without publishing
+        id: finish
+        env:
+          CI_RESULT: ${{ needs.validation.result }}
+        run: python3 scripts/upstream-sync/preview.py finish --output "$RUNNER_TEMP/upstream-preview" --ci-result "$CI_RESULT"
+      - name: Save report and completed-input marker
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.result_artifact }}
+          path: |
+            ${{ runner.temp }}/upstream-preview/*.json
+            ${{ runner.temp }}/upstream-preview/*.md
+            ${{ runner.temp }}/upstream-preview/*.log
+            ${{ runner.temp }}/upstream-preview/*.patch
+            ${{ runner.temp }}/upstream-preview/*.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Surface a new conflict, contract blocker or failed check
+        if: steps.finish.outputs.should_fail == 'true'
+        run: |
+          echo '::error::Upstream preview needs attention. See the summary and report artifact; main was not changed.'
+          exit 1

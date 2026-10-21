@@ -234,7 +234,7 @@ function leakyProbes() {
     cluster: () => ({
       slotBridgeStatus: () => ({
         link: { state: 'backoff', error: { code: 'ssh_closed', message: 'connect to 10.0.0.9 as root failed' } },
-        bridge: { alive: false, error: 'listen /var/lib/vm2api/cluster/node-a/docker.sock EACCES' },
+        bridge: { alive: false, error: 'listen /var/lib/tapmodels/cluster/node-a/docker.sock EACCES' },
         relays: null,
       }),
     }),
@@ -265,7 +265,14 @@ test('tenant diagnosis carries codes and numbers but no raw logs, paths, hosts o
   try {
     const d = await diagnoseSlotServices(vm, { projectRoot: root, probes: leakyProbes() })
     const body = JSON.stringify(d)
-    for (const leak of [...SECRETS, '/home/kincli', '/var/lib/vm2api', '10.0.0.9', 'permission denied', 'log_tail']) {
+    for (const leak of [
+      ...SECRETS,
+      '/home/kincli',
+      '/var/lib/tapmodels',
+      '10.0.0.9',
+      'permission denied',
+      'log_tail',
+    ]) {
       assert.equal(body.includes(leak), false, `tenant response leaks ${leak}`)
     }
     const by = Object.fromEntries(d.checks.map((c) => [c.id, c]))

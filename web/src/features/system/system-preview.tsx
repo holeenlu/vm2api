@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { PersonaPreset } from '@/types/panel-routing'
 import { Copy, EyeOff, FileText } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import {
   PREVIEW_CALLER_AGENT,
@@ -13,7 +14,6 @@ import {
   envTimezoneText,
   estimateTokens,
   personaHideEnabled,
-  personaPresetLabel,
   presetFlagEnabled,
   previewSystemBlocks,
   type RawBlock,
@@ -32,6 +32,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { systemPresetLabel } from './preset-label'
 import { personaPreviewVarsQueryOptions } from './queries'
 
 /** 常驻约束与调用方占位高亮，其余原样。 */
@@ -77,6 +78,8 @@ export function SystemPreview({
   blocks: RawBlock[]
   compat: Record<string, unknown>
 }) {
+  const { t } = useTranslation('system')
+
   const dash = useQuery(dashboardQueryOptions())
   const [withCaller, setWithCaller] = useState(true)
   const zones = [
@@ -127,20 +130,20 @@ export function SystemPreview({
       <CardHeader className='space-y-2 px-4'>
         <div className='flex items-center gap-2'>
           <FileText className='size-4 text-muted-foreground' aria-hidden />
-          <CardTitle className='text-sm'>最终 system prompt</CardTitle>
+          <CardTitle className='text-sm'>{t('system:finalPrompt')}</CardTitle>
           <Badge variant='secondary' className='font-normal'>
-            {personaPresetLabel(preset)}
+            {systemPresetLabel(preset)}
           </Badge>
           <Button
             type='button'
             size='icon'
             variant='ghost'
             className='ml-auto size-7 cursor-pointer'
-            aria-label='复制 system prompt'
+            aria-label={t('system:copyPrompt')}
             disabled={!plain}
             onClick={() => {
               void navigator.clipboard.writeText(plain)
-              toast.success('已复制')
+              toast.success(t('system:copied'))
             }}
           >
             <Copy />
@@ -148,13 +151,13 @@ export function SystemPreview({
         </div>
         <div className='flex flex-wrap items-center gap-x-3 gap-y-2'>
           <span className='text-[11px] text-muted-foreground'>
-            不含 billing
+            {t('system:excludesBilling')}
           </span>
           <Select value={timezone} onValueChange={setPicked}>
             <SelectTrigger
               size='sm'
               className='h-7 cursor-pointer font-mono text-[11px]'
-              aria-label='预览用槽位时区'
+              aria-label={t('system:previewTimezone')}
             >
               <SelectValue />
             </SelectTrigger>
@@ -172,7 +175,7 @@ export function SystemPreview({
           </Select>
           <label className='ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground'>
             <Switch checked={withCaller} onCheckedChange={setWithCaller} />
-            含调用方
+            {t('system:includeCaller')}
           </label>
         </div>
       </CardHeader>
@@ -208,12 +211,14 @@ export function SystemPreview({
                           className='flex items-center gap-0.5'
                           title={
                             blockMasked
-                              ? '注入块不计 usage'
-                              : '常驻约束不计 usage'
+                              ? t('system:injectedUsageExcluded')
+                              : t('system:constraintsUsageExcluded')
                           }
                         >
                           <EyeOff className='size-3' aria-hidden />
-                          {blockMasked ? '遮罩' : '约束遮罩'}
+                          {blockMasked
+                            ? t('system:mask')
+                            : t('system:constraintsMask')}
                         </span>
                       ) : null}
                       <span className='tabular-nums'>
@@ -223,7 +228,7 @@ export function SystemPreview({
                   </div>
                   {block.placeholder ? (
                     <p className='px-2.5 py-2 text-[11px] text-muted-foreground italic'>
-                      零宽占位
+                      {t('system:zeroWidthPlaceholder')}
                     </p>
                   ) : (
                     <pre className='max-h-80 overflow-auto px-2.5 py-2 font-mono text-[11px] leading-relaxed break-words whitespace-pre-wrap'>
@@ -235,14 +240,19 @@ export function SystemPreview({
             })}
           </ol>
         ) : (
-          <p className='text-xs text-muted-foreground'>无 system 块</p>
+          <p className='text-xs text-muted-foreground'>
+            {t('system:noSystemBlocks')}
+          </p>
         )}
       </CardContent>
       {rendered.length ? (
         <div className='flex items-center justify-between border-t border-border/40 px-4 pt-3 font-mono text-[10px] text-muted-foreground tabular-nums'>
-          <span>{rendered.length} 块</span>
+          <span>{t('system:blockCount', { count: rendered.length })}</span>
           <span>
-            {plain.length} 字符 · ≈{estimateTokens(plain)} tok
+            {t('system:promptSize', {
+              count: plain.length,
+              tokens: estimateTokens(plain),
+            })}
           </span>
         </div>
       ) : null}

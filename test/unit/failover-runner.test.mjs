@@ -130,6 +130,32 @@ test('invalid panel cache layout stops before execution without rotating or cool
   assert.equal(attempts.items[0].errorScope, 'request')
 })
 
+test('image-tail preparation rejection neither executes upstream nor switches accounts', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const attempts = new Attempts()
+  const runner = new FailoverRunner({ scheduler, attemptsRepo: attempts })
+  const result = await runner.run({
+    requestId: 'invalid-image-tail-binding',
+    model: 'claude-opus-5-5',
+    canonicalBody: { model: 'claude-opus-5-5' },
+    applyAttempt: () => {
+      const error = new Error('Signed thinking requires explicit drop_block permission.')
+      error.status = 400
+      error.body = {
+        error: { type: 'invalid_request_error', code: 'tool_result_image_tail_binding', message: error.message },
+      }
+      throw error
+    },
+    callAttempt: () => assert.fail('invalid image-tail binding must not execute'),
+  })
+  assert.equal(result.status, 400)
+  assert.equal(result.body.error.code, 'tool_result_image_tail_binding')
+  assert.equal(result.attemptCount, 0)
+  assert.equal(scheduler.selectCalls, 1)
+  assert.deepEqual(scheduler.cooldowns, [])
+  assert.equal(attempts.items[0].errorScope, 'request')
+})
+
 test('account1 quota exhausted rotates to account2 and commits final sticky', async () => {
   const scheduler = new Scheduler([candidate(1), candidate(2)])
   const attempts = new Attempts()

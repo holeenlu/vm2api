@@ -1,3 +1,5 @@
+import { t as translate } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Collapsible,
@@ -17,34 +19,64 @@ import { Switch } from '@/components/ui/switch'
 
 type OfficialCcConfig = Record<string, unknown>
 
-const TIMEOUTS: [number, string][] = [
-  [30000, '30 秒'],
-  [60000, '1 分钟'],
-  [120000, '2 分钟'],
-  [240000, '4 分钟'],
-  [480000, '8 分钟'],
-  [900000, '15 分钟'],
-]
+function getTimeouts(): [number, string][] {
+  return [
+    [30000, translate('settings:duration.thirtySeconds')],
+    [60000, translate('settings:duration.oneMinute')],
+    [120000, translate('settings:duration.twoMinutes')],
+    [240000, translate('settings:duration.fourMinutes')],
+    [480000, translate('settings:duration.eightMinutes')],
+    [900000, translate('settings:duration.fifteenMinutes')],
+  ]
+}
 
-const MEMORY: [string, string][] = [
-  ['500m', '500 MB（推荐）'],
-  ['512m', '512 MB'],
-  ['1g', '1 GB'],
-  ['2g', '2 GB'],
-  ['4g', '4 GB'],
-  ['8g', '8 GB'],
-]
+function getMemoryOptions(): [string, string][] {
+  return [
+    ['500m', translate('settings:official.recommendedMemory')],
+    ['512m', '512 MB'],
+    ['1g', '1 GB'],
+    ['2g', '2 GB'],
+    ['4g', '4 GB'],
+    ['8g', '8 GB'],
+  ]
+}
 
-const BASIC: [string, string, string, boolean][] = [
-  ['enabled', '换票后自动', '启用', true],
-  ['sync_telemetry', '同步遥测', '初装成功后开启', false],
-]
+function getBasicOptions(): [string, string, string, boolean][] {
+  return [
+    [
+      'enabled',
+      translate('settings:official.autoAfterToken'),
+      translate('settings:enable'),
+      true,
+    ],
+    [
+      'sync_telemetry',
+      translate('settings:official.syncTelemetry'),
+      translate('settings:official.syncTelemetryHelp'),
+      false,
+    ],
+  ]
+}
 
-const ADVANCED: [string, string, string][] = [
-  ['wipe', '清空初装', '每次换票清空'],
-  ['apply_seed', '后置播种', 'init 之后覆写'],
-  ['reconcile_fingerprint', '官方指纹', 'machineID 覆盖 device_id'],
-]
+function getAdvancedOptions(): [string, string, string][] {
+  return [
+    [
+      'wipe',
+      translate('settings:official.wipe'),
+      translate('settings:official.wipeHelp'),
+    ],
+    [
+      'apply_seed',
+      translate('settings:official.applySeed'),
+      translate('settings:official.applySeedHelp'),
+    ],
+    [
+      'reconcile_fingerprint',
+      translate('settings:official.fingerprint'),
+      translate('settings:official.fingerprintHelp'),
+    ],
+  ]
+}
 
 function SwitchRow({
   id,
@@ -79,32 +111,33 @@ export function OfficialCcSettingsPane({
   config: OfficialCcConfig
   onChange: (next: OfficialCcConfig) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const set = (patch: OfficialCcConfig) => onChange({ ...config, ...patch })
   const timeout = Number(config.timeout_ms ?? 240000)
   const memory = String(config.memory ?? '500m')
-  const timeouts = TIMEOUTS.some(([v]) => v === timeout)
-    ? TIMEOUTS
+  const timeouts = getTimeouts().some(([v]) => v === timeout)
+    ? getTimeouts()
     : [
-        ...TIMEOUTS,
-        [timeout, `${Math.round(timeout / 1000)} 秒`] as [number, string],
+        ...getTimeouts(),
+        [
+          timeout,
+          t('duration.seconds', { value1: Math.round(timeout / 1000) }),
+        ] as [number, string],
       ]
 
   return (
     <Card>
       <CardHeader className='pb-2'>
-        <CardTitle className='text-sm'>官方 Claude Code 初装</CardTitle>
+        <CardTitle className='text-sm'>{t('official.title')}</CardTitle>
       </CardHeader>
       <CardContent className='space-y-3'>
         <p className='text-xs text-muted-foreground'>
-          这是槽位外面的初装配置。启用时每次换票都重新 wipe 再跑官方
-          hello，不是只写票。运输固定 Rust cli-hop，这里不能改成 HTTP。真正跑
-          CLI 的是数据面：默认 cli-node + kernel，也可切 cc-node + kernel 或
-          crag + cc-node。成功后按「同步遥测」写官方身份，并热更新槽内
-          worker.json。虚拟机页的种子开关不能单独打开 DNT 来对抗这份配置。
+          {t('official.description')}
         </p>
 
         <div className='divide-y'>
-          {BASIC.map(([key, label, hint, defaultOn]) => (
+          {getBasicOptions().map(([key, label, hint, defaultOn]) => (
             <SwitchRow
               key={key}
               id={`occ-${key}`}
@@ -116,8 +149,8 @@ export function OfficialCcSettingsPane({
           ))}
           <SwitchRow
             id='occ-resident'
-            label='hello 后常驻'
-            hint='默认关。打开后单次 hello 不退出'
+            label={t('official.resident')}
+            hint={t('official.residentHelp')}
             checked={config.resident === true}
             onChange={(v) => set({ resident: v })}
           />
@@ -125,11 +158,11 @@ export function OfficialCcSettingsPane({
 
         <Collapsible>
           <CollapsibleTrigger className='text-sm text-muted-foreground hover:text-foreground'>
-            高级设置
+            {t('advanced')}
           </CollapsibleTrigger>
           <CollapsibleContent className='space-y-3 pt-3'>
             <div className='divide-y'>
-              {ADVANCED.map(([key, label, hint]) => (
+              {getAdvancedOptions().map(([key, label, hint]) => (
                 <SwitchRow
                   key={key}
                   id={`occ-${key}`}
@@ -142,7 +175,7 @@ export function OfficialCcSettingsPane({
             </div>
 
             <div className='space-y-1.5'>
-              <Label htmlFor='occ-hello'>hello 提示词</Label>
+              <Label htmlFor='occ-hello'>{t('official.helloPrompt')}</Label>
               <Input
                 id='occ-hello'
                 maxLength={200}
@@ -153,7 +186,7 @@ export function OfficialCcSettingsPane({
 
             <div className='grid gap-3 sm:grid-cols-2'>
               <div className='space-y-1.5'>
-                <Label htmlFor='occ-timeout'>单轮超时</Label>
+                <Label htmlFor='occ-timeout'>{t('official.timeout')}</Label>
                 <Select
                   value={String(timeout)}
                   onValueChange={(v) => set({ timeout_ms: Number(v) })}
@@ -171,7 +204,7 @@ export function OfficialCcSettingsPane({
                 </Select>
               </div>
               <div className='space-y-1.5'>
-                <Label htmlFor='occ-memory'>初装内存</Label>
+                <Label htmlFor='occ-memory'>{t('official.memory')}</Label>
                 <Select
                   value={memory}
                   onValueChange={(v) => set({ memory: v })}
@@ -180,7 +213,7 @@ export function OfficialCcSettingsPane({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {MEMORY.map(([v, l]) => (
+                    {getMemoryOptions().map(([v, l]) => (
                       <SelectItem key={v} value={v}>
                         {l}
                       </SelectItem>
@@ -191,10 +224,7 @@ export function OfficialCcSettingsPane({
             </div>
 
             <p className='text-xs text-muted-foreground'>
-              运输固定 cli-hop，跟 inference.engine=rust。保存不会把
-              official_cc.inference 写成 http。三种内核搭配在内核页切换。hello
-              之后在槽内跑 CLI /usage，失败重试 2 次；账号等级以完整官方 usage
-              为准。hello 默认不常驻。
+              {t('official.runtimeHelp')}
             </p>
           </CollapsibleContent>
         </Collapsible>

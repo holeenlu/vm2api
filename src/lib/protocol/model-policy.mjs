@@ -24,7 +24,6 @@ import {
   HAIKU_BETA_HEADER,
   joinBetas,
 } from './claude-code-betas.mjs'
-import { reasoningEffortOf } from './log-fields.mjs'
 
 function isCatalogModelId(id) {
   const s = String(id || '')
@@ -58,11 +57,11 @@ const CAP_HAIKU = {
 }
 
 const CAP_HAIKU_55 = {
-  context_window: 100000,
-  supports_1m: false,
-  thinking_mode: 'adaptive_or_enabled',
+  context_window: 1000000,
+  supports_1m: true,
+  thinking_mode: 'adaptive_only',
   supports_adaptive: true,
-  requires_adaptive: false,
+  requires_adaptive: true,
   supports_interleaved: true,
   supports_effort: true,
   supports_context_management: true,
@@ -139,7 +138,7 @@ function entry(partial) {
   }
 }
 
-/** Official seed matrix (Aug 2026). Panel "reset" restores this. */
+/** Official seed matrix (2026-10-20). Panel "reset" restores this. */
 export function seedDefaultPolicy() {
   const models = {}
   const add = (id, cfg) => {
@@ -163,7 +162,7 @@ export function seedDefaultPolicy() {
       on_adaptive: 'convert_to_enabled',
       on_enabled: 'passthrough',
     },
-    aliases: ['haiku', 'claude-haiku-4-5', 'claude-3-5-haiku', 'claude-3-5-haiku-latest'],
+    aliases: ['claude-haiku-4-5', 'claude-3-5-haiku', 'claude-3-5-haiku-latest'],
   })
 
   add('claude-haiku-4-5', {
@@ -186,11 +185,11 @@ export function seedDefaultPolicy() {
   })
 
   // Claude Code 2.1.293. Native 1M; no context-1m beta and no gateway id.
-  // budget_tokens is rejected. disabled thinking stays only at high or below.
+  // Native 1M context and 128K output; thinking is always adaptive.
   add(HAIKU_55_ID, {
     display_name: 'Haiku 5.5',
     family: 'haiku',
-    sort: 12,
+    sort: 4,
     capabilities: CAP_HAIKU_55,
     betas: {
       required: ['claude-code-20250219', 'oauth-2025-04-20', 'interleaved-thinking-2025-05-14'],
@@ -198,8 +197,8 @@ export function seedDefaultPolicy() {
       pass_context_1m: false,
     },
     params: {
-      max_tokens_default: 100000,
-      max_tokens_cap: 100000,
+      max_tokens_default: 128000,
+      max_tokens_cap: 128000,
       on_adaptive: 'passthrough',
       on_enabled: 'passthrough',
       default_effort: 'medium',
@@ -301,7 +300,7 @@ export function seedDefaultPolicy() {
   add(SONNET_55_ID, {
     display_name: 'Sonnet 5.5',
     family: 'sonnet',
-    sort: 31,
+    sort: 3,
     capabilities: CAP_ADAPTIVE_ONLY,
     betas: { pass_context_1m: true },
     params: {
@@ -326,7 +325,7 @@ export function seedDefaultPolicy() {
       on_adaptive: 'passthrough',
       on_enabled: 'passthrough',
     },
-    aliases: ['opus'],
+    aliases: [],
   })
 
   // Claude Code 2.1.280. ID is hyphenated. Dotted claude-opus-5.5 is only an alias.
@@ -334,7 +333,7 @@ export function seedDefaultPolicy() {
   add(OPUS_55_ID, {
     display_name: 'Opus 5.5',
     family: 'opus',
-    sort: 36,
+    sort: 2,
     capabilities: CAP_ADAPTIVE_ONLY,
     betas: { pass_context_1m: true },
     params: {
@@ -344,7 +343,7 @@ export function seedDefaultPolicy() {
       on_enabled: 'convert_to_adaptive',
       default_effort: 'medium',
     },
-    aliases: [OPUS_55_LEGACY_ID],
+    aliases: ['opus', OPUS_55_LEGACY_ID],
   })
 
   add('claude-fable-5', {
@@ -359,13 +358,13 @@ export function seedDefaultPolicy() {
       on_adaptive: 'passthrough',
       on_enabled: 'passthrough',
     },
-    aliases: ['fable'],
+    aliases: [],
   })
 
   add(FABLE_51_ID, {
     display_name: 'Fable 5.1',
     family: 'fable',
-    sort: 41,
+    sort: 1,
     capabilities: CAP_ADAPTIVE_ONLY,
     betas: { pass_context_1m: false },
     params: {
@@ -374,7 +373,7 @@ export function seedDefaultPolicy() {
       on_adaptive: 'passthrough',
       on_enabled: 'passthrough',
     },
-    aliases: [FABLE_51_LEGACY_ID],
+    aliases: ['fable', FABLE_51_LEGACY_ID],
   })
 
   return {
@@ -393,12 +392,12 @@ export function seedDefaultPolicy() {
     models,
     aliases: {
       sonnet: 'claude-sonnet-5-5',
-      opus: 'claude-opus-5',
-      haiku: 'claude-haiku-4-5-20251001',
+      opus: OPUS_55_ID,
+      haiku: HAIKU_55_ID,
       'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
       'claude-3-5-haiku': 'claude-haiku-4-5-20251001',
       'claude-3-5-haiku-latest': 'claude-haiku-4-5-20251001',
-      fable: 'claude-fable-5',
+      fable: FABLE_51_ID,
       [FABLE_51_LEGACY_ID]: FABLE_51_ID,
       [OPUS_55_LEGACY_ID]: OPUS_55_ID,
     },
@@ -456,6 +455,8 @@ export function normalizePolicy(raw) {
       models[id] = deepMergeEntry(base, cfg)
     }
   }
+  if (raw.source === 'seed')
+    for (const id of [FABLE_51_ID, OPUS_55_ID, SONNET_55_ID, HAIKU_55_ID]) models[id].sort = seed.models[id].sort
   models[FABLE_51_ID].aliases = [
     ...new Set([
       FABLE_51_LEGACY_ID,
@@ -490,6 +491,7 @@ export function normalizePolicy(raw) {
   const rawDefaults = raw.defaults && typeof raw.defaults === 'object' ? raw.defaults : {}
   const hasWhitelist = Object.prototype.hasOwnProperty.call(rawDefaults, 'context_1m_whitelist')
   const aliases = { ...seed.aliases, ...(raw.aliases || {}) }
+  if (raw.source === 'seed') for (const alias of ['opus', 'haiku', 'fable']) aliases[alias] = seed.aliases[alias]
   for (const [alias, target] of Object.entries(aliases)) {
     const normalized = String(target).trim().toLowerCase()
     if (normalized === FABLE_51_LEGACY_ID) aliases[alias] = FABLE_51_ID
@@ -497,6 +499,11 @@ export function normalizePolicy(raw) {
   }
   aliases[FABLE_51_LEGACY_ID] = FABLE_51_ID
   aliases[OPUS_55_LEGACY_ID] = OPUS_55_ID
+  for (const [id, cfg] of Object.entries(models)) {
+    cfg.aliases = (cfg.aliases || []).filter(
+      (alias) => !['opus', 'sonnet', 'haiku', 'fable'].includes(alias) || aliases[alias] === id,
+    )
+  }
   return {
     version: Number(raw.version) || 1,
     updated_at: raw.updated_at || new Date().toISOString(),
@@ -600,12 +607,12 @@ function persistHaiku55Model(repo, stored) {
     dirty = true
   } else {
     const wasOldSeed =
-      Number(current.capabilities?.context_window) === 1_000_000 &&
-      Number(current.params?.max_tokens_default) === 128_000 &&
-      Number(current.params?.max_tokens_cap) === 128_000
+      Number(current.capabilities?.context_window) === 100_000 &&
+      Number(current.params?.max_tokens_default) === 100_000 &&
+      Number(current.params?.max_tokens_cap) === 100_000
     if (wasOldSeed) {
       models[HAIKU_55_ID] = deepMergeEntry(current, {
-        capabilities: { context_window: desired.capabilities.context_window },
+        capabilities: { ...desired.capabilities },
         params: {
           max_tokens_default: desired.params.max_tokens_default,
           max_tokens_cap: desired.params.max_tokens_cap,
@@ -845,9 +852,7 @@ export function isHaiku55Model(model = '') {
 function applyHaiku55Thinking(body) {
   if (!body.thinking || typeof body.thinking !== 'object') return body
   const type = String(body.thinking.type || '').toLowerCase()
-  const effort = String(reasoningEffortOf(body) || '').toLowerCase()
-  const disabledBlocked = type === 'disabled' && (effort === 'xhigh' || effort === 'max')
-  if (type === 'enabled' || body.thinking.budget_tokens != null || disabledBlocked) {
+  if (type === 'enabled' || type === 'disabled' || body.thinking.budget_tokens != null) {
     body.thinking = adaptiveOnlyThinking(body.thinking)
   }
   return body

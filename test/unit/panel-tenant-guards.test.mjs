@@ -18,11 +18,7 @@ after(() => {
 
 const { createPanelHandler } = await import('../../src/lib/admin/panel-routes.mjs')
 const { authorizePanelRoute } = await import('../../src/lib/admin/panel-acl.mjs')
-const { ApiKeyStore } = await import('../../src/lib/admin/api-keys.mjs')
 const { PanelUserStore } = await import('../../src/lib/admin/panel-users.mjs')
-const { parseAllowedVms } = await import('../../src/lib/admin/key-scope.mjs')
-const { createVmPool } = await import('../../src/lib/admin/vm-pools.mjs')
-const { VmPoolsRepo } = await import('../../src/lib/db/repos/vm-pools-repo.mjs')
 const { createDatabase } = await import('../../src/lib/db/database.mjs')
 const { createPanelSession, verifyPanelSession } = await import('../../src/lib/core/security.mjs')
 const { readCodexAccounts, upsertCodexAccount } = await import('../../src/lib/vm/codex-slot.mjs')
@@ -79,22 +75,22 @@ function makeHandler(root, who, body, extra = {}) {
   return { call, response }
 }
 
-test('tenant cannot import credentials into another tenant slot; missing and foreign look the same', async (t) => {
+test('commercial customers cannot import credentials into own, foreign or missing slots', async (t) => {
   const root = makeProject(t)
   codexVm(root, 'vm-mine', 'u-1')
   codexVm(root, 'vm-other', 'u-2')
   const body = (vm_id) => ({ vm_id, mode: 'access_token', raw: 'tenant-at' })
 
   const foreign = await makeHandler(root, TENANT, body('vm-other')).call('POST', '/api/panel/vms/import')
-  assert.equal(foreign.status, 404)
+  assert.equal(foreign.status, 403)
   const missing = await makeHandler(root, TENANT, body('vm-nope')).call('POST', '/api/panel/vms/import')
-  assert.equal(missing.status, 404)
+  assert.equal(missing.status, 403)
   assert.deepEqual(foreign.body, missing.body)
   assert.equal(readCodexAccounts(root, 'vm-other')[0].access_token, 'old-vm-other')
 
   const own = await makeHandler(root, TENANT, body('vm-mine')).call('POST', '/api/panel/vms/import')
-  assert.equal(own.status, 200, JSON.stringify(own.body))
-  assert.equal(readCodexAccounts(root, 'vm-mine')[0].access_token, 'tenant-at')
+  assert.equal(own.status, 403, JSON.stringify(own.body))
+  assert.equal(readCodexAccounts(root, 'vm-mine')[0].access_token, 'old-vm-mine')
 })
 
 test('admin import still reaches any slot', async (t) => {
@@ -126,7 +122,7 @@ test('tenant proxy import cannot bind a slot it does not own', async (t) => {
     'POST',
     '/api/panel/proxies/import',
   )
-  assert.equal(tenant.status, 404)
+  assert.equal(tenant.status, 403)
   assert.deepEqual(calls, [])
 
   const admin = await makeHandler(root, ADMIN, { text: 'h:1080', bind_vm_id: 'vm-other' }, { proxyPool }).call(
@@ -138,206 +134,6 @@ test('tenant proxy import cannot bind a slot it does not own', async (t) => {
     calls.map((c) => c[0]),
     ['import', 'bind'],
   )
-})
-
-function keyFixture(t) {
-  const root = makeProject(t)
-  claudeVm(root, 'vm-mine', 'u-1')
-  claudeVm(root, 'vm-other', 'u-2')
-  const store = new ApiKeyStore({ dataDir: fs.mkdtempSync(path.join(root, 'keys-')) })
-  const key = store.create({ name: 'mine', user_id: 'u-1', group_id: 1 })
-  return { root, store, key }
-}
-
-test('tenant key PATCH drops user_id and group_id', async (t) => {
-  const { root, store, key } = keyFixture(t)
-  const out = await makeHandler(
-    root,
-    TENANT,
-    { name: 'renamed', user_id: 'u-2', group_id: 7 },
-    { apiKeyStore: store },
-  ).call('PATCH', `/api/panel/api-keys/${key.id}`)
-  assert.equal(out.status, 200, JSON.stringify(out.body))
-  const saved = store.getById(key.id)
-  assert.equal(saved.name, 'renamed')
-  assert.equal(saved.user_id, 'u-1')
-  assert.equal(saved.group_id, 1)
-
-  const cleared = await makeHandler(root, TENANT, { user_id: null }, { apiKeyStore: store }).call(
-    'PATCH',
-    `/api/panel/api-keys/${key.id}`,
-  )
-  assert.equal(cleared.status, 200)
-  assert.equal(store.getById(key.id).user_id, 'u-1')
-})
-
-test('tenant key scope only accepts its own slots, on PATCH and create', async (t) => {
-  const { root, store, key } = keyFixture(t)
-  const foreign = { group_type: 'anthropic', allowed_vms: ['vm-other'] }
-  const missing = { group_type: 'anthropic', allowed_vms: ['vm-nope'] }
-
-  const patchForeign = await makeHandler(root, TENANT, foreign, { apiKeyStore: store }).call(
-    'PATCH',
-    `/api/panel/api-keys/${key.id}`,
-  )
-  assert.equal(patchForeign.status, 400)
-  assert.equal(patchForeign.body.error.code, 'key_vm_unknown')
-  const patchMissing = await makeHandler(root, TENANT, missing, { apiKeyStore: store }).call(
-    'PATCH',
-    `/api/panel/api-keys/${key.id}`,
-  )
-  assert.deepEqual(patchForeign.body, patchMissing.body)
-  assert.equal(store.getById(key.id).group_type, 'all')
-
-  const patchOwn = await makeHandler(
-    root,
-    TENANT,
-    { group_type: 'anthropic', allowed_vms: ['vm-mine'] },
-    { apiKeyStore: store },
-  ).call('PATCH', `/api/panel/api-keys/${key.id}`)
-  assert.equal(patchOwn.status, 200, JSON.stringify(patchOwn.body))
-  assert.deepEqual(parseAllowedVms(store.getById(key.id).allowed_vms), ['vm-mine'])
-
-  const before = store.list().length
-  const createForeign = await makeHandler(root, TENANT, { name: 'x', ...foreign }, { apiKeyStore: store }).call(
-    'POST',
-    '/api/panel/api-keys',
-  )
-  assert.equal(createForeign.status, 400)
-  assert.equal(createForeign.body.error.code, 'key_vm_unknown')
-  assert.equal(store.list().length, before)
-
-  const created = await makeHandler(
-    root,
-    TENANT,
-    { name: 'new', user_id: 'u-2', group_id: 7, group_type: 'anthropic', allowed_vms: ['vm-mine'] },
-    { apiKeyStore: store },
-  ).call('POST', '/api/panel/api-keys')
-  assert.equal(created.status, 201, JSON.stringify(created.body))
-  const rec = store.getById(created.body.item.id)
-  assert.equal(rec.user_id, 'u-1')
-  assert.equal(rec.group_id, 1)
-})
-
-test('admin key edits keep user_id, group_id and any slot', async (t) => {
-  const { root, store, key } = keyFixture(t)
-  const out = await makeHandler(
-    root,
-    ADMIN,
-    { user_id: 'u-2', group_id: 7, group_type: 'anthropic', allowed_vms: ['vm-other'] },
-    { apiKeyStore: store },
-  ).call('PATCH', `/api/panel/api-keys/${key.id}`)
-  assert.equal(out.status, 200, JSON.stringify(out.body))
-  const saved = store.getById(key.id)
-  assert.equal(saved.user_id, 'u-2')
-  assert.equal(saved.group_id, 7)
-  assert.deepEqual(parseAllowedVms(saved.allowed_vms), ['vm-other'])
-
-  const created = await makeHandler(
-    root,
-    ADMIN,
-    { name: 'for-u2', user_id: 'u-2', group_id: 7, group_type: 'anthropic', allowed_vms: ['vm-other'] },
-    { apiKeyStore: store },
-  ).call('POST', '/api/panel/api-keys')
-  assert.equal(created.status, 201, JSON.stringify(created.body))
-  const rec = store.getById(created.body.item.id)
-  assert.equal(rec.user_id, 'u-2')
-  assert.equal(rec.group_id, 7)
-})
-
-test('tenant key create/patch vm_pool_id guard; admin can set pool', async (t) => {
-  const { root, store, key } = keyFixture(t)
-  const poolRepo = new VmPoolsRepo(store.db)
-  const pool = createVmPool(poolRepo, { name: 'Shared Pool', vm_ids: [] })
-
-  // 1. Tenant POST /api/panel/api-keys with non-empty vm_pool_id -> 403 key_pool_forbidden
-  const countBefore = store.list().length
-  const tenantCreateWithPool = await makeHandler(
-    root,
-    TENANT,
-    { name: 'tenant-pool-key', vm_pool_id: pool.id },
-    { apiKeyStore: store },
-  ).call('POST', '/api/panel/api-keys')
-  assert.equal(tenantCreateWithPool.status, 403, JSON.stringify(tenantCreateWithPool.body))
-  assert.deepEqual(tenantCreateWithPool.body, {
-    ok: false,
-    error: { code: 'key_pool_forbidden', message: '只有管理员可以设置账号池' },
-  })
-  assert.equal(store.list().length, countBefore, 'did not write key to db on 403')
-
-  // 2. Tenant POST /api/panel/api-keys without vm_pool_id or with null/empty string -> 201 success
-  const tenantCreateEmpty = await makeHandler(
-    root,
-    TENANT,
-    { name: 'tenant-empty-pool', vm_pool_id: '' },
-    { apiKeyStore: store },
-  ).call('POST', '/api/panel/api-keys')
-  assert.equal(tenantCreateEmpty.status, 201, JSON.stringify(tenantCreateEmpty.body))
-  const emptyKey = store.getById(tenantCreateEmpty.body.item.id)
-  assert.equal(emptyKey.vm_pool_id, null)
-
-  const tenantCreateNull = await makeHandler(
-    root,
-    TENANT,
-    { name: 'tenant-null-pool', vm_pool_id: null },
-    { apiKeyStore: store },
-  ).call('POST', '/api/panel/api-keys')
-  assert.equal(tenantCreateNull.status, 201, JSON.stringify(tenantCreateNull.body))
-  const nullKey = store.getById(tenantCreateNull.body.item.id)
-  assert.equal(nullKey.vm_pool_id, null)
-
-  // 3. Admin POST with vm_pool_id -> 201 success
-  const adminCreate = await makeHandler(
-    root,
-    ADMIN,
-    { name: 'admin-pool-key', vm_pool_id: pool.id },
-    { apiKeyStore: store },
-  ).call('POST', '/api/panel/api-keys')
-  assert.equal(adminCreate.status, 201, JSON.stringify(adminCreate.body))
-  const adminKey = store.getById(adminCreate.body.item.id)
-  assert.equal(adminKey.vm_pool_id, pool.id)
-
-  // 4. Admin assigns pool to tenant key
-  const adminPatchPool = await makeHandler(root, ADMIN, { vm_pool_id: pool.id }, { apiKeyStore: store }).call(
-    'PATCH',
-    `/api/panel/api-keys/${key.id}`,
-  )
-  assert.equal(adminPatchPool.status, 200, JSON.stringify(adminPatchPool.body))
-  assert.equal(store.getById(key.id).vm_pool_id, pool.id)
-
-  // 5. Tenant PATCH with non-empty vm_pool_id -> 403 key_pool_forbidden
-  const tenantPatchWithPool = await makeHandler(
-    root,
-    TENANT,
-    { vm_pool_id: 'pool_other01' },
-    { apiKeyStore: store },
-  ).call('PATCH', `/api/panel/api-keys/${key.id}`)
-  assert.equal(tenantPatchWithPool.status, 403, JSON.stringify(tenantPatchWithPool.body))
-  assert.deepEqual(tenantPatchWithPool.body, {
-    ok: false,
-    error: { code: 'key_pool_forbidden', message: '只有管理员可以设置账号池' },
-  })
-  assert.equal(store.getById(key.id).vm_pool_id, pool.id, 'retained existing pool')
-
-  // 6. Tenant PATCH with null or empty string vm_pool_id -> retains existing pool without error
-  const tenantPatchNull = await makeHandler(
-    root,
-    TENANT,
-    { name: 'renamed-by-tenant', vm_pool_id: null },
-    { apiKeyStore: store },
-  ).call('PATCH', `/api/panel/api-keys/${key.id}`)
-  assert.equal(tenantPatchNull.status, 200, JSON.stringify(tenantPatchNull.body))
-  const keyAfterTenantNull = store.getById(key.id)
-  assert.equal(keyAfterTenantNull.name, 'renamed-by-tenant')
-  assert.equal(keyAfterTenantNull.vm_pool_id, pool.id, 'pool was not wiped by tenant')
-
-  // 7. Tenant PATCH without vm_pool_id -> retains existing pool
-  const tenantPatchOmit = await makeHandler(root, TENANT, { max_concurrency: 5 }, { apiKeyStore: store }).call(
-    'PATCH',
-    `/api/panel/api-keys/${key.id}`,
-  )
-  assert.equal(tenantPatchOmit.status, 200, JSON.stringify(tenantPatchOmit.body))
-  assert.equal(store.getById(key.id).vm_pool_id, pool.id)
 })
 
 function usersFixture(t) {
@@ -371,7 +167,7 @@ test('unrelated user edits keep sessions alive', async (t) => {
   const root = makeProject(t)
   const user = panelUsers.create({ username: 'quota', password: 'tenant-pass', role: 'user' })
   const token = createPanelSession(user.username, { role: 'user' })
-  const out = await makeHandler(root, ADMIN, { vm_create_quota: 3, role: 'user', enabled: true }, { panelUsers }).call(
+  const out = await makeHandler(root, ADMIN, { concurrency: 3, role: 'user', enabled: true }, { panelUsers }).call(
     'PATCH',
     `/api/panel/users/${user.id}`,
   )
@@ -379,8 +175,9 @@ test('unrelated user edits keep sessions alive', async (t) => {
   assert.equal(verifyPanelSession(token)?.user, 'quota')
 })
 
-test('test-models is readable by user and super; other routes stay closed', () => {
-  for (const role of ['user', 'super', 'admin']) {
+test('test-models permits operators but not commercial customers', () => {
+  assert.equal(authorizePanelRoute('GET', '/api/panel/test-models', 'user').ok, false)
+  for (const role of ['super', 'admin']) {
     assert.equal(authorizePanelRoute('GET', '/api/panel/test-models', role).ok, true, role)
   }
   for (const role of ['user', 'super']) {
@@ -393,7 +190,7 @@ test('test-models is readable by user and super; other routes stay closed', () =
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/test-chat', 'super').ok, false)
 })
 
-test('tenant test-models: own slot lists models, foreign slot 404s, refresh never goes live', async (t) => {
+test('customers cannot inspect slot models; operators cannot force live catalog refresh', async (t) => {
   const root = makeProject(t)
   // A listener standing in for the slot SOCKS5: any connection means a live catalog refresh ran.
   let dials = 0
@@ -419,13 +216,11 @@ test('tenant test-models: own slot lists models, foreign slot 404s, refresh neve
   )
 
   const own = await makeHandler(root, TENANT, null).call('GET', '/api/panel/test-models?vm_id=vm-mine&refresh=1')
-  assert.equal(own.status, 200, JSON.stringify(own.body))
-  assert.equal(own.body.data.source, 'policy')
-  assert.ok(Array.isArray(own.body.data.items) && own.body.data.items.length > 0, JSON.stringify(own.body.data))
+  assert.equal(own.status, 403, JSON.stringify(own.body))
   assert.equal(dials, 0)
 
   const foreign = await makeHandler(root, TENANT, null).call('GET', '/api/panel/test-models?vm_id=vm-other')
-  assert.equal(foreign.status, 404)
+  assert.equal(foreign.status, 403)
   const missing = await makeHandler(root, TENANT, null).call('GET', '/api/panel/test-models?vm_id=vm-nope')
   assert.deepEqual(foreign.body, missing.body)
 

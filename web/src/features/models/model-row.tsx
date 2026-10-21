@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import type { PolicyPrice } from '@/types/panel-pricing'
 import { BadgeDollarSign, Gauge, SlidersHorizontal } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -68,6 +69,8 @@ export function ModelRow({
   onParam,
   onPass1m,
 }: Props) {
+  const { t } = useTranslation('models')
+
   const on = model.enabled !== false
   const win = contextWindowLabel(model)
   const caps = model.capabilities || {}
@@ -124,9 +127,11 @@ export function ModelRow({
                     {displayName}
                   </h3>
                   <Badge variant={live ? 'default' : 'secondary'}>
-                    {live ? '对外' : '隐藏'}
+                    {live ? t('models:public') : t('models:hidden')}
                   </Badge>
-                  {on ? null : <Badge variant='outline'>停用</Badge>}
+                  {on ? null : (
+                    <Badge variant='outline'>{t('models:disabled')}</Badge>
+                  )}
                 </div>
                 <p className='mt-1 truncate font-mono text-[11px] text-muted-foreground'>
                   {model.id}
@@ -136,7 +141,7 @@ export function ModelRow({
                     {fmtBaseRates(price)}
                   </span>
                   <span className='text-[10px] text-muted-foreground'>
-                    每 1M
+                    {t('models:perMillion')}
                   </span>
                   <Badge variant={priceSourceVariant(priceSource)}>
                     {priceSourceLabel(priceSource)}
@@ -146,12 +151,15 @@ export function ModelRow({
             </div>
 
             <div className='grid gap-2 text-xs sm:grid-cols-3'>
-              <Metric label='上下文' value={win.text} strong />
+              <Metric label={t('models:context')} value={win.text} strong />
               <Metric
-                label='输出上限'
+                label={t('models:outputCap')}
                 value={`${formatK(params.max_tokens_cap ?? 64000)}`}
               />
-              <Metric label='Thinking' value={thinkingPolicyLabel(model)} />
+              <Metric
+                label={t('models:thinking')}
+                value={thinkingPolicyLabel(model)}
+              />
             </div>
 
             <div className='flex flex-wrap gap-1.5'>
@@ -167,7 +175,7 @@ export function ModelRow({
               ) : null}
               {!(model.aliases || []).length ? (
                 <span className='text-xs text-muted-foreground'>
-                  未设置别名
+                  {t('models:noAliases')}
                 </span>
               ) : null}
             </div>
@@ -181,13 +189,15 @@ export function ModelRow({
               <Checkbox
                 checked={on}
                 onCheckedChange={(value) => onToggleEnabled(value === true)}
-                aria-label={`启用 ${displayName}`}
+                aria-label={t('models:enableModel', { name: displayName })}
               />
-              <span className='text-xs text-muted-foreground'>启用</span>
+              <span className='text-xs text-muted-foreground'>
+                {t('models:enabled')}
+              </span>
             </div>
             <Button size='sm' variant='outline' className='gap-1.5'>
               <SlidersHorizontal className='size-3.5' />
-              配置
+              {t('models:configure')}
             </Button>
           </div>
         </div>
@@ -213,22 +223,22 @@ export function ModelRow({
         <div className='grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]'>
           <section className='space-y-4'>
             <Panel
-              title='模型覆写'
+              title={t('models:modelOverrides')}
               icon={<SlidersHorizontal className='size-4' />}
             >
-              <EditorRow label='对外启用'>
+              <EditorRow label={t('models:publicEnabled')}>
                 <div className='flex items-center gap-2'>
                   <Checkbox
                     checked={on}
                     onCheckedChange={(value) => onToggleEnabled(value === true)}
-                    aria-label='对外启用'
+                    aria-label={t('models:publicEnabled')}
                   />
                   <span className='text-xs text-muted-foreground'>
-                    关闭后仍保留配置，但不进入公开模型目录。
+                    {t('models:publicEnabledHint')}
                   </span>
                 </div>
               </EditorRow>
-              <EditorRow label='上下文窗口'>
+              <EditorRow label={t('models:contextWindow')}>
                 <NumberInput
                   value={Number(caps.context_window || 0)}
                   onChange={(value) =>
@@ -244,12 +254,12 @@ export function ModelRow({
               </EditorRow>
               <div className='space-y-2'>
                 <span className='text-xs font-medium text-muted-foreground'>
-                  别名
+                  {t('models:aliases')}
                 </span>
                 <Textarea
                   className='min-h-24 font-mono text-xs'
                   value={(model.aliases || []).join('\n')}
-                  placeholder='每行一个别名，例如 claude-haiku-5-5-private'
+                  placeholder={t('models:aliasesPlaceholder')}
                   onChange={(event) =>
                     onModel((rec) => {
                       rec.aliases = splitList(event.target.value)
@@ -259,20 +269,23 @@ export function ModelRow({
               </div>
             </Panel>
 
-            <Panel title='模型参数' icon={<Gauge className='size-4' />}>
-              <EditorRow label='默认 max_tokens'>
+            <Panel
+              title={t('models:modelParameters')}
+              icon={<Gauge className='size-4' />}
+            >
+              <EditorRow label={t('models:maxTokensDefault')}>
                 <NumberInput
                   value={params.max_tokens_default ?? 8192}
                   onChange={(value) => onParam('max_tokens_default', value)}
                 />
               </EditorRow>
-              <EditorRow label='max_tokens 上限'>
+              <EditorRow label={t('models:maxTokensCap')}>
                 <NumberInput
                   value={params.max_tokens_cap ?? 64000}
                   onChange={(value) => onParam('max_tokens_cap', value)}
                 />
               </EditorRow>
-              <EditorRow label='fallback budget'>
+              <EditorRow label={t('models:fallbackBudget')}>
                 <NumberInput
                   value={fallback}
                   onChange={(value) =>
@@ -280,7 +293,11 @@ export function ModelRow({
                   }
                 />
               </EditorRow>
-              <EditorRow label='adaptive'>
+              <EditorRow
+                label={
+                  /* i18n-exempt "adaptive" -- Anthropic thinking mode wire value, displayed for protocol inspection. */ 'adaptive'
+                }
+              >
                 <Select
                   value={params.on_adaptive || 'passthrough'}
                   onValueChange={(value) => onParam('on_adaptive', value)}
@@ -289,15 +306,23 @@ export function ModelRow({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value='passthrough'>透传</SelectItem>
-                    <SelectItem value='convert_to_enabled'>
-                      转为 enabled + budget
+                    <SelectItem value='passthrough'>
+                      {t('models:passthrough')}
                     </SelectItem>
-                    <SelectItem value='strip'>剥离 thinking</SelectItem>
+                    <SelectItem value='convert_to_enabled'>
+                      {t('models:convertToEnabled')}
+                    </SelectItem>
+                    <SelectItem value='strip'>
+                      {t('models:stripThinking')}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </EditorRow>
-              <EditorRow label='enabled'>
+              <EditorRow
+                label={
+                  /* i18n-exempt "enabled" -- Anthropic thinking mode wire value, displayed for protocol inspection. */ 'enabled'
+                }
+              >
                 <Select
                   value={onEnabled}
                   onValueChange={(value) => onParam('on_enabled', value)}
@@ -306,8 +331,12 @@ export function ModelRow({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value='passthrough'>透传</SelectItem>
-                    <SelectItem value='strip'>剥离 thinking</SelectItem>
+                    <SelectItem value='passthrough'>
+                      {t('models:passthrough')}
+                    </SelectItem>
+                    <SelectItem value='strip'>
+                      {t('models:stripThinking')}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </EditorRow>
@@ -317,7 +346,7 @@ export function ModelRow({
           <aside className='space-y-4'>
             {showBeta ? (
               <Panel
-                title='官方 beta'
+                title={t('models:officialBeta')}
                 icon={<Gauge className='size-4' />}
                 compact
               >
@@ -337,65 +366,91 @@ export function ModelRow({
                     className={cn('h-9 w-full', inheritHit && 'text-primary')}
                     title={
                       inheritHit
-                        ? '未设开关，命中回退通配'
+                        ? t('models:wildcardMatched')
                         : mode === 'true'
-                          ? '矩阵指定透传'
+                          ? t('models:policyPass')
                           : mode === 'false'
-                            ? '矩阵指定剥离'
-                            : '未设，走回退通配'
+                            ? t('models:policyStrip')
+                            : t('models:wildcardFallback')
                     }
                   >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value='true'>透传 1M beta</SelectItem>
-                    <SelectItem value='false'>剥离 1M beta</SelectItem>
+                    <SelectItem value='true'>
+                      {t('models:pass1mBeta')}
+                    </SelectItem>
+                    <SelectItem value='false'>
+                      {t('models:strip1mBeta')}
+                    </SelectItem>
                     <SelectItem value='inherit'>
-                      {effective ? '通配 → 透传' : '通配 → 剥离'}
+                      {effective
+                        ? t('models:wildcardPass')
+                        : t('models:wildcardStrip')}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className='text-xs text-muted-foreground'>
-                  Beta drop：<span className='font-mono'>{drop}</span>
+                  <Trans
+                    t={t}
+                    i18nKey='models:betaDrop'
+                    values={{ drop }}
+                    components={{ value: <span className='font-mono' /> }}
+                  />
                 </p>
               </Panel>
             ) : null}
 
             <Panel
-              title='价格 / 计费'
+              title={t('models:priceBilling')}
               icon={<BadgeDollarSign className='size-4' />}
               compact
             >
-              <Fact label='来源' value={priceSourceLabel(priceSource)} />
               <Fact
-                label='input / output / cache read'
+                label={t('models:source')}
+                value={priceSourceLabel(priceSource)}
+              />
+              <Fact
+                label={t('models:baseRateLabel')}
                 value={`${fmtBaseRates(price)} / 1M`}
                 mono
               />
               {price ? (
                 <Fact
-                  label='cache 5m / 1h'
+                  label={t('models:cacheWriteLabel')}
                   value={`${fmtPerM(price.cache_5m)} / ${fmtPerM(price.cache_1h)}`}
                   mono
                 />
               ) : null}
             </Panel>
 
-            <Panel title='能力' icon={<Gauge className='size-4' />} compact>
-              <Fact label='上下文' value={win.text} />
-              <Fact label='Thinking' value={thinkingPolicyLabel(model)} />
-              <Fact label='目录状态' value={live ? '对外可见' : '未进入目录'} />
+            <Panel
+              title={t('models:capabilities')}
+              icon={<Gauge className='size-4' />}
+              compact
+            >
+              <Fact label={t('models:context')} value={win.text} />
+              <Fact
+                label={t('models:thinking')}
+                value={thinkingPolicyLabel(model)}
+              />
+              <Fact
+                label={t('models:catalogStatus')}
+                value={
+                  live ? t('models:publicVisible') : t('models:notInCatalog')
+                }
+              />
             </Panel>
           </aside>
         </div>
 
         <DialogFooter className='items-center gap-2 sm:justify-between'>
           <p className='text-xs text-muted-foreground'>
-            关闭弹窗不会保存；右上角「保存更改」才会写入策略。
+            {t('models:dialogSaveHint')}
           </p>
           <DialogClose asChild>
             <Button type='button' variant='outline'>
-              完成
+              {t('models:done')}
             </Button>
           </DialogClose>
         </DialogFooter>
@@ -415,6 +470,8 @@ function Panel({
   compact?: boolean
   children: ReactNode
 }) {
+  useTranslation('models')
+
   return (
     <div className='rounded-xl border border-border/70 bg-background/70 p-3'>
       <div className='mb-3 flex items-center gap-2 text-sm font-semibold'>
@@ -433,6 +490,8 @@ function EditorRow({
   label: string
   children: ReactNode
 }) {
+  useTranslation('models')
+
   return (
     <div className='grid gap-1.5 sm:grid-cols-[8rem_minmax(0,1fr)] sm:items-center'>
       <span className='text-xs font-medium text-muted-foreground'>{label}</span>
@@ -452,6 +511,8 @@ function Metric({
   value: string
   strong?: boolean
 }) {
+  useTranslation('models')
+
   return (
     <div className='rounded-lg bg-muted/45 px-2.5 py-2'>
       <div className='text-[11px] text-muted-foreground'>{label}</div>
@@ -473,6 +534,8 @@ function Fact({
   value: string
   mono?: boolean
 }) {
+  useTranslation('models')
+
   return (
     <div className='flex items-start justify-between gap-3 text-xs'>
       <span className='text-muted-foreground'>{label}</span>
@@ -488,6 +551,8 @@ function NumberInput({
   value: number
   onChange: (value: number) => void
 }) {
+  useTranslation('models')
+
   return (
     <Input
       className='field-count h-8 w-full sm:w-[150px]'

@@ -11,6 +11,8 @@ import {
   CRS_OFFICIAL_CLI_SYSTEM,
   parkableSystemText,
 } from '../../src/lib/identity/crs-persona.mjs'
+import { assembleOfficialPromptBody } from '../../src/lib/protocol/anthropic-messages.mjs'
+import { validateCacheBreakpoints } from '../../src/lib/protocol/cache-ttl.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 
 test('prepareCliHopBody drops metadata and CLI-owned system but keeps official agent leftover', () => {
@@ -40,7 +42,7 @@ test('prepareCliHopBody drops metadata and CLI-owned system but keeps official a
   assert.equal(body.stream, true)
 })
 
-test('preserveSystem forwards the inbound system unchanged', () => {
+test('preserveSystem keeps prompt text but removes caller billing and cache markers', () => {
   const billing = 'x-anthropic-billing-header: cc_version=2.1.280.096; cc_entrypoint=cli; cch=bdff0;'
   const body = prepareCliHopBody(
     {
@@ -55,16 +57,15 @@ test('preserveSystem forwards the inbound system unchanged', () => {
     },
     { preserveSystem: true },
   )
-  assert.equal(body.system.length, 3)
-  assert.equal(body.system[0].text, billing)
-  assert.equal(body.system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
-  assert.equal(body.system[2].text, 'RFC 2119 keywords')
+  assert.equal(body.system.length, 2)
+  assert.equal(body.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.")
+  assert.equal(body.system[1].text, 'RFC 2119 keywords')
   assert.equal(body.system[0].cache_control, undefined)
   assert.equal(body.system[1].cache_control, undefined)
-  assert.deepEqual(body.system[2].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.doesNotMatch(JSON.stringify(body.system), /x-anthropic-billing-header:/)
 })
 
-test('preserveSystem keeps caller system markers and restamps the last user message', () => {
+test('preserveSystem clears caller system markers and restamps the last user message', () => {
   const input = {
     model: 'claude-opus-5-5',
     max_tokens: 128,
@@ -82,7 +83,7 @@ test('preserveSystem keeps caller system markers and restamps the last user mess
   const body = prepareCliHopBody(input, { preserveSystem: true, cacheTtl: '1h' })
   assert.equal(body.system.length, 1)
   assert.equal(body.system[0].text, 'caller')
-  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m', scope: 'global' })
+  assert.equal(body.system[0].cache_control, undefined)
   assert.equal(body.messages[0].content[0].cache_control, undefined)
   assert.equal(body.messages[1].content[0].cache_control, undefined)
   assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
@@ -115,7 +116,7 @@ test('environment opt-out prevents HTTP slot selection from overwriting caller t
   assert.deepEqual(body.system.slice(1), [{ type: 'text', text: caller }])
 })
 
-test('cli-hop passthrough rejects invalid caller markers instead of repairing them', () => {
+test('cli-hop removes invalid caller markers before placing owned breakpoints', () => {
   const request = (content) => ({
     model: 'claude-opus-5-5',
     messages: [{ role: 'user', content }],
@@ -130,14 +131,14 @@ test('cli-hop passthrough rejects invalid caller markers instead of repairing th
   ]) {
     const input = request(content)
     const before = structuredClone(input)
-    assert.throws(
-      () => prepareCliHopBody(input, { preserveSystem: true }),
-      (error) => {
-        assert.equal(error.status, 400)
-        assert.equal(error.body.error.code, 'invalid_cache_control')
-        return true
-      },
-    )
+    const body = prepareCliHopBody(input, { preserveSystem: true, cacheTtl: '5m' })
+    assert.doesNotThrow(() => validateCacheBreakpoints(body))
+    const markers = messageMarkers(body)
+    assert.ok(markers.length <= 1)
+    for (const hit of markers) {
+      assert.equal(hit.ttl, '5m')
+      assert.ok(!['thinking', 'redacted_thinking'].includes(hit.type))
+    }
     assert.deepEqual(input, before)
   }
 })
@@ -379,7 +380,7 @@ test('cli-hop drops caller tool markers and restamps the last user message', () 
   assert.equal(body.tools[0].cache_control, undefined)
   assert.equal(body.system.length, 1)
   assert.equal(body.system[0].text, 'caller')
-  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.equal(body.system[0].cache_control, undefined)
   assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl: '5m' }])
 })
 
@@ -401,46 +402,66 @@ test('cli-hop short history only marks the last message', () => {
 })
 
 test('cli-hop does not mark thinking blocks', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      thinking: { type: 'adaptive' },
-      messages: [
-        {
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'answer' },
-            { type: 'thinking', thinking: 'hidden', signature: 'sig_real_1234567890abcdef' },
-          ],
-        },
-      ],
-    },
-    { cacheTtl: '1h' },
-  )
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    thinking: { type: 'adaptive' },
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'answer' },
+          { type: 'thinking', thinking: 'hidden', signature: 'sig_real_1234567890abcdef' },
+        ],
+      },
+    ],
+  })
   assert.equal(body.messages.at(-1).content[0].cache_control, undefined)
   assert.equal(body.messages.at(-1).content[1].type, 'thinking')
   assert.equal(body.messages.at(-1).content[1].cache_control, undefined)
 })
 
-test('cli-hop uses the inbound session TTL on both message anchors', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      messages: [
-        { role: 'user', content: 'u1' },
-        { role: 'assistant', content: 'a1' },
-        { role: 'user', content: 'u2' },
-        { role: 'assistant', content: 'a2' },
-      ],
-    },
-    { cacheTtl: '1h' },
-  )
+test('cli-hop defaults its only message anchor to one-hour TTL', () => {
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+      { role: 'assistant', content: 'a2' },
+    ],
+  })
   assert.deepEqual(
     messageMarkers(body).map((hit) => hit.ttl),
     ['1h'],
   )
+})
+
+test('final prompt assembly uses configured TTL for system and latest-user markers without mutating input', () => {
+  const input = {
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    system: [{ type: 'text', text: 'caller' }],
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+    ],
+  }
+  const before = structuredClone(input)
+  for (const ttl of ['5m', '1h']) {
+    const body = assembleOfficialPromptBody(prepareCliHopBody(input, { cacheTtl: ttl }), {
+      ttl,
+      preserveMessageMarker: true,
+    })
+    assert.deepEqual(
+      body.system.map((block) => block.cache_control),
+      [{ type: 'ephemeral', ttl }],
+    )
+    assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl }])
+    assert.deepEqual(input, before)
+  }
 })
 
 test('Claude Code turns stay a content prefix of the next one, from turn 1 on', () => {

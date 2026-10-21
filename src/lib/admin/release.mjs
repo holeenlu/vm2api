@@ -16,7 +16,7 @@ const MODULE_PROJECT = path.resolve(__dirname, '..', '..', '..')
 const execFileAsync = promisify(execFile)
 const UPGRADE_SCRIPT = fs.readFileSync(path.join(MODULE_PROJECT, 'scripts', 'panel-upgrade.sh'), 'utf8')
 
-export const GITHUB_REPO = 'dofastted/vm2api'
+export const GITHUB_REPO = 'holeenlu/vm2api'
 export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh`
 export const DOCKER_SOCK = '/var/run/docker.sock'
 
@@ -25,7 +25,7 @@ const GITHUB_TIMEOUT_MS = 8000
 const releaseCache = { at: 0, value: null, error: null }
 
 export function projectRoot(explicit) {
-  return explicit || process.env.KIN_PROJECT_ROOT || process.env.VM2API_HOST_ROOT || MODULE_PROJECT
+  return explicit || process.env.KIN_PROJECT_ROOT || process.env.TAPMODELS_HOST_ROOT || MODULE_PROJECT
 }
 
 export function readLocalVersion(root = projectRoot()) {
@@ -54,7 +54,7 @@ export function readLocalVersion(root = projectRoot()) {
 }
 
 const ARCH_ALIASES = Object.freeze({ amd64: 'amd64', x86_64: 'amd64', x64: 'amd64', arm64: 'arm64', aarch64: 'arm64' })
-const RELEASE_TAG_RE = /^v?(\d+\.\d+\.\d+)(?:-(amd64|x86_64|arm64|aarch64))?$/i
+const RELEASE_TAG_RE = /^v?(\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?)(?:-(amd64|x86_64|arm64|aarch64))?$/i
 
 /** Docker architecture name for uname / Node / Docker spellings; '' when unsupported. */
 export function normalizeArch(value) {
@@ -85,7 +85,7 @@ export function normalizeTag(value) {
 }
 
 export function isReleaseTag(value) {
-  return /^v\d+\.\d+\.\d+$/.test(String(value || '').trim())
+  return /^v\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?$/.test(String(value || '').trim())
 }
 
 /**
@@ -100,10 +100,11 @@ export function imageTagFor(tag, arch = process.arch) {
   return target === 'arm64' ? `${parsed.tag}-arm64` : parsed.tag
 }
 
+/** Numeric application versions: legacy X.Y.Z is revision zero of X.Y.Z.N. */
 export function compareSemver(a, b) {
   const pa = parseSemver(a)
   const pb = parseSemver(b)
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     if (pa[i] > pb[i]) return 1
     if (pa[i] < pb[i]) return -1
   }
@@ -113,7 +114,7 @@ export function compareSemver(a, b) {
 function parseSemver(value) {
   const n = normalizeVersion(value)
   const parts = n.split('.').map((x) => Number.parseInt(x, 10))
-  return [parts[0] || 0, parts[1] || 0, parts[2] || 0]
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0, parts[3] || 0]
 }
 
 function bulletsOf(body) {
@@ -158,7 +159,7 @@ export function parseChangelog(markdown) {
       })
       continue
     }
-    const m = heading.match(/^v?(\d+\.\d+\.\d+)\s*[—–-]\s*(\d{4}-\d{2}-\d{2})?/)
+    const m = heading.match(/^v?(\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?)\s*[—–-]\s*(\d{4}-\d{2}-\d{2})?/)
     if (!m) continue
     entries.push({
       version: m[1],
@@ -208,10 +209,10 @@ export function defaultUpgradeCommand() {
 export function githubApiHeaders(accept = 'application/vnd.github+json') {
   const headers = {
     Accept: accept,
-    'User-Agent': 'vm2api-release-check',
+    'User-Agent': 'tapmodels-release-check',
     'X-GitHub-Api-Version': '2022-11-28',
   }
-  const token = process.env.GITHUB_TOKEN || process.env.VM2API_GITHUB_TOKEN
+  const token = process.env.GITHUB_TOKEN || process.env.TAPMODELS_GITHUB_TOKEN
   if (token) headers.Authorization = `Bearer ${token}`
   return headers
 }
@@ -228,7 +229,7 @@ export function publicRelease(payload) {
   return {
     version,
     tag: normalizeTag(version),
-    name: payload.name || `vm2api ${version}`,
+    name: payload.name || `tapmodels ${version}`,
     html_url: payload.html_url || `https://github.com/${GITHUB_REPO}/releases/tag/${normalizeTag(version)}`,
     published_at: payload.published_at || payload.created_at || null,
     notes: String(payload.body || '').trim(),
@@ -336,7 +337,7 @@ function which(cmd) {
  * control-plane container's own mounts; identity when running natively.
  */
 export function hostRoot(root) {
-  const explicit = String(process.env.VM2API_HOST_ROOT || process.env.KIN_HOST_ROOT || '').trim()
+  const explicit = String(process.env.TAPMODELS_HOST_ROOT || process.env.KIN_HOST_ROOT || '').trim()
   if (explicit) return explicit
   return toHostPath(projectRoot(root), { projectRoot: projectRoot(root) })
 }
@@ -364,7 +365,7 @@ export async function hostUpgradeDeployment({
   execFileImpl = execFileAsync,
 } = {}) {
   if (!containerized || !canSpawnHostUpgrade({ dockerBin, sock })) return null
-  const names = [...new Set([hostname, env.VM2API_CONTAINER_NAME].filter(Boolean))]
+  const names = [...new Set([hostname, env.TAPMODELS_CONTAINER_NAME].filter(Boolean))]
   for (const name of names) {
     try {
       const container = await inspectContainer(name, { dockerBin, execFileImpl })
@@ -379,7 +380,7 @@ export async function hostUpgradeDeployment({
         !container.State?.Running ||
         !container.Id ||
         container.Config?.Hostname !== hostname ||
-        labels['com.docker.compose.service'] !== 'vm2api' ||
+        labels['com.docker.compose.service'] !== 'tapmodels' ||
         !/^[a-z0-9][a-z0-9_-]*$/.test(project || '') ||
         !path.isAbsolute(root || '') ||
         !files.length ||
@@ -393,7 +394,7 @@ export async function hostUpgradeDeployment({
         files,
         container: String(container.Name || name).replace(/^\//, ''),
         id: container.Id,
-        helper: `vm2api-upgrade-${project}`,
+        helper: `tapmodels-upgrade-${project}`,
       }
     } catch {
       // Try the hostname when an explicitly configured name is stale.
@@ -410,7 +411,7 @@ export async function readHostUpgradeStatus(options = {}) {
       dockerBin: options.dockerBin || which('docker'),
       execFileImpl: options.execFileImpl || execFileAsync,
     })
-    const target = container.Config?.Labels?.['vm2api.upgrade.target']
+    const target = container.Config?.Labels?.['tapmodels.upgrade.target']
     if (!isReleaseTag(target)) return null
     const state = container.State || {}
     return {
@@ -522,7 +523,7 @@ export async function startHostUpgrade({
         '--name',
         deployment.helper,
         '--label',
-        `vm2api.upgrade.target=${target}`,
+        `tapmodels.upgrade.target=${target}`,
         '-v',
         `${deployment.root}:${deployment.root}`,
         '-v',

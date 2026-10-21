@@ -1,10 +1,12 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type {
   NotifyConfig,
   NotifyEvents,
   NotifyTelegramConfig,
   NotifyWecomConfig,
 } from '@/types/panel-routing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtExpiresAt } from '@/lib/format'
@@ -27,20 +29,54 @@ const DEFAULT_EVENTS: NotifyEvents = {
   account_up: false,
 }
 
-const EVENT_FIELDS: {
+function getEventFields(): {
   key: keyof NotifyEvents
   label: string
   desc: string
-}[] = [
-  { key: 'pool_empty', label: '账号池清空', desc: '可用账号降到 0' },
-  { key: 'pool_low', label: '账号池偏低', desc: '低于最小可用数' },
-  { key: 'pool_recovered', label: '账号池恢复', desc: '从低水位恢复' },
-  { key: 'digest', label: '定时汇报', desc: '按汇报间隔发送摘要' },
-  { key: 'revoked', label: '凭证吊销', desc: '发现新的吊销账号' },
-  { key: 'invalid', label: '凭证失效', desc: '发现新的失效凭证' },
-  { key: 'account_down', label: '账号离线', desc: '单个账号变为不可用' },
-  { key: 'account_up', label: '账号上线', desc: '单个账号恢复可用' },
-]
+}[] {
+  return [
+    {
+      key: 'pool_empty',
+      label: translate('settings:notify.poolEmpty'),
+      desc: translate('settings:notify.poolEmptyHelp'),
+    },
+    {
+      key: 'pool_low',
+      label: translate('settings:notify.poolLow'),
+      desc: translate('settings:notify.poolLowHelp'),
+    },
+    {
+      key: 'pool_recovered',
+      label: translate('settings:notify.poolRecovered'),
+      desc: translate('settings:notify.poolRecoveredHelp'),
+    },
+    {
+      key: 'digest',
+      label: translate('settings:notify.periodic'),
+      desc: translate('settings:notify.periodicHelp'),
+    },
+    {
+      key: 'revoked',
+      label: translate('settings:notify.revoked'),
+      desc: translate('settings:notify.revokedHelp'),
+    },
+    {
+      key: 'invalid',
+      label: translate('settings:notify.invalid'),
+      desc: translate('settings:notify.invalidHelp'),
+    },
+    {
+      key: 'account_down',
+      label: translate('settings:notify.offline'),
+      desc: translate('settings:notify.offlineHelp'),
+    },
+    {
+      key: 'account_up',
+      label: translate('settings:notify.online'),
+      desc: translate('settings:notify.onlineHelp'),
+    },
+  ]
+}
 
 function notifyConfig(value: NotifyConfig | undefined): NotifyConfig {
   return {
@@ -101,6 +137,8 @@ export function NotifyPane({
   value: NotifyConfig | undefined
   onChange: (next: NotifyConfig) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const config = notifyConfig(value)
   const telegram = config.telegram
   const wecom = config.wecom
@@ -109,9 +147,9 @@ export function NotifyPane({
   const testTelegram = useMutation({
     mutationFn: () => {
       if (!telegram.bot_token.trim() && !telegram.bot_token_set) {
-        throw new Error('先填写 Bot token')
+        throw new Error(t('notify.tokenRequired'))
       }
-      if (!telegram.chat_id.trim()) throw new Error('先填写 Chat ID')
+      if (!telegram.chat_id.trim()) throw new Error(t('notify.chatRequired'))
       return api('/api/panel/notify/test', {
         method: 'POST',
         body: JSON.stringify({
@@ -121,7 +159,7 @@ export function NotifyPane({
       })
     },
     onSuccess: async () => {
-      toast.success('测试 Telegram 已发送')
+      toast.success(t('notify.telegramSent'))
       await status.refetch()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -130,7 +168,7 @@ export function NotifyPane({
   const testWecom = useMutation({
     mutationFn: () => {
       if (!wecom.webhook.trim() && !wecom.webhook_set) {
-        throw new Error('先填写 Webhook 地址')
+        throw new Error(t('notify.webhookRequired'))
       }
       return api('/api/panel/notify/test', {
         method: 'POST',
@@ -141,7 +179,7 @@ export function NotifyPane({
       })
     },
     onSuccess: async () => {
-      toast.success('测试企业微信已发送')
+      toast.success(t('notify.wecomSent'))
       await status.refetch()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -160,14 +198,14 @@ export function NotifyPane({
     <>
       <Card>
         <CardHeader className='flex flex-row items-center justify-between gap-3'>
-          <CardTitle>通知状态</CardTitle>
+          <CardTitle>{t('notify.status')}</CardTitle>
           <Button
             variant='outline'
             size='sm'
             loading={status.isFetching}
             onClick={() => status.refetch()}
           >
-            刷新状态
+            {t('notify.refreshStatus')}
           </Button>
         </CardHeader>
         <CardContent className='space-y-3'>
@@ -178,12 +216,12 @@ export function NotifyPane({
                   ? {
                       key: 'telegram-ready',
                       cls: 'ok',
-                      text: 'Telegram 已就绪',
+                      text: t('notify.telegramReady'),
                     }
                   : {
                       key: 'telegram-missing',
                       cls: 'none',
-                      text: 'Telegram 未就绪',
+                      text: t('notify.telegramNotReady'),
                     }
               }
               variant='pill'
@@ -191,27 +229,35 @@ export function NotifyPane({
             <StatusMark
               tone={
                 status.data?.channels?.wecom
-                  ? { key: 'wecom-ready', cls: 'ok', text: '企业微信已就绪' }
+                  ? {
+                      key: 'wecom-ready',
+                      cls: 'ok',
+                      text: t('notify.wecomReady'),
+                    }
                   : {
                       key: 'wecom-missing',
                       cls: 'none',
-                      text: '企业微信未就绪',
+                      text: t('notify.wecomNotReady'),
                     }
               }
               variant='pill'
             />
             <span className='text-muted-foreground'>
-              上次检查 {fmtExpiresAt(status.data?.last_run_at)}
+              {t('notify.lastCheck', {
+                value1: fmtExpiresAt(status.data?.last_run_at),
+              })}
             </span>
           </div>
           {status.error ? (
             <p role='alert' className='text-sm text-destructive'>
-              无法读取通知状态：{(status.error as Error).message}
+              {t('notify.statusFailed', {
+                value1: (status.error as Error).message,
+              })}
             </p>
           ) : null}
           {status.data?.last_error ? (
             <p role='alert' className='text-sm text-destructive'>
-              上次错误：{status.data.last_error}
+              {t('notify.lastError', { value1: status.data.last_error })}
             </p>
           ) : null}
         </CardContent>
@@ -219,53 +265,68 @@ export function NotifyPane({
 
       <Card>
         <CardHeader>
-          <CardTitle>通知策略</CardTitle>
+          <CardTitle>{t('notify.policy')}</CardTitle>
         </CardHeader>
         <CardContent className='divide-y'>
-          <SettingRow label='启用通知' desc='按账号池状态与事件规则发送通知'>
+          <SettingRow label={t('notify.enable')} desc={t('notify.enableHelp')}>
             <Switch
               checked={config.enabled}
-              aria-label='启用通知'
+              aria-label={t('notify.enable')}
               onCheckedChange={(enabled) => patch({ enabled })}
             />
           </SettingRow>
-          <SettingRow label='启动即检查' desc='网关重启后立即检查一次账号池'>
+          <SettingRow
+            label={t('notify.checkOnStart')}
+            desc={t('notify.checkOnStartHelp')}
+          >
             <Switch
               checked={config.run_on_start}
-              aria-label='启动即检查'
+              aria-label={t('notify.checkOnStart')}
               onCheckedChange={(run_on_start) => patch({ run_on_start })}
             />
           </SettingRow>
-          <SettingRow label='检查间隔' desc='秒，最小 15'>
+          <SettingRow
+            label={t('notify.checkInterval')}
+            desc={t('notify.minimumCheck')}
+          >
             <NumberField
-              ariaLabel='检查间隔（秒）'
+              ariaLabel={t('notify.checkIntervalSeconds')}
               value={config.interval_sec}
               min={15}
               max={86400}
               onChange={(interval_sec) => patch({ interval_sec })}
             />
           </SettingRow>
-          <SettingRow label='通知冷却' desc='秒，同类事件的最小发送间隔'>
+          <SettingRow
+            label={t('notify.cooldown')}
+            desc={t('notify.cooldownHelp')}
+          >
             <NumberField
-              ariaLabel='通知冷却（秒）'
+              ariaLabel={t('notify.cooldownSeconds')}
               value={config.cooldown_sec}
               min={30}
               max={86400}
               onChange={(cooldown_sec) => patch({ cooldown_sec })}
             />
           </SettingRow>
-          <SettingRow label='汇报间隔' desc='秒，最小 300'>
+          <SettingRow
+            label={t('notify.reportInterval')}
+            desc={t('notify.minimumReport')}
+          >
             <NumberField
-              ariaLabel='汇报间隔（秒）'
+              ariaLabel={t('notify.reportIntervalSeconds')}
               value={config.digest_sec}
               min={300}
               max={86400}
               onChange={(digest_sec) => patch({ digest_sec })}
             />
           </SettingRow>
-          <SettingRow label='最小可用数' desc='低于该数量触发账号池偏低'>
+          <SettingRow
+            label={t('notify.minimumAvailable')}
+            desc={t('notify.minimumAvailableHelp')}
+          >
             <NumberField
-              ariaLabel='最小可用数'
+              ariaLabel={t('notify.minimumAvailable')}
               value={config.min_available}
               min={1}
               max={1000}
@@ -273,11 +334,11 @@ export function NotifyPane({
             />
           </SettingRow>
           <SettingRow
-            label='控制台地址'
-            desc='通知消息中的回跳链接，留空使用后端地址'
+            label={t('notify.consoleUrl')}
+            desc={t('notify.consoleUrlHelp')}
           >
             <Input
-              aria-label='控制台地址'
+              aria-label={t('notify.consoleUrl')}
               className='w-full min-w-56 sm:w-80'
               maxLength={200}
               placeholder={location.origin}
@@ -290,10 +351,10 @@ export function NotifyPane({
 
       <Card>
         <CardHeader>
-          <CardTitle>事件</CardTitle>
+          <CardTitle>{t('notify.events')}</CardTitle>
         </CardHeader>
         <CardContent className='divide-y'>
-          {EVENT_FIELDS.map((field) => (
+          {getEventFields().map((field) => (
             <SettingRow key={field.key} label={field.label} desc={field.desc}>
               <Switch
                 checked={config.events[field.key]}
@@ -307,40 +368,43 @@ export function NotifyPane({
 
       <Card>
         <CardHeader className='flex flex-row items-center justify-between gap-3'>
-          <CardTitle>Telegram Bot</CardTitle>
+          <CardTitle>{t('notify.telegramBot')}</CardTitle>
           <Button
             variant='outline'
             size='sm'
             loading={testTelegram.isPending}
             onClick={() => testTelegram.mutate()}
           >
-            发送测试
+            {t('notify.sendTest')}
           </Button>
         </CardHeader>
         <CardContent className='divide-y'>
-          <SettingRow label='启用 Telegram' desc='保存后纳入定时通知通道'>
+          <SettingRow
+            label={t('notify.enableTelegram')}
+            desc={t('notify.channelHelp')}
+          >
             <Switch
               checked={telegram.enabled}
-              aria-label='启用 Telegram'
+              aria-label={t('notify.enableTelegram')}
               onCheckedChange={(enabled) => patchTelegram({ enabled })}
             />
           </SettingRow>
           <SettingRow
-            label='Bot token'
+            label={t('notify.botToken')}
             desc={
               telegram.bot_token_set
-                ? '已保存；留空不会覆盖现有 token'
-                : '从 BotFather 获取，保存后不再回显'
+                ? t('notify.savedToken')
+                : t('notify.tokenHelp')
             }
           >
             <Input
-              aria-label='Bot token'
+              aria-label={t('notify.botToken')}
               className='w-full min-w-56 sm:w-80'
               type='password'
               autoComplete='new-password'
               maxLength={500}
               placeholder={
-                telegram.bot_token_set ? '已保存，留空不改' : '123456:AA…'
+                telegram.bot_token_set ? t('savedBlankKeeps') : '123456:AA…'
               }
               value={telegram.bot_token}
               onChange={(event) =>
@@ -348,9 +412,9 @@ export function NotifyPane({
               }
             />
           </SettingRow>
-          <SettingRow label='Chat ID' desc='个人 ID 或以 -100 开头的群 ID'>
+          <SettingRow label={t('notify.chatId')} desc={t('notify.chatHelp')}>
             <Input
-              aria-label='Chat ID'
+              aria-label={t('notify.chatId')}
               className='w-full min-w-56 sm:w-80'
               maxLength={80}
               placeholder='-100…'
@@ -365,21 +429,24 @@ export function NotifyPane({
 
       <Card>
         <CardHeader className='flex flex-row items-center justify-between gap-3'>
-          <CardTitle>企业微信群机器人</CardTitle>
+          <CardTitle>{t('notify.wecomBot')}</CardTitle>
           <Button
             variant='outline'
             size='sm'
             loading={testWecom.isPending}
             onClick={() => testWecom.mutate()}
           >
-            发送测试
+            {t('notify.sendTest')}
           </Button>
         </CardHeader>
         <CardContent className='divide-y'>
-          <SettingRow label='启用企业微信' desc='保存后纳入定时通知通道'>
+          <SettingRow
+            label={t('notify.enableWecom')}
+            desc={t('notify.channelHelp')}
+          >
             <Switch
               checked={wecom.enabled}
-              aria-label='启用企业微信'
+              aria-label={t('notify.enableWecom')}
               onCheckedChange={(enabled) => patchWecom({ enabled })}
             />
           </SettingRow>
@@ -387,29 +454,32 @@ export function NotifyPane({
             label='Webhook'
             desc={
               wecom.webhook_set
-                ? '已保存；留空不会覆盖现有地址'
-                : '群设置 → 群机器人 → 复制 Webhook 地址（或只填 key），保存后不再回显'
+                ? t('notify.savedWebhook')
+                : t('notify.webhookHelp')
             }
           >
             <Input
-              aria-label='企业微信 Webhook'
+              aria-label={t('notify.wecomWebhook')}
               className='w-full min-w-56 sm:w-80'
               type='password'
               autoComplete='new-password'
               maxLength={500}
               placeholder={
                 wecom.webhook_set
-                  ? '已保存，留空不改'
+                  ? t('savedBlankKeeps')
                   : 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'
               }
               value={wecom.webhook}
               onChange={(event) => patchWecom({ webhook: event.target.value })}
             />
           </SettingRow>
-          <SettingRow label='@所有人' desc='通知消息提醒群内所有成员'>
+          <SettingRow
+            label={t('notify.mentionAll')}
+            desc={t('notify.mentionAllHelp')}
+          >
             <Switch
               checked={wecom.mention_all}
-              aria-label='企业微信 @所有人'
+              aria-label={t('notify.wecomMentionAll')}
               onCheckedChange={(mention_all) => patchWecom({ mention_all })}
             />
           </SettingRow>

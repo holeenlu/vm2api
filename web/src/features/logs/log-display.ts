@@ -1,7 +1,8 @@
+import { t as translate } from '@/i18n'
 /**
  * 滚动日志页的纯展示逻辑（不含组件），移植自 claude-code-hub 的
  * `model-audit-display.ts` / `thinking-effort-badge.tsx` / 表格内联计算，
- * 并按 vm2api 的 `ProviderChainItem`（request_attempts 直出）改写供应商链部分。
+ * 并按 tapmodels 的 `ProviderChainItem`（request_attempts 直出）改写供应商链部分。
  */
 import type {
   CacheTtlApplied,
@@ -13,9 +14,9 @@ import { toast } from 'sonner'
 export async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text)
-    toast.success('已复制')
+    toast.success(translate('logs:copied'))
   } catch {
-    toast.error('复制失败')
+    toast.error(translate('logs:copyFailed'))
   }
 }
 
@@ -63,8 +64,12 @@ export function statusBadgeTooltip(
   errorCode: string | null | undefined
 ): string | null {
   if (!isIncompleteCommitted(statusCode, finalState)) return null
-  const state = terminalStateLabel(finalState ?? null) || '响应未完整结束'
-  return errorCode ? `${state}（${errorCode}）` : state
+  const state =
+    terminalStateLabel(finalState ?? null) ||
+    translate('logs:incompleteResponse')
+  return errorCode
+    ? translate('logs:stateWithCode', { state, code: errorCode })
+    : state
 }
 
 export function isSuccessStatus(statusCode: number | null): boolean {
@@ -76,19 +81,22 @@ export function isSuccessStatus(statusCode: number | null): boolean {
 /** hub `common.relativeTimeShort`：刚刚 / N秒前 / N分前 / … / N年前。 */
 export function formatShortDistance(date: Date, now: Date): string {
   if (Number.isNaN(date.getTime())) return '-'
-  if (date > now) return '刚刚'
+  if (date > now) return translate('logs:justNow')
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000)
   const minutes = Math.floor(seconds / 60)
   const hours = Math.floor(minutes / 60)
   const days = Math.floor(hours / 24)
-  if (days >= 365) return `${Math.floor(days / 365)}年前`
-  if (days >= 30) return `${Math.floor(days / 30)}月前`
-  if (days >= 7) return `${Math.floor(days / 7)}周前`
-  if (days > 0) return `${days}天前`
-  if (hours > 0) return `${hours}时前`
-  if (minutes > 0) return `${minutes}分前`
-  if (seconds > 0) return `${seconds}秒前`
-  return '刚刚'
+  if (days >= 365)
+    return translate('logs:yearsAgo', { count: Math.floor(days / 365) })
+  if (days >= 30)
+    return translate('logs:monthsAgo', { count: Math.floor(days / 30) })
+  if (days >= 7)
+    return translate('logs:weeksAgo', { count: Math.floor(days / 7) })
+  if (days > 0) return translate('logs:daysAgo', { count: days })
+  if (hours > 0) return translate('logs:hoursAgo', { count: hours })
+  if (minutes > 0) return translate('logs:minutesAgo', { count: minutes })
+  if (seconds > 0) return translate('logs:secondsAgo', { count: seconds })
+  return translate('logs:justNow')
 }
 
 // ---------- 缓存 ----------
@@ -180,7 +188,7 @@ export type ModelAuditDisplay = {
 }
 
 /**
- * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：vm2api 的
+ * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：tapmodels 的
  * `model` 就是计价用的生效模型（`requested_model` 是客户端原值）。
  */
 export function resolveModelAuditDisplay(row: {
@@ -235,19 +243,43 @@ export function thinkingEffortBadgeClass(effort: string): string {
 // ---------- 供应商链 ----------
 
 const SELECTION_REASON_LABELS: Record<string, string> = {
-  sticky: '粘性会话',
-  'sticky-spill': '粘性溢出',
-  'family-affinity': '家族亲和',
-  'device-affinity': '设备亲和',
-  'priority-load': '优先级负载',
-  'seat-held': '已占席位',
-  balanced: '平衡',
-  fill: '填充',
-  queued: '排队授予',
-  peek: '单候选',
+  get sticky() {
+    return translate('logs:stickySession')
+  },
+  get 'sticky-spill'() {
+    return translate('logs:stickySpill')
+  },
+  get 'family-affinity'() {
+    return translate('logs:familyAffinity')
+  },
+  get 'device-affinity'() {
+    return translate('logs:deviceAffinity')
+  },
+  get 'priority-load'() {
+    return translate('logs:priorityLoad')
+  },
+  get 'seat-held'() {
+    return translate('logs:seatHeld')
+  },
+  get balanced() {
+    return translate('logs:balanced')
+  },
+  get fill() {
+    return translate('logs:fill')
+  },
+  get queued() {
+    return translate('logs:queuedGrant')
+  },
+  get peek() {
+    return translate('logs:singleCandidate')
+  },
   // 预调度之前的轮询策略已删除，但 request_attempts 里的历史行仍带这两个值。
-  'round-robin': '轮询',
-  'weighted-round-robin': '加权轮询',
+  get 'round-robin'() {
+    return translate('logs:roundRobin')
+  },
+  get 'weighted-round-robin'() {
+    return translate('logs:weightedRoundRobin')
+  },
 }
 
 export function selectionReasonLabel(reason: string | null): string | null {
@@ -256,14 +288,30 @@ export function selectionReasonLabel(reason: string | null): string | null {
 }
 
 const TERMINAL_STATE_LABELS: Record<string, string> = {
-  verified: '成功',
-  incomplete: '响应未完整结束',
-  transport_error: '传输错误',
-  cancelled: '已取消',
-  exhausted: '候选耗尽',
-  rejected: '被拒绝',
-  error: '错误',
-  unknown: '未知',
+  get verified() {
+    return translate('logs:success')
+  },
+  get incomplete() {
+    return translate('logs:incompleteResponse')
+  },
+  get transport_error() {
+    return translate('logs:transportError')
+  },
+  get cancelled() {
+    return translate('logs:cancelled')
+  },
+  get exhausted() {
+    return translate('logs:candidatesExhausted')
+  },
+  get rejected() {
+    return translate('logs:rejected')
+  },
+  get error() {
+    return translate('logs:error')
+  },
+  get unknown() {
+    return translate('logs:unknown')
+  },
 }
 
 export function terminalStateLabel(state: string | null): string | null {
@@ -286,7 +334,9 @@ export function chainItemStatus(item: ProviderChainItem): ChainItemStatus {
 
 /** 尝试的展示名：槽位名 → 槽位 id → 账号。 */
 export function chainItemName(item: ProviderChainItem): string {
-  return item.vmName || item.vmId || item.providerName || '未知'
+  return (
+    item.vmName || item.vmId || item.providerName || translate('logs:unknown')
+  )
 }
 
 /** 重试次数 = 尝试数 - 1（每条 request_attempts 都是真实上游请求）。 */
@@ -308,7 +358,7 @@ export function finalChainItem(
 export function finalProviderName(row: UsageLogRow): string {
   const last = finalChainItem(row.providerChain)
   if (last) return chainItemName(last)
-  return row.vmName || row.vmId || row.providerName || '未知'
+  return row.vmName || row.vmId || row.providerName || translate('logs:unknown')
 }
 
 /** 队列等待取首次尝试：后续尝试的 wait 只是重试间隔，不是排队。 */
@@ -330,7 +380,7 @@ export type LatencySegment = {
 }
 
 /**
- * hub `LatencyBreakdownBar` 的三段，TTFB 段（vm2api 无数据）换成排队等待：
+ * hub `LatencyBreakdownBar` 的三段，TTFB 段（tapmodels 无数据）换成排队等待：
  * 等待 → 等待首 Token → 生成。首 token 越界整体放弃；等待越界只丢该段。
  */
 export function latencySegments(input: {
@@ -346,9 +396,19 @@ export function latencySegments(input: {
       ? input.waitMs
       : 0
   const parts: Array<[LatencySegment['key'], string, number, string]> = [
-    ['wait', '排队等待', wait, 'bg-blue-500'],
-    ['ttft', '等待首 Token', ttftMs - wait, 'bg-violet-500'],
-    ['generation', '生成时间', durationMs - ttftMs, 'bg-emerald-500'],
+    ['wait', translate('logs:queueWait'), wait, 'bg-blue-500'],
+    [
+      'ttft',
+      translate('logs:awaitingFirstToken'),
+      ttftMs - wait,
+      'bg-violet-500',
+    ],
+    [
+      'generation',
+      translate('logs:generationTime'),
+      durationMs - ttftMs,
+      'bg-emerald-500',
+    ],
   ]
   return parts.map(([key, label, ms, color]) => ({
     key,
@@ -362,4 +422,37 @@ export function latencySegments(input: {
 /** 条宽：真实占比，非零段至少 3%，免得 1ms 段塌成 0 宽却仍出现在图例里。 */
 export function segmentWidth(segment: LatencySegment): number {
   return segment.ms > 0 ? Math.max(segment.percent, 3) : 0
+}
+
+/** Class IDs are API values; labels are resolved in the current UI language. */
+const ERROR_LABEL_KEYS: Record<string, string> = {
+  auth: 'logs:errorClass.auth',
+  request: 'logs:errorClass.request',
+  signature: 'logs:errorClass.signature',
+  rate_limit: 'logs:errorClass.rate_limit',
+  quota: 'logs:errorClass.quota',
+  overloaded: 'logs:errorClass.overloaded',
+  unavailable: 'logs:errorClass.unavailable',
+  timeout: 'logs:errorClass.timeout',
+  credential: 'logs:errorClass.credential',
+  proxy: 'logs:errorClass.proxy',
+  upstream: 'logs:errorClass.upstream',
+  other: 'logs:errorClass.other',
+  distill: 'logs:errorClass.distill',
+  refusal: 'logs:errorClass.refusal',
+}
+export function errorClassLabel(
+  id: string | null | undefined,
+  fallback?: string | null
+): string {
+  return id && ERROR_LABEL_KEYS[id]
+    ? translate(ERROR_LABEL_KEYS[id])
+    : fallback || id || translate('logs:unknown')
+}
+
+export function errorOwnerLabel(owner: string): string {
+  if (owner === 'provider') return translate('logs:ownerProvider')
+  if (owner === 'client') return translate('logs:ownerClient')
+  if (owner === 'platform') return translate('logs:ownerPlatform')
+  return owner
 }

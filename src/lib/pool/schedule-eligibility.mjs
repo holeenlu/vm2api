@@ -6,7 +6,7 @@ import { hasBoundExit, isLocalEgressProxy } from '../vm/egress.mjs'
 import { isVmScheduleReady, vmHasClaudeCredential, isCodexVm } from '../vm/vm-registry.mjs'
 import { expiresAtToMs, hasRefreshPresence } from '../oauth/oauth-credentials.mjs'
 import { rustKernelBusy } from '../transport/rust-kernel-client.mjs'
-import { socksProxyEndpoint } from '../vm/socks-address.mjs'
+import { proxyEndpointOf } from '../vm/proxy-address.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 
 // Only a dead grant / operator disable should keep the slot out of the pool.
@@ -120,7 +120,7 @@ export const WORKER_PROXY_UNKNOWN = undefined
 export function evaluateProxySync({ vm, workerProxyEndpoint = WORKER_PROXY_UNKNOWN, egressMode = '' } = {}) {
   if (isLocalEgressProxy(vm?.proxy)) return { ok: true }
   if (String(egressMode || '').trim() === 'transparent') return { ok: true }
-  const want = socksProxyEndpoint(vm?.proxy)
+  const want = proxyEndpointOf(vm?.proxy)
   if (!want) return { ok: true }
   if (workerProxyEndpoint === WORKER_PROXY_UNKNOWN) return { ok: true }
   if (!workerProxyEndpoint) return { ok: false, reason: 'worker_proxy_missing' }

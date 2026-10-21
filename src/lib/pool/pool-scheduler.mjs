@@ -39,7 +39,7 @@ import { isCodexVm } from '../vm/vm-kind.mjs'
 import { detectInboundPlatform } from '../protocol/platform-detect.mjs'
 import { resolveCredentialScheduleLevel } from './credential-weight.mjs'
 import { PLATFORM_SCOPE, normalizeOwnerId, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
-import { keyAllowsVm } from '../admin/key-scope.mjs'
+import { keyAllowsVm, refreshKeyScope, keyAllowsModel } from '../admin/key-scope.mjs'
 import {
   kernelFaults,
   rustKernelBusy,
@@ -493,6 +493,12 @@ export class PoolScheduler extends EventEmitter {
         return fail('all_accounts_busy', waitCandidates, waitAvailable, waitPool)
       }
       const now = Date.now()
+      // Eligibility inspection is asynchronous: a cooldown/RPM window can
+      // expire before this wait is planned. Re-read it instead of dropping its
+      // wake time and sleeping until the full request deadline.
+      if (waitPool.some((candidate) => Number(candidate.availableAt) > 0 && Number(candidate.availableAt) <= now)) {
+        continue
+      }
       const wakeAts = waitPool.map((candidate) => Number(candidate.availableAt) || 0).filter((value) => value > now)
       const concurrencyWait = waitPool.some((candidate) => candidate.busy && stickyShouldWait(candidate.waitReason))
       const waitPlan = this.resolveWaitPlan({
@@ -868,6 +874,8 @@ export class PoolScheduler extends EventEmitter {
   } = {}) {
     const now = Date.now()
     this.runtimeRepo?.clearExpired?.(now)
+    keyScope = refreshKeyScope(keyScope)
+    if (!keyAllowsModel(keyScope, model)) return []
     const summaries = listVms(this.projectRoot)
     const candidates = []
     // Accounts dropped by an upstream 429 / 529 cooldown; an empty pool reports
@@ -929,6 +937,7 @@ export class PoolScheduler extends EventEmitter {
         state,
         model: normalizeModel(model),
         priority: priorityOf(vm, eligibility.account, now),
+        groupPriority: keyScope?.resource_priorities?.[vm.id] ?? 50,
         weight: weightOf(vm, state),
         inflight,
         maxConcurrency,
@@ -1330,6 +1339,8 @@ export class PoolScheduler extends EventEmitter {
     }
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
+    const groupPriority = Math.min(...pool.map((c) => c.groupPriority ?? 50))
+    pool = pool.filter((c) => (c.groupPriority ?? 50) === groupPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
     pool = pool.filter((candidate) => candidate.loadRatio === minLoad)
     if (pool.length === 1) return { ...pool[0], selectionReason: reasonFor('priority-load') }
@@ -1344,6 +1355,8 @@ export class PoolScheduler extends EventEmitter {
     if (!candidates.length) return null
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
+    const groupPriority = Math.min(...pool.map((c) => c.groupPriority ?? 50))
+    pool = pool.filter((c) => (c.groupPriority ?? 50) === groupPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
     pool = pool.filter((candidate) => candidate.loadRatio === minLoad)
     pool.sort((left, right) => left.lastUsedAt - right.lastUsedAt || left.accountId.localeCompare(right.accountId))
