@@ -19,7 +19,7 @@ type Preset = {
 }
 
 /**
- * hub 的四个快捷预设 + vm2api 的「Debug 采样」（只看 debug 模式落库的行）。
+ * hub 的四个快捷预设 + tapmodels 的「Debug 采样」（只看 debug 模式落库的行）。
  * 激活态完全由筛选值推导，日期选择器改了也能保持同步；只改草稿，需「应用筛选」。
  */
 export function QuickFiltersBar({

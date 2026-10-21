@@ -109,27 +109,27 @@ test('native payload names the missing or foreign file and hashes content', (t) 
       return true
     },
   )
-  assert.equal(remoteNativePayloadDir('/Users/u/.vm2api', 'abc'), '/Users/u/.vm2api/native/abc')
+  assert.equal(remoteNativePayloadDir('/Users/u/.tapmodels', 'abc'), '/Users/u/.tapmodels/native/abc')
 })
 
 test('launchd plists run the kernel and sidecar from the slot tree with escaped values', () => {
-  const p = nativeSlotPaths('/Users/o&b/.vm2api', 'vm-07', 'd1g3st')
-  assert.equal(p.payload, '/Users/o&b/.vm2api/native/d1g3st')
-  assert.equal(p.claude, '/Users/o&b/.vm2api/vms/vm-07/claude')
+  const p = nativeSlotPaths('/Users/o&b/.tapmodels', 'vm-07', 'd1g3st')
+  assert.equal(p.payload, '/Users/o&b/.tapmodels/native/d1g3st')
+  assert.equal(p.claude, '/Users/o&b/.tapmodels/vms/vm-07/claude')
   const vm = { id: 'vm-07', timezone: 'Asia/Tokyo', locale: 'ja_JP.UTF-8' }
   const plists = nativeServicePlists(vm, p)
   assert.deepEqual(nativeLabels('vm-07'), {
-    kernel: 'com.vm2api.slot.vm-07.kernel',
-    telemetry: 'com.vm2api.slot.vm-07.telemetry',
+    kernel: 'com.tapmodels.slot.vm-07.kernel',
+    telemetry: 'com.tapmodels.slot.vm-07.telemetry',
   })
-  assert.equal(plists.kernel.path, '/Users/o&b/.vm2api/vms/vm-07/launchd/com.vm2api.slot.vm-07.kernel.plist')
+  assert.equal(plists.kernel.path, '/Users/o&b/.tapmodels/vms/vm-07/launchd/com.tapmodels.slot.vm-07.kernel.plist')
   const kernel = plists.kernel.body
-  assert.match(kernel, /<string>\/Users\/o&amp;b\/\.vm2api\/native\/d1g3st\/kin-kernel<\/string>/)
+  assert.match(kernel, /<string>\/Users\/o&amp;b\/\.tapmodels\/native\/d1g3st\/kin-kernel<\/string>/)
   assert.match(kernel, /<string>--gateway-worker<\/string>/)
-  assert.match(kernel, /<string>\/Users\/o&amp;b\/\.vm2api\/vms\/vm-07\/run\/kernel\.json<\/string>/)
+  assert.match(kernel, /<string>\/Users\/o&amp;b\/\.tapmodels\/vms\/vm-07\/run\/kernel\.json<\/string>/)
   assert.match(
     kernel,
-    /<key>CLAUDE_CONFIG_DIR<\/key>\s*<string>\/Users\/o&amp;b\/\.vm2api\/vms\/vm-07\/claude<\/string>/,
+    /<key>CLAUDE_CONFIG_DIR<\/key>\s*<string>\/Users\/o&amp;b\/\.tapmodels\/vms\/vm-07\/claude<\/string>/,
   )
   assert.match(kernel, /<key>KeepAlive<\/key>\s*<true\/>/)
   assert.match(kernel, /<key>Umask<\/key>\s*<integer>63<\/integer>/)
@@ -185,7 +185,7 @@ test('node platform comes from uname -s and the darwin host stats parse like /pr
 
 test('platform is stored per node without touching the edit version', () => {
   const db = new DatabaseSync(':memory:')
-  for (const name of ['026_cluster_nodes.sql', '040_cluster_node_platform.sql']) {
+  for (const name of ['026_cluster_nodes.sql', '046_cluster_node_platform.sql']) {
     db.exec(fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   }
   const repo = new ClusterNodesRepo(db)
@@ -208,7 +208,7 @@ test('platform is stored per node without touching the edit version', () => {
   db.close()
 })
 
-function bindMac(t, { ready = true, root = '/Users/kin/.vm2api', projectRoot = '/unused' } = {}) {
+function bindMac(t, { ready = true, root = '/Users/kin/.tapmodels', projectRoot = '/unused' } = {}) {
   const manager = {
     nodePlatform: (id) => (id === 'node-mac' ? 'darwin' : 'linux'),
     nodeHostFacts: (id) => (id === 'node-mac' ? { root, uid: 501, gid: 20, platform: 'darwin' } : null),
@@ -233,9 +233,9 @@ test('a macOS node slot gets the native host: node paths, no Docker', (t) => {
   assert.equal(host.native, true)
   assert.equal(host.supports('codex'), false)
   const digest = describeNativePayload('/unused').digest
-  assert.equal(host.bins.cli, `/Users/kin/.vm2api/native/${digest}/cli-node`)
-  assert.equal(host.bins.cc, `/Users/kin/.vm2api/native/${digest}/cc-node`)
-  assert.equal(host.slotPaths(vm).run, '/Users/kin/.vm2api/vms/vm-07/run')
+  assert.equal(host.bins.cli, `/Users/kin/.tapmodels/native/${digest}/cli-node`)
+  assert.equal(host.bins.cc, `/Users/kin/.tapmodels/native/${digest}/cc-node`)
+  assert.equal(host.slotPaths(vm).run, '/Users/kin/.tapmodels/vms/vm-07/run')
   assert.throws(
     () => host.dockerApi(),
     (err) => err.code === 'native_node_unsupported',
@@ -257,9 +257,9 @@ test('kernel.json of a macOS slot points at node paths instead of container moun
   const written = writeKernelConfig(root, vm, { token: 'tok', proxyUrl: '', proxyRequired: false })
   const doc = JSON.parse(fs.readFileSync(written.configPath, 'utf8'))
   const digest = describeNativePayload(root).digest
-  assert.equal(doc.socket_path, '/Users/kin/.vm2api/vms/vm-07/run/kernel.sock')
-  assert.equal(doc.credential_path, '/Users/kin/.vm2api/vms/vm-07/claude/credentials.json')
-  assert.equal(doc.claude_bin, `/Users/kin/.vm2api/native/${digest}/cli-node`)
+  assert.equal(doc.socket_path, '/Users/kin/.tapmodels/vms/vm-07/run/kernel.sock')
+  assert.equal(doc.credential_path, '/Users/kin/.tapmodels/vms/vm-07/claude/credentials.json')
+  assert.equal(doc.claude_bin, `/Users/kin/.tapmodels/native/${digest}/cli-node`)
   assert.equal(doc.runtime_kind, 'docker')
 })
 
@@ -281,7 +281,7 @@ test('kernel.json of a macOS slot whose node never connected is skipped, not wri
   assert.equal(written, null)
   assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-07', 'run', 'kernel.json')), false)
   // Once the slot has run, its own runtime record carries the node root.
-  const known = { id: 'vm-07', node_id: 'node-mac', runtime: { remote_dir: '/Users/kin/.vm2api/vms/vm-07' } }
+  const known = { id: 'vm-07', node_id: 'node-mac', runtime: { remote_dir: '/Users/kin/.tapmodels/vms/vm-07' } }
   const doc = JSON.parse(fs.readFileSync(writeKernelConfig(root, known, { token: 'tok' }).configPath, 'utf8'))
-  assert.equal(doc.socket_path, '/Users/kin/.vm2api/vms/vm-07/run/kernel.sock')
+  assert.equal(doc.socket_path, '/Users/kin/.tapmodels/vms/vm-07/run/kernel.sock')
 })

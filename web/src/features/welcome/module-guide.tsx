@@ -5,6 +5,11 @@ import { hasPanelView } from './steps'
 type GuideTo =
   | '/overview'
   | '/statistics'
+  | '/groups'
+  | '/billing'
+  | '/subscriptions'
+  | '/ops'
+  | '/users'
   | '/logs'
   | '/cluster'
   | '/vm'
@@ -50,11 +55,23 @@ const GROUPS: { title: string; items: GuideItem[] }[] = [
         to: '/logs',
         summary: '逐条请求，可筛选、导出和打开详情。',
       },
+      {
+        title: '运维监控',
+        view: 'ops',
+        to: '/ops',
+        summary: '运行健康、请求质量、队列、任务与告警。',
+      },
     ],
   },
   {
     title: '资源',
     items: [
+      {
+        title: '分组',
+        view: 'groups',
+        to: '/groups',
+        summary: '可用服务、模型与计费方式；站长和运维在此维护资源关联。',
+      },
       {
         title: '集群',
         view: 'cluster',
@@ -117,7 +134,8 @@ const GROUPS: { title: string; items: GuideItem[] }[] = [
         view: 'keys',
         to: '/keys',
         summary: '发给客户端的 sk-vm- 密钥。',
-        detail: '不要把主控密钥写进环境变量。可按槽、模型和并发收口。',
+        detail:
+          '不要把主控密钥写进环境变量。通过分组选择服务，账户资金与限额由全部 Key 共享。',
       },
       {
         title: 'Anthropic',
@@ -132,6 +150,24 @@ const GROUPS: { title: string; items: GuideItem[] }[] = [
   {
     title: '系统',
     items: [
+      {
+        title: '账务',
+        view: 'billing',
+        to: '/billing',
+        summary: '账户余额、在途预留与资金流水。',
+      },
+      {
+        title: '套餐',
+        view: 'subscriptions',
+        to: '/subscriptions',
+        summary: '分组订阅、有效期与滚动窗口剩余额度。',
+      },
+      {
+        title: '用户',
+        view: 'users',
+        to: '/users',
+        summary: '站长管理用户、分组授权、并发限制和充值。',
+      },
       {
         title: '设置',
         view: 'settings',
@@ -176,6 +212,10 @@ function GuideTitle({ item }: { item: GuideItem }) {
 }
 
 export function WelcomeModuleGuide({ views }: { views?: string[] | null }) {
+  const visibleGroups = GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => hasPanelView(views, item.view)),
+  })).filter((group) => group.items.length > 0)
   return (
     <section
       className='relative z-10 px-6 pt-2 pb-8'
@@ -189,22 +229,15 @@ export function WelcomeModuleGuide({ views }: { views?: string[] | null }) {
           各页在管什么
         </h2>
         <div className='grid gap-6 lg:grid-cols-2'>
-          {GROUPS.map((group) => (
+          {visibleGroups.map((group) => (
             <div key={group.title} className='min-w-0'>
               <h3 className='mb-2 text-sm font-medium'>{group.title}</h3>
               <dl className='divide-y rounded-2xl border bg-background/70'>
                 {group.items.map((item) => {
-                  const allowed = hasPanelView(views, item.view)
                   return (
                     <div key={item.title} className='px-3 py-2.5'>
                       <dt>
-                        {allowed ? (
-                          <GuideTitle item={item} />
-                        ) : (
-                          <span className='text-sm font-medium text-muted-foreground'>
-                            {item.title}
-                          </span>
-                        )}
+                        <GuideTitle item={item} />
                       </dt>
                       <dd className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>
                         {item.summary}

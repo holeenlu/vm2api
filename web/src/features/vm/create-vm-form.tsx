@@ -662,7 +662,7 @@ export function CreateVmForm({
               options={VM_LOCALES.map(([value, label]) => ({
                 value,
                 label: (
-                  <span className='inline-flex items-baseline gap-1.5'>
+                  <span className='inline-flex shrink-0 items-baseline gap-1.5 whitespace-nowrap'>
                     {label}
                     <span className='font-mono text-[11px] opacity-70'>
                       {value.replace('.UTF-8', '')}

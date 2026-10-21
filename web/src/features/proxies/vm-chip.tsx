@@ -4,7 +4,7 @@ import { GripVertical, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /** 槽位拖拽的 dataTransfer 类型。自定义 MIME，避免和文本拖拽混淆。 */
-export const VM_DRAG_TYPE = 'application/x-vm2api-vm'
+export const VM_DRAG_TYPE = 'application/x-tapmodels-vm'
 
 const DOT: Record<'ok' | 'bad' | 'none', string> = {
   ok: 'var(--status-ok-solid)',

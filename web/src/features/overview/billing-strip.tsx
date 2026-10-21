@@ -1,4 +1,3 @@
-import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import type { BillingAccountRow, BillingSnapshot } from '@/types/panel-overview'
 import type { Vm } from '@/types/panel-vm'
@@ -7,7 +6,6 @@ import { indexVms, isCodexVm } from '@/lib/vm-kind'
 import { billingRowSlot } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
 import { SlotIdentity } from '@/components/platform-chip'
-import { billingQueryOptions } from '@/features/billing/queries'
 import { PanelCard, StatCell } from '@/features/overview/panel-card'
 
 /** 计费面板。对齐 index.html 的 `renderBillingStrip(src)`。 */
@@ -22,25 +20,15 @@ export function BillingStrip({
   fallbackToday?: number
   fallbackTotal?: number
 }) {
-  const owned = useQuery(billingQueryOptions('vm'))
   const today = billing?.today?.total_cost ?? fallbackToday ?? 0
   const total = billing?.total?.total_cost ?? fallbackTotal ?? 0
   const byId = indexVms(vms)
   let claudeCost = 0
   let gptCost = 0
-  // 与今日/累计同口径：官方价（total_cost），不乘分组倍率。
-  for (const item of owned.data?.items || []) {
-    const vm = item.vm_id ? byId.get(item.vm_id) : undefined
-    const cost = Number(item.official_cost_usd ?? 0)
+  for (const vm of vms || []) {
+    const cost = Number(vm.total_cost || 0)
     if (isCodexVm(vm)) gptCost += cost
     else claudeCost += cost
-  }
-  if (!owned.data?.items?.length) {
-    for (const vm of vms || []) {
-      const cost = Number(vm.total_cost || 0)
-      if (isCodexVm(vm)) gptCost += cost
-      else claudeCost += cost
-    }
   }
   const rows: BillingAccountRow[] = (billing?.accounts || [])
     .filter((a) => Number(a.total_cost) > 0)
@@ -48,11 +36,11 @@ export function BillingStrip({
 
   return (
     <PanelCard
-      title='计费'
+      title='账号统计计价'
       meta='上海日切 · Claude / GPT'
       action={
         <Button variant='outline' size='sm' asChild>
-          <Link to='/billing'>计费详情</Link>
+          <Link to='/statistics'>消费统计</Link>
         </Button>
       }
     >

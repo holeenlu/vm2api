@@ -9,7 +9,7 @@ export const LOGS_TABLE_COLUMNS = [
   { id: 'tokens', label: 'Tokens' },
   { id: 'cache', label: '缓存' },
   { id: 'performance', label: '性能' },
-  { id: 'cost', label: '成本' },
+  { id: 'cost', label: '实扣' },
 ] as const
 
 export type LogsTableColumn = (typeof LOGS_TABLE_COLUMNS)[number]['id']
@@ -22,7 +22,7 @@ const VALID: Record<string, true> = Object.fromEntries(
 
 /** 按面板用户分键，同一浏览器切换账号互不串。 */
 function storageKey(user: string): string {
-  return `vm2api-columns:usage-logs:${user}`
+  return `tapmodels-columns:usage-logs:${user}`
 }
 
 export function readHiddenColumns(user: string): LogsTableColumn[] {

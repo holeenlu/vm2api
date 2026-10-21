@@ -274,7 +274,9 @@ function LogRow({
       )}
       {hidden('cost') ? null : (
         <div className='min-w-[50px] flex-[0.6] px-1.5 text-right font-mono text-xs'>
-          {nonBilling || row.costUsd == null ? (
+          {row.billingStatus?.startsWith('pending') ? (
+            <span className='text-amber-600'>待对账</span>
+          ) : nonBilling || row.costUsd == null ? (
             '-'
           ) : (
             <Tooltip delayDuration={250}>

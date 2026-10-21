@@ -38,7 +38,7 @@ import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import { filterVmsForPanel } from './resource-owner.mjs'
 import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../pool/weekly-split.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
-import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
+import { proxyFamily, normalizeProxyHost } from '../vm/proxy-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
@@ -640,7 +640,7 @@ export async function buildDashboard({
   return ok({
     health: {
       status: 'ok',
-      service: 'vm2api',
+      service: 'tapmodels',
       rewrite: cfg.rewrite?.enabled ? 'on' : 'off',
       base_url: cfg.base_url,
     },
@@ -1696,7 +1696,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   }
   const proxy = {
     id: hit?.id || base.id || v.proxy_id || null,
-    host: normalizeSocksHost(hit?.host || base.host) || hit?.host || base.host || null,
+    host: normalizeProxyHost(hit?.host || base.host) || hit?.host || base.host || null,
     port: hit?.port ?? base.port ?? null,
     label: hit?.label || null,
     scheme: hit?.scheme || base.scheme || (isLocalEgressId(hit?.id) || isLocalEgressId(base.id) ? 'local' : 'socks5'),
@@ -1704,7 +1704,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
     status: hit?.status ?? null,
     enabled: hit?.enabled ?? null,
     blocked_reason: hit ? hit.blocked_reason || null : proxyBlockedReason(base),
-    address_family: hit?.address_family || socksProxyFamily(base) || null,
+    address_family: hit?.address_family || proxyFamily(base) || null,
     latency_ms: hit?.latency_ms ?? null,
     last_error: hit?.last_error || null,
     last_probe_at: hit?.last_probe_at || null,
@@ -1886,6 +1886,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     restrictionReason,
   })
   return {
+    groups: v.groups || [],
+    groups_version: v.groups_version || 0,
     id: v.id,
     name: v.name,
     status: v.status,

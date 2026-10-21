@@ -1,6 +1,6 @@
 /**
- * Tenant ownership for VMs, proxies, and /v1 dispatch.
- * vm.json is SSOT for VM owner/origin; this module is the only decoder.
+ * Historical infrastructure provenance, and explicit platform diagnostic scope.
+ * Commercial authorization is handled by key-scope and group_resources.
  */
 
 export const VM_ORIGIN = {
@@ -14,12 +14,6 @@ export const PLATFORM_SCOPE = Object.freeze({ type: 'platform' })
 export function normalizeOwnerId(id) {
   const s = String(id || '').trim()
   return s || null
-}
-
-export function clampVmCreateQuota(value, fallback = 0) {
-  const n = Number(value)
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(0, Math.min(100, Math.round(n)))
 }
 
 export function vmOwnerId(vm) {
@@ -39,6 +33,7 @@ export function proxyOwnerId(proxy) {
 }
 
 export function ownerScopeFromApiKey(record, { apiKeyKind = null, ownerRole = null } = {}) {
+  if (record?.group_id) return { type: 'any' }
   if (apiKeyKind === 'master') return PLATFORM_SCOPE
   const userId = normalizeOwnerId(record?.user_id)
   if (!userId) return PLATFORM_SCOPE
@@ -46,7 +41,7 @@ export function ownerScopeFromApiKey(record, { apiKeyKind = null, ownerRole = nu
     .trim()
     .toLowerCase()
   if (role === 'admin' || role === 'super') return PLATFORM_SCOPE
-  return { type: 'user', userId }
+  return { type: 'any' } // Commercial group scope, not infrastructure ownership, authorizes customers.
 }
 
 export function ownerScopeFromRequest(req, usersRepo = null) {
@@ -72,21 +67,8 @@ export function vmMatchesOwnerScope(vm, scope = PLATFORM_SCOPE) {
   return false
 }
 
-export function filterVmsForPanel(vms, { role, userId } = {}) {
-  if (role === 'admin' || role === 'super') return vms
-  const owner = normalizeOwnerId(userId)
-  if (!owner) return []
-  return (vms || []).filter((vm) => vmOwnerId(vm) === owner)
-}
-
-export function countUserCreatedVms(vms, userId) {
-  const owner = normalizeOwnerId(userId)
-  if (!owner) return 0
-  return (vms || []).filter((vm) => vmOwnerId(vm) === owner && vmOriginOf(vm) === VM_ORIGIN.userCreated).length
-}
-
-export function canUserDeleteVm(vm, userId) {
-  return vmOwnerId(vm) === normalizeOwnerId(userId) && vmOriginOf(vm) === VM_ORIGIN.userCreated
+export function filterVmsForPanel(vms, { role } = {}) {
+  return ['admin', 'super'].includes(role) ? vms : []
 }
 
 export function canBindProxyToVm(proxy, vm, { role } = {}) {
@@ -95,16 +77,8 @@ export function canBindProxyToVm(proxy, vm, { role } = {}) {
   const r = String(role || '')
     .trim()
     .toLowerCase()
-  if (r === 'user') return !!(pOwner && vOwner && pOwner === vOwner)
+  if (r !== 'admin' && r !== 'super') return false
   // admin/super: user proxies stay off the platform pool
   if (pOwner && !vOwner) return false
   return true
-}
-
-export function assignOriginForOwner(ownerUserId, { previousOrigin = VM_ORIGIN.platform, actorRole = 'admin' } = {}) {
-  const owner = normalizeOwnerId(ownerUserId)
-  if (!owner) return VM_ORIGIN.platform
-  if (actorRole === 'user') return VM_ORIGIN.userCreated
-  if (previousOrigin === VM_ORIGIN.userCreated) return VM_ORIGIN.userCreated
-  return VM_ORIGIN.adminAssigned
 }

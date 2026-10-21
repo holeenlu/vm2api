@@ -16,7 +16,7 @@ flowchart LR
 
 | 密钥 | 来源 | 能调 |
 |------|------|------|
-| Master `VM2API_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
+| Master `TAPMODELS_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
 | `sk-vm-…` | 控制台签发 | **只** `/v1/*` |
 | 面板会话 | 面板登录 | **只** `/api/panel/*` |
 

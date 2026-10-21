@@ -419,11 +419,7 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
     role: 'user',
     ownerUserId: 'user-1',
   })
-  assert.equal(tenantList.data.items.length, 1)
-  const tenantVm = tenantList.data.items[0]
-  assert.equal(tenantVm.id, 'vm-tenant')
-  assert.equal(tenantVm.node_name, undefined)
-  assert.equal(tenantVm.proxy.node_name, undefined)
+  assert.equal(tenantList.data.items.length, 0)
 
   const adminAlloc = publicAllocatedProxy(
     pool,

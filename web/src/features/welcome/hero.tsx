@@ -78,7 +78,7 @@ export function WelcomeHero({
                 asChild
                 className='group h-11 rounded-lg px-5 text-sm font-medium'
               >
-                <Link to='/overview'>
+                <Link to='/'>
                   进入控制台
                   <ArrowRight
                     aria-hidden

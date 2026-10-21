@@ -1,3 +1,8 @@
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -118,10 +123,20 @@ test('setup-token count_tokens hops and returns input_tokens', async () => {
   assert.equal(cap.calls[0].body.five_hour, undefined)
 })
 
-test('a platform-scoped key cannot count tokens on the other platform and peeks only its VMs', async () => {
+test('a platform-scoped key cannot count tokens on the other platform and peeks only its VMs', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'count-scope-'))
+  const db = openDatabase({ dataDir: dir })
+  t.after(() => {
+    closeDatabase()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+  const groups = new GroupsRepo(db)
+  const claude = groups.create({ name: 'claude', platform: 'anthropic' }),
+    openai = groups.create({ name: 'gpt', platform: 'openai' })
+  groups.assignResource('vm', 'vm-02', [claude.id], 0)
   const scopedReq = (group_type) => ({
     apiKeyKind: 'managed',
-    apiKeyRecord: { group_type, allowed_vms: '["vm-02"]' },
+    apiKeyRecord: { group_id: group_type === 'openai' ? openai.id : claude.id },
   })
   const cap = jsonCapture()
   const seen = []
@@ -145,7 +160,8 @@ test('a platform-scoped key cannot count tokens on the other platform and peeks 
   assert.equal(seen.length, 0)
   await handleUserCountTokens(scopedReq('anthropic'), {}, deps)
   assert.equal(cap.calls[1].status, 200)
-  assert.deepEqual(seen[0], { group_type: 'anthropic', allowed_vms: ['vm-02'], vm_pool_id: null })
+  assert.equal(seen[0].group_id, claude.id)
+  assert.deepEqual(seen[0].allowed_vms, ['vm-02'])
 })
 
 test('distill count_tokens returns distill_blocked and never peeks or hops', async () => {

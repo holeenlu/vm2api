@@ -112,8 +112,8 @@ function attemptIcon(item: ProviderChainItem, index: number) {
 
 /** 纯文本技术时间线，供复制排障。 */
 function formatTimeline(row: UsageLogRow): string {
-  const base = Date.parse(row.providerChain[0]?.startedAt ?? '')
-  return row.providerChain
+  const base = Date.parse((row.providerChain || [])[0]?.startedAt ?? '')
+  return (row.providerChain || [])
     .map((item) => {
       const offset = Number.isFinite(base)
         ? `+${Math.max(0, Date.parse(item.startedAt ?? '') - base) || 0}ms`
@@ -193,7 +193,7 @@ export function LogicTraceTab({
   row: UsageLogRow
   initialExpandedIndex?: number
 }) {
-  const chain = row.providerChain
+  const chain = row.providerChain || []
   const base = Date.parse(chain[0]?.startedAt ?? '')
   const sticky = chain[0]?.selectionReason === 'sticky'
   const vmCount = new Set(chain.map((item) => item.vmId).filter(Boolean)).size

@@ -17,7 +17,7 @@ export function EntryStrip() {
     /\/$/,
     ''
   )
-  const ids = (models.data?.items || []).map((m) => m.id)
+  const ids = (models.data?.data || models.data?.items || []).map((m) => m.id)
 
   return (
     <Collapsible className='mb-5 rounded-xl border bg-card'>

@@ -36,7 +36,7 @@ export const GATE_DIAL_TIMEOUT_MS = 3_000
 const GATE_MOUNT = '/etc/kin-slot-gate'
 const PREFACE = 'KSG1'
 const REPLY_MAX = 64
-const SLOT_IMAGE_PREFIX = 'vm2api/kin-slot-'
+const SLOT_IMAGE_PREFIX = 'tapmodels/kin-slot-'
 const CERT_WAIT_TRIES = 20
 const CERT_WAIT_MS = 250
 
@@ -202,7 +202,7 @@ export function gateContainer({ host, imageRef, body, binaryDigest }) {
       User: user,
       Entrypoint: [`${GATE_MOUNT}/kin-slot-gate`],
       Cmd: ['-config', `${GATE_MOUNT}/gate.json`],
-      Labels: { 'kin.gate': '1', 'kin.gate.cfg': digest, 'vm2api.cluster': '1' },
+      Labels: { 'kin.gate': '1', 'kin.gate.cfg': digest, 'tapmodels.cluster': '1' },
       HostConfig: {
         NetworkMode: 'host',
         Binds: [`${host.root}/gate:${GATE_MOUNT}:ro`, `${host.root}/gate/tls:${GATE_MOUNT}/tls`, `${vms}:${vms}:ro`],

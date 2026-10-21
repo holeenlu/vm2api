@@ -32,7 +32,7 @@ export function WelcomeCta({ signedIn }: { signedIn: boolean }) {
         <div className='mt-8 flex items-center justify-center gap-3'>
           {signedIn ? (
             <Button asChild className='group rounded-lg'>
-              <Link to='/overview'>
+              <Link to='/'>
                 进入控制台
                 <ArrowRight
                   aria-hidden
@@ -74,7 +74,7 @@ export function WelcomeFooter() {
   return (
     <footer className='relative z-10 px-6 pb-10'>
       <div className='mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 border-t border-border/40 pt-6 text-xs text-muted-foreground'>
-        <span className='font-medium text-foreground/80'>vm2api</span>
+        <span className='font-medium text-foreground/80'>tapmodels</span>
         <span>
           个人学习与非商用自建 ·{' '}
           <a

@@ -11,18 +11,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { SearchSelect } from '@/components/search-select'
 import { usageLogSessionSuggestionsQueryOptions } from '../queries'
 import type { LogsFilterState } from '../search'
-import { FilterCombobox } from './filter-combobox'
-
-const ALL = '__all__'
 
 function SessionIdInput({
   value,
@@ -116,7 +107,7 @@ export function IdentityFilters({
       {isAdmin ? (
         <div className='space-y-2'>
           <Label>用户</Label>
-          <FilterCombobox
+          <SearchSelect
             value={filters.userId}
             options={options?.users ?? []}
             allLabel='全部用户'
@@ -131,32 +122,20 @@ export function IdentityFilters({
       ) : null}
       <div className='space-y-2'>
         <Label>API 密钥</Label>
-        <Select
-          value={filters.keyId ?? ALL}
-          disabled={optionsLoading}
-          onValueChange={(value) =>
-            onChange({ ...filters, keyId: value === ALL ? undefined : value })
-          }
-        >
-          <SelectTrigger className='w-full'>
-            <SelectValue
-              placeholder={optionsLoading ? '加载中...' : '全部密钥'}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL}>全部密钥</SelectItem>
-            {keys.map((key) => (
-              <SelectItem key={key.id} value={key.id}>
-                {key.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <SearchSelect
+          value={filters.keyId}
+          options={keys}
+          allLabel='全部密钥'
+          label='API 密钥'
+          searchPlaceholder='按名称或 ID 搜索 API 密钥…'
+          loading={optionsLoading}
+          onChange={(keyId) => onChange({ ...filters, keyId })}
+        />
       </div>
       {isAdmin ? (
         <div className='space-y-2'>
           <Label>供应商</Label>
-          <FilterCombobox
+          <SearchSelect
             value={filters.vmId}
             options={options?.vms ?? []}
             allLabel='全部供应商'

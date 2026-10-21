@@ -84,9 +84,11 @@ export function proxyStatusTone(proxy: VmProxySnap): StatusTone {
   return {
     key,
     text:
-      proxy.blocked_reason === 'ipv6_disabled'
-        ? 'IPv6 已关闭'
-        : PROXY_HEALTH_LABEL[key],
+      proxy.blocked_reason === 'proxy_expired' || proxy.status === 'expired'
+        ? '已到期'
+        : proxy.blocked_reason === 'ipv6_disabled'
+          ? 'IPv6 已关闭'
+          : PROXY_HEALTH_LABEL[key],
     cls: HEALTH_MARK[key],
   }
 }

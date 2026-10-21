@@ -51,10 +51,12 @@ import {
 } from '@/features/vm/use-vm-column-order'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
-import { VmOwnerLine } from '@/features/vm/vm-owner-line'
+import { VmGroupLabels } from '@/features/vm/vm-groups'
+import { useVmPerms } from './vm-perms'
 
 /** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
 const COL_CLS: Record<VmColumnKey | 'actions', string> = {
+  groups: 'min-w-[130px] flex-[0.8]',
   vm: 'min-w-[170px] flex-[1.15]',
   sched: 'min-w-[62px] flex-[0.3]',
   type: 'min-w-[120px] flex-[0.75]',
@@ -363,7 +365,7 @@ function SlotCell({ vm }: { vm: Vm }) {
           {name}
         </span>
       </div>
-      <VmOwnerLine
+      <VmGroupLabels
         vm={vm}
         className='truncate text-[10.5px] text-muted-foreground'
       />
@@ -383,6 +385,7 @@ const COLUMNS: Record<
   VmColumnKey,
   { label: string; cell: (ctx: CellCtx) => ReactNode }
 > = {
+  groups: { label: '分组', cell: ({ vm }) => <VmGroupLabels vm={vm} /> },
   vm: { label: '账号', cell: ({ vm }) => <SlotCell vm={vm} /> },
   sched: {
     label: '调度',
@@ -429,6 +432,7 @@ export function VmTable({
   const now = useNow()
   const statusBar = useStatusBarShow()
   const columns = useVmColumnOrder()
+  const canSeeMoney = useVmPerms().admin
   const [dragKey, setDragKey] = useState<VmColumnKey | null>(null)
   const [overKey, setOverKey] = useState<VmColumnKey | null>(null)
   const onRowKey = (e: KeyboardEvent<HTMLDivElement>, vm: Vm) => {
@@ -454,60 +458,62 @@ export function VmTable({
     <div className='overflow-x-auto rounded-lg border border-border/60'>
       <div className='min-w-[1180px]'>
         <div className='sticky top-0 z-10 flex h-8 items-center border-b bg-muted/30 pl-1.5 text-xs font-medium tracking-wide text-muted-foreground'>
-          {columns.order.map((key) => {
-            const dragging = dragKey === key
-            const target = overKey === key && dragKey && dragKey !== key
-            const forward =
-              dragKey != null &&
-              columns.order.indexOf(dragKey) < columns.order.indexOf(key)
-            return (
-              <div
-                key={key}
-                draggable
-                tabIndex={0}
-                title='拖动调整列顺序（Alt+←/→）'
-                className={cn(
-                  'group/col flex cursor-grab items-center gap-0.5 px-1.5 py-1 select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:cursor-grabbing',
-                  COL_CLS[key],
-                  dragging && 'opacity-40',
-                  target &&
-                    (forward
-                      ? 'shadow-[inset_-2px_0_0_0_var(--ring)]'
-                      : 'shadow-[inset_2px_0_0_0_var(--ring)]')
-                )}
-                onDragStart={(e) => {
-                  e.dataTransfer.effectAllowed = 'move'
-                  e.dataTransfer.setData('text/plain', key)
-                  setDragKey(key)
-                }}
-                onDragOver={(e) => {
-                  if (!dragKey) return
-                  e.preventDefault()
-                  e.dataTransfer.dropEffect = 'move'
-                  if (overKey !== key) setOverKey(key)
-                }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  if (dragKey) columns.move(dragKey, key)
-                  endDrag()
-                }}
-                onDragEnd={endDrag}
-                onKeyDown={(e) => onHeaderKey(e, key)}
-              >
-                <GripVertical
-                  className='size-3 shrink-0 opacity-0 transition-opacity group-hover/col:opacity-60'
-                  aria-hidden
-                />
-                <span className='truncate'>{COLUMNS[key].label}</span>
-                {key === 'status' ? (
-                  <StatusBarOptions
-                    show={statusBar.show}
-                    onToggle={statusBar.toggle}
+          {columns.order
+            .filter((k) => canSeeMoney || k !== 'cost')
+            .map((key) => {
+              const dragging = dragKey === key
+              const target = overKey === key && dragKey && dragKey !== key
+              const forward =
+                dragKey != null &&
+                columns.order.indexOf(dragKey) < columns.order.indexOf(key)
+              return (
+                <div
+                  key={key}
+                  draggable
+                  tabIndex={0}
+                  title='拖动调整列顺序（Alt+←/→）'
+                  className={cn(
+                    'group/col flex cursor-grab items-center gap-0.5 px-1.5 py-1 select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:cursor-grabbing',
+                    COL_CLS[key],
+                    dragging && 'opacity-40',
+                    target &&
+                      (forward
+                        ? 'shadow-[inset_-2px_0_0_0_var(--ring)]'
+                        : 'shadow-[inset_2px_0_0_0_var(--ring)]')
+                  )}
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('text/plain', key)
+                    setDragKey(key)
+                  }}
+                  onDragOver={(e) => {
+                    if (!dragKey) return
+                    e.preventDefault()
+                    e.dataTransfer.dropEffect = 'move'
+                    if (overKey !== key) setOverKey(key)
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (dragKey) columns.move(dragKey, key)
+                    endDrag()
+                  }}
+                  onDragEnd={endDrag}
+                  onKeyDown={(e) => onHeaderKey(e, key)}
+                >
+                  <GripVertical
+                    className='size-3 shrink-0 opacity-0 transition-opacity group-hover/col:opacity-60'
+                    aria-hidden
                   />
-                ) : null}
-              </div>
-            )
-          })}
+                  <span className='truncate'>{COLUMNS[key].label}</span>
+                  {key === 'status' ? (
+                    <StatusBarOptions
+                      show={statusBar.show}
+                      onToggle={statusBar.toggle}
+                    />
+                  ) : null}
+                </div>
+              )
+            })}
           <div className={cn(COL_CLS.actions, 'flex justify-end')}>
             {columns.isDefault ? null : (
               <Button
@@ -550,11 +556,13 @@ export function VmTable({
               onClick={() => actions.openDetail(vm)}
               onKeyDown={(e) => onRowKey(e, vm)}
             >
-              {columns.order.map((key) => (
-                <div key={key} className={cn('px-1.5', COL_CLS[key])}>
-                  {COLUMNS[key].cell(ctx)}
-                </div>
-              ))}
+              {columns.order
+                .filter((k) => canSeeMoney || k !== 'cost')
+                .map((key) => (
+                  <div key={key} className={cn('px-1.5', COL_CLS[key])}>
+                    {COLUMNS[key].cell(ctx)}
+                  </div>
+                ))}
               <div
                 className={cn(COL_CLS.actions, 'flex justify-end')}
                 onClick={(e) => e.stopPropagation()}

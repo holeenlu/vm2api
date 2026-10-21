@@ -8,15 +8,12 @@ import {
   rewriteToolNames,
   sanitizeAnthropicBodyForBetaTokens,
   ensureFastModeBeta,
-  ensureClearThinkingContextManagement,
   stripInvalidThinkingBlocks,
-  alignSamplingWithThinking,
   modelSupportsMidConversationSystem,
 } from './anthropic-policy.mjs'
-import { liftMidConversationSystemMessages, promoteContentToBlocks } from './sanitize.mjs'
+import { liftMidConversationSystemMessages } from './sanitize.mjs'
 import {
   applyThinkingDisplay,
-  ensureUnofficialAdaptiveThinking,
   ensureUnofficialEffortHigh,
   normalizeThinkingForModel,
   thinkingDisplayMode,
@@ -48,11 +45,9 @@ import {
 } from '../identity/official-cc-system-2.1.241.mjs'
 import {
   applyCacheTtlToBody,
-  applyMessageBreakpoints,
   DEFAULT_CACHE_TTL,
   enforceCacheTtlOrder,
   normalizeCacheTtl,
-  removeCacheControlFields,
   stripIllegalCacheControlFields,
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
@@ -167,7 +162,6 @@ function stabilizeMessageBudgets(body) {
   })
   return changed ? { ...body, messages } : body
 }
-const OFFICIAL_CACHE = Object.freeze({ type: 'ephemeral' })
 
 function textOf(block) {
   if (typeof block === 'string') return block
@@ -176,7 +170,7 @@ function textOf(block) {
 
 /**
  * Every cli-hop request leaves as the captured Claude Code shape: the identity
- * sentence, then the caller's own prompt. Both markers omit ttl. A request that
+ * sentence, then the caller's own prompt. Both markers use the session TTL. A request that
  * already has that identity keeps its second block; anything else is joined
  * behind a fresh identity.
  */
@@ -191,7 +185,7 @@ export function officialSystemTemplate(system, ttl = DEFAULT_CACHE_TTL) {
   return out
 }
 
-/** One marker, on the last text of the current tail, ttl omitted. */
+/** One marker on the latest user turn, using the session TTL. */
 function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL) {
   if (!Array.isArray(messages) || messages.length === 0) return messages
   const next = messages.map((message) => {

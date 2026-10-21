@@ -36,8 +36,8 @@ export function readPackageFacts(text: string): PackageRead | null {
     return { ok: false, error: 'JSON 还不是一份完整的包' }
   }
   const root = record(doc)
-  if (!root || root.type !== 'vm2api-vm-package') {
-    return { ok: false, error: '这不是 vm2api 单槽包' }
+  if (!root || root.type !== 'tapmodels-vm-package') {
+    return { ok: false, error: '这不是 tapmodels 单槽包' }
   }
   const vm = record(root.vm)
   if (!vm) return { ok: false, error: '包里没有 vm' }

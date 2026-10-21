@@ -39,7 +39,7 @@ export function formatDuration(ms: number | null | undefined): string {
 }
 
 /**
- * 输出速率 tok/s。生成窗口以首 token 为起点（vm2api 没有独立的 TTFB，
+ * 输出速率 tok/s。生成窗口以首 token 为起点（tapmodels 没有独立的 TTFB，
  * hub 用 firstByteMs 的位置这里用 TTFT）；任一输入缺失或窗口非正返回 null。
  */
 export function calculateOutputRate(

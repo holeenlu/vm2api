@@ -27,7 +27,9 @@ import { EmptyState } from '@/components/empty-state'
 import { PageHeader } from '@/components/page-header'
 import { SlotIdentity } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { meQueryOptions } from '@/features/auth/queries'
+import { groupsQueryOptions } from '@/features/groups/queries'
 import { usageQueryOptions } from '@/features/overview/queries'
 import { CreateVmDialog } from '@/features/vm/create-vm-dialog'
 import { FleetPulse } from '@/features/vm/fleet-pulse'
@@ -47,6 +49,7 @@ import {
   type VmKindFilter,
   type VmSortKey,
 } from '@/features/vm/vm-table'
+import { VmBatchGroups } from './vm-batch-groups'
 
 const SORT_CHIPS = [
   ['status', '状态'],
@@ -97,6 +100,8 @@ export function VmListPage() {
     enabled: me.data?.role !== 'user',
   })
   const qc = useQueryClient()
+  const [groupFilter, setGroupFilter] = useState('all')
+  const groups = useQuery(groupsQueryOptions())
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState<VmZoneFilter>('all')
   const [kind, setKind] = useState<VmKindFilter>('all')
@@ -150,12 +155,21 @@ export function VmListPage() {
   const vms: Vm[] = vmsQ.data?.items || []
   const poolQueue = vmsQ.data?.pool_queue
   const accounts = usage.data?.accounts
-  const canCreate =
-    me.data?.role === 'admin' ||
-    (me.data?.role === 'user' && (me.data.vm_create_quota || 0) > 0)
+  const canCreate = me.data?.role === 'admin' || me.data?.role === 'super'
   const perms = vmPermsFor(me.data?.role)
   const scoped = filterVms(vms, '', 'all', kind)
-  const list = sortVms(filterVms(vms, q, filter, kind), sort, dir, accounts)
+  const list = sortVms(
+    filterVms(vms, q, filter, kind).filter(
+      (v) =>
+        groupFilter === 'all' ||
+        (groupFilter === 'none'
+          ? !v.groups?.length
+          : v.groups?.some((g) => String(g.id) === groupFilter))
+    ),
+    sort,
+    dir,
+    accounts
+  )
 
   return (
     <PageHeader
@@ -164,7 +178,22 @@ export function VmListPage() {
       fluid
       extra={
         poolQueue || canCreate ? (
-          <div className='flex items-center gap-3'>
+          <div className='flex flex-wrap items-center gap-3'>
+            <SearchSelect
+              label='按分组筛选'
+              value={groupFilter === 'all' ? undefined : groupFilter}
+              options={[
+                { id: 'none', name: '未分组' },
+                ...(groups.data?.items || []).map((g) => ({
+                  id: String(g.id),
+                  name: g.name,
+                })),
+              ]}
+              allLabel='全部分组'
+              searchPlaceholder='搜索分组…'
+              onChange={(id) => setGroupFilter(id || 'all')}
+            />
+            <VmBatchGroups vms={list} />
             {poolQueue ? (
               <span
                 className={cn(

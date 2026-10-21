@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 
 export const SETTINGS_TABS = [
+  ['branding', '品牌'],
   ['sticky', '粘性'],
   ['pool', '账号池'],
   ['quota', '配额'],
@@ -66,6 +67,7 @@ export const SETTINGS_NAV_GROUPS: {
   {
     label: '运维',
     items: [
+      { id: 'branding', icon: Fingerprint },
       { id: 'notify', icon: BellRing },
       { id: 'logs', icon: ScrollText },
       { id: 'backup', icon: Archive },

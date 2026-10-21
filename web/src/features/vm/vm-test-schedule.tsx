@@ -691,8 +691,8 @@ export function VmTestSchedule({
           <AlertDialogHeader>
             <AlertDialogTitle>同步到全部槽？</AlertDialogTitle>
             <AlertDialogDescription>
-              把本槽当前显示的定时测试整个覆盖到你有权限的全部槽（租户仅自己的槽）：
-              开关（{enabled ? '启用' : '暂停'}
+              把本槽当前显示的定时测试整个覆盖到你有权限维护的全部槽： 开关（
+              {enabled ? '启用' : '暂停'}
               ）、频率、时刻/分钟、星期、时区、模型、Prompt、
               {codex ? 'effort' : 'token 上限'}。不用先点保存。
               另一类槽（Claude/Codex 不同）只同步开关和时间，保留自己的模型与

@@ -57,6 +57,35 @@ export type ProbeAllResult = {
   results?: { ok?: boolean }[]
 }
 
+export type ProbeOneResult = {
+  probe?: {
+    ok?: boolean
+    scope?: string
+    latency_ms?: number | null
+    error?: string
+  }
+}
+
+export function probeOneOutcome(data: ProbeOneResult): Outcome {
+  const probe = data.probe
+  if (probe?.scope === 'pending')
+    return { level: 'info', text: '节点连接正在建立，请稍后重试' }
+  if (!probe?.ok)
+    return {
+      level: 'error',
+      text: `连接失败${probe?.error ? `：${probe.error}` : ''}`,
+    }
+  if (probe.scope === 'local')
+    return {
+      level: 'success',
+      text: '本地出口已就绪；互联网可达性请查看质量检测',
+    }
+  return {
+    level: 'success',
+    text: `连接正常${probe.latency_ms == null ? '' : ` · ${probe.latency_ms} ms`}`,
+  }
+}
+
 export function probeAllOutcome(data: ProbeAllResult): Outcome {
   if (data.ok === false) {
     if (data.error === 'probe_in_progress') {

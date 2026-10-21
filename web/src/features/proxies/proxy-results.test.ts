@@ -5,9 +5,25 @@ import {
   disableConfirmText,
   editOutcome,
   probeAllOutcome,
+  probeOneOutcome,
 } from './proxy-results'
 
 describe('proxy action outcomes', () => {
+  it('reports failed connections even when the probe request returned HTTP 200', () => {
+    expect(
+      probeOneOutcome({ probe: { ok: false, error: 'ECONNREFUSED' } })
+    ).toEqual({ level: 'error', text: '连接失败：ECONNREFUSED' })
+    expect(
+      probeOneOutcome({ probe: { ok: true, scope: 'socks', latency_ms: 0 } })
+        .text
+    ).toContain('0 ms')
+    expect(
+      probeOneOutcome({ probe: { ok: false, scope: 'pending' } }).level
+    ).toBe('info')
+    expect(
+      probeOneOutcome({ probe: { ok: true, scope: 'local' } }).text
+    ).toContain('质量检测')
+  })
   it('warns when the slot reload after binding failed', () => {
     const out = bindOutcome('vm-1 已绑定', { ok: false, error: 'boot timeout' })
     expect(out.level).toBe('warning')

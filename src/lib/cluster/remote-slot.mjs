@@ -404,7 +404,7 @@ export function remoteEgressContainer({ vmId, proxyId, dir, imageRef, body, host
         'kin.egress.vm': vmId,
         'kin.egress.proxy': proxyId,
         'kin.egress.cfg': digest,
-        'vm2api.cluster': '1',
+        'tapmodels.cluster': '1',
       },
       HostConfig: {
         NetworkMode: 'host',
@@ -679,7 +679,7 @@ function kvmSlotContainerBody(vm, { image, network, remoteDir, routing, accel, s
       'kin.vm.os': vm.kernel,
       'kin.vm.layout': SLOT_LAYOUT,
       'kin.vm.runtime': 'kvm',
-      'vm2api.cluster': '1',
+      'tapmodels.cluster': '1',
     },
     HostConfig: {
       Binds: [
@@ -738,7 +738,7 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
       'kin.vm.layout': SLOT_LAYOUT,
       'kin.vm.runtime': 'docker',
       ...(codex ? { 'kin.vm.role': CODEX_SLOT_ROLE } : {}),
-      'vm2api.cluster': '1',
+      'tapmodels.cluster': '1',
     },
     HostConfig: {
       Binds: [

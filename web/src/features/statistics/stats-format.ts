@@ -129,7 +129,7 @@ export type SessionDisplay = {
 const LIVE_WINDOW_MS = 60_000
 
 /**
- * hub `getSessionDisplayStatus` 的 vm2api 版。vm2api 只在请求完成时落库，没有「进行中 / 初始化」，
+ * hub `getSessionDisplayStatus` 的 tapmodels 版。tapmodels 只在请求完成时落库，没有「进行中 / 初始化」，
  * 所以按最后一次请求区分：失败 → FAIL；1 分钟内刚完成 → LIVE；其余 IDLE。
  */
 export function sessionDisplay(

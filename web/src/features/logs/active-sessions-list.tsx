@@ -104,7 +104,7 @@ function SessionListItem({
 }
 
 /**
- * 近 5 分钟有请求的会话（hub `ActiveSessionsList`）。vm2api 请求完成才落库，
+ * 近 5 分钟有请求的会话（hub `ActiveSessionsList`）。tapmodels 请求完成才落库，
  * 没有「进行中」态，所以状态图标只区分末次成功 / 失败；点击改为按会话筛选日志。
  */
 export function ActiveSessionsList({

@@ -1,7 +1,7 @@
 /**
  * 滚动日志页的纯展示逻辑（不含组件），移植自 claude-code-hub 的
  * `model-audit-display.ts` / `thinking-effort-badge.tsx` / 表格内联计算，
- * 并按 vm2api 的 `ProviderChainItem`（request_attempts 直出）改写供应商链部分。
+ * 并按 tapmodels 的 `ProviderChainItem`（request_attempts 直出）改写供应商链部分。
  */
 import type {
   CacheTtlApplied,
@@ -180,7 +180,7 @@ export type ModelAuditDisplay = {
 }
 
 /**
- * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：vm2api 的
+ * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：tapmodels 的
  * `model` 就是计价用的生效模型（`requested_model` 是客户端原值）。
  */
 export function resolveModelAuditDisplay(row: {
@@ -330,7 +330,7 @@ export type LatencySegment = {
 }
 
 /**
- * hub `LatencyBreakdownBar` 的三段，TTFB 段（vm2api 无数据）换成排队等待：
+ * hub `LatencyBreakdownBar` 的三段，TTFB 段（tapmodels 无数据）换成排队等待：
  * 等待 → 等待首 Token → 生成。首 token 越界整体放弃；等待越界只丢该段。
  */
 export function latencySegments(input: {

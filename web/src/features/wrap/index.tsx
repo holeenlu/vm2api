@@ -13,18 +13,12 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { EmptyState } from '@/components/empty-state'
 import { PageHeader } from '@/components/page-header'
 import { CardGridSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { dataplaneLabel } from '@/features/vm/dataplane-contract'
 import {
@@ -868,22 +862,17 @@ export function WrapSamplePage() {
       >
         <div className='space-y-1'>
           <p className='text-sm'>glibc shim 来源槽（可选）</p>
-          <Select
-            value={glibcVm || 'none'}
-            onValueChange={(v) => setGlibcVm(v === 'none' ? '' : v)}
-          >
-            <SelectTrigger aria-label='glibc shim 来源槽'>
-              <SelectValue placeholder='不拷 shim' />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='none'>不拷 shim</SelectItem>
-              {vms.map((vm) => (
-                <SelectItem key={vm.id} value={vm.id}>
-                  {vm.id} · {osOf(vm)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SearchSelect
+            label='glibc shim 来源槽'
+            value={glibcVm}
+            options={vms.map((v) => ({
+              id: v.id,
+              name: `${v.id} · ${osOf(v)}`,
+            }))}
+            allLabel='不拷 shim'
+            searchPlaceholder='搜索来源槽…'
+            onChange={(id) => setGlibcVm(id || '')}
+          />
         </div>
       </ConfirmDialog>
       <ConfirmDialog

@@ -51,7 +51,7 @@ test('default password remains pending until the effective admin password change
   }
 })
 
-test('step sets follow role: admin 6, user 5, super schedulable+first_request', () => {
+test('step sets follow role: admin 6, user 3, super schedulable+first_request', () => {
   assert.deepEqual(idsOf('admin'), [
     'admin_password',
     'egress',
@@ -61,12 +61,12 @@ test('step sets follow role: admin 6, user 5, super schedulable+first_request', 
     'first_request',
   ])
   assert.equal(STEPS_BY_ROLE.admin.length, 6)
-  assert.deepEqual(idsOf('user'), ['egress', 'slot_account', 'schedulable', 'api_key', 'first_request'])
+  assert.deepEqual(idsOf('user'), ['service_group', 'api_key', 'first_request'])
   assert.equal(
     payload('user').steps.some((s) => s.id === 'admin_password'),
     false,
   )
-  assert.equal(payload('user').total, 5)
+  assert.equal(payload('user').total, 3)
   assert.deepEqual(idsOf('super'), ['schedulable', 'first_request'])
   assert.equal(payload('super').total, 2)
   assert.deepEqual(
@@ -147,16 +147,13 @@ test('PUT complete / dismiss / reset round-trip through settings; invalid action
   )
 })
 
-test('only VMs visible to the user drive slot and schedulable steps', () => {
-  const vms = [
-    { id: 'vm-a', owner_user_id: 'u1', has_token: false, schedulable: true },
-    { id: 'vm-b', owner_user_id: 'u2', has_token: true, schedulable: true },
-  ]
-  const steps = (userId) => payload('user', vmStepFacts(filterVmsForPanel(vms, { role: 'user', userId }))).steps
-  assert.equal(steps('u1').find((s) => s.id === 'slot_account').done, false)
-  assert.equal(steps('u1').find((s) => s.id === 'schedulable').done, false)
-  assert.equal(steps('u2').find((s) => s.id === 'slot_account').done, true)
-  assert.equal(steps('u2').find((s) => s.id === 'schedulable').done, true)
+test('customer onboarding uses service entitlements instead of owning supply', () => {
+  const ready = buildOnboardingPayload({ role: 'user', facts: { groupCount: 1 } })
+  assert.equal(ready.steps.find((s) => s.id === 'service_group').done, true)
+  assert.equal(
+    ready.steps.some((s) => s.id === 'slot_account'),
+    false,
+  )
 })
 
 test('first_request EXISTS uses the same ownerPred as request-log stats', () => {

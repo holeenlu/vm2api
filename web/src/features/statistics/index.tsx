@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { VIEW_DESCRIPTIONS, VIEW_TITLES } from '@/config/nav'
 import type { LeaderboardScope, StatsDimension } from '@/types/panel-statistics'
 import { Activity, Clock, DollarSign, TrendingUp } from 'lucide-react'
+import { useAuthStore } from '@/stores/auth-store'
 import { formatCurrency, formatDuration } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/page-header'
@@ -17,9 +18,16 @@ import { usageOverviewQueryOptions } from './queries'
 import { StatisticsChartCard } from './statistics-chart-card'
 import { browserTimeZone, percentChange } from './stats-format'
 
-const ADMIN_DIMENSIONS: StatsDimension[] = ['user', 'key', 'model', 'vm']
+const ADMIN_DIMENSIONS: StatsDimension[] = [
+  'user',
+  'key',
+  'model',
+  'group',
+  'endpoint',
+  'vm',
+]
 // user 角色只能看本人数据，后端对 user / vm 维度回 400。
-const USER_DIMENSIONS: StatsDimension[] = ['key', 'model']
+const USER_DIMENSIONS: StatsDimension[] = ['key', 'model', 'group', 'endpoint']
 
 const ADMIN_CARDS: { scope: LeaderboardScope; title: string }[] = [
   { scope: 'user', title: '用户排行' },
@@ -47,6 +55,7 @@ export function StatisticsPage() {
 }
 
 function StatisticsDashboard({ isUser }: { isUser: boolean }) {
+  const canSeeMoney = useAuthStore((s) => s.me?.role !== 'super')
   const [tz] = useState(browserTimeZone)
   const dimensions = isUser ? USER_DIMENSIONS : ADMIN_DIMENSIONS
   const cards = isUser ? USER_CARDS : ADMIN_CARDS
@@ -92,17 +101,19 @@ function StatisticsDashboard({ isUser }: { isUser: boolean }) {
             percentChange(overview?.todayRequests, overview?.yesterdayRequests)
           )}
         />
-        <BentoMetricCard
-          title='今日消费'
-          value={overview?.todayCost ?? 0}
-          formatter={(v) => formatCurrency(v)}
-          icon={DollarSign}
-          accentColor='amber'
-          className='min-h-[120px]'
-          comparisons={vsYesterday(
-            percentChange(overview?.todayCost, overview?.yesterdayCost)
-          )}
-        />
+        {canSeeMoney && (
+          <BentoMetricCard
+            title='今日消费'
+            value={overview?.todayCost ?? 0}
+            formatter={(v) => formatCurrency(v)}
+            icon={DollarSign}
+            accentColor='amber'
+            className='min-h-[120px]'
+            comparisons={vsYesterday(
+              percentChange(overview?.todayCost, overview?.yesterdayCost)
+            )}
+          />
+        )}
         <BentoMetricCard
           title='平均响应时间'
           value={overview?.todayAvgDurationMs ?? 0}

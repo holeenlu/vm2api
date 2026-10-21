@@ -5,6 +5,7 @@ import { ArrowRight } from 'lucide-react'
 import { IconGithub } from '@/assets/brand-icons'
 import { Logo } from '@/assets/logo'
 import { cn } from '@/lib/utils'
+import { useBranding } from '@/context/branding-provider'
 import { Button } from '@/components/ui/button'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { scrollToSection } from './scroll'
@@ -19,6 +20,7 @@ export function WelcomeTopBar({
   signedIn: boolean
   username: string
 }) {
+  const brand = useBranding()
   const [scrolled, setScrolled] = useState(false)
 
   useEffect(() => {
@@ -60,7 +62,9 @@ export function WelcomeTopBar({
             <span className='grid size-7 place-items-center rounded-lg bg-foreground text-background transition-transform duration-300 group-hover:scale-105'>
               <Logo aria-hidden className='size-4' />
             </span>
-            <span className='text-sm font-semibold tracking-tight'>vm2api</span>
+            <span className='text-sm font-semibold tracking-tight'>
+              {brand.name}
+            </span>
           </button>
 
           <div className='flex items-center gap-0.5'>
@@ -106,7 +110,7 @@ export function WelcomeTopBar({
                   size='sm'
                   className='group h-8 rounded-lg px-3.5 text-xs font-medium'
                 >
-                  <Link to='/overview'>
+                  <Link to='/'>
                     进入控制台
                     <ArrowRight
                       aria-hidden

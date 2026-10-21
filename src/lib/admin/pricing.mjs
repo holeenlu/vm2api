@@ -178,10 +178,10 @@ function selectBand(price, mode, prompt) {
  * Official standard cost for one request's usage object.
  * After normalizeUsage, input_tokens is the uncached bucket for every vendor.
  */
-export function calculateCost(usage = {}, model = null) {
+export function calculateCost(usage = {}, model = null, { resolvedPrice = null } = {}) {
   const u = normalizeUsage(usage)
   const mid = model || u.model || u.upstream_model || u.requested_model || ''
-  const resolved = resolvePrice(mid)
+  const resolved = resolvedPrice || resolvePrice(mid)
   const outputTokens = n(u.output_tokens)
   const cacheRead = n(u.cache_read_tokens)
   const { cache5m, cache1h } = cacheSplit(u)
@@ -287,8 +287,8 @@ export function billingBandFromUsage(usage = {}) {
   return { service_tier: tier || null, speed: speed || null }
 }
 
-export function costColumnsFromUsage(usage, model) {
-  const c = calculateCost(usage, model)
+export function costColumnsFromUsage(usage, model, options) {
+  const c = calculateCost(usage, model, options)
   return {
     input_cost: c.known ? c.input_cost : null,
     output_cost: c.known ? c.output_cost : null,

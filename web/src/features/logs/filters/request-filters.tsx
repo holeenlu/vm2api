@@ -1,16 +1,8 @@
 import type { UsageLogFilterOptions } from '@/types/panel-usage-logs'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { SearchSelect } from '@/components/search-select'
 import type { LogsFilterState } from '../search'
-
-const ALL = '__all__'
 
 function OptionSelect({
   label,
@@ -32,27 +24,15 @@ function OptionSelect({
   return (
     <div className='space-y-2'>
       <Label>{label}</Label>
-      <Select
-        value={value ?? ALL}
-        onValueChange={(next) => onChange(next === ALL ? undefined : next)}
-      >
-        <SelectTrigger className='w-full'>
-          <SelectValue placeholder={loading ? '加载中...' : allLabel} />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={ALL}>{allLabel}</SelectItem>
-          {loading && !items.length ? (
-            <div className='p-2 text-center text-sm text-muted-foreground'>
-              加载中...
-            </div>
-          ) : null}
-          {items.map((item) => (
-            <SelectItem key={item} value={item}>
-              {item}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <SearchSelect
+        label={label}
+        value={value}
+        options={items.map((id) => ({ id, name: id }))}
+        allLabel={allLabel}
+        searchPlaceholder={`搜索${label}…`}
+        loading={loading}
+        onChange={onChange}
+      />
     </div>
   )
 }

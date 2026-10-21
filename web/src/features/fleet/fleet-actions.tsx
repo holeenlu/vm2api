@@ -8,6 +8,7 @@ import {
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { wrapSyncKernelFails } from '@/lib/wrap-health'
+import { useLocale } from '@/context/locale-provider'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -80,6 +81,7 @@ async function invalidateFleet(qc: QueryClient) {
 }
 
 export function FleetActions() {
+  const { t } = useLocale()
   const qc = useQueryClient()
   const me = useQuery(meQueryOptions())
   // 额度探测、全槽更新、重装内核都是管理员接口，其它角色点了只会 403。
@@ -89,7 +91,7 @@ export function FleetActions() {
   const [kernelMode, setKernelMode] = useState<'keep' | 'traits'>('keep')
   const refresh = useMutation({
     mutationFn: () => invalidateFleet(qc),
-    onSuccess: () => toast.success('已刷新'),
+    onSuccess: () => toast.success(t('已刷新')),
   })
   const probe = useMutation({
     mutationFn: () =>
@@ -178,7 +180,7 @@ export function FleetActions() {
         disabled={refresh.isPending}
         loading={refresh.isPending}
       >
-        刷新
+        {t('刷新')}
       </Button>
       {canManage ? (
         <>
@@ -189,7 +191,7 @@ export function FleetActions() {
             disabled={probe.isPending}
             loading={probe.isPending}
           >
-            额度探测
+            {t('额度探测')}
           </Button>
           <Button
             variant='outline'
@@ -198,7 +200,7 @@ export function FleetActions() {
             disabled={fleet.isPending}
             loading={fleet.isPending}
           >
-            全槽更新
+            {t('全槽更新')}
           </Button>
           <Button
             variant='outline'
@@ -207,7 +209,7 @@ export function FleetActions() {
             disabled={wrapSync.isPending}
             loading={wrapSync.isPending}
           >
-            重装当前内核
+            {t('重装当前内核')}
           </Button>
         </>
       ) : null}

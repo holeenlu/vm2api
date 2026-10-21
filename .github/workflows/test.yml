@@ -1,4 +1,4 @@
-# PR/main gate: Node + Go + pinned amd64 payload ELFs + web + native ARM64 deployment.
+# PR/main gate: Node + Go + linux/amd64 payloads + web. No ARM64 builds.
 name: ci
 
 on:
@@ -6,6 +6,20 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      preview_artifact:
+        description: 'Same-run artifact containing a prepared candidate bundle; empty checks the normal checkout'
+        type: string
+        default: ''
+      preview_sha:
+        description: 'Exact candidate commit produced by trusted preparation'
+        type: string
+        default: ''
+      preview_source:
+        description: 'Frozen upstream parent of the customization candidate'
+        type: string
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,6 +34,20 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -32,6 +60,10 @@ jobs:
       - run: npm ci
       - name: panel user and onboarding regression tests
         run: node --test test/unit/panel-users.test.mjs test/unit/onboarding.test.mjs test/e2e/panel-users.e2e.test.mjs
+      - name: Upstream preview safety and Git integration tests
+        run: python3 -m unittest discover -s test/upstream_sync -v
+      - name: Release planning and publication contracts
+        run: python3 -m unittest discover -s test/release -v
       - name: format-check
         run: npx biome format
       - name: syntax-check Node source and scripts
@@ -45,38 +77,25 @@ jobs:
       - name: ARM64 host preparation and rollback tests
         run: python3 -m unittest discover -s test/deploy -v
 
-  arm64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - name: prepare pinned x86 QEMU handler
-        run: |
-          python3 deploy/prepare-arm64.py
-          python3 deploy/prepare-arm64.py --check
-          python3 deploy/prepare-arm64.py
-      - name: verify real kernel rollback on the disposable runner
-        run: python3 test/deploy/smoke_binfmt_restore.py
-      - name: validate ARM64 Compose configuration
-        run: |
-          python3 deploy/init-arm64-env.py --port 18787 --container-name vm2api-arm64-ci
-          docker compose -f docker-compose.yml -f docker-compose.arm64.yml config --quiet
-      - name: build native control plane
-        run: docker build --progress=plain --platform linux/arm64 -f deploy/Dockerfile.arm64-control -t vm2api-arm64-control:ci .
-      - name: verify native runtime and emulated payloads
-        run: python3 test/deploy/smoke_arm64_image.py vm2api-arm64-control:ci
-      - name: build and verify a different checkout VERSION
-        run: |
-          trap 'git restore -- VERSION' EXIT
-          python3 -c 'from pathlib import Path; p = Path("VERSION"); p.write_text(p.read_text().strip() + "-arm64-build-check\n")'
-          docker build --progress=plain --platform linux/arm64 -f deploy/Dockerfile.arm64-control -t vm2api-arm64-control:ci-version .
-          python3 test/deploy/smoke_arm64_image.py vm2api-arm64-control:ci-version
-
   worker:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25.x'
@@ -108,6 +127,20 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -124,6 +157,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -139,3 +186,47 @@ jobs:
           pnpm format:check
           pnpm test
           pnpm build
+
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      RELAY_ACCEPTANCE_URL: ''
+      RELAY_ACCEPTANCE_KEY: ''
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: api-kernel/go.sum
+      - run: npm ci
+      - name: Build isolated API kernel for contract tests
+        working-directory: api-kernel
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/kin-api-kernel-contracts" ./cmd/kin-api-kernel
+          echo "KIN_API_KERNEL_BIN=$RUNNER_TEMP/kin-api-kernel-contracts" >> "$GITHUB_ENV"
+      - name: Commercial authorization, settlement and native model catalog contracts
+        run: |
+          node --import ./test/fixtures/kin-computer-test-env.mjs --test \
+            test/e2e/relay-operations.e2e.test.mjs \
+            test/e2e/relay-refinements.e2e.test.mjs \
+            test/e2e/codex-key-catalog.e2e.test.mjs

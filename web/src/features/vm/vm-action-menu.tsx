@@ -11,7 +11,6 @@ import {
   RefreshCw,
   RotateCcw,
   Trash2,
-  Undo2,
   UserRoundPlus,
 } from 'lucide-react'
 import { canRefreshCredential, credTypeOf } from '@/lib/cred-type'
@@ -27,7 +26,6 @@ import {
 import { meQueryOptions } from '@/features/auth/queries'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { useVmActions } from '@/features/vm/vm-actions-context'
-import { canReclaimVm } from '@/features/vm/vm-owner'
 import { VmPackageDialog } from '@/features/vm/vm-package-dialog'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
@@ -108,24 +106,16 @@ export function VmActionMenu({
               打包 JSON
             </DropdownMenuItem>
           ) : null}
-          {admin && actions.openAssignOwner ? (
+          {actions.openAssignGroups ? (
             <DropdownMenuItem
-              disabled={actions.ownerBusyId === vm.id}
-              onSelect={() => actions.openAssignOwner?.(vm)}
+              disabled={actions.groupsBusyId === vm.id}
+              onSelect={() => actions.openAssignGroups?.(vm)}
             >
               <UserRoundPlus />
-              分配给租户
+              分配给分组
             </DropdownMenuItem>
           ) : null}
-          {admin && actions.reclaimOwner && canReclaimVm(vm) ? (
-            <DropdownMenuItem
-              disabled={actions.ownerBusyId === vm.id}
-              onSelect={() => actions.reclaimOwner?.(vm)}
-            >
-              <Undo2 />
-              收回
-            </DropdownMenuItem>
-          ) : null}
+
           <DropdownMenuSeparator />
           <DropdownMenuItem
             disabled={!restricted || actions.recoveringId === vm.id}

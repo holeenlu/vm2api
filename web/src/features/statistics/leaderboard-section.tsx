@@ -13,6 +13,7 @@ import {
   Medal,
   Trophy,
 } from 'lucide-react'
+import { useAuthStore } from '@/stores/auth-store'
 import {
   formatCurrency,
   formatDuration,
@@ -47,6 +48,8 @@ const SCOPE_LABELS: Record<LeaderboardScope, string> = {
   key: '密钥',
   vm: '供应商',
   model: '模型',
+  group: '分组',
+  endpoint: '入口',
 }
 
 const LIMIT = 50
@@ -185,6 +188,10 @@ export function LeaderboardSection({
   scope: LeaderboardScope
   onScopeChange: (scope: LeaderboardScope) => void
 }) {
+  const canSeeMoney = useAuthStore((s) => s.me?.role !== 'super')
+  const visibleColumns = COLUMNS.filter(
+    (c) => canSeeMoney || !['totalCost', 'totalActualCost'].includes(c.key)
+  )
   const [period, setPeriod] = useState<StatsRange>('today')
   const [sortKey, setSortKey] = useState<SortKey | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
@@ -270,12 +277,14 @@ export function LeaderboardSection({
                   key={row}
                   className='grid gap-4'
                   style={{
-                    gridTemplateColumns: `repeat(${COLUMNS.length + 2}, minmax(0, 1fr))`,
+                    gridTemplateColumns: `repeat(${visibleColumns.length + 2}, minmax(0, 1fr))`,
                   }}
                 >
-                  {Array.from({ length: COLUMNS.length + 2 }).map((_, col) => (
-                    <Skeleton key={col} className='h-4 w-full' />
-                  ))}
+                  {Array.from({ length: visibleColumns.length + 2 }).map(
+                    (_, col) => (
+                      <Skeleton key={col} className='h-4 w-full' />
+                    )
+                  )}
                 </div>
               ))}
             </div>
@@ -307,7 +316,7 @@ export function LeaderboardSection({
                   <TableRow>
                     <TableHead className='w-24'>排名</TableHead>
                     <TableHead>{SCOPE_LABELS[scope]}</TableHead>
-                    {COLUMNS.map((col) => (
+                    {visibleColumns.map((col) => (
                       <TableHead
                         key={col.key}
                         className={cn(
@@ -359,7 +368,7 @@ export function LeaderboardSection({
                       >
                         <EntryName entry={row} scope={scope} />
                       </TableCell>
-                      {COLUMNS.map((col) => (
+                      {visibleColumns.map((col) => (
                         <TableCell
                           key={col.key}
                           className={cn(

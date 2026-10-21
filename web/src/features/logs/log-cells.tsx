@@ -62,7 +62,7 @@ export function ThinkingEffortBadge({ effort }: { effort: string }) {
 }
 
 /**
- * 思考强度。vm2api 只记录客户端请求值（无供应商覆写审计），
+ * 思考强度。tapmodels 只记录客户端请求值（无供应商覆写审计），
  * 因此没有 hub 的「请求 → 实际」箭头。
  */
 export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {

@@ -27,7 +27,7 @@ function renderStatus(overrides: Partial<ReleaseStatus>) {
     needs_wrap_cli_sync: false,
     upgrade_command: '',
     check_command: '',
-    repo: 'dofastted/vm2api',
+    repo: 'holeenlu/vm2api',
     source_error: null,
     changelog: [],
     ...overrides,

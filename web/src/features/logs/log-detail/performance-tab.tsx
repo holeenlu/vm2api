@@ -97,7 +97,7 @@ export function PerformanceTab({ row }: { row: UsageLogRow }) {
   const rate = calculateOutputRate(outputTokens, durationMs, ttftMs)
   const showRate =
     rate != null && !shouldHideOutputRate(rate, durationMs, ttftMs)
-  const wait = queueWaitMs(row.providerChain)
+  const wait = queueWaitMs(row.providerChain || [])
 
   if (ttftMs == null && durationMs == null) {
     return (

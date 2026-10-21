@@ -34,13 +34,6 @@ import { cacheHitPct } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Tooltip,
@@ -50,8 +43,9 @@ import {
 import { ChoiceTiles } from '@/components/choice-tiles'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
-import { PlatformChip, SlotIdentity } from '@/components/platform-chip'
+import { PlatformChip } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesForVmBind } from '@/features/proxies/proxy-sort'
@@ -125,7 +119,7 @@ function VmDetailBody({
     ...dashboardQueryOptions(5000),
     enabled: perms.dashboard,
   })
-  // 租户读不了 dashboard，槽位下拉改用自己能看到的列表。
+  // 槽位下拉复用资源管理角色的可见列表。
   const slots = useQuery({
     ...vmsListQueryOptions(),
     enabled: perms.known && !perms.dashboard,
@@ -351,23 +345,19 @@ function VmDetailBody({
             <Link to='/vm'>列表</Link>
           </Button>
           {slotList.length > 1 ? (
-            <Select
+            <SearchSelect
+              className='w-64'
+              label='切换节点'
               value={id}
-              onValueChange={(next) =>
-                navigate({ to: '/vm/$id', params: { id: next } })
-              }
-            >
-              <SelectTrigger className='h-8 w-[220px]' aria-label='切换节点'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {slotList.map((v) => (
-                  <SelectItem key={v.id} value={v.id} className='max-w-[280px]'>
-                    <SlotIdentity vm={v} compact />
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              options={slotList.map((v) => ({
+                id: v.id,
+                name: `${v.name || v.id} · ${v.id}`,
+              }))}
+              searchPlaceholder='搜索槽位…'
+              onChange={(next) => {
+                if (next) void navigate({ to: '/vm/$id', params: { id: next } })
+              }}
+            />
           ) : null}
           <PlatformChip vm={vm} />
           <RuntimeChip vm={vm} className='text-[11px]' />

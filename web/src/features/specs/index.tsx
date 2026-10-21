@@ -127,7 +127,7 @@ function hostTone(
   return { key: 'kvm', text: '不可用', cls: 'bad' }
 }
 
-/** 客户机里 dmidecode / ip link 会读到的值。每槽随机的部分如实标出。 */
+/** 用户机里 dmidecode / ip link 会读到的值。每槽随机的部分如实标出。 */
 function GuestReadout({ cfg }: { cfg: VmRoutingConfig }) {
   const rows: [string, string, boolean?][] = [
     ...SMBIOS_FIELDS.map(
@@ -358,7 +358,7 @@ export function SpecsPage() {
               title='硬件指纹'
               summary={`${isCpuModel(cfg.cpu_model) ? VM_CPU_MODEL_LABELS[cfg.cpu_model] : cfg.cpu_model} · ${macValue || '—'}`}
               forceOpen={!!(errors.cpu_model || errors.mac_oui)}
-              desc='只对虚拟机生效。写进客户机的 CPU 型号与 DMI；序列号、UUID、MAC 后三字节与磁盘序列号每槽另行随机。'
+              desc='只对虚拟机生效。写进用户机的 CPU 型号与 DMI；序列号、UUID、MAC 后三字节与磁盘序列号每槽另行随机。'
             >
               <div className='divide-y'>
                 <SettingRow
@@ -465,7 +465,7 @@ export function SpecsPage() {
             <section className='space-y-3 border-t pt-5'>
               <div className='space-y-0.5'>
                 <h4 className='text-xs font-medium text-muted-foreground'>
-                  客户机读到的硬件
+                  用户机读到的硬件
                 </h4>
                 <p className='text-xs text-muted-foreground'>
                   按当前草稿预览 dmidecode 与网卡。

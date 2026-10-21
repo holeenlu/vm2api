@@ -14,6 +14,8 @@ export const PROXY_HEALTH_KEYS = [
 export type ProxyHealthKey = (typeof PROXY_HEALTH_KEYS)[number]
 
 export function proxyHealthKey(prx: VmProxySnap): ProxyHealthKey {
+  if (prx.blocked_reason === 'proxy_expired' || prx.status === 'expired')
+    return 'dead'
   if (prx.blocked_reason) return 'off'
   if (prx.enabled === false) return 'off'
   if (prx.status === 'dead') return 'dead'
@@ -114,6 +116,8 @@ export function proxyIsInvalid(prx: VmProxySnap | undefined): boolean {
 }
 
 export function proxyStatusLabel(prx: VmProxySnap): string {
+  if (prx.blocked_reason === 'proxy_expired' || prx.status === 'expired')
+    return '已到期'
   if (prx.blocked_reason === 'ipv6_disabled') return 'IPv6 已关闭'
   if (prx.enabled === false || prx.status === 'dead') return '失效'
   if (prx.status === 'fail') return '失败'

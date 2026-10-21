@@ -1,4 +1,7 @@
 export type ViewId =
+  | 'groups'
+  | 'ops'
+  | 'subscriptions'
   | 'overview'
   | 'cluster'
   | 'vm'
@@ -20,20 +23,23 @@ export type ViewId =
   | 'wrap'
 
 export const VIEW_TITLES: Record<ViewId, string> = {
+  groups: '分组',
+  ops: '运维监控',
+  subscriptions: '套餐',
   overview: '总览',
   cluster: '集群',
   vm: '虚拟机',
   import: '导入',
   specs: '规格',
-  billing: '计费',
+  billing: '账务',
   proxies: '代理池',
   models: '模型',
   risk: '风险审计',
   system: 'system提示词',
   keys: '密钥',
-  api: 'API',
+  api: '上游 API',
   anthropic: 'Anthropic',
-  logs: '日志',
+  logs: '使用记录',
   statistics: '统计',
   database: '数据库',
   settings: '设置',

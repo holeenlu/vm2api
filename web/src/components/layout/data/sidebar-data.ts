@@ -26,12 +26,15 @@ const ALL_GROUPS: NavGroup[] = [
     items: [
       { title: '总览', url: '/overview', icon: LayoutDashboard },
       { title: '统计', url: '/statistics', icon: ChartColumn },
-      { title: '日志', url: '/logs', icon: ScrollText },
+      { title: '使用记录', url: '/logs', icon: ScrollText },
+      { title: '运维监控', url: '/ops', icon: LayoutDashboard },
     ],
   },
   {
     title: '资源',
     items: [
+      { title: '分组', url: '/groups', icon: Layers },
+      { title: '上游 API', url: '/api', icon: Cable },
       { title: '集群', url: '/cluster', icon: Boxes },
       { title: '虚拟机', url: '/vm', icon: Server },
       { title: '导入', url: '/import', icon: Download },
@@ -52,6 +55,9 @@ const ALL_GROUPS: NavGroup[] = [
   {
     title: '系统',
     items: [
+      { title: '用户', url: '/users', icon: Server },
+      { title: '账务', url: '/billing', icon: ChartColumn },
+      { title: '套餐', url: '/subscriptions', icon: Layers },
       { title: '设置', url: '/settings', icon: Settings },
       { title: '内核', url: '/wrap', icon: Layers },
       { title: '数据库', url: '/database', icon: Database },
@@ -78,17 +84,5 @@ export function navGroupsFor(views?: string[] | null): NavGroup[] {
 }
 
 export const sidebarData: SidebarData = {
-  user: {
-    name: 'admin',
-    email: 'admin',
-    avatar: '',
-  },
-  teams: [
-    {
-      name: 'vm2api',
-      logo: LayoutDashboard,
-      plan: 'Console API',
-    },
-  ],
   navGroups: ALL_GROUPS,
 }

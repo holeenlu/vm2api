@@ -4,7 +4,7 @@ import { ArrowUpRight, Star, X } from 'lucide-react'
 import { IconGithub } from '@/assets/brand-icons'
 import { Button } from '@/components/ui/button'
 
-const STORAGE_KEY = 'vm2api_star_hint_day'
+const STORAGE_KEY = 'tapmodels_star_hint_day'
 const VISIBLE_MS = 10_000
 
 function localDay(now = new Date()): string {
@@ -65,7 +65,7 @@ export function StarHint() {
         </span>
         <div className='min-w-0 space-y-2.5'>
           <div className='space-y-0.5'>
-            <p className='text-sm font-semibold'>觉得 vm2api 好用？</p>
+            <p className='text-sm font-semibold'>觉得 tapmodels 好用？</p>
             <p className='text-[13px] leading-snug text-muted-foreground'>
               去 GitHub 点个 Star，帮更多人发现这个项目。
             </p>

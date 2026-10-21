@@ -106,6 +106,7 @@ export function isPresetTimezone(value: string): boolean {
 export const VM_LOCALES: [string, string][] = [
   ['en_US.UTF-8', 'English'],
   ['zh_CN.UTF-8', '中文'],
+  ['zh_TW.UTF-8', '繁體中文'],
   ['ja_JP.UTF-8', '日本語'],
   ['C.UTF-8', 'C'],
 ]

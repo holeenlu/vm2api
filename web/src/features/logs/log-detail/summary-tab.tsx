@@ -113,7 +113,7 @@ function Cost({ value }: { value: number | null | undefined }) {
   )
 }
 
-/** 「概览」：hub SummaryTab 的各区块，按 vm2api 实有字段取舍。 */
+/** 「概览」：hub SummaryTab 的各区块，按 tapmodels 实有字段取舍。 */
 export function SummaryTab({
   row,
   scrollToRedirect,
@@ -498,7 +498,7 @@ export function SummaryTab({
         </div>
       ) : null}
 
-      {row.specialSettings.length ? (
+      {row.specialSettings?.length ? (
         <div className='space-y-2'>
           <SectionTitle icon={Settings2} color='text-purple-600'>
             特殊设置

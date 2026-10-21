@@ -4,7 +4,7 @@ import { latencySegments, segmentWidth } from '../log-display'
 
 /**
  * 延迟分解条（hub `LatencyBreakdownBar`）。三段：排队等待（首次尝试的
- * `wait_ms`，替代 vm2api 没有的 TTFB）→ 等待首 Token → 生成。
+ * `wait_ms`，替代 tapmodels 没有的 TTFB）→ 等待首 Token → 生成。
  */
 export function LatencyBreakdownBar({
   waitMs,

@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { PageHeader } from '@/components/page-header'
+import { SearchSelect } from '@/components/search-select'
 import { apiEndpointsQueryOptions } from '@/features/api-endpoints/queries'
 import { proxyLabel } from '@/features/proxies/proxy-sort'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
@@ -389,18 +390,13 @@ export function AnthropicConsolePage() {
 
         <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_6rem_auto]'>
           {models.length ? (
-            <Select value={model} onValueChange={setModel}>
-              <SelectTrigger className='w-full' aria-label='模型'>
-                <SelectValue placeholder='选择模型' />
-              </SelectTrigger>
-              <SelectContent>
-                {models.map((id) => (
-                  <SelectItem key={id} value={id}>
-                    {id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <SearchSelect
+              label='模型'
+              value={model}
+              options={models.map((id) => ({ id, name: id }))}
+              searchPlaceholder='搜索模型…'
+              onChange={(id) => setModel(id || '')}
+            />
           ) : (
             <Input
               value={model}

@@ -15,8 +15,10 @@ import { useAuthStore } from '@/stores/auth-store'
 import { ApiError } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { onPanelSessionExpired } from '@/lib/session'
+import { BrandingProvider } from './context/branding-provider'
 import { DirectionProvider } from './context/direction-provider'
 import { FontProvider } from './context/font-provider'
+import { LocaleProvider } from './context/locale-provider'
 import { ThemeProvider } from './context/theme-provider'
 import { routeTree } from './routeTree.gen'
 import './styles/index.css'
@@ -50,6 +52,17 @@ const queryClient = new QueryClient({
   }),
 })
 
+useAuthStore.subscribe((current, previous) => {
+  if (
+    current.token !== previous.token ||
+    current.user !== previous.user ||
+    (current.me && previous.me && current.me.role !== previous.me.role)
+  ) {
+    void queryClient.cancelQueries()
+    queryClient.clear()
+  }
+})
+
 const router = createRouter({
   routeTree,
   history: createHashHistory(),
@@ -70,13 +83,17 @@ if (!rootElement.innerHTML) {
   root.render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <ThemeProvider defaultTheme='dark'>
-          <FontProvider>
-            <DirectionProvider>
-              <RouterProvider router={router} />
-            </DirectionProvider>
-          </FontProvider>
-        </ThemeProvider>
+        <BrandingProvider>
+          <LocaleProvider>
+            <ThemeProvider defaultTheme='dark'>
+              <FontProvider>
+                <DirectionProvider>
+                  <RouterProvider router={router} />
+                </DirectionProvider>
+              </FontProvider>
+            </ThemeProvider>
+          </LocaleProvider>
+        </BrandingProvider>
       </QueryClientProvider>
     </StrictMode>
   )

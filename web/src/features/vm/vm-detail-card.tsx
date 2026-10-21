@@ -10,7 +10,6 @@ import {
   Play,
   RefreshCw,
   RotateCcw,
-  Undo2,
   UserRoundPlus,
 } from 'lucide-react'
 import { credTypeLabel, credTypeOf } from '@/lib/cred-type'
@@ -43,7 +42,6 @@ import {
 import { StatusMark } from '@/components/status-mark'
 import { meQueryOptions } from '@/features/auth/queries'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
-import { usersQueryOptions } from '@/features/users/queries'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { Field } from '@/features/vm/detail-section-primitives'
 import { NodeChip } from '@/features/vm/node-chip'
@@ -56,12 +54,8 @@ import {
 import { VmUsagePanel } from '@/features/vm/usage-windows'
 import { refreshBlockedReason } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
+import { VmGroupLabels } from '@/features/vm/vm-groups'
 import { VmMemoryBlock } from '@/features/vm/vm-memory-block'
-import {
-  canReclaimVm,
-  resolveOwnerUsername,
-  vmOriginLabel,
-} from '@/features/vm/vm-owner'
 import { useVmPerms } from '@/features/vm/vm-perms'
 import { VmSchedulingBlock } from '@/features/vm/vm-scheduling'
 
@@ -87,11 +81,7 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
   const me = useQuery(meQueryOptions())
   const admin = me.data?.role === 'admin'
   const perms = useVmPerms()
-  const users = useQuery({
-    ...usersQueryOptions(),
-    enabled: admin,
-    staleTime: 60_000,
-  })
+
   const today = vmTodayStats(vm, accounts)
   const week = vmWeekOutcome(vm, accounts)
   const codex = isCodexVm(vm)
@@ -224,14 +214,8 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
               <ProxyChip vm={vm} compact />
             </Field>
             {admin ? (
-              <Field label='租户属主' compact>
-                <span className='text-xs'>
-                  {resolveOwnerUsername(vm.owner_user_id, users.data?.items)}
-                  <span className='text-muted-foreground'>
-                    {' '}
-                    · {vmOriginLabel(vm.origin)}
-                  </span>
-                </span>
+              <Field label='所属分组' compact>
+                <VmGroupLabels vm={vm} />
               </Field>
             ) : null}
           </div>
@@ -284,26 +268,17 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
         >
           <RotateCcw /> 恢复状态
         </Button>
-        {admin && actions.openAssignOwner ? (
+        {actions.openAssignGroups ? (
           <Button
             size='sm'
             variant='outline'
-            disabled={actions.ownerBusyId === vm.id}
-            onClick={() => actions.openAssignOwner?.(vm)}
+            disabled={actions.groupsBusyId === vm.id}
+            onClick={() => actions.openAssignGroups?.(vm)}
           >
-            <UserRoundPlus /> 分配给租户
+            <UserRoundPlus /> 分配给分组
           </Button>
         ) : null}
-        {admin && actions.reclaimOwner && canReclaimVm(vm) ? (
-          <Button
-            size='sm'
-            variant='outline'
-            disabled={actions.ownerBusyId === vm.id}
-            onClick={() => actions.reclaimOwner?.(vm)}
-          >
-            <Undo2 /> 收回
-          </Button>
-        ) : null}
+
         <Button size='sm' variant='ghost' className='ms-auto' asChild>
           <Link to='/vm/$id' params={{ id: vm.id }}>
             <ExternalLink /> 完整页面

@@ -1,3 +1,4 @@
+import { keyScopeFromRequest } from '../admin/key-scope.mjs'
 import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
 import { consumeClaudeSSEData } from '../protocol/convert.mjs'
@@ -19,6 +20,7 @@ import { usageFromSseLine } from '../protocol/handle-codex.mjs'
 
 export function resolveInferenceBackend(req) {
   if (req?.apiKeyKind !== 'managed') return 'oauth'
+  if (req.apiKeyRecord?.group_id) return keyScopeFromRequest(req).allowed_endpoints?.length ? 'api' : 'oauth'
   return String(req.apiKeyRecord?.category || '')
     .trim()
     .toLowerCase() === 'api'
@@ -71,7 +73,8 @@ export async function runApiInference({
 } = {}) {
   const canonical = officialMessagesBody(convertedBody)
   const model = canonical.model
-  const picked = scheduler.pick(model)
+  const scope = keyScopeFromRequest(req)
+  const picked = scheduler.pick(model, Date.now(), scope.platform ? null : scope.allowed_endpoints)
   if (!picked.ok) {
     return {
       ok: false,

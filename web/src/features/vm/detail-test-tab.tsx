@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/select'
 import { TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { SearchSelect } from '@/components/search-select'
 import {
   DATAPLANE_HINT,
   HOP_TRANSPORT_LABEL,
@@ -95,21 +96,16 @@ export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
         <CardContent className='space-y-3 pt-0'>
           <div className='space-y-1.5'>
             <Label>模型</Label>
-            <Select
+            <SearchSelect
+              label='测试模型'
               value={model || models[0]?.id || ''}
-              onValueChange={onModelChange}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder='选择模型' />
-              </SelectTrigger>
-              <SelectContent>
-                {models.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.label || m.display_name || m.id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              options={models.map((m) => ({
+                id: m.id,
+                name: m.label || m.display_name || m.id,
+              }))}
+              searchPlaceholder='搜索测试模型…'
+              onChange={(id) => onModelChange(id || '')}
+            />
           </div>
           <div className='space-y-1.5'>
             <Label>Prompt</Label>

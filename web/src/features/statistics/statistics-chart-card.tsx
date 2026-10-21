@@ -15,6 +15,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { useAuthStore } from '@/stores/auth-store'
 import { formatCurrency, formatTokenAmount } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -39,6 +40,8 @@ const DIMENSION_LABELS: Record<StatsDimension, string> = {
   key: '密钥',
   model: '模型',
   vm: '槽位',
+  group: '分组',
+  endpoint: '入口',
 }
 
 const CHART_HEIGHT_WITH_LEGEND = 240
@@ -86,9 +89,12 @@ export function StatisticsChartCard({
   tz: string
   className?: string
 }) {
+  const canSeeMoney = useAuthStore((s) => s.me?.role !== 'super')
   const [range, setRange] = useState<StatsRange>('today')
   const [dimension, setDimension] = useState<StatsDimension>(dimensions[0])
-  const [metric, setMetric] = useState<StatsMetric>('cost')
+  const [metric, setMetric] = useState<StatsMetric>(
+    canSeeMoney ? 'cost' : 'requests'
+  )
   const [chartMode, setChartMode] = useState<'overlay' | 'stacked'>('overlay')
   // 记被隐藏的序列 id（而非已选）：5s 轮询带来的新序列默认可见，且 id 跨刷新稳定。
   const [hidden, setHidden] = useState<Set<string>>(() => new Set())
@@ -117,7 +123,7 @@ export function StatisticsChartCard({
     0
   )
   const tabTotals = Object.fromEntries(
-    METRIC_TABS.map((tab) => [
+    METRIC_TABS.filter((t) => canSeeMoney || t.id !== 'cost').map((tab) => [
       tab.id,
       visible.reduce((sum, s) => sum + (totalsOf(s)?.[tab.id] ?? 0), 0),
     ])
@@ -254,28 +260,30 @@ export function StatisticsChartCard({
       </div>
 
       <div className='flex border-b border-border/50 dark:border-white/[0.06]'>
-        {METRIC_TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type='button'
-            data-active={metric === tab.id}
-            aria-pressed={metric === tab.id}
-            onClick={() => setMetric(tab.id)}
-            className={cn(
-              'flex flex-1 cursor-pointer flex-col items-start gap-0.5 px-4 py-2 transition-colors',
-              'border-r border-border/50 last:border-r-0 dark:border-white/[0.06]',
-              'hover:bg-muted/30 dark:hover:bg-white/[0.02]',
-              'data-[active=true]:bg-muted/50 dark:data-[active=true]:bg-white/[0.04]'
-            )}
-          >
-            <span className='text-[10px] tracking-wide text-muted-foreground uppercase'>
-              {tab.label}
-            </span>
-            <span className='text-base font-bold tabular-nums'>
-              {formatMetric(tab.id, tabTotals[tab.id])}
-            </span>
-          </button>
-        ))}
+        {METRIC_TABS.filter((t) => canSeeMoney || t.id !== 'cost').map(
+          (tab) => (
+            <button
+              key={tab.id}
+              type='button'
+              data-active={metric === tab.id}
+              aria-pressed={metric === tab.id}
+              onClick={() => setMetric(tab.id)}
+              className={cn(
+                'flex flex-1 cursor-pointer flex-col items-start gap-0.5 px-4 py-2 transition-colors',
+                'border-r border-border/50 last:border-r-0 dark:border-white/[0.06]',
+                'hover:bg-muted/30 dark:hover:bg-white/[0.02]',
+                'data-[active=true]:bg-muted/50 dark:data-[active=true]:bg-white/[0.04]'
+              )}
+            >
+              <span className='text-[10px] tracking-wide text-muted-foreground uppercase'>
+                {tab.label}
+              </span>
+              <span className='text-base font-bold tabular-nums'>
+                {formatMetric(tab.id, tabTotals[tab.id])}
+              </span>
+            </button>
+          )
+        )}
       </div>
 
       <div ref={chartWrapperRef} className='px-4 py-2'>

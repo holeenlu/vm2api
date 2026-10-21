@@ -2,6 +2,7 @@ import type { ViewId } from '@/config/nav'
 import { DOCS_URL } from '@/config/repo'
 
 export type OnboardingStepId =
+  | 'service_group'
   | 'admin_password'
   | 'egress'
   | 'slot_account'
@@ -10,7 +11,7 @@ export type OnboardingStepId =
   | 'first_request'
 
 export type StepPanelTo =
-  '/users' | '/proxies' | '/import' | '/vm' | '/keys' | '/logs'
+  '/groups' | '/users' | '/proxies' | '/import' | '/vm' | '/keys' | '/logs'
 
 export type StepMeta = {
   id: OnboardingStepId
@@ -22,6 +23,14 @@ export type StepMeta = {
 }
 
 export const STEP_META: Record<OnboardingStepId, StepMeta> = {
+  service_group: {
+    id: 'service_group',
+    title: '查看可用服务',
+    description: '确认获授权分组、模型和余额或套餐，再创建 Key。',
+    panelTo: '/groups',
+    panelView: 'groups',
+    docsPath: 'guide/api',
+  },
   admin_password: {
     id: 'admin_password',
     title: '修改默认密码',

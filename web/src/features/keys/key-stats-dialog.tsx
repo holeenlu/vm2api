@@ -80,12 +80,7 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
   return (
     <div className='space-y-3 pb-1'>
       <div className='text-xs text-muted-foreground'>
-        {item.group_type === 'anthropic'
-          ? 'Anthropic'
-          : item.group_type === 'openai'
-            ? 'OpenAI'
-            : '全局'}
-        {' · '}近 {usage?.days ?? 30} 天 · 官方价
+        {item.group_name || '平台服务'} · 近 {usage?.days ?? 30} 天 · 实际消费
       </div>
       {q.isLoading ? (
         <div className='space-y-3'>

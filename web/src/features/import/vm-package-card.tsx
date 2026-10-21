@@ -114,7 +114,7 @@ export function VmPackageImportCard() {
         value={text}
         disabled={busy}
         aria-label='虚拟机包 JSON'
-        placeholder='把 vm2api-vm-package 贴在这里'
+        placeholder='把 tapmodels-vm-package 贴在这里'
         onChange={(e) => {
           setText(e.target.value)
           if (parseError) setParseError('')

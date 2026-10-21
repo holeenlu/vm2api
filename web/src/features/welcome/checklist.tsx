@@ -27,6 +27,7 @@ import {
 import type { OnboardingPayload } from './types'
 
 const STEP_ICONS: Record<OnboardingStepId, LucideIcon> = {
+  service_group: Boxes,
   admin_password: LockKeyhole,
   egress: Globe,
   slot_account: Boxes,

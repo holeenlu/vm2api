@@ -52,6 +52,7 @@ import { Socks5Pane } from '@/features/settings/socks5-pane'
 import { StickyPane } from '@/features/settings/sticky-pane'
 import { uploadIntervalOf } from '@/features/settings/telemetry-interval'
 import { TelemetryPane } from '@/features/settings/telemetry-pane'
+import { BrandingPane } from './branding-pane'
 import { ProtocolPane } from './protocol-pane'
 
 export function SettingsPage() {
@@ -190,7 +191,11 @@ export function SettingsPage() {
     serverJson !== null &&
     Object.keys(draft).length > 0 &&
     JSON.stringify(draft) !== serverJson
-  const hideSave = tab === 'socks5' || tab === 'backup' || tab === 'about'
+  const hideSave =
+    tab === 'branding' ||
+    tab === 'socks5' ||
+    tab === 'backup' ||
+    tab === 'about'
   const showSaveBar = dirty && !hideSave
 
   const discard = () => {
@@ -252,6 +257,7 @@ export function SettingsPage() {
                   }
                 />
               ) : null}
+              {tab === 'branding' && <BrandingPane />}
               {tab === 'pool' ? (
                 <div className='space-y-4'>
                   <PoolPane

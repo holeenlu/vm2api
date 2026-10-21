@@ -66,6 +66,7 @@ export type SettingRow = {
 export const SEED_LOCALE_OPTIONS = [
   ['en', 'en_US.UTF-8'],
   ['cn', 'zh_CN.UTF-8'],
+  ['tw', 'zh_TW.UTF-8'],
   ['jp', 'ja_JP.UTF-8'],
 ] as const
 

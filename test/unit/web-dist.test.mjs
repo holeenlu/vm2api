@@ -21,7 +21,7 @@ function mockRes() {
 }
 
 test('serves Vite index at /console and assets from web/dist', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-'))
   const dist = path.join(root, 'web', 'dist', 'assets')
   fs.mkdirSync(dist, { recursive: true })
   fs.writeFileSync(path.join(root, 'web', 'dist', 'index.html'), '<!doctype html><title>ok</title>')
@@ -40,7 +40,7 @@ test('serves Vite index at /console and assets from web/dist', () => {
 })
 
 test('caches hashed assets forever but never the index or unhashed files', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-cache-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-cache-'))
   const dist = path.join(root, 'web', 'dist')
   fs.mkdirSync(path.join(dist, 'assets'), { recursive: true })
   fs.mkdirSync(path.join(dist, 'model-icons'), { recursive: true })
@@ -62,7 +62,7 @@ test('caches hashed assets forever but never the index or unhashed files', () =>
 })
 
 test('rejects missing dist, traversal, and /health', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-empty-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-empty-'))
   assert.equal(tryServeWebDist(mockRes(), root, '/console'), false)
 
   fs.mkdirSync(path.join(root, 'web', 'dist'), { recursive: true })
@@ -72,7 +72,7 @@ test('rejects missing dist, traversal, and /health', () => {
 })
 
 test('serves the documented /cc entry as the console index', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-cc-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-cc-'))
   fs.mkdirSync(path.join(root, 'web', 'dist'), { recursive: true })
   fs.writeFileSync(path.join(root, 'web', 'dist', 'index.html'), '<!doctype html><title>cc</title>')
   for (const entry of ['/cc', '/cc/', '/console', '/console/']) {

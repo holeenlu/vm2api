@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import type { VmProxySnap } from '@/types/panel-vm'
+import { Eye, EyeOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -15,6 +16,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
+import { EMPTY_LIFETIME, expiryDate, expiryISO } from './proxy-lifetime'
+import { ProxyLifetimeFields } from './proxy-lifetime-fields'
 import { type ProxyEditResult, editOutcome } from './proxy-results'
 import { proxyBoundIds } from './proxy-sort'
 
@@ -36,6 +39,11 @@ export function ProxyEditDialog({
   onOpenChange: (open: boolean) => void
 }) {
   const qc = useQueryClient()
+  const proxies = useQuery(proxiesQueryOptions())
+  const [protocol, setProtocol] = useState('socks5')
+  const [lifetime, setLifetime] = useState(EMPTY_LIFETIME)
+  const [enabled, setEnabled] = useState(true)
+  const [showPassword, setShowPassword] = useState(false)
   const [host, setHost] = useState('')
   const [port, setPort] = useState('')
   const [username, setUsername] = useState('')
@@ -54,6 +62,14 @@ export function ProxyEditDialog({
   const proxyId = proxy?.id || ''
   useEffect(() => {
     if (!proxyId) return
+    setProtocol(proxy?.scheme || 'socks5')
+    setEnabled(proxy?.enabled !== false)
+    setShowPassword(false)
+    setLifetime({
+      expires_at: expiryDate(proxy?.expires_at),
+      fallback_mode: proxy?.fallback_mode || 'none',
+      backup_proxy_id: proxy?.backup_proxy_id || '',
+    })
     setHost(String(proxy?.host || ''))
     setPort(String(proxy?.port || ''))
     setUsername('')
@@ -73,6 +89,20 @@ export function ProxyEditDialog({
       if (host.trim() && host.trim() !== proxy?.host) patch.host = host.trim()
       if (port.trim() && port.trim() !== String(proxy?.port ?? '')) {
         patch.port = Number(port.trim())
+      }
+      if (!localProxy && protocol !== (proxy?.scheme || 'socks5'))
+        patch.protocol = protocol
+      if (enabled !== (proxy?.enabled !== false)) patch.enabled = enabled
+      if (!localProxy) {
+        if (lifetime.expires_at !== expiryDate(proxy?.expires_at))
+          patch.expires_at = expiryISO(lifetime.expires_at)
+        if (
+          lifetime.fallback_mode !== (proxy?.fallback_mode || 'none') ||
+          lifetime.backup_proxy_id !== (proxy?.backup_proxy_id || '')
+        ) {
+          patch.fallback_mode = lifetime.fallback_mode
+          patch.backup_proxy_id = lifetime.backup_proxy_id || null
+        }
       }
       if (clearAuth) {
         patch.username = ''
@@ -106,111 +136,185 @@ export function ProxyEditDialog({
   // 空值也算不合法：清空输入框并不表示「删除端口」，而且清空后 patch 里既不
   // 会带 host/port 也不带账密，提交出去只会换回一个 no_editable_fields 400。
   const portBad =
-    !port.trim() || !Number.isInteger(portNum) || portNum < 1 || portNum > 65535
-  const hostBad = !host.trim()
-  // SOCKS5 没有「只有密码」的认证方式，后端 socks5Record() 见用户名为空就把
+    !localProxy &&
+    (!port.trim() ||
+      !Number.isInteger(portNum) ||
+      portNum < 1 ||
+      portNum > 65535)
+  const hostBad = !localProxy && !host.trim()
+  // 代理表单不接受「只有密码」；后端 proxyRecord() 见用户名为空就把
   // 密码一并丢掉。原本无账密的代理若只填密码，网关会以
   // password_without_username 拒掉 —— 在这里先拦住，别让用户白填一遍。
   const passwordWithoutUser =
     !clearAuth && !!password && !username.trim() && !proxy?.has_auth
-  const connectionChanged = !(
-    host.trim() === String(proxy?.host || '') &&
-    port.trim() === String(proxy?.port ?? '') &&
-    !username.trim() &&
-    !password &&
-    !clearAuth
-  )
+  const connectionChanged =
+    !localProxy &&
+    !(
+      protocol === (proxy?.scheme || 'socks5') &&
+      host.trim() === String(proxy?.host || '') &&
+      port.trim() === String(proxy?.port ?? '') &&
+      !username.trim() &&
+      !password &&
+      !clearAuth
+    )
   const domainChanged =
     !localProxy && domainForward !== (proxy?.domain_forward === true)
-  const nothingChanged = !connectionChanged && !labelChanged && !domainChanged
+  const lifetimeChanged =
+    !localProxy &&
+    (lifetime.expires_at !== expiryDate(proxy?.expires_at) ||
+      lifetime.fallback_mode !== (proxy?.fallback_mode || 'none') ||
+      lifetime.backup_proxy_id !== (proxy?.backup_proxy_id || ''))
+  const nothingChanged =
+    !connectionChanged &&
+    !labelChanged &&
+    !domainChanged &&
+    !lifetimeChanged &&
+    enabled === (proxy?.enabled !== false)
 
   return (
     <Dialog open={!!proxy} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
+      <DialogContent className='flex max-h-[90svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl'>
+        <DialogHeader className='border-b px-6 py-5'>
           <DialogTitle>编辑代理</DialogTitle>
         </DialogHeader>
-        <div className='space-y-3'>
-          <div className='space-y-1'>
-            <Label>代理名称</Label>
+        <div className='min-h-0 space-y-5 overflow-y-auto px-6 py-5'>
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-label'>名称</Label>
             <Input
+              id='proxy-edit-label'
               value={label}
               maxLength={PROXY_LABEL_MAX}
               onChange={(e) => setLabel(e.target.value)}
               placeholder='如：东京-2 号机、xx 机房'
             />
           </div>
-          <div className='grid gap-3 sm:grid-cols-[2fr_1fr]'>
-            <div className='space-y-1'>
-              <Label>主机</Label>
-              <Input
-                value={host}
-                onChange={(e) => setHost(e.target.value)}
-                aria-invalid={hostBad}
-              />
-            </div>
-            <div className='space-y-1'>
-              <Label>端口</Label>
-              <Input
-                value={port}
-                inputMode='numeric'
-                onChange={(e) => setPort(e.target.value)}
-                aria-invalid={portBad}
-              />
-            </div>
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-protocol'>协议</Label>
+            <select
+              id='proxy-edit-protocol'
+              className='h-10 w-full rounded-md border bg-background px-3 disabled:opacity-60'
+              value={localProxy ? 'local' : protocol}
+              disabled={localProxy}
+              onChange={(e) => setProtocol(e.target.value)}
+            >
+              {localProxy ? (
+                <option value='local'>本地直连（LOCAL）</option>
+              ) : (
+                ['http', 'socks5', 'https', 'socks5h'].map((v) => (
+                  <option key={v} value={v}>
+                    {v.toUpperCase()}
+                  </option>
+                ))
+              )}
+            </select>
           </div>
-          {hostBad ? (
-            <p className='text-xs text-[color:var(--status-bad)]'>
-              主机不能为空。
-            </p>
-          ) : null}
-          {portBad ? (
-            <p className='text-xs text-[color:var(--status-bad)]'>
-              端口需在 1–65535 之间。
-            </p>
-          ) : null}
+          {localProxy ? (
+            <div className='rounded-lg bg-muted/40 p-4 text-sm'>
+              <p className='font-medium'>使用所在 VPS 的网络出口</p>
+              <p className='mt-1 leading-6 text-muted-foreground'>
+                可修改名称与启用状态。无需设置主机、端口或认证；本地直连不设有效期和到期回退。
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className='grid gap-4 sm:grid-cols-2'>
+                <div className='space-y-1'>
+                  <Label htmlFor='proxy-edit-host'>主机</Label>
+                  <Input
+                    id='proxy-edit-host'
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    aria-invalid={hostBad}
+                  />
+                </div>
+                <div className='space-y-1'>
+                  <Label htmlFor='proxy-edit-port'>端口</Label>
+                  <Input
+                    id='proxy-edit-port'
+                    value={port}
+                    inputMode='numeric'
+                    onChange={(e) => setPort(e.target.value)}
+                    aria-invalid={portBad}
+                  />
+                </div>
+              </div>
+              {hostBad ? (
+                <p className='text-xs text-[color:var(--status-bad)]'>
+                  主机不能为空。
+                </p>
+              ) : null}
+              {portBad ? (
+                <p className='text-xs text-[color:var(--status-bad)]'>
+                  端口需在 1–65535 之间。
+                </p>
+              ) : null}
 
-          <div className='space-y-1'>
-            <Label>用户名</Label>
-            <Input
-              value={username}
-              disabled={clearAuth}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder={proxy?.has_auth ? '留空则不修改' : '（当前无账密）'}
-            />
-          </div>
-          <div className='space-y-1'>
-            <Label>密码</Label>
-            <Input
-              type='password'
-              value={password}
-              disabled={clearAuth}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={proxy?.has_auth ? '留空则不修改' : '（当前无账密）'}
-            />
-          </div>
-          {proxy?.has_auth ? (
-            <label className='flex items-center gap-2 text-sm'>
-              <input
-                type='checkbox'
-                checked={clearAuth}
-                onChange={(e) => {
-                  setClearAuth(e.target.checked)
-                  // 勾上就把两个框清空：留着已输入的账密既不会提交（patch 只发
-                  // username: ''），取消勾选后又会突然复活，看着像输入被吞了。
-                  if (e.target.checked) {
-                    setUsername('')
-                    setPassword('')
+              <div className='space-y-1'>
+                <Label htmlFor='proxy-edit-username'>用户名（可选）</Label>
+                <Input
+                  id='proxy-edit-username'
+                  value={username}
+                  autoComplete='off'
+                  disabled={clearAuth}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder={
+                    proxy?.has_auth ? '留空则不修改' : '（当前无账密）'
                   }
-                }}
-              />
-              清除账密（改为免认证）
-            </label>
-          ) : null}
+                />
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='proxy-edit-password'>密码（可选）</Label>
+                <div className='relative'>
+                  <Input
+                    autoComplete='new-password'
+                    className='pr-10'
+                    type={showPassword ? 'text' : 'password'}
+                    id='proxy-edit-password'
+                    value={password}
+                    disabled={clearAuth}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={
+                      proxy?.has_auth ? '留空则不修改' : '（当前无账密）'
+                    }
+                  />
+                  <button
+                    type='button'
+                    aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                    className='absolute inset-y-0 right-3 text-muted-foreground'
+                    onClick={() => setShowPassword(!showPassword)}
+                  >
+                    {showPassword ? (
+                      <EyeOff className='size-4' />
+                    ) : (
+                      <Eye className='size-4' />
+                    )}
+                  </button>
+                </div>
+              </div>
+              {proxy?.has_auth ? (
+                <label className='flex items-center gap-2 text-sm'>
+                  <input
+                    type='checkbox'
+                    checked={clearAuth}
+                    onChange={(e) => {
+                      setClearAuth(e.target.checked)
+                      // 勾上就把两个框清空：留着已输入的账密既不会提交（patch 只发
+                      // username: ''），取消勾选后又会突然复活，看着像输入被吞了。
+                      if (e.target.checked) {
+                        setUsername('')
+                        setPassword('')
+                      }
+                    }}
+                  />
+                  清除账密（改为免认证）
+                </label>
+              ) : null}
 
-          <p className='text-xs text-muted-foreground'>
-            账密不会回显。留空表示保持原值。
-          </p>
+              <p className='text-xs text-muted-foreground'>
+                账密不会回显。留空表示保持原值。
+              </p>
+            </>
+          )}
           {localProxy ? null : (
             <label className='flex items-center gap-2 text-sm'>
               <input
@@ -221,9 +325,29 @@ export function ProxyEditDialog({
               域名转发（IPv6-only 出口按主机名 CONNECT，不回落 IPv4）
             </label>
           )}
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-enabled'>状态</Label>
+            <select
+              id='proxy-edit-enabled'
+              className='h-10 w-full rounded-md border bg-background px-3'
+              value={enabled ? 'active' : 'inactive'}
+              onChange={(e) => setEnabled(e.target.value === 'active')}
+            >
+              <option value='active'>启用</option>
+              <option value='inactive'>停用</option>
+            </select>
+          </div>
+          {!localProxy && (
+            <ProxyLifetimeFields
+              currentId={proxyId}
+              value={lifetime}
+              onChange={setLifetime}
+              proxies={proxies.data?.proxies || []}
+            />
+          )}
           {passwordWithoutUser ? (
             <p className='text-xs text-[color:var(--status-bad)]'>
-              只填密码不生效，SOCKS5 需要同时有用户名。
+              认证需要同时提供用户名。
             </p>
           ) : null}
           {boundCount && connectionChanged ? (
@@ -232,7 +356,7 @@ export function ProxyEditDialog({
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <DialogFooter className='border-t px-6 py-4'>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             取消
           </Button>
@@ -243,11 +367,12 @@ export function ProxyEditDialog({
               hostBad ||
               portBad ||
               nothingChanged ||
-              passwordWithoutUser
+              passwordWithoutUser ||
+              (lifetime.fallback_mode === 'proxy' && !lifetime.backup_proxy_id)
             }
             loading={save.isPending}
           >
-            保存
+            更新
           </Button>
         </DialogFooter>
       </DialogContent>

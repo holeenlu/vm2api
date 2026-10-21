@@ -41,6 +41,7 @@ import {
   zoneOf,
   type BladeState,
 } from '@/features/vm/vm-rack-model'
+import { VmGroupLabels } from './vm-groups'
 
 export type RackSize = 's' | 'm' | 'l'
 
@@ -464,6 +465,7 @@ export const VmBlade = memo(function VmBlade({
         ) : null}
       </div>
       <SpecLine vm={vm} />
+      <VmGroupLabels vm={vm} />
       {state === 'live' ? (
         <BladeUsage vm={vm} accounts={accounts} now={now} />
       ) : state === 'unprobed' ? (

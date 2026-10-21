@@ -31,33 +31,32 @@ test('prepareCliHopBody drops metadata and CLI-owned system but keeps official a
   })
   assert.equal(body.metadata, undefined)
   assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(body.system[0].cache_control.ttl, undefined)
+  assert.equal(body.system[0].cache_control.ttl, '1h')
   assert.match(body.system[1].text, /You are an interactive agent/)
   assert.equal(body.model, 'claude-sonnet-5')
-  assert.deepEqual(body.messages[0].content, [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }])
+  assert.deepEqual(body.messages[0].content, [
+    { type: 'text', text: 'hi', cache_control: { type: 'ephemeral', ttl: '1h' } },
+  ])
   assert.equal(body.stream, true)
 })
 
 test('every cli-hop system becomes the identity plus the caller body', () => {
   const billing = 'x-anthropic-billing-header: cc_version=2.1.280.096; cc_entrypoint=cli; cch=bdff0;'
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-opus-5-5',
-      max_tokens: 32,
-      system: [
-        { type: 'text', text: billing },
-        { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-        { type: 'text', text: 'RFC 2119 keywords', cache_control: { type: 'ephemeral', ttl: '1h' } },
-      ],
-      messages: [{ role: 'user', content: 'ping' }],
-    },
-    { preserveSystem: true },
-  )
+  const body = prepareCliHopBody({
+    model: 'claude-opus-5-5',
+    max_tokens: 32,
+    system: [
+      { type: 'text', text: billing },
+      { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+      { type: 'text', text: 'RFC 2119 keywords', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ],
+    messages: [{ role: 'user', content: 'ping' }],
+  })
   assert.equal(body.system.length, 2)
   assert.equal(body.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.")
   assert.equal(body.system[1].text, 'RFC 2119 keywords')
-  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral' })
-  assert.deepEqual(body.system[1].cache_control, { type: 'ephemeral' })
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(body.system[1].cache_control, { type: 'ephemeral', ttl: '1h' })
 })
 
 test('cli-hop normalizes mixed caller markers to the official template', () => {
@@ -75,13 +74,13 @@ test('cli-hop normalizes mixed caller markers to the official template', () => {
       { role: 'user', content: [{ type: 'text', text: 'last' }] },
     ],
   }
-  const body = prepareCliHopBody(input, { preserveSystem: true, cacheTtl: '1h' })
+  const body = prepareCliHopBody(input)
   assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
   assert.equal(body.system[1].text, 'caller')
-  assert.deepEqual(body.system[1].cache_control, { type: 'ephemeral' })
+  assert.deepEqual(body.system[1].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.equal(body.messages[0].content[0].cache_control, undefined)
   assert.equal(body.messages[1].content[0].cache_control, undefined)
-  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral' })
+  assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
 })
 
 test('caller environment stays behind the official identity', () => {
@@ -354,28 +353,25 @@ function messageMarkers(body) {
   return hits
 }
 
-test('cli-hop drops caller system/tools markers and restamps last plus penultimate user', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      tools: [{ name: 'Read', cache_control: { type: 'ephemeral', ttl: '5m' } }],
-      system: [{ type: 'text', text: 'caller', cache_control: { type: 'ephemeral', ttl: '1h' } }],
-      cache_control: { type: 'ephemeral', ttl: '5m' },
-      messages: [
-        { role: 'user', content: [{ type: 'text', text: 'u1', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
-        { role: 'assistant', content: [{ type: 'text', text: 'a1', cache_control: { type: 'ephemeral' } }] },
-        { role: 'user', content: [{ type: 'text', text: 'u2' }] },
-        { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
-      ],
-    },
-    { cacheTtl: '5m' },
-  )
+test('cli-hop replaces caller markers and marks only the latest user turn', () => {
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    tools: [{ name: 'Read', cache_control: { type: 'ephemeral', ttl: '5m' } }],
+    system: [{ type: 'text', text: 'caller', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+    cache_control: { type: 'ephemeral', ttl: '5m' },
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'u1', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a1', cache_control: { type: 'ephemeral' } }] },
+      { role: 'user', content: [{ type: 'text', text: 'u2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
+    ],
+  })
   assert.equal(body.cache_control, undefined)
   assert.equal(body.tools[0].cache_control, undefined)
   assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral' })
-  assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl: undefined }])
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl: '1h' }])
 })
 
 test('cli-hop short history only marks the last message', () => {
@@ -392,50 +388,70 @@ test('cli-hop short history only marks the last message', () => {
     body.messages.map((message) => message.role),
     ['user', 'assistant', 'user'],
   )
-  assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl: undefined }])
+  assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl: '1h' }])
 })
 
 test('cli-hop does not mark thinking blocks', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      thinking: { type: 'adaptive' },
-      messages: [
-        {
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'answer' },
-            { type: 'thinking', thinking: 'hidden', signature: 'sig_real_1234567890abcdef' },
-          ],
-        },
-      ],
-    },
-    { cacheTtl: '1h' },
-  )
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    thinking: { type: 'adaptive' },
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'answer' },
+          { type: 'thinking', thinking: 'hidden', signature: 'sig_real_1234567890abcdef' },
+        ],
+      },
+    ],
+  })
   assert.equal(body.messages.at(-1).content[0].cache_control, undefined)
   assert.equal(body.messages.at(-1).content[1].type, 'thinking')
   assert.equal(body.messages.at(-1).content[1].cache_control, undefined)
 })
 
-test('cli-hop uses the inbound session TTL on both message anchors', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      messages: [
-        { role: 'user', content: 'u1' },
-        { role: 'assistant', content: 'a1' },
-        { role: 'user', content: 'u2' },
-        { role: 'assistant', content: 'a2' },
-      ],
-    },
-    { cacheTtl: '1h' },
-  )
+test('cli-hop defaults its only message anchor to one-hour TTL', () => {
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+      { role: 'assistant', content: 'a2' },
+    ],
+  })
   assert.deepEqual(
     messageMarkers(body).map((hit) => hit.ttl),
-    [undefined],
+    ['1h'],
   )
+})
+
+test('cli-hop uses the requested TTL for system and latest-user markers without mutating input', () => {
+  const input = {
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    system: [{ type: 'text', text: 'caller' }],
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+    ],
+  }
+  const before = structuredClone(input)
+  for (const ttl of ['5m', '1h']) {
+    const body = prepareCliHopBody(input, { cacheTtl: ttl })
+    assert.deepEqual(
+      body.system.map((block) => block.cache_control),
+      [
+        { type: 'ephemeral', ttl },
+        { type: 'ephemeral', ttl },
+      ],
+    )
+    assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl }])
+    assert.deepEqual(input, before)
+  }
 })
 
 test('Claude Code turns stay a content prefix of the next one, from turn 1 on', () => {

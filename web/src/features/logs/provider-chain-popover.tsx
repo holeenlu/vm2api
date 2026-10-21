@@ -135,7 +135,7 @@ function SingleAttempt({
 
 /**
  * 供应商单元格 + 决策链 popover（hub `ProviderChainPopover` 的串行重试分支）。
- * vm2api 的每条 request_attempts 都是一次真实上游请求，按 attemptNumber 排序。
+ * tapmodels 的每条 request_attempts 都是一次真实上游请求，按 attemptNumber 排序。
  */
 export function ProviderChainPopover({
   row,
@@ -144,7 +144,7 @@ export function ProviderChainPopover({
   row: UsageLogRow
   onChainItemClick: (index: number) => void
 }) {
-  const chain = row.providerChain
+  const chain = row.providerChain || []
   const name = finalProviderName(row)
   if (chain.length <= 1) return <SingleAttempt name={name} item={chain[0]} />
 

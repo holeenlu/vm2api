@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
+import { useQuery } from '@tanstack/react-query'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { FileCode2, FileText, Gauge, GitBranch, XIcon } from 'lucide-react'
 import {
@@ -11,6 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { meQueryOptions } from '@/features/auth/queries'
 import { StatusBadge } from '../log-cells'
 import type { DetailTab } from '../virtualized-logs-table'
 import { LogicTraceTab } from './logic-trace-tab'
@@ -37,6 +39,9 @@ export function LogDetailDialog({
   state: DetailState | null
   onClose: () => void
 }) {
+  const me = useQuery(meQueryOptions())
+  const isStaff = me.data?.role === 'admin' || me.data?.role === 'super'
+  const isAdmin = me.data?.role === 'admin'
   const [tab, setTab] = useState<DetailTab>('summary')
   useEffect(() => {
     if (!state) return
@@ -72,7 +77,12 @@ export function LogDetailDialog({
           {row ? (
             <Tabs
               key={row.id}
-              value={tab}
+              value={
+                (tab === 'raw' && !isAdmin) ||
+                (tab === 'logic-trace' && !isStaff)
+                  ? 'summary'
+                  : tab
+              }
               onValueChange={(value) => setTab(value as DetailTab)}
               className='flex min-h-0 flex-1 flex-col'
             >
@@ -82,18 +92,22 @@ export function LogDetailDialog({
                     <FileText className={TAB_ICON} />
                     <span>概览</span>
                   </TabsTrigger>
-                  <TabsTrigger value='logic-trace' className={TAB_TRIGGER}>
-                    <GitBranch className={TAB_ICON} />
-                    <span>决策链</span>
-                  </TabsTrigger>
+                  {isStaff && (
+                    <TabsTrigger value='logic-trace' className={TAB_TRIGGER}>
+                      <GitBranch className={TAB_ICON} />
+                      <span>决策链</span>
+                    </TabsTrigger>
+                  )}
                   <TabsTrigger value='performance' className={TAB_TRIGGER}>
                     <Gauge className={TAB_ICON} />
                     <span>性能</span>
                   </TabsTrigger>
-                  <TabsTrigger value='raw' className={TAB_TRIGGER}>
-                    <FileCode2 className={TAB_ICON} />
-                    <span>原始数据</span>
-                  </TabsTrigger>
+                  {isAdmin && (
+                    <TabsTrigger value='raw' className={TAB_TRIGGER}>
+                      <FileCode2 className={TAB_ICON} />
+                      <span>原始数据</span>
+                    </TabsTrigger>
+                  )}
                 </TabsList>
               </div>
               <div className='min-h-0 flex-1 overflow-y-auto px-6 pt-4 pb-6'>
@@ -103,18 +117,25 @@ export function LogDetailDialog({
                     scrollToRedirect={!!state?.scrollToRedirect}
                   />
                 </TabsContent>
-                <TabsContent value='logic-trace' className='mt-0'>
-                  <LogicTraceTab
-                    row={row}
-                    initialExpandedIndex={state?.chainIndex}
-                  />
-                </TabsContent>
+                {isStaff && (
+                  <TabsContent value='logic-trace' className='mt-0'>
+                    <LogicTraceTab
+                      row={row}
+                      initialExpandedIndex={state?.chainIndex}
+                    />
+                  </TabsContent>
+                )}
                 <TabsContent value='performance' className='mt-0'>
                   <PerformanceTab row={row} />
                 </TabsContent>
-                <TabsContent value='raw' className='mt-0'>
-                  <RawDataTab requestId={row.requestId} logMode={row.logMode} />
-                </TabsContent>
+                {isAdmin && (
+                  <TabsContent value='raw' className='mt-0'>
+                    <RawDataTab
+                      requestId={row.requestId}
+                      logMode={row.logMode}
+                    />
+                  </TabsContent>
+                )}
               </div>
             </Tabs>
           ) : null}

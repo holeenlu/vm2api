@@ -8,14 +8,20 @@ import { Logo } from '@/assets/logo'
 import { useAuthStore } from '@/stores/auth-store'
 import { loginRequest } from '@/lib/api'
 import { apiBase, sameOriginPanel, setApiBase } from '@/lib/session'
+import { useBranding } from '@/context/branding-provider'
+import { useLocale } from '@/context/locale-provider'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { LanguageSelect } from '@/components/language-select'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { onboardingQueryOptions } from '@/features/welcome/queries'
+import { meQueryOptions } from './queries'
 
 /** Standalone sign-in page; layout follows the newapi /sign-in screen. */
 export function LoginPage() {
+  const brand = useBranding()
+  const { t } = useLocale()
   const search = useSearch({ from: '/login' })
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -41,16 +47,19 @@ export function LoginPage() {
         base: hideBase ? '' : base.trim().replace(/\/$/, '') || apiBase(),
       })
       signIn(result.token, result.user)
+      const me = await queryClient.fetchQuery(meQueryOptions())
       let needsWelcome = false
       try {
-        const onboarding = await queryClient.fetchQuery(
-          onboardingQueryOptions(true)
-        )
-        needsWelcome = Boolean(onboarding.needs_welcome)
+        if (me.role === 'admin') {
+          const onboarding = await queryClient.fetchQuery(
+            onboardingQueryOptions(true)
+          )
+          needsWelcome = Boolean(onboarding.needs_welcome)
+        }
       } catch {
         needsWelcome = false
       }
-      toast.success('登录成功')
+      toast.success(t('登录成功'))
       if (needsWelcome) {
         await navigate({ to: '/welcome', search: { setup: true } })
         return
@@ -66,9 +75,9 @@ export function LoginPage() {
         await navigate({ href: next })
         return
       }
-      await navigate({ to: '/overview' })
+      await navigate({ to: me.role === 'user' ? '/statistics' : '/overview' })
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败')
+      setError(err instanceof Error ? err.message : t('登录失败'))
     } finally {
       setPending(false)
     }
@@ -95,62 +104,67 @@ export function LoginPage() {
           <span className='grid size-7 place-items-center rounded-lg bg-foreground text-background transition-transform duration-300 group-hover:scale-105'>
             <Logo aria-hidden className='size-4' />
           </span>
-          <span className='text-sm font-semibold tracking-tight'>vm2api</span>
+          <span className='text-sm font-semibold tracking-tight'>
+            {brand.name}
+          </span>
         </Link>
-        <ThemeSwitch />
+        <div className='flex items-center gap-2'>
+          <LanguageSelect />
+          <ThemeSwitch />
+        </div>
       </header>
 
       <main className='relative flex flex-1 items-center justify-center px-6 pb-20'>
         <div className='welcome-fade-up w-full max-w-[22rem]'>
-          <h1 className='text-xl font-semibold tracking-tight'>登录控制台</h1>
+          <h1 className='text-xl font-semibold tracking-tight'>
+            {t('登录控制台')}
+          </h1>
           <p className='mt-2 text-sm text-muted-foreground'>
-            第一次使用？看
             <a
               href={`${DOCS_URL}guide/install`}
               target='_blank'
               rel='noreferrer'
               className='text-foreground underline underline-offset-4'
             >
-              安装文档
+              {t('安装文档')}
             </a>
-            ，或回到
+            {' · '}
             <Link
               to='/welcome'
               className='text-foreground underline underline-offset-4'
             >
-              欢迎页
+              {t('欢迎页')}
             </Link>
-            。
           </p>
 
           <form className='mt-8 space-y-4' onSubmit={onSubmit}>
             <div className='space-y-2'>
-              <Label htmlFor='login-username'>用户名</Label>
+              <Label htmlFor='login-username'>{t('用户名')}</Label>
               <Input
                 id='login-username'
                 className='h-10 rounded-lg'
                 autoComplete='username'
-                placeholder='输入面板用户名'
+                placeholder={t('输入面板用户名')}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
               />
             </div>
             <div className='space-y-2'>
-              <Label htmlFor='login-password'>密码</Label>
+              <Label htmlFor='login-password'>{t('密码')}</Label>
               <div className='relative'>
                 <Input
                   id='login-password'
                   type={showPassword ? 'text' : 'password'}
                   className='h-10 rounded-lg pe-10'
                   autoComplete='current-password'
-                  placeholder='输入密码'
+                  placeholder={t('输入密码')}
                   autoFocus
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                 />
                 <button
                   type='button'
-                  aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                  aria-label={t(showPassword ? '隐藏密码' : '显示密码')}
                   onClick={() => setShowPassword((v) => !v)}
                   className='absolute inset-y-0 end-0 flex w-10 items-center justify-center rounded-e-lg text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
                 >
@@ -185,7 +199,7 @@ export function LoginPage() {
               disabled={pending}
             >
               <LogIn aria-hidden className='size-4' />
-              {pending ? '登录中…' : '登录'}
+              {t(pending ? '登录中…' : '登录')}
             </Button>
           </form>
         </div>

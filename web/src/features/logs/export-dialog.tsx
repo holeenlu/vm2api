@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Download } from 'lucide-react'
 import { ERROR_CLASS_IDS, ERROR_CLASS_META } from '@/lib/log-mute'
 import { Button } from '@/components/ui/button'
@@ -85,8 +85,10 @@ export function ExportDialog({
   onOpenChange: (open: boolean) => void
   /** 「跟随当前筛选」的说明文案，由页面根据当前筛选态拼出。 */
   currentSummary: string
-  onExport: (opts: ExportOptions) => Promise<void>
+  onExport: (opts: ExportOptions, signal?: AbortSignal) => Promise<void>
 }) {
+  const controller = useRef<AbortController | null>(null)
+  useEffect(() => () => controller.current?.abort(), [])
   const [format, setFormat] = useState<'jsonl' | 'csv'>('jsonl')
   const [scope, setScope] = useState<ExportScope>('current')
   const [errorClass, setErrorClass] = useState('')
@@ -96,17 +98,29 @@ export function ExportDialog({
   const [exporting, setExporting] = useState(false)
 
   async function handleConfirm() {
+    controller.current = new AbortController()
     setExporting(true)
     try {
-      await onExport({ format, scope, errorClass, window, includeMuted, limit })
+      await onExport(
+        { format, scope, errorClass, window, includeMuted, limit },
+        controller.current.signal
+      )
       onOpenChange(false)
+    } catch {
+      /* The caller reports export errors. */
     } finally {
       setExporting(false)
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !exporting && onOpenChange(o)}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) controller.current?.abort()
+        onOpenChange(o)
+      }}
+    >
       <DialogContent className='sm:max-w-md'>
         <DialogHeader>
           <DialogTitle>导出日志</DialogTitle>
@@ -236,8 +250,10 @@ export function ExportDialog({
         <DialogFooter>
           <Button
             variant='outline'
-            onClick={() => onOpenChange(false)}
-            disabled={exporting}
+            onClick={() => {
+              controller.current?.abort()
+              onOpenChange(false)
+            }}
           >
             取消
           </Button>

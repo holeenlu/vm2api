@@ -6,8 +6,8 @@ import { Reveal } from './reveal'
 import { docsHref } from './steps'
 
 const NOTES = [
-  '密钥用控制台签发的 sk-vm-…，明文只显示一次。',
-  'Master 的 VM2API_API_KEY 能改面板，不要写进客户端。',
+  '密钥用控制台签发的 sk-vm-…，可查看或轮换，切勿公开分享。',
+  'Master 的 TAPMODELS_API_KEY 能改面板，不要写进客户端。',
   'Claude Code 的 base URL 填主机；Codex 与 OpenAI SDK 填主机加 /v1。',
 ] as const
 
@@ -29,15 +29,15 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
       id: 'codex',
       label: 'Codex',
       file: '~/.codex/config.toml',
-      hint: 'env_key 指向 VM2API_KEY，不是 Master 的 VM2API_API_KEY',
+      hint: 'env_key 指向 TAPMODELS_KEY，不是 Master 的 TAPMODELS_API_KEY',
       code: [
         'model = "gpt-5.4"',
-        'model_provider = "vm2api"',
+        'model_provider = "tapmodels"',
         '',
-        '[model_providers.vm2api]',
-        'name = "vm2api"',
+        '[model_providers.tapmodels]',
+        'name = "tapmodels"',
         `base_url = "${base}/v1"`,
-        'env_key = "VM2API_KEY"',
+        'env_key = "TAPMODELS_KEY"',
         'wire_api = "responses"',
       ].join('\n'),
     },

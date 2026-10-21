@@ -416,13 +416,10 @@ export function ModelsPage() {
                 <section className='rounded-2xl border border-primary/20 bg-primary/[0.035] p-4'>
                   <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
                     <div className='space-y-1'>
-                      <h3 className='font-semibold'>
-                        Haiku 5.5 · 100K 实用模型
-                      </h3>
+                      <h3 className='font-semibold'>Haiku 5.5 · 1M 上下文</h3>
                       <p className='text-sm leading-6 text-muted-foreground'>
-                        默认策略把 claude-haiku-5-5 的上下文窗口、默认
-                        max_tokens、输出上限统一收敛到 100K，避免超过官方 Haiku
-                        5.5 长上下文计费阈值。
+                        claude-haiku-5-5 默认支持 1M 上下文、最高 128K
+                        输出，并使用自适应思考。实际可用性取决于上游账号权限；可在模型策略中设置更低的输出上限。
                       </p>
                     </div>
                     <Button

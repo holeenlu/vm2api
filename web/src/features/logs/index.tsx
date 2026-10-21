@@ -23,7 +23,9 @@ import {
 } from '@/components/ui/collapsible'
 import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
+import { SearchSelect } from '@/components/search-select'
 import { meQueryOptions } from '@/features/auth/queries'
+import { groupsQueryOptions } from '@/features/groups/queries'
 import { routingQueryOptions } from '@/features/settings/queries'
 import { ActiveSessionsList } from './active-sessions-list'
 import {
@@ -54,6 +56,7 @@ import {
   type LogsFilterState,
 } from './search'
 import { UsageLogsStatsPanel } from './usage-logs-stats-panel'
+import { UsageRankings } from './usage-rankings'
 import { VirtualizedLogsTable, type OpenDetail } from './virtualized-logs-table'
 
 const route = getRouteApi('/_authenticated/logs')
@@ -63,6 +66,7 @@ export function LogsPage() {
   const navigate = route.useNavigate()
   const search = route.useSearch()
   const me = useQuery(meQueryOptions())
+  const groups = useQuery(groupsQueryOptions())
   const role = me.data?.role
   const isAdmin = role === 'admin' || role === 'super'
   const user = me.data?.user ?? ''
@@ -73,6 +77,7 @@ export function LogsPage() {
       ? filters.errorClass
       : ''
 
+  const [tab, setTab] = useState<'detail' | 'errors' | 'user' | 'key'>('detail')
   const [isFilterOpen, setIsFilterOpen] = useState(
     () => activeFilterCount(filters) > 0
   )
@@ -96,8 +101,11 @@ export function LogsPage() {
     {}) as ErrorCollection
 
   const apiFilters = useMemo(
-    () => filtersToApi(filters, muted),
-    [filters, muted]
+    () => ({
+      ...filtersToApi(filters, muted),
+      ...(tab === 'errors' ? { errorsOnly: true } : {}),
+    }),
+    [filters, muted, tab]
   )
   const filterCount = activeFilterCount(filters)
 
@@ -180,10 +188,12 @@ export function LogsPage() {
     })
   }, [])
 
-  async function handleExport(opts: ExportOptions) {
+  async function handleExport(opts: ExportOptions, signal?: AbortSignal) {
     try {
       const qs = exportQuery(opts, filters, muted)
-      const res = await panelFetch(`/api/panel/request-logs/export?${qs}`)
+      const res = await panelFetch(`/api/panel/request-logs/export?${qs}`, {
+        signal,
+      })
       if (!res.ok) throw new ApiError('导出失败', res.status)
       // 只有受信 Origin 能读到这三个头；其余跨域场景为 null，下方按缺失处理。
       const count = Number(res.headers.get('x-kin-export-count') ?? NaN)
@@ -193,7 +203,7 @@ export function LogsPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `vm2api-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.${opts.format}`
+      a.download = `tapmodels-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.${opts.format}`
       a.click()
       URL.revokeObjectURL(url)
       if (truncated && Number.isFinite(count) && Number.isFinite(total)) {
@@ -206,6 +216,7 @@ export function LogsPage() {
         toast.success('已下载')
       }
     } catch (error) {
+      if (signal?.aborted) return
       toast.error(error instanceof Error ? error.message : '导出失败')
       throw error
     }
@@ -235,6 +246,25 @@ export function LogsPage() {
       description={VIEW_DESCRIPTIONS.logs}
       fluid
     >
+      <div className='mb-4 flex gap-2'>
+        {(
+          ['detail', 'errors', ...(isAdmin ? ['user'] : []), 'key'] as const
+        ).map((t) => (
+          <Button
+            key={t}
+            variant={tab === t ? 'default' : 'outline'}
+            onClick={() => setTab(t as typeof tab)}
+          >
+            {t === 'detail'
+              ? '明细'
+              : t === 'errors'
+                ? '错误'
+                : t === 'user'
+                  ? '用户排行'
+                  : 'Key 排行'}
+          </Button>
+        ))}
+      </div>
       <div className='space-y-3'>
         <ActiveSessionsList
           maxHeight='200px'
@@ -282,15 +312,17 @@ export function LogsPage() {
               </button>
             </CollapsibleTrigger>
             <div className='flex items-center gap-1'>
-              <Button
-                variant='outline'
-                size='sm'
-                className='h-8 gap-1.5 text-xs'
-                onClick={() => setExportOpen(true)}
-              >
-                <Download className='h-3.5 w-3.5' />
-                导出
-              </Button>
+              {role !== 'super' && (
+                <Button
+                  variant='outline'
+                  size='sm'
+                  className='h-8 gap-1.5 text-xs'
+                  onClick={() => setExportOpen(true)}
+                >
+                  <Download className='h-3.5 w-3.5' />
+                  导出
+                </Button>
+              )}
               <ColumnVisibilityDropdown
                 hidden={hiddenColumns}
                 onChange={(next) => {
@@ -340,6 +372,20 @@ export function LogsPage() {
             className={cn(!isFilterOpen && 'hidden')}
           >
             <div className='mt-3 rounded-lg border border-border/60 bg-card p-4'>
+              <SearchSelect
+                className='mb-3 min-w-56'
+                label='使用记录分组'
+                searchPlaceholder='搜索使用记录分组…'
+                value={filters.groupId}
+                options={(groups.data?.items || []).map((g) => ({
+                  id: String(g.id),
+                  name: g.name,
+                }))}
+                onChange={(value) => {
+                  applyFilters({ ...filters, groupId: value })
+                }}
+                allLabel='全部分组'
+              />
               <UsageLogsFilters
                 isAdmin={isAdmin}
                 filters={filters}
@@ -350,12 +396,42 @@ export function LogsPage() {
           </CollapsibleContent>
         </Collapsible>
         <div className='overflow-hidden rounded-lg border border-border/60'>
-          <VirtualizedLogsTable
-            filters={apiFilters}
-            autoRefreshEnabled={!isFullscreen && isAutoRefresh}
-            hiddenColumns={hiddenColumns}
-            onOpenDetail={openDetail}
-          />
+          {tab === 'user' || tab === 'key' ? (
+            <UsageRankings
+              filters={apiFilters}
+              scope={tab}
+              canSeeMoney={role !== 'super'}
+              showOwner={role !== 'user'}
+              onSelect={(id) => {
+                applyFilters({
+                  ...filters,
+                  ...(tab === 'user' ? { userId: id } : { keyId: id }),
+                })
+                setTab('detail')
+              }}
+            />
+          ) : (
+            <VirtualizedLogsTable
+              filters={apiFilters}
+              autoRefreshEnabled={!isFullscreen && isAutoRefresh}
+              hiddenColumns={[
+                ...new Set([
+                  ...hiddenColumns,
+                  ...(role === 'user'
+                    ? ([
+                        'user',
+                        'provider',
+                        'ip',
+                        'sessionId',
+                      ] as LogsTableColumn[])
+                    : role === 'super'
+                      ? (['cost'] as LogsTableColumn[])
+                      : []),
+                ]),
+              ]}
+              onOpenDetail={openDetail}
+            />
+          )}
         </div>
       </div>
       <LogDetailDialog state={detail} onClose={() => setDetail(null)} />

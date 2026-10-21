@@ -4,6 +4,7 @@ import type {
   LeaderboardScope,
 } from '@/types/panel-statistics'
 import { Award, ChevronRight, Medal, Trophy } from 'lucide-react'
+import { useAuthStore } from '@/stores/auth-store'
 import { formatCurrency, formatTokenAmount } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { ModelVendorIcon } from '@/components/model-vendor-icon'
@@ -96,9 +97,13 @@ export function LeaderboardCard({
   onViewAll?: () => void
   className?: string
 }) {
+  const canSeeMoney = useAuthStore((s) => s.me?.role !== 'super')
   const board = useQuery(leaderboardQueryOptions('today', scope, MAX_ITEMS, tz))
   const entries = board.data?.entries ?? []
-  const maxCost = Math.max(0, ...entries.map((e) => e.totalCost))
+  const maxCost = Math.max(
+    0,
+    ...entries.map((e) => (canSeeMoney ? e.totalCost : e.totalRequests))
+  )
 
   return (
     <BentoCard className={cn('min-h-[280px]', className)}>
@@ -137,7 +142,12 @@ export function LeaderboardCard({
           </div>
         ) : (
           entries.slice(0, MAX_ITEMS).map((entry, idx) => {
-            const pct = maxCost > 0 ? (entry.totalCost / maxCost) * 100 : 0
+            const pct =
+              maxCost > 0
+                ? ((canSeeMoney ? entry.totalCost : entry.totalRequests) /
+                    maxCost) *
+                  100
+                : 0
             return (
               <div
                 key={entry.id}
@@ -152,7 +162,9 @@ export function LeaderboardCard({
                       className='text-sm font-medium'
                     />
                     <span className='ml-2 text-sm font-semibold tabular-nums'>
-                      {formatCurrency(entry.totalCost)}
+                      {canSeeMoney
+                        ? formatCurrency(entry.totalCost)
+                        : entry.totalRequests.toLocaleString() + ' 次'}
                     </span>
                   </div>
                   <div className='h-1.5 w-full overflow-hidden rounded-full bg-muted/40 dark:bg-white/10'>

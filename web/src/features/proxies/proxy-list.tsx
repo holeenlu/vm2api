@@ -200,7 +200,7 @@ export function ProxyList({
         ) : null}
 
         {/* 宽屏用表头排序；表头隐藏时才需要这组下拉。 */}
-        <div className='ms-auto flex items-center gap-1 @3xl/plist:hidden'>
+        <div className='ms-auto flex items-center gap-1 @5xl/plist:hidden'>
           <Select
             value={sortKey}
             onValueChange={(v) => onSortKey(v as ProxySortKey)}
@@ -262,7 +262,7 @@ export function ProxyList({
               ) : (
                 <span
                   key={c.label}
-                  className={cn(c.label === '操作' && 'sr-only')}
+                  className={cn(c.label === '操作' && 'text-center')}
                 >
                   {c.label}
                 </span>
