@@ -1,16 +1,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
-  applyCacheTtlToBody,
-  applyCacheTtlToUsage,
   clearConversationCacheTtls,
-  DEFAULT_CACHE_TTL,
-  enforceCacheTtlOrder,
-  fillMissingCacheTtl,
-  validateCacheBreakpoints,
-  normalizeCacheTtl,
   pinConversationCacheTtl,
   resolveCacheTtl,
+  applyCacheTtlToBody,
+  applyCacheTtlToUsage,
+  DEFAULT_CACHE_TTL,
+  cacheTtlFromRouting,
+  cacheTtlFromRoutingFile,
+  enforceCacheTtlOrder,
+  validateCacheBreakpoints,
+  normalizeCacheTtl,
   stripIllegalCacheControlFields,
 } from '../../src/lib/protocol/cache-ttl.mjs'
 import { calculateCost } from '../../src/lib/admin/pricing.mjs'
@@ -23,49 +27,24 @@ test('cache ttl accepts only 1h or 5m output values', () => {
   assert.equal(normalizeCacheTtl('bogus'), '1h')
 })
 
-test('header overrides routing default', () => {
-  assert.equal(
-    resolveCacheTtl({ headers: { 'x-kin-cache-ttl': '1h' }, routing: { compatibility: { cache_ttl: '5m' } } }),
-    '1h',
-  )
-  assert.equal(resolveCacheTtl({ headers: {}, routing: { compatibility: { cache_ttl: '1h' } } }), '1h')
-  assert.equal(resolveCacheTtl({ headers: {}, routing: { compatibility: {} } }), '1h')
-  assert.equal(resolveCacheTtl({ headers: {}, routing: { compatibility: { cache_ttl: '5m' } } }), '5m')
+test('the settings panel selects cache TTL and invalid or missing values use one hour', () => {
+  assert.equal(cacheTtlFromRouting({ compatibility: { cache_ttl: '5m' } }), '5m')
+  assert.equal(cacheTtlFromRouting({ compatibility: { cache_ttl: '1h' } }), '1h')
+  assert.equal(cacheTtlFromRouting({ compatibility: { cache_ttl: 'bad' } }), '1h')
+  assert.equal(cacheTtlFromRouting({}), '1h')
 })
 
-test('ttl-less markers (official Claude Code) take the settings menu value', () => {
-  const body = {
-    system: [{ type: 'text', text: 's', cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }] }],
+test('routing-file fallback reflects settings updates', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-ttl-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, 'routing.json')
+  assert.equal(cacheTtlFromRoutingFile(file), '1h')
+  for (const ttl of ['5m', '1h', '5m']) {
+    fs.writeFileSync(file, JSON.stringify({ compatibility: { cache_ttl: ttl } }))
+    assert.equal(cacheTtlFromRoutingFile(file), ttl)
   }
-  assert.equal(resolveCacheTtl({ headers: {}, body, routing: { compatibility: { cache_ttl: '1h' } } }), '1h')
-  assert.equal(resolveCacheTtl({ headers: {}, body, routing: { compatibility: { cache_ttl: '5m' } } }), '5m')
-  const out = applyCacheTtlToBody(body, '1h')
-  assert.deepEqual(out.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
-  assert.deepEqual(out.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
-})
-
-test('owned TTL completion preserves explicit mixed TTLs and scope without mutating input', () => {
-  const input = {
-    system: [
-      { type: 'text', text: 'hour', cache_control: { type: 'ephemeral', ttl: '1h', scope: 'global' } },
-      { type: 'text', text: 'missing', cache_control: { type: 'ephemeral', scope: 'org' } },
-    ],
-    messages: [
-      { role: 'user', content: [{ type: 'text', text: 'short', cache_control: { type: 'ephemeral', ttl: '5m' } }] },
-    ],
-  }
-  const before = structuredClone(input)
-  const output = fillMissingCacheTtl(input, '5m')
-  assert.deepEqual(
-    output.system.map((block) => block.cache_control),
-    [
-      { type: 'ephemeral', ttl: '1h', scope: 'global' },
-      { type: 'ephemeral', ttl: '5m', scope: 'org' },
-    ],
-  )
-  assert.deepEqual(output.messages, input.messages)
-  assert.deepEqual(input, before)
+  fs.writeFileSync(file, '{')
+  assert.equal(cacheTtlFromRoutingFile(file), '1h')
 })
 
 test('native validation counts automatic caching against the explicit marker budget', () => {
@@ -78,48 +57,6 @@ test('native validation counts automatic caching against the explicit marker bud
     cache_control: { type: 'ephemeral' },
   }
   assert.throws(() => validateCacheBreakpoints(input), /four breakpoints/)
-})
-
-test('a conversation keeps its first TTL until that cache would have expired', () => {
-  clearConversationCacheTtls()
-  const t0 = 1_000_000
-  assert.equal(pinConversationCacheTtl('conv-a', '5m', t0), '5m')
-  // Menu flipped to 1h mid-conversation: still 5m while the 5m cache is warm.
-  assert.equal(pinConversationCacheTtl('conv-a', '1h', t0 + 4 * 60_000), '5m')
-  // Each turn refreshes the window.
-  assert.equal(pinConversationCacheTtl('conv-a', '1h', t0 + 8 * 60_000), '5m')
-  // Idle longer than 5m: the cache is gone, so the new value applies.
-  assert.equal(pinConversationCacheTtl('conv-a', '1h', t0 + 14 * 60_000), '1h')
-  assert.equal(pinConversationCacheTtl('conv-b', '5m', t0), '5m', 'conversations are independent')
-  assert.equal(pinConversationCacheTtl('', '5m', t0), '5m')
-  assert.equal(pinConversationCacheTtl('', '1h', t0), '1h', 'no key means no pin')
-  clearConversationCacheTtls()
-})
-
-test('explicit inbound 5m or 1h overrides the console default', () => {
-  assert.equal(
-    resolveCacheTtl({
-      headers: {},
-      body: { tools: [{ name: 'Read', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
-      routing: { compatibility: { cache_ttl: '5m' } },
-    }),
-    '1h',
-  )
-  assert.equal(
-    resolveCacheTtl({
-      headers: {},
-      body: { tools: [{ name: 'Read', cache_control: { type: 'ephemeral', ttl: '5m' } }] },
-      routing: { compatibility: { cache_ttl: '1h' } },
-    }),
-    '5m',
-  )
-  assert.equal(
-    resolveCacheTtl({
-      headers: { 'x-kin-cache-ttl': '5m' },
-      body: { system: [{ cache_control: { type: 'ephemeral', ttl: '1h' } }] },
-    }),
-    '5m',
-  )
 })
 
 test('stripIllegalCacheControlFields drops scope on system and tools', () => {
@@ -274,4 +211,80 @@ test('default 5m usage stays in the 1.25x bucket', () => {
   assert.equal(out.cache_ttl, '5m')
   const billed = calculateCost(out, 'claude-sonnet-5')
   assert.equal(billed.cache_creation_cost, 0.005)
+})
+
+test('header overrides routing default', () => {
+  assert.equal(
+    resolveCacheTtl({ headers: { 'x-kin-cache-ttl': '1h' }, routing: { compatibility: { cache_ttl: '5m' } } }),
+    '1h',
+  )
+  assert.equal(resolveCacheTtl({ headers: {}, routing: { compatibility: { cache_ttl: '1h' } } }), '1h')
+  assert.equal(resolveCacheTtl({ headers: {}, routing: { compatibility: {} } }), '1h')
+  assert.equal(resolveCacheTtl({ headers: {}, routing: { compatibility: { cache_ttl: '5m' } } }), '5m')
+})
+
+test('ttl-less markers (official Claude Code) take the settings menu value', () => {
+  const body = {
+    system: [{ type: 'text', text: 's', cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }] }],
+  }
+  assert.equal(resolveCacheTtl({ headers: {}, body, routing: { compatibility: { cache_ttl: '1h' } } }), '1h')
+  assert.equal(resolveCacheTtl({ headers: {}, body, routing: { compatibility: { cache_ttl: '5m' } } }), '5m')
+  const out = applyCacheTtlToBody(body, '1h')
+  assert.deepEqual(out.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(out.messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+})
+
+test('native validation counts automatic caching against the explicit marker budget', () => {
+  const input = {
+    system: Array.from({ length: 4 }, (_, index) => ({
+      type: 'text',
+      text: String(index),
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    })),
+    cache_control: { type: 'ephemeral' },
+  }
+  assert.throws(() => validateCacheBreakpoints(input), /four breakpoints/)
+})
+
+test('a conversation keeps its first TTL until that cache would have expired', () => {
+  clearConversationCacheTtls()
+  const t0 = 1_000_000
+  assert.equal(pinConversationCacheTtl('conv-a', '5m', t0), '5m')
+  // Menu flipped to 1h mid-conversation: still 5m while the 5m cache is warm.
+  assert.equal(pinConversationCacheTtl('conv-a', '1h', t0 + 4 * 60_000), '5m')
+  // Each turn refreshes the window.
+  assert.equal(pinConversationCacheTtl('conv-a', '1h', t0 + 8 * 60_000), '5m')
+  // Idle longer than 5m: the cache is gone, so the new value applies.
+  assert.equal(pinConversationCacheTtl('conv-a', '1h', t0 + 14 * 60_000), '1h')
+  assert.equal(pinConversationCacheTtl('conv-b', '5m', t0), '5m', 'conversations are independent')
+  assert.equal(pinConversationCacheTtl('', '5m', t0), '5m')
+  assert.equal(pinConversationCacheTtl('', '1h', t0), '1h', 'no key means no pin')
+  clearConversationCacheTtls()
+})
+
+test('explicit inbound 5m or 1h overrides the console default', () => {
+  assert.equal(
+    resolveCacheTtl({
+      headers: {},
+      body: { tools: [{ name: 'Read', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+      routing: { compatibility: { cache_ttl: '5m' } },
+    }),
+    '1h',
+  )
+  assert.equal(
+    resolveCacheTtl({
+      headers: {},
+      body: { tools: [{ name: 'Read', cache_control: { type: 'ephemeral', ttl: '5m' } }] },
+      routing: { compatibility: { cache_ttl: '1h' } },
+    }),
+    '5m',
+  )
+  assert.equal(
+    resolveCacheTtl({
+      headers: { 'x-kin-cache-ttl': '5m' },
+      body: { system: [{ cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+    }),
+    '5m',
+  )
 })

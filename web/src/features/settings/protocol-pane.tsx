@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import {
   SESSION_IDLE_TTL_SECONDS_DEFAULT,
   SESSION_IDLE_TTL_SECONDS_MAX,
@@ -11,6 +12,7 @@ import {
   Scaling,
   ShieldCheck,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   cacheTtlFromCompat,
   detectProxiedOfficialCcFromCompat,
@@ -29,15 +31,20 @@ import { ChipGroup, PaneSection, StepperSetting } from './scheduler-controls'
 type Block = Record<string, unknown>
 
 /** Mirrors `hasClaudeCodeClientHeaders` + body checks in src/lib/identity/claude-code-only.mjs. */
-const CLAUDE_CODE_FINGERPRINT: [string, string][] = [
-  ['UA', 'claude-cli/x.y.z'],
-  ['x-app', 'cli'],
-  ['anthropic-beta', 'claude-code-20250219'],
-  ['Stainless SDK', 'x-stainless-lang: js'],
-  ['会话头', '= user_id.session_id'],
-  ['system', '官方计费块 / 身份行'],
-  ['计费块', 'cc_version = UA 版本'],
-]
+function getClaudeCodeFingerprint(): [string, string][] {
+  return [
+    ['UA', 'claude-cli/x.y.z'],
+    ['x-app', 'cli'],
+    ['anthropic-beta', 'claude-code-20250219'],
+    ['Stainless SDK', 'x-stainless-lang: js'],
+    [translate('settings:protocol.sessionHeader'), '= user_id.session_id'],
+    ['system', translate('settings:protocol.billingIdentity')],
+    [
+      translate('settings:protocol.billingBlock'),
+      translate('settings:protocol.versionMatch'),
+    ],
+  ]
+}
 
 function autoCompactWindowValue(value: unknown) {
   const tokens = Number(value)
@@ -57,6 +64,8 @@ export function ProtocolPane({
   onCompatChange: (next: Block) => void
   onInferenceChange: (patch: Block) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const strict = compat.claude_code_only === true
   const relay = detectProxiedOfficialCcFromCompat(compat)
   const cch = cchEnabledFromCompat(compat)
@@ -64,33 +73,33 @@ export function ProtocolPane({
     <div className='space-y-4'>
       <PaneSection
         icon={ShieldCheck}
-        title='入站准入'
-        desc='谁能调用 Claude。GPT 准入在 OpenAI 页。'
+        title={t('protocol.inboundAccess')}
+        desc={t('protocol.accessHelp')}
         aside={
           <Badge variant={strict ? 'default' : 'secondary'}>
-            {strict ? 'Claude 仅限 Claude Code' : 'Claude 不限客户端'}
+            {strict ? t('protocol.claudeCodeOnly') : t('protocol.anyClient')}
           </Badge>
         }
       >
         <div className='divide-y'>
           <SettingRow
-            label='仅允许 Claude Code 家族请求'
-            desc='其余一律 403 claude_code_only，不选号、不上游。'
+            label={t('protocol.allowClaudeCode')}
+            desc={t('protocol.rejectOtherClients')}
           >
             <Switch
               checked={strict}
               onCheckedChange={(on) =>
                 onCompatChange({ ...compat, claude_code_only: on })
               }
-              aria-label='仅允许 Claude Code 家族请求'
+              aria-label={t('protocol.allowClaudeCode')}
             />
           </SettingRow>
           <SettingRow
-            label='识别中转来的官方 Claude Code'
+            label={t('protocol.detectProxied')}
             desc={
               relay
-                ? 'UA 被改写但系统里有官方计费块的请求按官方处理，准入也放行。计费块被丢掉时，还要官方 system 和合法 user_id。'
-                : '已关：只认直连 Claude Code，中转流量按第三方处理。'
+                ? t('protocol.detectProxiedHelp')
+                : t('protocol.detectDisabled')
             }
           >
             <Switch
@@ -98,15 +107,15 @@ export function ProtocolPane({
               onCheckedChange={(on) =>
                 onCompatChange({ ...compat, detect_proxied_official_cc: on })
               }
-              aria-label='识别中转来的官方 Claude Code'
+              aria-label={t('protocol.detectProxied')}
             />
           </SettingRow>
           <SettingRow
-            label='官方 Claude Code 家族透传'
+            label={t('protocol.officialPassthrough')}
             desc={
               compat.official_cc_passthrough === true
-                ? '开：保留入站 system/tools/messages 与 cache 标记；出站 session 仍按槽位重建，device 绑槽位。'
-                : '关：官方家族也套用协议里的 system 档。打开后才透传。'
+                ? t('protocol.passthroughEnabled')
+                : t('protocol.passthroughDisabled')
             }
           >
             <Switch
@@ -114,7 +123,7 @@ export function ProtocolPane({
               onCheckedChange={(on) =>
                 onCompatChange({ ...compat, official_cc_passthrough: on })
               }
-              aria-label='官方 Claude Code 家族透传'
+              aria-label={t('protocol.officialPassthrough')}
             />
           </SettingRow>
         </div>
@@ -125,10 +134,12 @@ export function ProtocolPane({
           )}
         >
           <p className='text-xs text-muted-foreground'>
-            {strict ? '直连放行须同时满足' : '开启后直连放行须同时满足'}
+            {strict
+              ? t('protocol.directRequirements')
+              : t('protocol.enabledRequirements')}
           </p>
           <ul className='grid gap-x-4 gap-y-1.5 sm:grid-cols-2'>
-            {CLAUDE_CODE_FINGERPRINT.map(([name, value]) => (
+            {getClaudeCodeFingerprint().map(([name, value]) => (
               <li key={name} className='flex min-w-0 items-start gap-2 text-xs'>
                 <Check
                   className={cn(
@@ -147,46 +158,44 @@ export function ProtocolPane({
             ))}
           </ul>
           <p className='text-xs leading-5 text-muted-foreground'>
-            OpenAI 格式入口与健康探测一律拒绝。count_tokens 只验请求头；CLI
-            自身的 quota 探测须是固定原样。面板测试与内部探测不受影响。
+            {t('protocol.requirementsHelp')}
           </p>
         </div>
       </PaneSection>
       <PaneSection
         icon={Database}
-        title='提示词缓存'
-        desc='设置默认缓存写入时长，保持现有断点布局。'
+        title={t('promptCache')}
+        desc={t('protocol.cacheHelp')}
       >
         <SettingRow
-          label='默认缓存写入 TTL'
-          desc='请求头、请求显式 TTL 与会话锁定值优先；system 模板中的显式 TTL 不变。'
+          label={t('protocol.defaultCacheTtl')}
+          desc={t('protocol.cachePriority')}
         >
           <ChipGroup
-            label='默认缓存写入 TTL'
+            label={t('protocol.defaultCacheTtl')}
             value={cacheTtlFromCompat(compat)}
             options={[
-              ['5m', '5 分钟（5m）'],
-              ['1h', '1 小时（1h）'],
+              ['5m', t('protocol.fiveMinutes')],
+              ['1h', t('protocol.oneHour')],
             ]}
             onChange={(cache_ttl) => onCompatChange({ ...compat, cache_ttl })}
           />
         </SettingRow>
         <p className='text-xs leading-5 text-muted-foreground'>
-          保存后作为新会话和自有缺省标记的
-          TTL。已有会话锁定值不变，官方透传仍保留调用方断点及缺失 TTL。
+          {t('protocol.cacheSaveHelp')}
         </p>
       </PaneSection>
       <PaneSection
         icon={Brain}
-        title='thinking 显示'
-        desc='调用方打开 thinking 却要求隐藏时，出站改成返回摘要。计费不变。'
+        title={t('protocol.thinkingDisplay')}
+        desc={t('protocol.thinkingHelp')}
       >
         <SettingRow
-          label='隐藏的 thinking 改为返回摘要'
+          label={t('protocol.summarizeHidden')}
           desc={
             thinkingDisplayFromCompat(compat) === 'summarized'
-              ? '开：omitted、updates，以及默认隐藏的模型上没写 display 的请求，出站改成 summarized。'
-              : '关：保留调用方的 display。updates 仍只在出站 beta 声明时保留，否则降成 omitted。'
+              ? t('protocol.summarizeEnabled')
+              : t('protocol.summarizeDisabled')
           }
         >
           <Switch
@@ -197,24 +206,24 @@ export function ProtocolPane({
                 thinking_display: on ? 'summarized' : 'passthrough',
               })
             }
-            aria-label='隐藏的 thinking 改为返回摘要'
+            aria-label={t('protocol.summarizeHidden')}
           />
         </SettingRow>
       </PaneSection>
       <PaneSection
         icon={Scaling}
-        title='Auto compact 窗口'
-        desc='默认跟随请求模型。显式值替换模型窗口，请求里的 CLAUDE_CODE_AUTO_COMPACT_WINDOW 仍优先。'
+        title={t('protocol.compactWindow')}
+        desc={t('protocol.compactHelp')}
       >
         <SettingRow
-          label='窗口'
-          desc='跟随模型时，Opus / Sonnet / Haiku 5.x 使用 1M，其余模型使用 200K。'
+          label={t('protocol.window')}
+          desc={t('protocol.modelWindowHelp')}
         >
           <ChipGroup
-            label='Auto compact 窗口'
+            label={t('protocol.compactWindow')}
             value={autoCompactWindowValue(compat.auto_compact_window)}
             options={[
-              ['model', '跟随模型'],
+              ['model', t('protocol.followModel')],
               ['200000', '200K'],
               ['500000', '500K'],
               ['1000000', '1M'],
@@ -230,39 +239,35 @@ export function ProtocolPane({
       </PaneSection>
       <PaneSection
         icon={Clock3}
-        title='CCH 统一附加'
-        desc='出站 billing 的 cch。开启后缺失也补，不区分试用或订阅。'
+        title={t('protocol.cch')}
+        desc={t('protocol.cchHelp')}
       >
         <SettingRow
-          label='强制附加 CCH'
-          desc={
-            cch
-              ? '开：出站补齐 cch；试用号缺失也写。保存后热写入各槽 kernel.json，不重启 CLI。'
-              : '关：固定发送 cch=00000;（5 个 0），不计算摘要。'
-          }
+          label={t('protocol.forceCch')}
+          desc={cch ? t('protocol.cchEnabled') : t('protocol.cchDisabled')}
         >
           <Switch
             checked={cch}
             onCheckedChange={(on) =>
               onCompatChange({ ...compat, cch_enabled: on })
             }
-            aria-label='强制附加 CCH'
+            aria-label={t('protocol.forceCch')}
           />
         </SettingRow>
       </PaneSection>
       <PaneSection
         icon={Clock3}
-        title='原生 sticky 槽'
-        desc='kernel 里 CLI 槽空闲回收。不是流空闲超时，也不是粘性页的账号绑定 TTL。'
+        title={t('protocol.nativeSticky')}
+        desc={t('protocol.nativeStickyHelp')}
       >
         <StepperSetting
           id='inference-session-idle-ttl'
-          label='槽空闲超时'
-          desc='从最后一次任务完成开始计时，活动请求不回收。保存后热生效，不重启内核。'
+          label={t('protocol.slotIdleTimeout')}
+          desc={t('protocol.slotIdleHelp')}
           value={sessionIdleTtlFromInference(inference)}
           min={SESSION_IDLE_TTL_SECONDS_MIN}
           max={SESSION_IDLE_TTL_SECONDS_MAX}
-          unit='秒'
+          unit={t('secondsUnit')}
           fallback={SESSION_IDLE_TTL_SECONDS_DEFAULT}
           onChange={(value) =>
             onInferenceChange({ session_idle_ttl_seconds: value })

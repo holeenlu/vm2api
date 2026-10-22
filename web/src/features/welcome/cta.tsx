@@ -1,11 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import { REPO_URL } from '@/config/repo'
 import { ArrowRight } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Reveal } from './reveal'
 import { docsHref } from './steps'
 
 export function WelcomeCta({ signedIn }: { signedIn: boolean }) {
+  const { t } = useTranslation('welcome')
+
   return (
     <section className='relative z-10 overflow-hidden px-6 py-24 md:py-32'>
       <div
@@ -20,20 +23,22 @@ export function WelcomeCta({ signedIn }: { signedIn: boolean }) {
       />
       <Reveal animation='scale-in' className='mx-auto max-w-2xl text-center'>
         <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-4xl'>
-          {signedIn ? '配置完成后' : '准备好了吗'}
+          {signedIn ? t('welcome:afterSetup') : t('welcome:ready')}
           <br />
           <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
-            {signedIn ? '去控制台看第一条请求' : '登录开始首配'}
+            {signedIn
+              ? t('welcome:firstRequestTitle')
+              : t('welcome:signInToSetup')}
           </span>
         </h2>
         <p className='mx-auto mt-5 max-w-md text-sm leading-relaxed text-muted-foreground md:text-base'>
-          控制台里能看到每个槽位的额度、每次调度和每条请求日志。
+          {t('welcome:consoleHelp')}
         </p>
         <div className='mt-8 flex items-center justify-center gap-3'>
           {signedIn ? (
             <Button asChild className='group rounded-lg'>
-              <Link to='/overview'>
-                进入控制台
+              <Link to='/'>
+                {t('welcome:openConsole')}
                 <ArrowRight
                   aria-hidden
                   className='size-3.5 transition-transform group-hover:translate-x-0.5'
@@ -43,7 +48,7 @@ export function WelcomeCta({ signedIn }: { signedIn: boolean }) {
           ) : (
             <Button asChild className='group rounded-lg'>
               <Link to='/login'>
-                登录控制台
+                {t('welcome:signInConsole')}
                 <ArrowRight
                   aria-hidden
                   className='size-3.5 transition-transform group-hover:translate-x-0.5'
@@ -61,7 +66,7 @@ export function WelcomeCta({ signedIn }: { signedIn: boolean }) {
               target='_blank'
               rel='noreferrer'
             >
-              安装文档
+              {t('welcome:installDocs')}
             </a>
           </Button>
         </div>
@@ -71,12 +76,14 @@ export function WelcomeCta({ signedIn }: { signedIn: boolean }) {
 }
 
 export function WelcomeFooter() {
+  const { t } = useTranslation('welcome')
+
   return (
     <footer className='relative z-10 px-6 pb-10'>
       <div className='mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 border-t border-border/40 pt-6 text-xs text-muted-foreground'>
-        <span className='font-medium text-foreground/80'>vm2api</span>
+        <span className='font-medium text-foreground/80'>tapmodels</span>
         <span>
-          个人学习与非商用自建 ·{' '}
+          {t('welcome:personalNoncommercial')}{' '}
           <a
             href={REPO_URL}
             target='_blank'

@@ -226,7 +226,7 @@ def snapshot_credential(before_ns: int) -> bool:
 
 
 def leave_service_cgroup() -> None:
-    """Survive `systemctl restart vm2api` (default KillMode=control-group)."""
+    """Survive `systemctl restart tapmodels` (default KillMode=control-group)."""
     pid = f"{os.getpid()}\n"
     for path in (
         "/sys/fs/cgroup/system.slice/cgroup.procs",

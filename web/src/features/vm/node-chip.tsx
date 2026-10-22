@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Server } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { meQueryOptions } from '@/features/auth/queries'
 import { clusterNodesQueryOptions } from '@/features/cluster/queries'
@@ -16,6 +17,8 @@ export function NodeChip({
   nodeId?: string | null
   className?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const me = useQuery(meQueryOptions())
   const canReadNodes = me.data?.role === 'admin' || me.data?.role === 'super'
   const nodes = useQuery({
@@ -24,12 +27,14 @@ export function NodeChip({
     enabled: canReadNodes && !!nodeId,
   })
   const node = nodeId ? nodes.data?.find((n) => n.id === nodeId) : undefined
-  const label = nodeId ? node?.label || node?.host || nodeId : 'local'
+  const label = nodeId
+    ? node?.label || node?.host || nodeId
+    : tVm('common:local')
   const title = !nodeId
-    ? '本机（控制面所在服务器）'
+    ? tVm('vm:nodeChip.localMachineControlPlaneServer')
     : node
-      ? `远端节点 ${label} · ${node.host}`
-      : `远端节点 ${nodeId}`
+      ? tVm('vm:nodeChip.remoteNode', { label: label, host: node.host })
+      : tVm('vm:nodeChip.remoteNodeAlternative', { nodeId: nodeId })
   return (
     <span
       className={cn(

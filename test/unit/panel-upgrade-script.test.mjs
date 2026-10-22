@@ -32,7 +32,7 @@ if (args[0] === 'compose') {
 `
 
 async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-upgrade space-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-upgrade space-'))
   const bin = path.join(root, 'fake-bin')
   const log = path.join(root, 'calls.jsonl')
   const bootVersion = path.join(root, 'boot-version')
@@ -88,7 +88,7 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
     fs.writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
     fs.writeFileSync(path.join(root, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(bootVersion, 'v1.2.6')
-    fs.writeFileSync(path.join(root, '.env'), 'VM2API_ADMIN_PASSWORD=keep-me\nVM2API_IMAGE_TAG=v1.2.6\n')
+    fs.writeFileSync(path.join(root, '.env'), 'TAPMODELS_ADMIN_PASSWORD=keep-me\nTAPMODELS_IMAGE_TAG=v1.2.6\n')
     fs.mkdirSync(path.join(root, 'src/config'), { recursive: true })
     fs.writeFileSync(path.join(root, 'src/config/routing.json'), 'operator config\n')
     if (source) fs.mkdirSync(path.join(root, '.git'))
@@ -114,7 +114,7 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
             TEST_LOG: log,
             BOOT_VERSION: bootVersion,
             PORT: String(server.address().port),
-            VM2API_API_KEY: 'test-key',
+            TAPMODELS_API_KEY: 'test-key',
             ...env,
           },
           timeout: 20000,
@@ -151,10 +151,10 @@ test('source upgrade builds the backend, preserves overrides, recreates it, and 
   const up = result.calls.find((args) => args.includes('up'))
   assert.ok(up.includes('--force-recreate'))
   assert.ok(up.includes('--no-deps'))
-  assert.ok(up.includes('vm2api'))
+  assert.ok(up.includes('tapmodels'))
   assert.ok(result.calls.some((args) => args[0] === 'exec'))
   assert.match(result.stdout, /restarted and verified at v1\.2\.7/)
-  assert.match(result.env, /VM2API_ADMIN_PASSWORD=keep-me/)
+  assert.match(result.env, /TAPMODELS_ADMIN_PASSWORD=keep-me/)
   assert.equal(result.routing, 'operator config\n', 'release checkout must preserve live routing config')
 })
 
@@ -209,8 +209,8 @@ test('empty installations and already unhealthy slots do not become false upgrad
 test('image upgrade pulls the pinned ARM64 release and records VERSION only after verification', async () => {
   const result = await runUpgrade({ source: false, arch: 'arm64' })
   assert.equal(result.code, 0, result.stderr)
-  assert.match(result.env, /VM2API_IMAGE_TAG=v1\.2\.7-arm64/)
-  assert.match(result.env, /VM2API_ADMIN_PASSWORD=keep-me/)
+  assert.match(result.env, /TAPMODELS_IMAGE_TAG=v1\.2\.7-arm64/)
+  assert.match(result.env, /TAPMODELS_ADMIN_PASSWORD=keep-me/)
   assert.ok(result.calls.some((args) => args.includes('pull')))
   assert.ok(!result.calls.some((args) => args.includes('build')))
   assert.equal(result.version, '1.2.7\n')

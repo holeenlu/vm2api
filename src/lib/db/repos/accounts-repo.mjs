@@ -105,10 +105,6 @@ export class AccountsRepo {
     this._removeAllocs = db.prepare('DELETE FROM account_allocations WHERE account_id = ?')
     this._removeGroups = db.prepare('DELETE FROM account_groups WHERE account_id = ?')
     this._remove = db.prepare('DELETE FROM accounts WHERE id = ?')
-    this._linkGroup = db.prepare(`
-      INSERT OR IGNORE INTO account_groups (account_id, group_id, priority, created_at)
-      VALUES (?, ?, ?, ?)
-    `)
   }
 
   get(accountId) {
@@ -119,7 +115,7 @@ export class AccountsRepo {
     return this._list.all().map(rowToAccount)
   }
 
-  /** Insert if missing, returns stored account. New accounts join the coding group (id=1). */
+  /** Insert if missing, returns stored account. Commercial resource membership is maintained separately. */
   insert(acc) {
     const now = new Date().toISOString()
     this._insert.run(
@@ -143,7 +139,6 @@ export class AccountsRepo {
       acc.created_at ?? now,
       acc.updated_at ?? now,
     )
-    this._linkGroup.run(acc.account_id, acc.group_id ?? 1, acc.group_priority ?? 50, now)
     return this.get(acc.account_id)
   }
 

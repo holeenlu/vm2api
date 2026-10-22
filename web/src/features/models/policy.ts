@@ -1,3 +1,5 @@
+import { t } from '@/i18n'
+
 export type Pass1mMode = 'true' | 'false' | 'inherit'
 export type BetaFilter = 'all' | 'pass' | 'strip' | 'inherit'
 export type CatalogMode =
@@ -163,8 +165,8 @@ export function thinkingPolicyLabel(m: ModelEntry): string {
     (caps.supports_adaptive ? 'passthrough' : 'convert_to_enabled')
   if (en === 'convert_to_adaptive') return 'enabled→adaptive'
   if (ad === 'convert_to_enabled') return 'adaptive→enabled'
-  if (en === 'strip' || ad === 'strip') return '剥离'
-  return '透传'
+  if (en === 'strip' || ad === 'strip') return t('models:strip')
+  return t('models:passthrough')
 }
 
 export function filterModels(

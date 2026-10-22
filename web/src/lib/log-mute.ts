@@ -1,26 +1,97 @@
+import { t } from '@/i18n'
 import type { ErrorOwner } from '@/types/panel-logs'
 
 const LS_LOG_MUTE = 'kin_log_muted_classes'
 
-/** 后端 `ERROR_CLASSES` 的完整镜像（`error-class.mjs`）。label 是后端权威中文，改动需同步。 */
+/** 后端 `ERROR_CLASSES` 的完整镜像（`error-class.mjs`）。仅 ID 与 owner 是契约，label 在读取时按当前语言显示。 */
 export const ERROR_CLASS_META: Record<
   string,
   { label: string; owner: ErrorOwner }
 > = {
-  auth: { label: '认证', owner: 'client' },
-  request: { label: '请求格式', owner: 'client' },
-  signature: { label: '思考签名', owner: 'client' },
-  rate_limit: { label: '限流', owner: 'provider' },
-  quota: { label: '额度', owner: 'platform' },
-  overloaded: { label: '过载排队', owner: 'provider' },
-  unavailable: { label: '无可用账号', owner: 'platform' },
-  timeout: { label: '超时', owner: 'provider' },
-  credential: { label: '凭证', owner: 'platform' },
-  proxy: { label: '代理', owner: 'platform' },
-  upstream: { label: '上游', owner: 'provider' },
-  other: { label: '其它', owner: 'platform' },
-  distill: { label: '蒸馏拦截', owner: 'platform' },
-  refusal: { label: '拒答拦截', owner: 'provider' },
+  auth: {
+    get label() {
+      return t('lib:errorClass.auth')
+    },
+    owner: 'client',
+  },
+  request: {
+    get label() {
+      return t('lib:errorClass.request')
+    },
+    owner: 'client',
+  },
+  signature: {
+    get label() {
+      return t('lib:errorClass.signature')
+    },
+    owner: 'client',
+  },
+  rate_limit: {
+    get label() {
+      return t('lib:errorClass.rateLimit')
+    },
+    owner: 'provider',
+  },
+  quota: {
+    get label() {
+      return t('lib:errorClass.quota')
+    },
+    owner: 'platform',
+  },
+  overloaded: {
+    get label() {
+      return t('lib:errorClass.overloaded')
+    },
+    owner: 'provider',
+  },
+  unavailable: {
+    get label() {
+      return t('lib:errorClass.unavailable')
+    },
+    owner: 'platform',
+  },
+  timeout: {
+    get label() {
+      return t('lib:errorClass.timeout')
+    },
+    owner: 'provider',
+  },
+  credential: {
+    get label() {
+      return t('lib:errorClass.credential')
+    },
+    owner: 'platform',
+  },
+  proxy: {
+    get label() {
+      return t('lib:errorClass.proxy')
+    },
+    owner: 'platform',
+  },
+  upstream: {
+    get label() {
+      return t('lib:errorClass.upstream')
+    },
+    owner: 'provider',
+  },
+  other: {
+    get label() {
+      return t('lib:errorClass.other')
+    },
+    owner: 'platform',
+  },
+  distill: {
+    get label() {
+      return t('lib:errorClass.distill')
+    },
+    owner: 'platform',
+  },
+  refusal: {
+    get label() {
+      return t('lib:errorClass.refusal')
+    },
+    owner: 'provider',
+  },
 }
 
 export const ERROR_CLASS_IDS = Object.keys(ERROR_CLASS_META)

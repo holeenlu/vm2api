@@ -16,7 +16,7 @@ flowchart LR
 
 | 密钥 | 来源 | 能调 |
 |------|------|------|
-| Master `VM2API_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
+| Master `TAPMODELS_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
 | `sk-vm-…` | 控制台签发 | **只** `/v1/*` |
 | 面板会话 | 面板登录 | **只** `/api/panel/*` |
 
@@ -41,7 +41,12 @@ x-api-key: sk-vm-…
 | `POST` | `/v1/responses` 或 `/responses` | OpenAI Responses | OpenAI Responses |
 | `GET` + Upgrade | `/v1/responses` 或 `/responses` | Responses WebSocket | JSON `response.*` 帧，不包 SSE |
 | `GET` | `/v1/models` | — | 本地模型策略目录 |
-| `GET` | `/health` · `/` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
+| `GET` / `HEAD` | `/` | 无鉴权 | `307` 跳转 `/console/`，`Cache-Control: no-store`；沿用管理台现有欢迎、登录与会话流程 |
+| `GET` | `/health` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
+
+原先通过 `/` 读取状态 JSON 的程序应改用 `/health`；仅检查服务存活可使用已有的 `/healthz`。其他入口和 API 行为不变。
+
+控制台入口 `/console`、`/console/`、`/cc`、`/cc/` 及前端静态资源均支持 `HEAD`：返回与 `GET` 一致的状态、内容类型和缓存策略，不发送响应体。`HEAD /` 跟随跳转后，控制台文件存在时返回 `200`，缺失时返回 `404`。
 
 上游 hop **永远** `stream: true`。客户端 `stream: true` 收 SSE；`stream: false` 或 `x-kin-delivery: verified` 由网关聚合成 JSON。
 
@@ -174,6 +179,8 @@ curl -sS http://127.0.0.1:8787/v1/models -H "Authorization: Bearer $KEY"
 读面板持久化的 `model_policy`，**不** hop 槽位 `/v1/models`。列表按密钥 `group_type` 过滤：`openai` 只列 GPT，`anthropic` 只列 Claude，`all` 与 master 两者都列。`POST /admin/models/refresh` 仍回完整目录。未入库的 id → `400`，请求被拒，不上游。别名如 `claude-haiku-4-5` 可解析到带日期的目录项。出站 `model` 去掉 `[1m]` 后缀。
 
 ## count_tokens / usage
+
+商业分组 Key 的 `GET /v1/usage` 返回调用用户的 USD 余额、预留、订阅和本人 Key 用量，不返回上游账号窗口。下面的 Claude/Codex 窗口选择仅适用于无组的平台诊断 Key；平台诊断排除历史私人槽位，不能借 `platform` 参数扩大授权范围。
 
 选当前会用的账户（sticky 仍可调度则用 sticky，否则下一张）。**不写、不拆 sticky。** 按该 VM 凭证分叉：
 

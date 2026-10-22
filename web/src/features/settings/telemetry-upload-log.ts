@@ -1,3 +1,5 @@
+import { t as translate } from '@/i18n'
+
 /** One line of `run/telemetry-upload.log`, written by the kin-worker sidecar. */
 export type UploadEntry = {
   at: number
@@ -52,10 +54,10 @@ export function summarizeUploads(lines: string[]): UploadSummary {
 
 export function relativeAgo(at: number, now: number): string {
   const s = Math.max(0, Math.round((now - at) / 1000))
-  if (s < 60) return `${s} 秒前`
+  if (s < 60) return translate('settings:relative.secondsAgo', { value1: s })
   const m = Math.round(s / 60)
-  if (m < 60) return `${m} 分钟前`
+  if (m < 60) return translate('settings:relative.minutesAgo', { value1: m })
   const h = Math.round(m / 60)
-  if (h < 48) return `${h} 小时前`
-  return `${Math.round(h / 24)} 天前`
+  if (h < 48) return translate('settings:relative.hoursAgo', { value1: h })
+  return translate('settings:relative.daysAgo', { value1: Math.round(h / 24) })
 }

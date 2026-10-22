@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
+import { toUsageLogRow } from '../../src/lib/db/repos/usage-logs-view.mjs'
 import { codexBodyToAnthropicMessage } from '../../src/lib/protocol/codex-convert.mjs'
 import { estimateWindow } from '../../src/lib/admin/window-estimate.mjs'
 
@@ -479,5 +480,32 @@ test('unpricedModels lists unpriced rows', () => {
     assert.equal(rows[0].requests, 2)
   } finally {
     db.close()
+  }
+})
+
+test('inbound device persists independently of rewritten session and is exposed in log detail', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    seed(repo, [
+      {
+        id: 'device-log',
+        user_id: 'u1',
+        api_key_id: 'k1',
+        inbound_device_id: 'caller-device',
+        session_id: 'caller-session',
+        outbound_session_id: 'rewritten-session',
+      },
+    ])
+    const names = { users: new Map(), keys: new Map(), accounts: new Map(), vms: new Map() }
+    const row = db.prepare("SELECT * FROM usage_logs WHERE id = 'device-log'").get()
+    assert.equal(row.inbound_device_id, 'caller-device')
+    assert.equal(row.outbound_session_id, 'rewritten-session')
+    assert.equal(toUsageLogRow(row, names).inboundDeviceId, 'caller-device')
+    seed(repo, [{ id: 'device-absent', user_id: 'u2', api_key_id: 'k2' }])
+    const absent = db.prepare("SELECT * FROM usage_logs WHERE id = 'device-absent'").get()
+    assert.equal(toUsageLogRow(absent, names).inboundDeviceId, null)
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })

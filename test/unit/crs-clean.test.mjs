@@ -224,7 +224,7 @@ test('normalizeAnthropicMessages is idempotent for legal turns', () => {
   ])
 })
 
-test('OpenAI chat unofficial rewrite is official 4-block plus caller --system append', () => {
+test('OpenAI chat unofficial rewrite is official 5-block plus caller --system append', () => {
   const { claude } = toClaudeMessages('openai.chat', {
     model: 'claude-haiku-4-5-20251001',
     messages: [
@@ -243,7 +243,7 @@ test('OpenAI chat unofficial rewrite is official 4-block plus caller --system ap
   assert.ok(JSON.stringify(cleaned.messages[0].content).includes('hi'))
 })
 
-test('empty unofficial system without tools still writes official 4 blocks', () => {
+test('empty unofficial system without tools still writes official 5 blocks', () => {
   const out = applyCrsUnofficialPersona({ messages: [] }, { officialClient: false })
   assert.equal(out.system.length, 5)
   assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
@@ -257,7 +257,7 @@ test('official Claude Code system is not replaced or appended', () => {
   assert.equal(out.system.length, 1)
 })
 
-test('Xcode unofficial system is appended after official 4 blocks', () => {
+test('Xcode unofficial system is appended after official 5 blocks', () => {
   const body = {
     system: 'You are currently in Xcode. Help with Swift.',
     messages: [{ role: 'user', content: 'hi' }],

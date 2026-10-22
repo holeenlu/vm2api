@@ -1,3 +1,4 @@
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -100,6 +101,7 @@ function fakeResponse() {
 
 unixTest('debug log records the envelope the slot kernel received, not the pre-transport body', async () => {
   const kernel = await fakeKernel()
+  const logDb = createDatabase({ dbPath: path.join(kernel.root, 'protocol.db') })
   const finished = []
   const handler = createHandleProtocol({
     json: (res, status) => {
@@ -124,7 +126,13 @@ unixTest('debug log records the envelope the slot kernel received, not the pre-t
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: {
+      db: logDb,
+      canAccept: (record) => ({ ok: true, record }),
+      recordUsage() {},
+      acquire: () => ({ ok: true }),
+      release() {},
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -189,6 +197,7 @@ unixTest('debug log records the envelope the slot kernel received, not the pre-t
   } finally {
     if (prevKernelBin === undefined) delete process.env.KIN_KERNEL_BIN
     else process.env.KIN_KERNEL_BIN = prevKernelBin
+    logDb.close()
     await kernel.close()
   }
 })

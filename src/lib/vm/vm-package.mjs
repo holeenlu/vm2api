@@ -21,11 +21,11 @@ import {
   writeGuestMachineIdFile,
 } from '../identity/workstation-fingerprint.mjs'
 import { assignComputerFingerprint } from '../identity/slot-computer.mjs'
-import { VM_ORIGIN, canBindProxyToVm, normalizeOwnerId } from '../admin/resource-owner.mjs'
+import { VM_ORIGIN, canBindProxyToVm } from '../admin/resource-owner.mjs'
 import { readCodexAccounts, writeCodexAccounts } from './codex-slot.mjs'
 import { hasBoundExit, isLocalEgressProxy } from './egress.mjs'
 import { OS_CATALOG, STANDARD_LOCALE, nextNumericIndex, padVm, parseVmIndex } from './vm-runtime.mjs'
-import { parseSocks5Fields } from './proxy-pool.mjs'
+import { parseProxyFields } from './proxy-pool.mjs'
 import { seedFreshCliHome } from './vm-recreate.mjs'
 import { atomicWriteJson, isValidVmId } from './vm-file.mjs'
 import { bindVmProxy, getVm, listVms } from './vm-registry.mjs'
@@ -38,7 +38,7 @@ import {
   normalizeSlotPersonaPreset,
   parseKernelDataplanePatch,
 } from './slot-engine.mjs'
-export const VM_PACKAGE_TYPE = 'vm2api-vm-package'
+export const VM_PACKAGE_TYPE = 'tapmodels-vm-package'
 export const VM_PACKAGE_VERSION = 1
 
 const DEFAULT_KERNEL = 'ubuntu-24.04'
@@ -120,7 +120,7 @@ function proxyDocument(proxy, label) {
   const username = proxy.username == null || proxy.username === '' ? null : String(proxy.username)
   const password = username == null || proxy.password == null ? null : String(proxy.password)
   return {
-    kind: 'socks5',
+    kind: proxy.scheme || proxy.protocol || 'socks5',
     host,
     port,
     username,
@@ -266,19 +266,21 @@ function parseProxy(raw) {
   const kind = cleanText(raw.kind || raw.scheme, 16).toLowerCase()
   if (kind === 'local' || raw.host === 'local') return { ok: true, value: { kind: 'local' } }
   if (raw.password && !cleanText(raw.username ?? raw.user, 200)) {
-    return fail('invalid_proxy', 'SOCKS5 不能只有密码没有用户名')
+    return fail('invalid_proxy', '代理认证不能只有密码没有用户名')
   }
-  const parsed = parseSocks5Fields({
+  const parsed = parseProxyFields({
+    protocol: raw.protocol || kind || 'socks5',
     host: raw.host,
     port: raw.port,
     username: raw.username ?? raw.user,
     password: raw.password ?? raw.pass,
   })
-  if (!parsed) return fail('invalid_proxy', 'SOCKS5 地址无效')
+  if (!parsed) return fail('invalid_proxy', '代理地址无效')
   return {
     ok: true,
     value: {
-      kind: 'socks5',
+      kind: parsed.scheme,
+      scheme: parsed.scheme,
       host: parsed.host,
       port: parsed.port,
       username: parsed.username,
@@ -316,7 +318,7 @@ function parseCredential(raw, codex) {
 export function parseVmPackage(doc) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return fail('invalid_package', '包必须是 JSON 对象')
   if (doc.type !== VM_PACKAGE_TYPE || doc.version !== VM_PACKAGE_VERSION) {
-    return fail('invalid_package', '不是 vm2api 单槽包')
+    return fail('invalid_package', '不是 tapmodels 单槽包')
   }
   const vm = doc.vm && typeof doc.vm === 'object' ? doc.vm : null
   if (!vm) return fail('invalid_package', '缺少 vm')
@@ -521,7 +523,7 @@ function proxyBindAllowed(spec, vm, role, proxyPool) {
   if (spec.proxy.kind === 'local') {
     if (role === 'user') return false
   } else {
-    const found = proxyPool.findSocks?.(spec.proxy)
+    const found = proxyPool.findProxy?.(spec.proxy)
     owner = found ? found.owner_user_id : vm.owner_user_id || null
   }
   return canBindProxyToVm({ owner_user_id: owner }, vm, { role })
@@ -543,11 +545,11 @@ async function attachProxy(projectRoot, id, spec, proxyPool, ownerUserId) {
     bindVmProxy(projectRoot, id, proxyPool.getProxyByIdWithAuth(bound.proxy?.id || proxyId))
     return { ok: true }
   }
-  const ensured = proxyPool.ensureSocks(spec.proxy, { ownerUserId, label: spec.proxy.label })
-  if (!ensured.ok) return fail(ensured.error || 'invalid_proxy', 'SOCKS5 无法写入')
+  const ensured = proxyPool.ensureProxy(spec.proxy, { ownerUserId, label: spec.proxy.label })
+  if (!ensured.ok) return fail(ensured.error || 'invalid_proxy', '代理无法写入')
   const bound = proxyPool.bind(ensured.proxy.id, id)
   if (!bound.ok) {
-    const message = bound.error === 'proxy_bind_limit' ? 'SOCKS5 绑定数量已满' : '绑定 SOCKS5 失败'
+    const message = bound.error === 'proxy_bind_limit' ? '代理绑定数量已满' : '绑定代理失败'
     return fail(bound.error || 'proxy_bind_failed', message)
   }
   bindVmProxy(projectRoot, id, proxyPool.getProxyByIdWithAuth(ensured.proxy.id))
@@ -599,7 +601,8 @@ export async function commitVmPackage({
     return { ok: false, status: 400, error: parsed?.error || { code: 'invalid_package', message: '包无效' } }
   const spec = parsed.value
   // Tenants cannot read or write seed-settings; a package must not smuggle them in either.
-  if (owner.role === 'user') spec.vm.seed_policy = null
+  if (!['admin', 'super'].includes(owner.role))
+    return { ok: false, status: 403, error: { code: 'forbidden', message: '客户不能导入 VM' } }
   const create = mode === 'create'
   let id = create ? spec.id : targetId
   let renamedFrom = null
@@ -647,8 +650,8 @@ export async function commitVmPackage({
       seed_policy: standardSeedPolicy(),
       runtime: { type: 'docker' },
       machine: resolveMachineSpec({ config: normalizeVmConfig(), runtime: 'docker' }),
-      owner_user_id: owner.role === 'user' ? normalizeOwnerId(owner.userId) : null,
-      origin: owner.role === 'user' ? VM_ORIGIN.userCreated : VM_ORIGIN.platform,
+      owner_user_id: null,
+      origin: VM_ORIGIN.platform,
     }
     fs.mkdirSync(path.dirname(file), { recursive: true })
   } else {

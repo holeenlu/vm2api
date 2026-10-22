@@ -15,7 +15,7 @@
  * The plists stay inside the slot tree, not in ~/Library/LaunchAgents: launchd
  * must not load a second copy at login next to the one this module bootstraps.
  * After a reboot the control plane finds the services missing and starts them
- * again (kernel watchdog → restartNativeKernel), so no console login is needed.
+ * again (kernel watchdog → restartNativeKernel) once the SSH user has a GUI login.
  *
  * Isolation is the user account: every slot on the node shares the SSH user,
  * its network and its hardware. First version: Claude slots on the node's own
@@ -43,7 +43,7 @@ const LOG_ROTATE_BYTES = 8 * 1024 * 1024
 const BOOTOUT_WAIT_TRIES = 25
 // kickstart -k waits for the old process to exit (up to the job's ExitTimeOut) before it returns.
 const LAUNCHCTL_TIMEOUT_MS = 30_000
-const LABEL_PREFIX = 'com.vm2api.slot'
+const LABEL_PREFIX = 'com.tapmodels.slot'
 export const LAUNCHD_GUI_REQUIRED =
   'SSH 用户没有登录 macOS 图形界面：launchd 槽位需要该用户保持登录（Mac mini 请开启自动登录）'
 
