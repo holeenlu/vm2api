@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { type CredType, credTypeLabel } from '@/lib/cred-type'
 import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
@@ -23,8 +24,8 @@ import { Field } from '@/features/vm/detail-section-primitives'
 import { VmEnvironmentCard } from '@/features/vm/environment-card'
 import { NodeChip } from '@/features/vm/node-chip'
 import { VmPhysicalFeaturesCard } from '@/features/vm/physical-features-card'
-import { isRemoteVm, REMOTE_UNSUPPORTED_TEXT } from '@/features/vm/placement'
-import { VmOwnerAdminCard } from '@/features/vm/vm-owner-admin-card'
+import { isRemoteVm, remoteUnsupportedText } from '@/features/vm/placement'
+import { VmGroupsCard } from '@/features/vm/vm-groups'
 import { VmShellCard } from '@/features/vm/vm-shell-card'
 
 type VmOpsTabProps = {
@@ -47,6 +48,8 @@ type VmOpsTabProps = {
 }
 
 export function VmOpsTab(props: VmOpsTabProps) {
+  const { t: tVm } = useTranslation('vm')
+
   const [kernelOpen, setKernelOpen] = useState(false)
   const [kernelMode, setKernelMode] = useState<'keep' | 'traits'>('keep')
   const {
@@ -70,16 +73,18 @@ export function VmOpsTab(props: VmOpsTabProps) {
   const remote = isRemoteVm(vm)
   return (
     <TabsContent value='ops' className='space-y-3 pt-4'>
-      <VmOwnerAdminCard vm={vm} />
+      <VmGroupsCard vm={vm} />
       <Card>
         <CardHeader className='pb-2'>
-          <CardTitle className='text-sm'>容器</CardTitle>
+          <CardTitle className='text-sm'>
+            <Trans ns='vm' i18nKey='detailOpsTab.container' />
+          </CardTitle>
         </CardHeader>
         <CardContent className='divide-y pt-0'>
-          <Field label='服务器'>
+          <Field label={tVm('vm:detailOpsTab.server')}>
             <NodeChip nodeId={vm.node_id} className='text-[11px]' />
           </Field>
-          <Field label='容器'>
+          <Field label={tVm('vm:detailOpsTab.container')}>
             <span className='font-mono text-xs'>
               {String(
                 (vm.runtime as Record<string, unknown> | undefined)
@@ -91,7 +96,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
           </Field>
           {(vm.runtime as Record<string, unknown> | undefined)
             ?.egress_container ? (
-            <Field label='出口容器'>
+            <Field label={tVm('vm:detailOpsTab.egressContainer')}>
               <span className='font-mono text-xs'>
                 {String(
                   (vm.runtime as Record<string, unknown>).egress_container
@@ -99,11 +104,11 @@ export function VmOpsTab(props: VmOpsTabProps) {
               </span>
             </Field>
           ) : null}
-          <Field label='guest'>
+          <Field label={tVm('vm:labels.guest')}>
             <span className='font-mono text-xs'>
               {String(
                 (vm.fingerprint as Record<string, unknown> | undefined)
-                  ?.hostname || '未采集'
+                  ?.hostname || tVm('vm:detailOpsTab.notCollected')
               )}
             </span>
           </Field>
@@ -128,7 +133,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
           loading={busy('/activate')}
           onClick={() => onAction('/activate')}
         >
-          设为活跃
+          <Trans ns='vm' i18nKey='detailOpsTab.setActive' />
         </Button>
         <Button
           size='sm'
@@ -136,7 +141,9 @@ export function VmOpsTab(props: VmOpsTabProps) {
           loading={busy('/reload')}
           onClick={() => onAction('/reload')}
         >
-          {gpt ? '重载 Codex kernel' : '重载 worker'}
+          {gpt
+            ? tVm('vm:detailOpsTab.reloadCodexKernel')
+            : tVm('vm:detailOpsTab.reloadWorker')}
         </Button>
         <Button
           size='sm'
@@ -144,7 +151,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
           loading={busy('/collect-identity')}
           onClick={() => onAction('/collect-identity')}
         >
-          采集特征
+          <Trans ns='vm' i18nKey='detailOpsTab.collectIdentity' />
         </Button>
         {gpt ? null : (
           <>
@@ -163,16 +170,19 @@ export function VmOpsTab(props: VmOpsTabProps) {
                       })
                     }
                   >
-                    执行官方初装
+                    <Trans ns='vm' i18nKey='detailOpsTab.runOfficialSetup' />
                   </Button>
                 </span>
               </TooltipTrigger>
               {remote ? (
-                <TooltipContent>{REMOTE_UNSUPPORTED_TEXT}</TooltipContent>
+                <TooltipContent>{remoteUnsupportedText()}</TooltipContent>
               ) : !officialCc ? (
                 <TooltipContent>
-                  官方初装只支持完整 OAuth 凭证，当前槽为{' '}
-                  {credTypeLabel(credType)}
+                  <Trans
+                    ns='vm'
+                    i18nKey='detailOpsTab.officialSetupRequiresFullOAuthCredentialsThisSlotUses'
+                    values={{ credTypeLabel: credTypeLabel(credType) }}
+                  />
                 </TooltipContent>
               ) : null}
             </Tooltip>
@@ -182,7 +192,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
               loading={busy('/reconcile-fingerprint')}
               onClick={() => onAction('/reconcile-fingerprint', {})}
             >
-              对齐官方指纹
+              <Trans ns='vm' i18nKey='detailOpsTab.alignOfficialFingerprint' />
             </Button>
           </>
         )}
@@ -196,7 +206,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
                 loading={busy('/oauth/refresh')}
                 onClick={() => onAction('/oauth/refresh', {})}
               >
-                刷新凭证
+                <Trans ns='vm' i18nKey='detailAccountTab.refreshCredentials' />
               </Button>
             </span>
           </TooltipTrigger>
@@ -216,7 +226,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
               loading={busy('/wrap-cli/promote')}
               onClick={() => onAction('/wrap-cli/promote')}
             >
-              晋升母本
+              <Trans ns='vm' i18nKey='detailOpsTab.promoteToSeed' />
             </Button>
             <Button
               size='sm'
@@ -224,7 +234,7 @@ export function VmOpsTab(props: VmOpsTabProps) {
               loading={busy('/wrap-cli/repair')}
               onClick={() => setKernelOpen(true)}
             >
-              重装 kernel
+              <Trans ns='vm' i18nKey='detailOpsTab.reinstallKernel' />
             </Button>
           </div>
         </>
@@ -233,40 +243,47 @@ export function VmOpsTab(props: VmOpsTabProps) {
       <Separator />
       <div className='flex flex-wrap gap-2'>
         <Button size='sm' variant='outline' onClick={onReset}>
-          重置
+          <Trans ns='vm' i18nKey='detailOpsTab.reset' />
         </Button>
         <Button size='sm' variant='destructive' onClick={onDelete}>
-          删除此槽位
+          <Trans ns='vm' i18nKey='detailOpsTab.deleteThisSlot' />
         </Button>
       </div>
       <Dialog open={kernelOpen} onOpenChange={setKernelOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>重装 kernel</DialogTitle>
+            <DialogTitle>
+              <Trans ns='vm' i18nKey='detailOpsTab.reinstallKernel' />
+            </DialogTitle>
           </DialogHeader>
           <ChoiceTiles
-            label='更新方式'
+            label={tVm('vm:detailOpsTab.updateMethod')}
             value={kernelMode}
             onChange={setKernelMode}
             choices={[
               {
                 value: 'keep',
-                title: '保留原数据重建',
-                detail:
-                  '留下凭证、指纹和统计，只换 kernel、cli-node 与 Go 遥测。',
+                title: tVm('vm:detailOpsTab.rebuildWithExistingData'),
+                detail: tVm(
+                  'vm:detailOpsTab.keepsCredentialsFingerprintsAndStatisticsReplacesOnlyKernelCli'
+                ),
               },
               {
                 value: 'traits',
-                title: '重建新特征',
+                title: tVm('vm:detailOpsTab.rebuildWithNewIdentity'),
                 detail: remote
-                  ? '集群槽只换镜像，不在这里清远程家目录。'
-                  : '清家目录并重抽计算机身份。',
+                  ? tVm(
+                      'vm:detailOpsTab.clusterSlotsOnlyReplaceTheImageTheRemoteHome'
+                    )
+                  : tVm(
+                      'vm:detailOpsTab.clearsTheHomeDirectoryAndGeneratesANewMachine'
+                    ),
               },
             ]}
           />
           <DialogFooter>
             <Button variant='outline' onClick={() => setKernelOpen(false)}>
-              取消
+              <Trans ns='vm' i18nKey='authSchemeEditor.cancel' />
             </Button>
             <Button
               variant={kernelMode === 'traits' ? 'destructive' : 'default'}
@@ -275,7 +292,9 @@ export function VmOpsTab(props: VmOpsTabProps) {
                 onAction('/wrap-cli/repair', { mode: kernelMode })
               }}
             >
-              {kernelMode === 'keep' ? '保留原数据重建' : '重建新特征'}
+              {kernelMode === 'keep'
+                ? tVm('vm:detailOpsTab.rebuildWithExistingData')
+                : tVm('vm:detailOpsTab.rebuildWithNewIdentity')}
             </Button>
           </DialogFooter>
         </DialogContent>

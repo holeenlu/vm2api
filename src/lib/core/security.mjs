@@ -69,8 +69,8 @@ export const HOP_BY_HOP = new Set([
 /** Panel admin credentials (env override) */
 export function getPanelAdmin() {
   return {
-    username: process.env.VM2API_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
-    password: process.env.VM2API_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
+    username: process.env.TAPMODELS_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
+    password: process.env.TAPMODELS_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
   }
 }
 

@@ -41,7 +41,7 @@ for (const [name, argv, expected] of [
   [
     'binfmt QEMU on an ARM64 host',
     [
-      '/usr/local/libexec/vm2api/qemu-x86_64',
+      '/usr/local/libexec/tapmodels/qemu-x86_64',
       '/home/kincli/.kin/kin-kernel',
       '/home/kincli/.kin/kin-kernel',
       '--gateway-worker',

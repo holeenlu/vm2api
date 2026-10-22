@@ -17,7 +17,7 @@ function findOAuthAuthBin() {
   const candidates = [
     named,
     path.join(__dirname, '..', '..', '..', 'bin', 'kin-oauth-auth'),
-    '/opt/vm2api/bin/kin-oauth-auth',
+    '/opt/tapmodels/bin/kin-oauth-auth',
     '/opt/kin-gateway/bin/kin-oauth-auth',
   ].filter(Boolean)
   return candidates.find((item) => fs.existsSync(item)) || null

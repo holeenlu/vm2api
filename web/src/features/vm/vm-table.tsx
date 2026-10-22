@@ -1,5 +1,6 @@
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { credTypeLabel, credTypeOf } from '@/lib/cred-type'
 import { usedPctOf } from '@/lib/format'
 import { isCodexVm, platformLabel } from '@/lib/vm-kind'
@@ -119,6 +120,8 @@ export function KindFilterChips({
   kind: VmKindFilter
   onChange: (kind: VmKindFilter) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   let claude = 0
   let openai = 0
   for (const vm of vms) {
@@ -126,8 +129,8 @@ export function KindFilterChips({
     else claude += 1
   }
   const chips = [
-    ['claude', 'claude', claude, '筛选 Claude'],
-    ['gpt', 'codex', openai, '筛选 OpenAI'],
+    ['claude', 'claude', claude, tVm('vm:vmTable.filterClaude')],
+    ['gpt', 'codex', openai, tVm('vm:vmTable.filterOpenAI')],
   ] as const
   return (
     <>

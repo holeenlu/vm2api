@@ -14,10 +14,10 @@ import {
   Settings2,
   Zap,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   calculateOutputRate,
   formatCurrency,
-  formatDuration,
   formatTokenAmount,
   shouldHideOutputRate,
 } from '@/lib/usage-format'
@@ -28,6 +28,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { formatDuration } from '@/features/logs/display-time'
 import { ThinkingEffortBadge } from '../log-cells'
 import {
   actualCacheRate,
@@ -37,6 +38,8 @@ import {
   hasFastMode,
   isSuccessStatus,
   resolveModelAuditDisplay,
+  terminalStateLabel,
+  errorOwnerLabel,
 } from '../log-display'
 
 function SectionTitle({
@@ -48,6 +51,8 @@ function SectionTitle({
   color: string
   children: React.ReactNode
 }) {
+  useTranslation('logs')
+
   return (
     <h4 className='flex items-center gap-2 text-sm font-semibold'>
       <Icon className={cn('h-4 w-4', color)} />
@@ -69,6 +74,8 @@ function MetricCard({
   label: string
   value: string
 }) {
+  useTranslation('logs')
+
   return (
     <div className='flex items-center gap-3 rounded-lg border bg-card p-3'>
       <div
@@ -96,6 +103,8 @@ function BillingRow({
   children: React.ReactNode
   className?: string
 }) {
+  useTranslation('logs')
+
   return (
     <div className={cn('flex justify-between gap-3', className)}>
       <span className='text-muted-foreground'>{label}:</span>
@@ -105,6 +114,8 @@ function BillingRow({
 }
 
 function Cost({ value }: { value: number | null | undefined }) {
+  useTranslation('logs')
+
   if (value == null || value <= 0) return null
   return (
     <span className='ml-3 text-muted-foreground'>
@@ -113,7 +124,7 @@ function Cost({ value }: { value: number | null | undefined }) {
   )
 }
 
-/** 「概览」：hub SummaryTab 的各区块，按 vm2api 实有字段取舍。 */
+/** 「概览」：hub SummaryTab 的各区块，按 tapmodels 实有字段取舍。 */
 export function SummaryTab({
   row,
   scrollToRedirect,
@@ -121,6 +132,8 @@ export function SummaryTab({
   row: UsageLogRow
   scrollToRedirect: boolean
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const audit = resolveModelAuditDisplay(row)
   const success = isSuccessStatus(row.statusCode)
   const rate = calculateOutputRate(row.outputTokens, row.durationMs, row.ttftMs)
@@ -182,14 +195,14 @@ export function SummaryTab({
         <div>
           <div className='flex items-center gap-2'>
             <span className='text-lg font-semibold'>
-              {row.statusCode ?? '未知'}
+              {row.statusCode ?? translate('logs:unknown')}
             </span>
             {row.statusCode != null ? (
               <Badge
                 variant={success ? 'default' : 'destructive'}
                 className='text-xs'
               >
-                {success ? 'OK' : 'Error'}
+                {success ? 'OK' : translate('common:error')}
               </Badge>
             ) : null}
             {row.errorLabel ? (
@@ -200,8 +213,8 @@ export function SummaryTab({
           </div>
           <p className='text-sm text-muted-foreground'>
             {success
-              ? '请求成功完成'
-              : '请求失败，以下是详细的错误信息和供应商决策链'}
+              ? translate('logs:requestCompleted')
+              : translate('logs:requestFailedDetails')}
           </p>
         </div>
       </div>
@@ -209,7 +222,7 @@ export function SummaryTab({
       {row.costUsd != null || totalTokens > 0 || row.durationMs != null ? (
         <div className='space-y-2'>
           <h4 className='text-sm font-semibold text-muted-foreground'>
-            关键指标
+            {translate('logs:keyMetrics')}
           </h4>
           <div className='grid grid-cols-2 gap-3'>
             {totalCost != null ? (
@@ -217,7 +230,7 @@ export function SummaryTab({
                 icon={DollarSign}
                 iconClass='text-emerald-600'
                 bgClass='bg-emerald-100 dark:bg-emerald-900/30'
-                label='总费用'
+                label={translate('logs:totalCost')}
                 value={formatCurrency(totalCost, 6)}
               />
             ) : null}
@@ -226,7 +239,7 @@ export function SummaryTab({
                 icon={Zap}
                 iconClass='text-blue-600'
                 bgClass='bg-blue-100 dark:bg-blue-900/30'
-                label='总令牌数'
+                label={translate('logs:totalTokensLong')}
                 value={formatTokenAmount(totalTokens)}
               />
             ) : null}
@@ -235,7 +248,7 @@ export function SummaryTab({
                 icon={Clock}
                 iconClass='text-purple-600'
                 bgClass='bg-purple-100 dark:bg-purple-900/30'
-                label='耗时'
+                label={translate('logs:duration')}
                 value={formatDuration(row.durationMs)}
               />
             ) : null}
@@ -244,7 +257,7 @@ export function SummaryTab({
                 icon={Zap}
                 iconClass='text-amber-600'
                 bgClass='bg-amber-100 dark:bg-amber-900/30'
-                label='输出速率'
+                label={translate('logs:outputRate')}
                 value={`${rate.toFixed(1)} tok/s`}
               />
             ) : null}
@@ -256,32 +269,34 @@ export function SummaryTab({
       row.cacheReadInputTokens + row.cacheCreationInputTokens > 0 ? (
         <div className='space-y-2'>
           <SectionTitle icon={DatabaseZap} color='text-cyan-600'>
-            缓存表现
+            {translate('logs:cachePerformance')}
           </SectionTitle>
           <div className='grid grid-cols-1 gap-3 sm:grid-cols-3'>
             <Tooltip>
               <TooltipTrigger asChild>
                 <div className='cursor-help rounded-lg border bg-card p-3'>
                   <div className='text-xs text-muted-foreground'>
-                    实际缓存率
+                    {translate('logs:actualCacheRate')}
                   </div>
                   <div className='font-mono text-sm font-semibold'>
                     {(cacheRate * 100).toFixed(1)}%
                   </div>
                 </div>
               </TooltipTrigger>
-              <TooltipContent>
-                缓存读取 / 输入侧总量（输入 + 缓存读 + 缓存写）
-              </TooltipContent>
+              <TooltipContent>{translate('logs:cacheRateHint')}</TooltipContent>
             </Tooltip>
             <div className='rounded-lg border bg-card p-3'>
-              <div className='text-xs text-muted-foreground'>缓存读取</div>
+              <div className='text-xs text-muted-foreground'>
+                {translate('logs:cacheRead')}
+              </div>
               <div className='font-mono text-sm font-semibold'>
                 {formatTokenAmount(row.cacheReadInputTokens)}
               </div>
             </div>
             <div className='rounded-lg border bg-card p-3'>
-              <div className='text-xs text-muted-foreground'>缓存写入</div>
+              <div className='text-xs text-muted-foreground'>
+                {translate('logs:cacheWrite')}
+              </div>
               <div className='font-mono text-sm font-semibold'>
                 {formatTokenAmount(row.cacheCreationInputTokens)}
               </div>
@@ -296,12 +311,14 @@ export function SummaryTab({
       row.reasoningEffort ||
       row.requestId ? (
         <div className='space-y-2'>
-          <h4 className='text-sm font-semibold'>会话信息</h4>
+          <h4 className='text-sm font-semibold'>
+            {translate('logs:sessionInformation')}
+          </h4>
           <div className='divide-y rounded-lg border bg-card'>
             {row.sessionId ? (
               <div className='flex items-center gap-2 p-4'>
                 <span className='shrink-0 text-xs text-muted-foreground'>
-                  出站 Session
+                  {translate('logs:outboundSession')}
                 </span>
                 <Link
                   to='/logs'
@@ -315,7 +332,7 @@ export function SummaryTab({
             {row.clientSessionId && row.clientSessionId !== row.sessionId ? (
               <div className='flex items-center gap-2 p-4'>
                 <span className='shrink-0 text-xs text-muted-foreground'>
-                  客户端 Session
+                  {translate('logs:clientSession')}
                 </span>
                 <Link
                   to='/logs'
@@ -329,7 +346,7 @@ export function SummaryTab({
             {row.inboundDeviceId ? (
               <div className='flex items-center gap-2 p-4'>
                 <span className='shrink-0 text-xs text-muted-foreground'>
-                  Device ID
+                  {translate('logs:deviceId')}
                 </span>
                 <span className='min-w-0 truncate font-mono text-xs'>
                   {row.inboundDeviceId}
@@ -339,7 +356,7 @@ export function SummaryTab({
             {row.requestId ? (
               <div className='flex items-center gap-2 p-4'>
                 <span className='shrink-0 text-xs text-muted-foreground'>
-                  Request ID
+                  {translate('logs:requestId')}
                 </span>
                 <span className='min-w-0 truncate font-mono text-xs'>
                   {row.requestId}
@@ -349,7 +366,7 @@ export function SummaryTab({
             {row.reasoningEffort ? (
               <div className='flex items-center gap-2 p-4'>
                 <span className='shrink-0 text-xs text-muted-foreground'>
-                  思考强度
+                  {translate('logs:reasoningEffort')}
                 </span>
                 <ThinkingEffortBadge effort={row.reasoningEffort} />
               </div>
@@ -361,19 +378,21 @@ export function SummaryTab({
       {row.userAgent || row.endpoint || row.clientIp ? (
         <div className='space-y-2'>
           <SectionTitle icon={Monitor} color='text-blue-600'>
-            客户端信息
+            {translate('logs:clientInformation')}
           </SectionTitle>
           <div className='divide-y rounded-lg border bg-card'>
             {row.clientIp ? (
               <div className='flex items-center justify-between gap-3 p-3'>
-                <span className='text-xs text-muted-foreground'>IP</span>
+                <span className='text-xs text-muted-foreground'>
+                  {translate('logs:ip')}
+                </span>
                 <code className='font-mono text-xs'>{row.clientIp}</code>
               </div>
             ) : null}
             {row.userAgent ? (
               <div className='space-y-1 p-3'>
                 <span className='text-xs text-muted-foreground'>
-                  User-Agent
+                  {translate('logs:userAgent')}
                 </span>
                 <code className='block font-mono text-xs break-all'>
                   {row.userAgent}
@@ -384,7 +403,7 @@ export function SummaryTab({
               <div className='flex items-center justify-between gap-3 p-3'>
                 <span className='flex items-center gap-1 text-xs text-muted-foreground'>
                   <Globe className='h-3 w-3' />
-                  Endpoint
+                  {translate('logs:endpointEnglish')}
                 </span>
                 <code className='font-mono text-xs'>
                   {row.method ? `${row.method} ` : ''}
@@ -394,7 +413,9 @@ export function SummaryTab({
             ) : null}
             {row.protocol ? (
               <div className='flex items-center justify-between gap-3 p-3'>
-                <span className='text-xs text-muted-foreground'>协议</span>
+                <span className='text-xs text-muted-foreground'>
+                  {translate('logs:protocol')}
+                </span>
                 <code className='font-mono text-xs'>{row.protocol}</code>
               </div>
             ) : null}
@@ -405,91 +426,111 @@ export function SummaryTab({
       {row.costUsd != null ? (
         <div className='space-y-2'>
           <SectionTitle icon={DollarSign} color='text-emerald-600'>
-            计费信息
+            {translate('logs:billingInformation')}
           </SectionTitle>
           <div className='space-y-3 rounded-lg border bg-card p-4'>
             <div className='space-y-2 text-sm'>
-              <BillingRow label='输入'>
-                {formatTokenAmount(row.inputTokens)} tokens
+              <BillingRow label={translate('logs:input')}>
+                {translate('logs:tokenAmount', {
+                  amount: formatTokenAmount(row.inputTokens),
+                })}
                 <Cost value={breakdown?.input} />
               </BillingRow>
-              <BillingRow label='输出'>
-                {formatTokenAmount(row.outputTokens)} tokens
+              <BillingRow label={translate('logs:output')}>
+                {translate('logs:tokenAmount', {
+                  amount: formatTokenAmount(row.outputTokens),
+                })}
                 <Cost value={breakdown?.output} />
               </BillingRow>
               {tokenSplit.fiveM > 0 ? (
-                <BillingRow label='缓存写入 (5m)'>
-                  {formatTokenAmount(tokenSplit.fiveM)} tokens{' '}
-                  <span className='text-orange-600'>(1.25x)</span>
+                <BillingRow label={translate('logs:cacheWriteFiveMinutes')}>
+                  {translate('logs:tokenAmount', {
+                    amount: formatTokenAmount(tokenSplit.fiveM),
+                  })}{' '}
+                  <span className='text-orange-600'>
+                    {translate('logs:shortCacheMultiplier')}
+                  </span>
                   <Cost value={costSplit.fiveM} />
                 </BillingRow>
               ) : null}
               {tokenSplit.oneH > 0 ? (
-                <BillingRow label='缓存写入 (1h)'>
-                  {formatTokenAmount(tokenSplit.oneH)} tokens{' '}
-                  <span className='text-orange-600'>(2x)</span>
+                <BillingRow label={translate('logs:cacheWriteOneHour')}>
+                  {translate('logs:tokenAmount', {
+                    amount: formatTokenAmount(tokenSplit.oneH),
+                  })}{' '}
+                  <span className='text-orange-600'>
+                    {translate('logs:longCacheMultiplier')}
+                  </span>
                   <Cost value={costSplit.oneH} />
                 </BillingRow>
               ) : null}
               {row.cacheReadInputTokens > 0 ? (
-                <BillingRow label='缓存读取'>
-                  {formatTokenAmount(row.cacheReadInputTokens)} tokens{' '}
-                  <span className='text-emerald-600'>(0.1x)</span>
+                <BillingRow label={translate('logs:cacheRead')}>
+                  {translate('logs:tokenAmount', {
+                    amount: formatTokenAmount(row.cacheReadInputTokens),
+                  })}{' '}
+                  <span className='text-emerald-600'>
+                    {translate('logs:cacheReadMultiplier')}
+                  </span>
                   <Cost value={breakdown?.cacheRead} />
                 </BillingRow>
               ) : null}
               {row.cacheTtlApplied ? (
-                <BillingRow label='缓存 TTL'>
+                <BillingRow label={translate('logs:cacheTtl')}>
                   <Badge variant='outline' className='text-xs'>
                     {row.cacheTtlApplied}
                   </Badge>
                 </BillingRow>
               ) : null}
               {row.context1mApplied ? (
-                <BillingRow label='1M 上下文'>
+                <BillingRow label={translate('logs:oneMillionContext')}>
                   <Badge
                     variant='outline'
                     className='border-purple-200 bg-purple-50 text-xs text-purple-700 dark:border-purple-800 dark:bg-purple-950/30 dark:text-purple-300'
                   >
-                    1M Context
+                    {translate('logs:contextMillion')}
                   </Badge>{' '}
                   <span className='text-xs text-muted-foreground'>
-                    (1M 上下文窗口已启用)
+                    {translate('logs:contextMillionEnabled')}
                   </span>
                 </BillingRow>
               ) : null}
               {hasFastMode(row) ? (
-                <BillingRow label='fast'>
+                <BillingRow label={translate('logs:fast')}>
                   <Badge
                     variant='outline'
                     className='border-orange-200 bg-orange-50 text-xs text-orange-700 dark:border-orange-800 dark:bg-orange-950/30 dark:text-orange-300'
                   >
-                    优先服务等级（fast 模式）
+                    {translate('logs:priorityService')}
                   </Badge>
                 </BillingRow>
               ) : null}
               {breakdown?.pricingModel ? (
-                <BillingRow label='计价模型'>
+                <BillingRow label={translate('logs:pricingModel')}>
                   {breakdown.pricingModel === 'unpriced'
-                    ? '无价表'
+                    ? translate('logs:noPriceTable')
                     : breakdown.pricingModel}
                 </BillingRow>
               ) : null}
               {breakdown?.baseTotal != null ? (
-                <BillingRow label='基础合计' className='border-t pt-2'>
+                <BillingRow
+                  label={translate('logs:baseTotal')}
+                  className='border-t pt-2'
+                >
                   <span className='font-medium'>
                     {formatCurrency(breakdown.baseTotal, 6)}
                   </span>
                 </BillingRow>
               ) : null}
               {multiplier != null ? (
-                <BillingRow label='分组倍率'>
-                  {multiplier.toFixed(2)}x
+                <BillingRow label={translate('logs:groupMultiplier')}>
+                  {multiplier.toFixed(2)}
+                  {translate('logs:multiplierSymbol')}
                 </BillingRow>
               ) : null}
             </div>
             <div className='flex items-center justify-between border-t pt-3'>
-              <span className='font-medium'>总费用</span>
+              <span className='font-medium'>{translate('logs:totalCost')}</span>
               <span className='font-mono text-lg font-semibold text-emerald-600'>
                 {formatCurrency(totalCost, 6)}
               </span>
@@ -498,10 +539,10 @@ export function SummaryTab({
         </div>
       ) : null}
 
-      {row.specialSettings.length ? (
+      {row.specialSettings?.length ? (
         <div className='space-y-2'>
           <SectionTitle icon={Settings2} color='text-purple-600'>
-            特殊设置
+            {translate('logs:specialSettings')}
           </SectionTitle>
           <div className='flex flex-wrap gap-2 rounded-lg border bg-card p-4'>
             {row.specialSettings.map((setting) => (
@@ -524,14 +565,14 @@ export function SummaryTab({
       <div className='space-y-2'>
         <h4 className='flex items-center gap-2 text-sm font-semibold'>
           <Settings2 className='h-4 w-4 text-slate-600' />
-          模型
+          {translate('logs:model')}
           {audit.hasActualMismatch ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <InfoIcon className='h-3.5 w-3.5 text-muted-foreground' />
               </TooltipTrigger>
               <TooltipContent className='max-w-xs'>
-                上游供应商实际返回的模型与请求的模型不一致。计费仍然基于请求模型。
+                {translate('logs:modelMismatchHint')}
               </TooltipContent>
             </Tooltip>
           ) : null}
@@ -541,7 +582,7 @@ export function SummaryTab({
             <>
               <div className='flex items-center gap-2'>
                 <span className='min-w-[6rem] text-xs text-muted-foreground'>
-                  请求模型
+                  {translate('logs:requestedModel')}
                 </span>
                 <code className='rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800'>
                   {audit.effectiveRequestModel}
@@ -549,7 +590,7 @@ export function SummaryTab({
               </div>
               <div className='flex items-center gap-2'>
                 <span className='min-w-[6rem] text-xs text-muted-foreground'>
-                  实际响应模型
+                  {translate('logs:actualModel')}
                 </span>
                 <code className='rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800'>
                   {audit.secondaryActualModel}
@@ -567,7 +608,7 @@ export function SummaryTab({
       {audit.hasRedirect ? (
         <div id='model-redirect-section' className='space-y-2'>
           <SectionTitle icon={ArrowRight} color='text-blue-600'>
-            模型重定向
+            {translate('logs:modelRedirect')}
           </SectionTitle>
           <div className='rounded-lg border bg-blue-50 p-3 dark:bg-blue-950/20'>
             <div className='flex flex-wrap items-center gap-2'>
@@ -579,7 +620,9 @@ export function SummaryTab({
                 {row.model}
               </code>
             </div>
-            <p className='mt-2 text-xs text-muted-foreground'>计费: 实际</p>
+            <p className='mt-2 text-xs text-muted-foreground'>
+              {translate('logs:billingActual')}
+            </p>
           </div>
         </div>
       ) : null}
@@ -587,7 +630,7 @@ export function SummaryTab({
       {row.errorMessage || row.errorCode ? (
         <div className='space-y-2'>
           <SectionTitle icon={AlertCircle} color='text-rose-600'>
-            错误信息
+            {translate('logs:errorInformation')}
           </SectionTitle>
           <div className='space-y-1 rounded-lg border bg-rose-50 p-3 dark:bg-rose-950/20'>
             {row.errorCode || row.errorOwner ? (
@@ -599,7 +642,9 @@ export function SummaryTab({
                 ) : null}
                 {row.errorOwner ? (
                   <Badge variant='outline' className='text-[10px]'>
-                    归属 {row.errorOwner}
+                    {translate('logs:errorAttribution', {
+                      owner: errorOwnerLabel(row.errorOwner),
+                    })}
                   </Badge>
                 ) : null}
               </div>
@@ -615,16 +660,26 @@ export function SummaryTab({
 
       {row.stopReason || row.via || row.finalState ? (
         <div className='space-y-2'>
-          <h4 className='text-sm font-semibold'>执行信息</h4>
+          <h4 className='text-sm font-semibold'>
+            {translate('logs:executionInformation')}
+          </h4>
           <div className='space-y-2 rounded-lg border bg-card p-4 text-sm'>
             {row.stopReason ? (
-              <BillingRow label='结束原因'>{row.stopReason}</BillingRow>
+              <BillingRow label={translate('logs:finishReason')}>
+                {row.stopReason}
+              </BillingRow>
             ) : null}
             {row.finalState ? (
-              <BillingRow label='终态'>{row.finalState}</BillingRow>
+              <BillingRow label={translate('logs:terminalState')}>
+                <span title={row.finalState}>
+                  {terminalStateLabel(row.finalState)}
+                </span>
+              </BillingRow>
             ) : null}
             {row.via ? (
-              <BillingRow label='实际链路'>{row.via}</BillingRow>
+              <BillingRow label={translate('logs:actualChain')}>
+                {row.via}
+              </BillingRow>
             ) : null}
           </div>
         </div>

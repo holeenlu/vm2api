@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Clock3, Link2, Radio, type LucideIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { fmtDuration } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import {
@@ -50,6 +51,8 @@ function SummaryButton({
   disabled: boolean
   onClick: () => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <Button
       ref={buttonRef}
@@ -65,7 +68,7 @@ function SummaryButton({
           <span className='truncate'>{title}</span>
           {pending ? (
             <span className='shrink-0 rounded bg-[color:var(--status-caution)]/15 px-1.5 py-0.5 text-[10px] text-[color:var(--status-caution)]'>
-              待保存
+              {t('pendingSave')}
             </span>
           ) : null}
         </span>
@@ -84,6 +87,8 @@ export function StickyPane({
   saving = false,
   pending = false,
 }: StickyPaneProps) {
+  const { t } = useTranslation('settings')
+
   const [dialog, setDialog] = useState<StickyDialog | null>(null)
   const [local, setLocal] = useState<Obj>({ ...sticky })
   const triggerRefs = useRef<
@@ -133,18 +138,18 @@ export function StickyPane({
   return (
     <div className='space-y-4'>
       <div>
-        <h2 className='text-base font-semibold'>粘性</h2>
+        <h2 className='text-base font-semibold'>{t('nav.sticky')}</h2>
         <p className='mt-1 text-sm text-muted-foreground'>
-          当前配置由 Claude 与 OpenAI 共享；绑定记录和两个平台的回路不同。
+          {t('sticky.description')}
         </p>
       </div>
       <div className='grid grid-cols-1 gap-3 lg:grid-cols-2'>
         <div>
           <SummaryButton
             icon={Link2}
-            title='会话绑定'
-            value={enabled ? '已启用' : '已停用'}
-            desc='优先回到绑定账号，不改变 Claude 独立席位语义'
+            title={t('sticky.binding')}
+            value={enabled ? t('enabled') : t('disabled')}
+            desc={t('sticky.bindingHelp')}
             pending={pending}
             disabled={saving}
             buttonRef={(node) => {
@@ -156,9 +161,9 @@ export function StickyPane({
         <div>
           <SummaryButton
             icon={Clock3}
-            title='绑定保持时间'
+            title={t('sticky.bindingTtl')}
             value={fmtDuration(ttl * 1000)}
-            desc='绑定记录 TTL，不是请求超时或席位宽限'
+            desc={t('sticky.bindingTtlHelp')}
             pending={pending}
             disabled={saving}
             buttonRef={(node) => {
@@ -181,26 +186,32 @@ export function StickyPane({
         <Radio className='size-4 text-muted-foreground' aria-hidden />
         <span>
           <span className='block text-sm font-medium'>
-            出站 session · {outbound === 'passthrough' ? '透传' : '重建'}
-            {pending ? (
-              <span className='ml-2 rounded bg-[color:var(--status-caution)]/15 px-1.5 py-0.5 text-[10px] font-normal text-[color:var(--status-caution)]'>
-                待保存
-              </span>
-            ) : null}
+            {
+              <>
+                {t('sticky.outboundSummary', {
+                  mode: t(
+                    outbound === 'passthrough'
+                      ? 'sticky.passthrough'
+                      : 'sticky.rebuild'
+                  ),
+                })}
+                {pending ? (
+                  <span className='ml-2 rounded bg-[color:var(--status-caution)]/15 px-1.5 py-0.5 text-[10px] font-normal text-[color:var(--status-caution)]'>
+                    {t('pendingSave')}
+                  </span>
+                ) : null}
+              </>
+            }
           </span>
           <span className='block text-xs font-normal text-muted-foreground'>
-            仅调整出站身份兼容策略
+            {t('sticky.identityScope')}
           </span>
         </span>
       </Button>
       <div className='rounded-lg border bg-muted/20 p-4 text-sm'>
-        <h3 className='font-medium'>身份识别与平台回路</h3>
+        <h3 className='font-medium'>{t('sticky.platformFlow')}</h3>
         <p className='mt-2 leading-6 text-muted-foreground'>
-          网关先取调用方显式 session，再按现有回退路径提取身份。Claude
-          保留设备/席位亲和； OpenAI
-          保留绑定账号与忙时借槽，previous_response_id 不能跨账号任意续接。 旧
-          mode、header_keys 和 body_keys
-          继续保存在路由配置中，但不在此提供没有生效路径的编辑器。
+          {t('sticky.platformFlowHelp')}
         </p>
       </div>
       <Dialog
@@ -216,14 +227,12 @@ export function StickyPane({
           <DialogHeader>
             <DialogTitle>
               {dialog === 'binding'
-                ? '会话绑定'
+                ? t('sticky.binding')
                 : dialog === 'ttl'
-                  ? '绑定保持时间'
-                  : '出站 session'}
+                  ? t('sticky.bindingTtl')
+                  : t('sticky.outboundSession')}
             </DialogTitle>
-            <DialogDescription>
-              应用到草稿后，仍需点击页面底部保存才会写入运行配置。
-            </DialogDescription>
+            <DialogDescription>{t('sticky.draftHelp')}</DialogDescription>
           </DialogHeader>
           <fieldset
             disabled={saving}
@@ -232,9 +241,11 @@ export function StickyPane({
             {dialog === 'binding' ? (
               <div className='flex items-center justify-between gap-4 rounded-lg border p-3'>
                 <div>
-                  <Label htmlFor='sticky-dialog-enabled'>启用绑定</Label>
+                  <Label htmlFor='sticky-dialog-enabled'>
+                    {t('sticky.enableBinding')}
+                  </Label>
                   <p className='mt-1 text-xs text-muted-foreground'>
-                    同一来源在 TTL 内优先回到原账号。
+                    {t('sticky.enableBindingHelp')}
                   </p>
                 </div>
                 <Switch
@@ -248,7 +259,9 @@ export function StickyPane({
             ) : null}
             {dialog === 'ttl' ? (
               <div className='space-y-2'>
-                <Label htmlFor='sticky-dialog-ttl'>绑定保持时间</Label>
+                <Label htmlFor='sticky-dialog-ttl'>
+                  {t('sticky.bindingTtl')}
+                </Label>
                 <Select
                   value={String(local.ttl_seconds ?? ttl)}
                   onValueChange={(next) =>
@@ -273,7 +286,9 @@ export function StickyPane({
             ) : null}
             {dialog === 'outbound' ? (
               <div className='space-y-2'>
-                <Label htmlFor='sticky-dialog-outbound'>出站身份</Label>
+                <Label htmlFor='sticky-dialog-outbound'>
+                  {t('sticky.outboundIdentity')}
+                </Label>
                 <Select
                   value={String(local.outbound_session || 'rebuild')}
                   onValueChange={(outbound_session) =>
@@ -290,12 +305,16 @@ export function StickyPane({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value='rebuild'>重建</SelectItem>
-                    <SelectItem value='passthrough'>透传</SelectItem>
+                    <SelectItem value='rebuild'>
+                      {t('sticky.rebuild')}
+                    </SelectItem>
+                    <SelectItem value='passthrough'>
+                      {t('sticky.passthrough')}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className='text-xs leading-5 text-muted-foreground'>
-                  透传依赖上游接受调用方 session；重建由网关生成稳定的出站身份。
+                  {t('sticky.outboundHelp')}
                 </p>
               </div>
             ) : null}
@@ -308,7 +327,7 @@ export function StickyPane({
               className='min-h-11'
               onClick={close}
             >
-              取消
+              {t('cancel')}
             </Button>
             <Button
               type='button'
@@ -316,7 +335,7 @@ export function StickyPane({
               className='min-h-11'
               onClick={apply}
             >
-              应用到草稿
+              {t('applyDraft')}
             </Button>
           </DialogFooter>
         </DialogContent>

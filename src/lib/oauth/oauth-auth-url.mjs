@@ -82,11 +82,11 @@ function fail(code, message) {
   return err
 }
 
-function normalizeSocks(proxyUrl) {
+function normalizeProxy(proxyUrl) {
   if (proxyUrl === '') return ''
   const s = String(proxyUrl || '').trim()
   if (!s) return null
-  return s.replace(/^socks5:\/\//i, 'socks5h://')
+  return s
 }
 
 export function normalizeOauthFlavor(raw) {
@@ -125,7 +125,7 @@ export function generateAuthUrl({ vmId, proxyUrl, flavor } = {}) {
     throw fail('claude_code_in_slot', '官方 Claude Code 登录必须由槽内 cli-node 执行，不能由宿主机生成授权链接')
   }
   if (!vmId) throw fail('vm_required', 'vm_id required (先创建虚拟机)')
-  if (normalizeSocks(proxyUrl) == null) {
+  if (normalizeProxy(proxyUrl) == null) {
     throw fail('proxy_required', '虚拟机未绑定 SOCKS5，请先分配代理再生成授权链接')
   }
   const spec = oauthFlavorSpec(flavor)
@@ -163,7 +163,7 @@ function parseAuthCode(fullCode) {
 }
 
 async function exchangeCodeForToken(authCode, codeVerifier, state, proxyUrl, session) {
-  const px = normalizeSocks(proxyUrl)
+  const px = normalizeProxy(proxyUrl)
   if (px == null) throw fail('proxy_required', '虚拟机未绑定 SOCKS5，无法换票')
   return exchangeTokenViaCookieAuth({
     code: authCode,

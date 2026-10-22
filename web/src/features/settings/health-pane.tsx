@@ -1,5 +1,6 @@
 import { type ComponentProps, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -75,6 +76,8 @@ function DeferredIntInput({
 }
 
 export function HealthPane(props: HealthPaneProps) {
+  const { t } = useTranslation('settings')
+
   const {
     title,
     failover,
@@ -101,25 +104,25 @@ export function HealthPane(props: HealthPaneProps) {
         <CardHeader>
           <CardTitle>{title}</CardTitle>
           <p className='text-xs text-muted-foreground'>
-            探测和测试请求在进入调度前就地应答，不占并发、会话席位和粘性。
+            {t('health.description')}
           </p>
         </CardHeader>
         <CardContent className='divide-y'>
           <SettingRow
-            label='拦截预热请求'
-            desc='仅 Claude 模型的 /v1/messages。Claude Code 的 Warmup、标题生成、SUGGESTION MODE、haiku max_tokens=1 连通性检查直接返回模拟响应，不打上游。'
+            label={t('health.interceptWarmup')}
+            desc={t('health.warmupHelp')}
           >
             <Switch
               checked={probe.intercept_warmup === true}
               onCheckedChange={(checked) =>
                 setProbe({ intercept_warmup: checked })
               }
-              aria-label='拦截预热请求'
+              aria-label={t('health.interceptWarmup')}
             />
           </SettingRow>
           <SettingRow
-            label='max_tokens 下限'
-            desc='Claude 出站时把过小的 max_tokens 抬到下限，避免探测请求在输出前被截断。未传 max_tokens 的请求不受影响。'
+            label={t('health.minimumTokens')}
+            desc={t('health.minimumTokensHelp')}
           >
             <div className='flex items-center gap-3'>
               <Input
@@ -134,14 +137,14 @@ export function HealthPane(props: HealthPaneProps) {
                     value: clampInt(event.target.value, 1, 4096, 128),
                   })
                 }
-                aria-label='max_tokens 下限'
+                aria-label={t('health.minimumTokens')}
               />
               <Switch
                 checked={minTokens.enabled !== false}
                 onCheckedChange={(checked) =>
                   setMinTokens({ enabled: checked })
                 }
-                aria-label='启用 max_tokens 下限'
+                aria-label={t('health.enableMinimum')}
               />
             </div>
           </SettingRow>
@@ -169,27 +172,28 @@ function HealthCacheCard({
   onProbeChange: (patch: Obj) => void
   onRealChange: (patch: Obj) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const status = useQuery(healthProbeQueryOptions())
   const snaps = status.data?.snapshots
   return (
     <Card>
       <CardHeader>
-        <CardTitle>健康缓存</CardTitle>
-        <p className='text-xs text-muted-foreground'>
-          定时用真实槽位跑一次对话并缓存结果。new-api 渠道测试、sub2api
-          账号测试这类 hi / ping 请求直接回放缓存，覆盖
-          Messages、Chat、Responses 的流式和非流式。
-        </p>
+        <CardTitle>{t('health.cache')}</CardTitle>
+        <p className='text-xs text-muted-foreground'>{t('health.cacheHelp')}</p>
       </CardHeader>
       <CardContent className='divide-y'>
-        <SettingRow label='启用' desc='关闭时探测请求照常进入调度'>
+        <SettingRow label={t('enable')} desc={t('health.disabledHint')}>
           <Switch
             checked={probe.enabled === true}
             onCheckedChange={(checked) => onProbeChange({ enabled: checked })}
-            aria-label='启用健康缓存'
+            aria-label={t('health.enableCache')}
           />
         </SettingRow>
-        <SettingRow label='探测间隔' desc='秒，30–86400'>
+        <SettingRow
+          label={t('health.probeInterval')}
+          desc={t('health.intervalRange')}
+        >
           <DeferredIntInput
             className='w-28'
             min={30}
@@ -197,22 +201,25 @@ function HealthCacheCard({
             fallback={600}
             value={Number(probe.interval_sec ?? 600)}
             onCommit={(next) => onProbeChange({ interval_sec: next })}
-            aria-label='探测间隔'
+            aria-label={t('health.probeInterval')}
           />
         </SettingRow>
         <SettingRow
-          label='全号轮询'
-          desc='每个间隔对所有可调度槽各探一次（受并发上限、工作时段、冷却与凭证排除约束）。列表中首个成功的结果仍写入健康缓存；关闭时探测到第一个可用槽即停止。'
+          label={t('health.probeAll')}
+          desc={t('health.probeAllHelp')}
         >
           <Switch
             checked={probe.probe_all_slots === true}
             onCheckedChange={(checked) =>
               onProbeChange({ probe_all_slots: checked })
             }
-            aria-label='全号轮询'
+            aria-label={t('health.probeAll')}
           />
         </SettingRow>
-        <SettingRow label='缓存有效期' desc='秒，过期后探测请求照常进入调度'>
+        <SettingRow
+          label={t('health.cacheTtl')}
+          desc={t('health.cacheTtlHelp')}
+        >
           <DeferredIntInput
             className='w-28'
             min={30}
@@ -220,32 +227,37 @@ function HealthCacheCard({
             fallback={900}
             value={Number(probe.cache_ttl_sec ?? 900)}
             onCommit={(next) => onProbeChange({ cache_ttl_sec: next })}
-            aria-label='缓存有效期'
+            aria-label={t('health.cacheTtl')}
           />
         </SettingRow>
-        <SettingRow label='Claude 探测模型' desc='在 Claude 槽上跑真实探测'>
+        <SettingRow
+          label={t('health.claudeModel')}
+          desc={t('health.claudeModelHelp')}
+        >
           <Input
             className='w-56'
             value={String(real.model ?? 'claude-haiku-4-5')}
             onChange={(event) => onRealChange({ model: event.target.value })}
-            aria-label='Claude 探测模型'
+            aria-label={t('health.claudeModel')}
           />
         </SettingRow>
         <SettingRow
-          label='GPT 探测模型'
-          desc='在 GPT 槽上跑真实探测。留空则 GPT 模型的探测请求不走缓存。'
+          label={t('health.gptModel')}
+          desc={t('health.gptModelHelp')}
         >
           <Input
             className='w-56'
-            placeholder='gpt-5.4'
+            placeholder={
+              /* i18n-exempt "gpt-5.4" -- Example model ID; copying it must preserve the API identifier. */ 'gpt-5.4'
+            }
             value={String(real.openai_model ?? '')}
             onChange={(event) =>
               onRealChange({ openai_model: event.target.value })
             }
-            aria-label='GPT 探测模型'
+            aria-label={t('health.gptModel')}
           />
         </SettingRow>
-        <SettingRow label='最近快照'>
+        <SettingRow label={t('health.latestSnapshot')}>
           <div className='flex flex-col items-end gap-1 text-xs'>
             <SnapshotLine label='Claude' snap={snaps?.anthropic} />
             <SnapshotLine label='GPT' snap={snaps?.openai} />
@@ -263,11 +275,21 @@ function SnapshotLine({
   label: string
   snap: HealthSnapshotView | undefined
 }) {
+  const { t } = useTranslation('settings')
+
   if (!snap?.at) {
-    return <span className='text-muted-foreground'>{label}：暂无</span>
+    return (
+      <span className='text-muted-foreground'>
+        {t('health.noSnapshot', { value1: label })}
+      </span>
+    )
   }
   const tone = snap.ok ? 'default' : snap.error ? 'destructive' : 'secondary'
-  const text = snap.ok ? '可用' : snap.error ? '失败' : '已过期'
+  const text = snap.ok
+    ? t('available')
+    : snap.error
+      ? t('failed')
+      : t('expired')
   return (
     <span className='flex items-center gap-2'>
       <span className='text-muted-foreground'>
@@ -287,33 +309,27 @@ function SignatureRepairCard({
   failover: Obj
   onChange: (next: Obj) => void
 }) {
+  const { t } = useTranslation('settings')
+
   // 默认值在 gateway HEAD 与工作区之间相反（!== false vs === true），
   // 所以不硬编码默认态，严格按 GET /routing 的实际值回显。
   const enabled = failover.signature_repair === true
   return (
     <Card>
       <CardHeader>
-        <CardTitle>签名修复</CardTitle>
+        <CardTitle>{t('health.signatureRepair')}</CardTitle>
       </CardHeader>
       <CardContent className='flex items-start justify-between gap-4'>
         <div className='space-y-1 text-sm text-muted-foreground'>
-          <p>
-            上游因思考签名返回 400 时，剥掉思考历史后重试一次，客户端最终看到
-            200。
-          </p>
-          <p>
-            关闭则保留同账号的 thinking / signature
-            块（缺少字段时补齐空字段），把 400 原样透传；切账号的清理和 cli-node
-            自身行为不受此开关改变。 其它修复（搜索 / 预填 / 工具配对 / schema /
-            自适应）不受此开关影响。
-          </p>
+          <p>{t('health.signatureRepairHelp')}</p>
+          <p>{t('health.signatureDisabledHelp')}</p>
         </div>
         <Switch
           checked={enabled}
           onCheckedChange={(checked) =>
             onChange({ ...failover, signature_repair: checked })
           }
-          aria-label='签名修复'
+          aria-label={t('health.signatureRepair')}
         />
       </CardContent>
     </Card>

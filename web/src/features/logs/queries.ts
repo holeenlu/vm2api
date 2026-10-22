@@ -71,14 +71,16 @@ export function usageLogsBatchQueryOptions({
 }) {
   return infiniteQueryOptions({
     queryKey: [...USAGE_LOGS_QUERY_KEY, 'batch', filters] as const,
-    queryFn: ({ pageParam }) => {
+    queryFn: ({ pageParam, signal }) => {
       const qs = usageLogFiltersQuery(filters)
       qs.set('limit', String(USAGE_LOGS_BATCH_SIZE))
       if (pageParam) {
         qs.set('cursor_created_at', pageParam.createdAt)
         qs.set('cursor_id', pageParam.id)
       }
-      return api<UsageLogsBatchResult>(`/api/panel/usage-logs?${qs}`)
+      return api<UsageLogsBatchResult>(`/api/panel/usage-logs?${qs}`, {
+        signal,
+      })
     },
     initialPageParam: null as UsageLogCursor | null,
     getNextPageParam: (last) =>

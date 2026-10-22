@@ -1,5 +1,5 @@
 /**
- * proxies repository — SOCKS5 pool rows + pool config in settings.
+ * proxies repository — proxy pool rows + pool config in settings.
  * The ProxyPool keeps its working set in memory (probe loop mutates it);
  * this repo is the persistence surface: loadAll / replaceAll.
  */
@@ -48,6 +48,11 @@ const COLUMNS = [
   'created_at',
   'updated_at',
   'domain_forward',
+  'quality_json',
+  'quality_version',
+  'expires_at',
+  'fallback_mode',
+  'backup_proxy_id',
 ]
 
 function rowToProxy(row) {
@@ -80,7 +85,9 @@ export class ProxiesRepo {
           ...COLUMNS.map((c) => {
             if (c === 'enabled') return p.enabled === false ? 0 : 1
             if (c === 'domain_forward') return p.domain_forward ? 1 : 0
-            if (c === 'protocol') return p.protocol ?? p.scheme ?? 'socks5'
+            if (c === 'quality_version') return p.quality_version || 0
+            if (c === 'fallback_mode') return p.fallback_mode || 'none'
+            if (c === 'protocol') return p.scheme ?? p.protocol ?? 'socks5'
             if (c === 'name') return p.name ?? (p.host && p.port != null ? `${p.host}:${p.port}` : p.id)
             return p[c] ?? null
           }),

@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { PersonaPreset } from '@/types/panel-routing'
 import { Check, ChevronDown, RotateCcw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   DEFAULT_PERSONA_TEMPLATES,
-  PERSONA_PRESET_OPTIONS,
   PERSONA_PRESETS,
   formatLineError,
   parsePersonaTemplateLines,
   personaPresetFromCompat,
-  personaPresetLabel,
   presetSeed,
   stringifyPersonaTemplate,
   templateSlotState,
@@ -36,6 +35,7 @@ import {
   Problems,
 } from '@/features/settings/persona-editors'
 import { InjectCard } from './inject-card'
+import { systemPresetLabel } from './preset-label'
 import { SystemPreview } from './system-preview'
 
 type Compat = Record<string, unknown>
@@ -58,13 +58,16 @@ function PresetBar({
   summaries: Record<PersonaPreset, string>
   onView: (preset: PersonaPreset) => void
 }) {
+  const { t } = useTranslation('system')
+
   return (
     <div
       role='tablist'
-      aria-label='system 提示词档位'
+      aria-label={t('system:presetSelector')}
       className='grid grid-cols-2 gap-2 lg:grid-cols-4'
     >
-      {PERSONA_PRESET_OPTIONS.map(([key, label]) => {
+      {PERSONA_PRESETS.map((key) => {
+        const label = systemPresetLabel(key)
         const selected = key === viewing
         return (
           <button
@@ -85,7 +88,7 @@ function PresetBar({
               {key === active ? (
                 <span className='ml-auto flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400'>
                   <Check className='size-3' aria-hidden />
-                  生效
+                  {t('system:active')}
                 </span>
               ) : null}
             </span>
@@ -110,6 +113,8 @@ export function SystemPromptWorkspace({
   onChange: (next: Compat) => void
   onProblemsChange: (problems: string[]) => void
 }) {
+  const { t } = useTranslation('system')
+
   const [drafts, setDrafts] = useState<PersonaDrafts | null>(null)
   const active = personaPresetFromCompat(compat)
   const [viewing, setViewing] = useState<PersonaPreset>(active)
@@ -125,22 +130,30 @@ export function SystemPromptWorkspace({
     if (!drafts) return []
     const out: string[] = []
     for (const key of PERSONA_PRESETS) {
-      const at = key === active ? '' : `「${personaPresetLabel(key)}」`
+      const messageKey =
+        key === active ? 'system:templateError' : 'system:presetTemplateError'
       const parsed = parsePersonaTemplateLines(drafts[key])
       for (const err of parsed.errors)
-        out.push(`模板${at}${formatLineError(err)}`)
+        out.push(
+          t(messageKey, {
+            preset: systemPresetLabel(key),
+            error: formatLineError(err),
+          })
+        )
       for (const msg of validatePersonaTemplate(parsed.blocks))
-        out.push(`模板${at}${msg}`)
+        out.push(t(messageKey, { preset: systemPresetLabel(key), error: msg }))
     }
     return out
-  }, [drafts, active])
+  }, [drafts, active, t])
 
   useEffect(() => {
     onProblemsChange(problems)
   }, [problems, onProblemsChange])
 
   if (!drafts) {
-    return <p className='text-sm text-muted-foreground'>读取中…</p>
+    return (
+      <p className='text-sm text-muted-foreground'>{t('system:loading')}</p>
+    )
   }
 
   const setDraft = (text: string) => {
@@ -171,8 +184,10 @@ export function SystemPromptWorkspace({
           {viewing !== active ? (
             <div className='flex items-center justify-between gap-3 rounded-xl border border-dashed px-4 py-2.5'>
               <span className='text-sm text-muted-foreground'>
-                正在查看「{personaPresetLabel(viewing)}」，当前生效「
-                {personaPresetLabel(active)}」
+                {t('system:viewingPreset', {
+                  viewing: systemPresetLabel(viewing),
+                  active: systemPresetLabel(active),
+                })}
               </span>
               <Button
                 type='button'
@@ -186,7 +201,7 @@ export function SystemPromptWorkspace({
                   })
                 }
               >
-                设为生效
+                {t('system:activate')}
               </Button>
             </div>
           ) : null}
@@ -216,9 +231,14 @@ export function SystemPromptWorkspace({
                       )}
                       aria-hidden
                     />
-                    <span className='text-sm font-medium'>模板</span>
+                    <span className='text-sm font-medium'>
+                      {t('system:template')}
+                    </span>
                     <span className='truncate text-xs text-muted-foreground'>
-                      {summaries[viewing]} · {blocks.length} 块
+                      {t('system:schemeBlocks', {
+                        summary: summaries[viewing],
+                        count: blocks.length,
+                      })}
                     </span>
                   </button>
                 </CollapsibleTrigger>
@@ -236,13 +256,15 @@ export function SystemPromptWorkspace({
                   }
                 >
                   <RotateCcw />
-                  恢复预设
+                  {t('system:restorePreset')}
                 </Button>
               </div>
               <CollapsibleContent className='space-y-3 border-t border-border/60 px-4 py-3'>
                 {viewing === 'custom' &&
                 personaDraftStoresEmpty(text, 'custom') ? (
-                  <Notice tone='caution'>空模板会回落官方提示词。</Notice>
+                  <Notice tone='caution'>
+                    {t('system:emptyTemplateHint')}
+                  </Notice>
                 ) : null}
                 <PersonaTemplateEditor
                   key={viewing}
