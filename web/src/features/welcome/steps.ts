@@ -1,7 +1,9 @@
 import type { ViewId } from '@/config/nav'
 import { DOCS_URL } from '@/config/repo'
+import { t } from '@/i18n'
 
 export type OnboardingStepId =
+  | 'service_group'
   | 'admin_password'
   | 'egress'
   | 'slot_account'
@@ -10,7 +12,7 @@ export type OnboardingStepId =
   | 'first_request'
 
 export type StepPanelTo =
-  '/users' | '/proxies' | '/import' | '/vm' | '/keys' | '/logs'
+  '/groups' | '/users' | '/proxies' | '/import' | '/vm' | '/keys' | '/logs'
 
 export type StepMeta = {
   id: OnboardingStepId
@@ -22,50 +24,86 @@ export type StepMeta = {
 }
 
 export const STEP_META: Record<OnboardingStepId, StepMeta> = {
+  service_group: {
+    id: 'service_group',
+    get title() {
+      return t('welcome:stepServices')
+    },
+    get description() {
+      return t('welcome:stepServicesHelp')
+    },
+    panelTo: '/groups',
+    panelView: 'groups',
+    docsPath: 'guide/api',
+  },
   admin_password: {
     id: 'admin_password',
-    title: '修改默认密码',
-    description: '环境变量里的 123456 不能留到生产。到用户页给管理员换一条。',
+    get title() {
+      return t('welcome:stepPassword')
+    },
+    get description() {
+      return t('welcome:stepPasswordHelp')
+    },
     panelTo: '/users',
     panelView: 'users',
     docsPath: 'guide/console/users',
   },
   egress: {
     id: 'egress',
-    title: '配置出口代理',
-    description: '每个槽位要有独立出口才能上线，本机 px-local 也算一条。',
+    get title() {
+      return t('welcome:stepEgress')
+    },
+    get description() {
+      return t('welcome:stepEgressHelp')
+    },
     panelTo: '/proxies',
     panelView: 'proxies',
     docsPath: 'guide/console/proxies',
   },
   slot_account: {
     id: 'slot_account',
-    title: '导入槽位账号',
-    description: '建槽并写入订阅凭证，官方客户端才有东西可跑。',
+    get title() {
+      return t('welcome:stepAccount')
+    },
+    get description() {
+      return t('welcome:stepAccountHelp')
+    },
     panelTo: '/import',
     panelView: 'import',
     docsPath: 'guide/console/import',
   },
   schedulable: {
     id: 'schedulable',
-    title: '上线可调度槽位',
-    description: '有凭证的槽打开调度后，网关才会把请求派进去。',
+    get title() {
+      return t('welcome:stepSchedule')
+    },
+    get description() {
+      return t('welcome:stepScheduleHelp')
+    },
     panelTo: '/vm',
     panelView: 'vm',
     docsPath: 'guide/slots',
   },
   api_key: {
     id: 'api_key',
-    title: '签发 API 密钥',
-    description: '给客户端一张 sk-vm- 密钥，不要把主控密钥写进环境变量。',
+    get title() {
+      return t('welcome:stepKey')
+    },
+    get description() {
+      return t('welcome:stepKeyHelp')
+    },
     panelTo: '/keys',
     panelView: 'keys',
     docsPath: 'guide/console/keys',
   },
   first_request: {
     id: 'first_request',
-    title: '发出第一个请求',
-    description: '打通 /v1 后，日志里出现一条 2xx 就算首配完成。',
+    get title() {
+      return t('welcome:stepRequest')
+    },
+    get description() {
+      return t('welcome:stepRequestHelp')
+    },
     panelTo: '/logs',
     panelView: 'logs',
     docsPath: 'guide/api',

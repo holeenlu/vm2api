@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { t, i18n } from '@/i18n'
 import type {
   StatsDimension,
   StatsMetric,
   StatsRange,
   StatsSeries,
 } from '@/types/panel-statistics'
+import { useTranslation } from 'react-i18next'
 import {
   Area,
   AreaChart,
@@ -15,6 +17,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { useAuthStore } from '@/stores/auth-store'
 import { formatCurrency, formatTokenAmount } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -29,16 +32,45 @@ import {
 } from './stats-format'
 
 const METRIC_TABS: { id: StatsMetric; label: string }[] = [
-  { id: 'cost', label: '总消耗金额' },
-  { id: 'requests', label: '总API调用次数' },
-  { id: 'tokens', label: '总 Token 数' },
+  {
+    id: 'cost',
+    get label() {
+      return t('statistics:totalSpend')
+    },
+  },
+  {
+    id: 'requests',
+    get label() {
+      return t('statistics:totalCalls')
+    },
+  },
+  {
+    id: 'tokens',
+    get label() {
+      return t('statistics:totalTokens')
+    },
+  },
 ]
 
 const DIMENSION_LABELS: Record<StatsDimension, string> = {
-  user: '用户',
-  key: '密钥',
-  model: '模型',
-  vm: '槽位',
+  get user() {
+    return t('statistics:user')
+  },
+  get key() {
+    return t('statistics:key')
+  },
+  get model() {
+    return t('statistics:model')
+  },
+  get vm() {
+    return t('statistics:slot')
+  },
+  get group() {
+    return t('statistics:group')
+  },
+  get endpoint() {
+    return t('statistics:entry')
+  },
 }
 
 const CHART_HEIGHT_WITH_LEGEND = 240
@@ -47,11 +79,11 @@ const CHART_HEIGHT_NO_LEGEND = 280
 function formatMetric(metric: StatsMetric, value: number): string {
   if (metric === 'cost') return formatCurrency(value)
   if (metric === 'tokens') return formatTokenAmount(value)
-  return value.toLocaleString()
+  return value.toLocaleString(i18n.language)
 }
 
 function seriesLabel(series: StatsSeries): string {
-  if (series.id === '__others__') return '其他'
+  if (series.id === '__others__') return t('statistics:other')
   return series.name || series.id
 }
 
@@ -64,6 +96,8 @@ function SeriesName({
   dimension: StatsDimension
   className?: string
 }) {
+  useTranslation('statistics')
+
   const label = seriesLabel(series)
   const showIcon = dimension === 'model' && !series.id.startsWith('__')
   return (
@@ -86,9 +120,14 @@ export function StatisticsChartCard({
   tz: string
   className?: string
 }) {
+  const { t } = useTranslation('statistics')
+
+  const canSeeMoney = useAuthStore((s) => s.me?.role !== 'super')
   const [range, setRange] = useState<StatsRange>('today')
   const [dimension, setDimension] = useState<StatsDimension>(dimensions[0])
-  const [metric, setMetric] = useState<StatsMetric>('cost')
+  const [metric, setMetric] = useState<StatsMetric>(
+    canSeeMoney ? 'cost' : 'requests'
+  )
   const [chartMode, setChartMode] = useState<'overlay' | 'stacked'>('overlay')
   // 记被隐藏的序列 id（而非已选）：5s 轮询带来的新序列默认可见，且 id 跨刷新稳定。
   const [hidden, setHidden] = useState<Set<string>>(() => new Set())
@@ -117,7 +156,7 @@ export function StatisticsChartCard({
     0
   )
   const tabTotals = Object.fromEntries(
-    METRIC_TABS.map((tab) => [
+    METRIC_TABS.filter((t) => canSeeMoney || t.id !== 'cost').map((tab) => [
       tab.id,
       visible.reduce((sum, s) => sum + (totalsOf(s)?.[tab.id] ?? 0), 0),
     ])
@@ -201,7 +240,9 @@ export function StatisticsChartCard({
     >
       <div className='flex flex-wrap items-center justify-between border-b border-border/50 dark:border-white/[0.06]'>
         <div className='flex flex-wrap items-center gap-4 px-4 py-2'>
-          <h4 className='text-sm font-semibold'>使用统计</h4>
+          <h4 className='text-sm font-semibold'>
+            {t('statistics:usageStats')}
+          </h4>
           {dimensions.length > 1 ? (
             <div className='inline-flex rounded-md border bg-muted/30 p-0.5'>
               {dimensions.map((dim) => (
@@ -221,13 +262,13 @@ export function StatisticsChartCard({
                 active={chartMode === 'overlay'}
                 onClick={() => setChartMode('overlay')}
               >
-                对比
+                {t('statistics:compare')}
               </ToggleChip>
               <ToggleChip
                 active={chartMode === 'stacked'}
                 onClick={() => setChartMode('stacked')}
               >
-                堆叠
+                {t('statistics:stacked')}
               </ToggleChip>
             </div>
           ) : null}
@@ -254,28 +295,30 @@ export function StatisticsChartCard({
       </div>
 
       <div className='flex border-b border-border/50 dark:border-white/[0.06]'>
-        {METRIC_TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type='button'
-            data-active={metric === tab.id}
-            aria-pressed={metric === tab.id}
-            onClick={() => setMetric(tab.id)}
-            className={cn(
-              'flex flex-1 cursor-pointer flex-col items-start gap-0.5 px-4 py-2 transition-colors',
-              'border-r border-border/50 last:border-r-0 dark:border-white/[0.06]',
-              'hover:bg-muted/30 dark:hover:bg-white/[0.02]',
-              'data-[active=true]:bg-muted/50 dark:data-[active=true]:bg-white/[0.04]'
-            )}
-          >
-            <span className='text-[10px] tracking-wide text-muted-foreground uppercase'>
-              {tab.label}
-            </span>
-            <span className='text-base font-bold tabular-nums'>
-              {formatMetric(tab.id, tabTotals[tab.id])}
-            </span>
-          </button>
-        ))}
+        {METRIC_TABS.filter((t) => canSeeMoney || t.id !== 'cost').map(
+          (tab) => (
+            <button
+              key={tab.id}
+              type='button'
+              data-active={metric === tab.id}
+              aria-pressed={metric === tab.id}
+              onClick={() => setMetric(tab.id)}
+              className={cn(
+                'flex flex-1 cursor-pointer flex-col items-start gap-0.5 px-4 py-2 transition-colors',
+                'border-r border-border/50 last:border-r-0 dark:border-white/[0.06]',
+                'hover:bg-muted/30 dark:hover:bg-white/[0.02]',
+                'data-[active=true]:bg-muted/50 dark:data-[active=true]:bg-white/[0.04]'
+              )}
+            >
+              <span className='text-[10px] tracking-wide text-muted-foreground uppercase'>
+                {tab.label}
+              </span>
+              <span className='text-base font-bold tabular-nums'>
+                {formatMetric(tab.id, tabTotals[tab.id])}
+              </span>
+            </button>
+          )
+        )}
       </div>
 
       <div ref={chartWrapperRef} className='px-4 py-2'>
@@ -286,14 +329,14 @@ export function StatisticsChartCard({
             className='grid place-items-center text-sm text-destructive'
             style={{ height: chartHeight }}
           >
-            获取统计数据失败
+            {t('statistics:statsError')}
           </div>
         ) : series.length === 0 || visibleTotal === 0 ? (
           <div
             className='grid place-items-center text-sm text-muted-foreground'
             style={{ height: chartHeight }}
           >
-            暂无统计数据
+            {t('statistics:noStats')}
           </div>
         ) : (
           <ResponsiveContainer width='100%' height={chartHeight}>
@@ -432,7 +475,9 @@ export function StatisticsChartCard({
           </ResponsiveContainer>
         )}
         {stats.error && data ? (
-          <p className='pt-2 text-xs text-destructive'>获取统计数据失败</p>
+          <p className='pt-2 text-xs text-destructive'>
+            {t('statistics:statsError')}
+          </p>
         ) : null}
       </div>
 
@@ -443,10 +488,10 @@ export function StatisticsChartCard({
               disabled={allVisible}
               onClick={() => setHidden(new Set())}
             >
-              全选
+              {t('statistics:selectAll')}
             </LegendAction>
             <LegendAction disabled={oneVisible} onClick={keepFirstWithUsage}>
-              清空
+              {t('statistics:clear')}
             </LegendAction>
           </div>
           <div className='max-h-[72px] overflow-y-auto pr-36'>
@@ -499,6 +544,8 @@ function ToggleChip({
   onClick: () => void
   children: string
 }) {
+  useTranslation('statistics')
+
   return (
     <button
       type='button'
@@ -521,6 +568,8 @@ function LegendAction({
   onClick: () => void
   children: string
 }) {
+  useTranslation('statistics')
+
   return (
     <button
       type='button'

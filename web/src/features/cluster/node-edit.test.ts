@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { ClusterApiNode } from '@/types/panel-cluster'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from '@/lib/api'
 import {
   connectionDraft,
@@ -8,6 +9,10 @@ import {
   nodeEditError,
   renameNodePatch,
 } from './node-edit'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 const node: ClusterApiNode = {
   id: 'node-a',

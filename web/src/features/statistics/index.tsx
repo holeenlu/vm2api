@@ -1,8 +1,11 @@
 import { useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { VIEW_DESCRIPTIONS, VIEW_TITLES } from '@/config/nav'
+import { t, i18n } from '@/i18n'
 import type { LeaderboardScope, StatsDimension } from '@/types/panel-statistics'
 import { Activity, Clock, DollarSign, TrendingUp } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { useAuthStore } from '@/stores/auth-store'
 import { formatCurrency, formatDuration } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/page-header'
@@ -17,22 +20,56 @@ import { usageOverviewQueryOptions } from './queries'
 import { StatisticsChartCard } from './statistics-chart-card'
 import { browserTimeZone, percentChange } from './stats-format'
 
-const ADMIN_DIMENSIONS: StatsDimension[] = ['user', 'key', 'model', 'vm']
+const ADMIN_DIMENSIONS: StatsDimension[] = [
+  'user',
+  'key',
+  'model',
+  'group',
+  'endpoint',
+  'vm',
+]
 // user 角色只能看本人数据，后端对 user / vm 维度回 400。
-const USER_DIMENSIONS: StatsDimension[] = ['key', 'model']
+const USER_DIMENSIONS: StatsDimension[] = ['key', 'model', 'group', 'endpoint']
 
 const ADMIN_CARDS: { scope: LeaderboardScope; title: string }[] = [
-  { scope: 'user', title: '用户排行' },
-  { scope: 'vm', title: '供应商排行' },
-  { scope: 'model', title: '模型排行' },
+  {
+    scope: 'user',
+    get title() {
+      return t('statistics:userRanking')
+    },
+  },
+  {
+    scope: 'vm',
+    get title() {
+      return t('statistics:providerRanking')
+    },
+  },
+  {
+    scope: 'model',
+    get title() {
+      return t('statistics:modelRanking')
+    },
+  },
 ]
 const USER_CARDS: { scope: LeaderboardScope; title: string }[] = [
-  { scope: 'key', title: '密钥排行' },
-  { scope: 'model', title: '模型排行' },
+  {
+    scope: 'key',
+    get title() {
+      return t('statistics:keyRanking')
+    },
+  },
+  {
+    scope: 'model',
+    get title() {
+      return t('statistics:modelRanking')
+    },
+  },
 ]
 const CARD_ACCENTS = ['primary', 'purple', 'blue'] as const
 
 export function StatisticsPage() {
+  useTranslation('statistics')
+
   const me = useQuery(meQueryOptions())
   return (
     <PageHeader
@@ -47,6 +84,9 @@ export function StatisticsPage() {
 }
 
 function StatisticsDashboard({ isUser }: { isUser: boolean }) {
+  const { t } = useTranslation('statistics')
+
+  const canSeeMoney = useAuthStore((s) => s.me?.role !== 'super')
   const [tz] = useState(browserTimeZone)
   const dimensions = isUser ? USER_DIMENSIONS : ADMIN_DIMENSIONS
   const cards = isUser ? USER_CARDS : ADMIN_CARDS
@@ -61,7 +101,9 @@ function StatisticsDashboard({ isUser }: { isUser: boolean }) {
   }
 
   const vsYesterday = (value: number | null) =>
-    value == null ? undefined : [{ value, label: '较昨日同期' }]
+    value == null
+      ? undefined
+      : [{ value, label: t('statistics:comparedYesterday') }]
   const durationChange = percentChange(
     overview?.todayAvgDurationMs,
     overview?.yesterdayAvgDurationMs
@@ -71,9 +113,9 @@ function StatisticsDashboard({ isUser }: { isUser: boolean }) {
     <div className='space-y-6'>
       <BentoGrid>
         <BentoMetricCard
-          title='活跃 Session'
+          title={t('statistics:activeSessions')}
           value={overview?.activeSessions ?? 0}
-          formatter={(v) => Math.round(v).toLocaleString()}
+          formatter={(v) => Math.round(v).toLocaleString(i18n.language)}
           icon={Activity}
           accentColor='emerald'
           className='min-h-[120px]'
@@ -82,9 +124,9 @@ function StatisticsDashboard({ isUser }: { isUser: boolean }) {
           ]}
         />
         <BentoMetricCard
-          title='今日请求'
+          title={t('statistics:todayRequests')}
           value={overview?.todayRequests ?? 0}
-          formatter={(v) => Math.round(v).toLocaleString()}
+          formatter={(v) => Math.round(v).toLocaleString(i18n.language)}
           icon={TrendingUp}
           accentColor='blue'
           className='min-h-[120px]'
@@ -92,19 +134,21 @@ function StatisticsDashboard({ isUser }: { isUser: boolean }) {
             percentChange(overview?.todayRequests, overview?.yesterdayRequests)
           )}
         />
+        {canSeeMoney && (
+          <BentoMetricCard
+            title={t('statistics:todayCost')}
+            value={overview?.todayCost ?? 0}
+            formatter={(v) => formatCurrency(v)}
+            icon={DollarSign}
+            accentColor='amber'
+            className='min-h-[120px]'
+            comparisons={vsYesterday(
+              percentChange(overview?.todayCost, overview?.yesterdayCost)
+            )}
+          />
+        )}
         <BentoMetricCard
-          title='今日消费'
-          value={overview?.todayCost ?? 0}
-          formatter={(v) => formatCurrency(v)}
-          icon={DollarSign}
-          accentColor='amber'
-          className='min-h-[120px]'
-          comparisons={vsYesterday(
-            percentChange(overview?.todayCost, overview?.yesterdayCost)
-          )}
-        />
-        <BentoMetricCard
-          title='平均响应时间'
+          title={t('statistics:averageResponseTime')}
           value={overview?.todayAvgDurationMs ?? 0}
           formatter={(v) => formatDuration(Math.round(v))}
           icon={Clock}

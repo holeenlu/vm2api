@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900" viewBox="0 0 1280 900" role="img" aria-labelledby="t d">
-  <title id="t">vm2api Issue 提交路线图</title>
+  <title id="t">tapmodels Issue 提交路线图</title>
   <desc id="d">自查、版本、复现路线、环境、日志、源码定位（可选）、脱敏、提交，随后维护者分诊、修复并发布 Release。</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -32,7 +32,7 @@
   <rect width="1280" height="900" rx="20" fill="url(#bg)"/>
 
   <!-- header -->
-  <text class="h1" x="40" y="68">vm2api Issue 提交路线图</text>
+  <text class="h1" x="40" y="68">tapmodels Issue 提交路线图</text>
   <text class="sub" x="40" y="98">Issue Reporting Roadmap · 按顺序收集，信息齐全即可直接复现定位</text>
   <g transform="translate(990 60)">
     <rect x="0" y="-12" width="34" height="16" rx="4" fill="none" stroke="#38bdf8" stroke-width="2"/>
@@ -61,8 +61,8 @@
     <text class="ct" x="60" y="40">使用的版本</text>
     <text class="en" x="60" y="60">VERSION</text>
     <line class="div" x1="18" y1="80" x2="252" y2="80"/>
-    <text x="20" y="106"><tspan class="b">• </tspan><tspan class="m">cat /opt/vm2api/VERSION</tspan></text>
-    <text x="20" y="130"><tspan class="b">• 镜像 </tspan><tspan class="m">docker inspect vm2api</tspan></text>
+    <text x="20" y="106"><tspan class="b">• </tspan><tspan class="m">cat /opt/tapmodels/VERSION</tspan></text>
+    <text x="20" y="130"><tspan class="b">• 镜像 </tspan><tspan class="m">docker inspect tapmodels</tspan></text>
     <text x="20" y="154"><tspan class="b">• </tspan><tspan class="m">install.sh status</tspan></text>
     <text class="b" x="20" y="178">• 部署方式 · 升级前 → 升级后</text>
   </g>
@@ -101,7 +101,7 @@
     <text class="ct" x="60" y="40">VM / 请求日志</text>
     <text class="en" x="60" y="60">LOGS</text>
     <line class="div" x1="18" y1="80" x2="252" y2="80"/>
-    <text x="20" y="106"><tspan class="b">• 控制面 </tspan><tspan class="m">docker logs vm2api</tspan></text>
+    <text x="20" y="106"><tspan class="b">• 控制面 </tspan><tspan class="m">docker logs tapmodels</tspan></text>
     <text x="20" y="130"><tspan class="b">• 槽位 </tspan><tspan class="m">docker logs kin-NN</tspan></text>
     <text x="20" y="154"><tspan class="b">• 请求 </tspan><tspan class="m">x-request-id</tspan><tspan class="b"> → attempts</tspan></text>
     <text class="b" x="20" y="178">• 创建报错原文 · 时间对齐</text>

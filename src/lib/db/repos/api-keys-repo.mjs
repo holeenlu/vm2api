@@ -31,9 +31,6 @@ const COLUMNS = [
   'key_prefix',
   'key_suffix',
   'category',
-  'group_type',
-  'allowed_vms',
-  'vm_pool_id',
   'key_secret',
   'user_id',
   'group_id',
@@ -77,15 +74,13 @@ const NUMERIC_DEFAULT_0 = new Set([
 
 function rowToRec(row) {
   if (!row) return null
-  return { ...row }
+  return Object.fromEntries(COLUMNS.map((c) => [c, row[c]]))
 }
 
 function toValue(rec, c) {
   const v = rec[c]
   if (v == null) {
     if (c === 'category') return 'oauth'
-    if (c === 'group_type') return 'all'
-    if (c === 'allowed_vms') return '[]'
     return NUMERIC_DEFAULT_0.has(c) ? 0 : null
   }
   return v
@@ -102,7 +97,9 @@ export class ApiKeysRepo {
       INSERT INTO api_keys (${COLUMNS.join(', ')})
       VALUES (${COLUMNS.map(() => '?').join(', ')})
     `)
-    this._delete = db.prepare('DELETE FROM api_keys WHERE id = ?')
+    this._delete = db.prepare(
+      "UPDATE api_keys SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),status='disabled' WHERE id=? AND deleted_at IS NULL",
+    )
     this._recordUsage = db.prepare(`
       UPDATE api_keys SET
         requests = requests + 1,

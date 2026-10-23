@@ -1,5 +1,8 @@
+import { t as tVm } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { localProxyText } from '@/lib/vm-status'
+import { localizedOption } from './localized-option'
 
 export type PackageFacts = {
   ok: true
@@ -33,28 +36,38 @@ export function readPackageFacts(text: string): PackageRead | null {
   try {
     doc = JSON.parse(raw)
   } catch {
-    return { ok: false, error: 'JSON 还不是一份完整的包' }
+    return {
+      ok: false,
+      error: tVm('vm:vmPackageView.jSONIsNotACompletePackageYet'),
+    }
   }
   const root = record(doc)
-  if (!root || root.type !== 'vm2api-vm-package') {
-    return { ok: false, error: '这不是 vm2api 单槽包' }
+  if (!root || root.type !== 'tapmodels-vm-package') {
+    return {
+      ok: false,
+      error: tVm('vm:vmPackageView.notATapmodelsSingleSlotPackage'),
+    }
   }
   const vm = record(root.vm)
-  if (!vm) return { ok: false, error: '包里没有 vm' }
+  if (!vm)
+    return { ok: false, error: tVm('vm:vmPackageView.packageHasNoVmEntry') }
   const proxy = record(root.proxy)
   const credential = record(root.credential)
   const kind = textOf(proxy?.kind || proxy?.scheme).toLowerCase()
-  let proxyText = '未带代理'
+  let proxyText = tVm('vm:vmPackageView.noProxyIncluded')
   if (proxy) {
     proxyText =
       kind === 'local' || proxy.host === 'local'
-        ? `${localProxyText()}（本地代理）`
+        ? tVm('vm:vmPackageView.localProxy', { value1: localProxyText() })
         : [textOf(proxy.host), proxy.port].filter(Boolean).join(':') || 'SOCKS5'
   }
-  let credentialText = '无凭证'
+  let credentialText = tVm('vm:detailStatusBoard.noCredentials')
   if (credential) {
     const platform = textOf(credential.platform).toLowerCase()
-    credentialText = platform === 'openai' ? 'Codex 凭证' : 'Claude 凭证'
+    credentialText =
+      platform === 'openai'
+        ? tVm('vm:vmPackageView.codexCredentials')
+        : tVm('vm:vmPackageView.claudeCredentials')
   }
   const platform = textOf(vm.platform || vm.family) || '—'
   return {
@@ -70,13 +83,13 @@ export function readPackageFacts(text: string): PackageRead | null {
 }
 
 const FACTS = [
-  ['id', '槽位'],
-  ['name', '名称'],
-  ['platform', '平台'],
-  ['kernel', '系统'],
-  ['timezone', '时区'],
-  ['proxy', '出口'],
-  ['credential', '凭证'],
+  localizedOption('id', 'vm:testChatTypes.slot'),
+  localizedOption('name', 'vm:createVmForm.name'),
+  localizedOption('platform', 'vm:createVmForm.platform'),
+  localizedOption('kernel', 'vm:createVmForm.operatingSystem'),
+  localizedOption('timezone', 'vm:physicalFeaturesCard.timezone'),
+  localizedOption('proxy', 'vm:createExitField.egress'),
+  localizedOption('credential', 'vm:detailTestTab.credentials'),
 ] as const
 
 export function PackageFacts({
@@ -86,6 +99,8 @@ export function PackageFacts({
   text: string
   className?: string
 }) {
+  useTranslation('vm')
+
   const facts = readPackageFacts(text)
   if (!facts) return null
   if (!facts.ok) {

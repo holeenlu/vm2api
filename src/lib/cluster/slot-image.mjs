@@ -126,7 +126,7 @@ export function slotDockerfile(baseImage, { runtime } = {}) {
 
 /**
  * `{ ref, base, hash, files, runtime }`. The tag is local to each node (never pushed):
- * vm2api/kin-slot-<kernel>:<hash12> or vm2api/kin-slot-kvm-<kernel>:<hash12>.
+ * tapmodels/kin-slot-<kernel>:<hash12> or tapmodels/kin-slot-kvm-<kernel>:<hash12>.
  * Docker output is identical when runtime is omitted.
  */
 export function slotImageSpec(projectRoot, kernel, { runtime } = {}) {
@@ -142,7 +142,7 @@ export function slotImageSpec(projectRoot, kernel, { runtime } = {}) {
   }
   const digest = hash.digest('hex').slice(0, 12)
   return {
-    ref: kvm ? `vm2api/kin-slot-kvm-${kernel}:${digest}` : `vm2api/kin-slot-${kernel}:${digest}`,
+    ref: kvm ? `tapmodels/kin-slot-kvm-${kernel}:${digest}` : `tapmodels/kin-slot-${kernel}:${digest}`,
     base,
     hash: digest,
     files,

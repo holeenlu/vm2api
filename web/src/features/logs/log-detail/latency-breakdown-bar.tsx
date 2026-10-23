@@ -1,10 +1,11 @@
-import { formatDuration } from '@/lib/usage-format'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { formatDuration } from '@/features/logs/display-time'
 import { latencySegments, segmentWidth } from '../log-display'
 
 /**
  * 延迟分解条（hub `LatencyBreakdownBar`）。三段：排队等待（首次尝试的
- * `wait_ms`，替代 vm2api 没有的 TTFB）→ 等待首 Token → 生成。
+ * `wait_ms`，替代 tapmodels 没有的 TTFB）→ 等待首 Token → 生成。
  */
 export function LatencyBreakdownBar({
   waitMs,
@@ -15,6 +16,8 @@ export function LatencyBreakdownBar({
   ttftMs: number | null
   durationMs: number | null
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const segments = latencySegments({ waitMs, ttftMs, durationMs })
   if (!segments || durationMs == null) return null
   const visible = segments.filter((s) => s.ms > 0)
@@ -49,7 +52,9 @@ export function LatencyBreakdownBar({
         ))}
       </div>
       <div className='text-center text-xs text-muted-foreground'>
-        总计: {formatDuration(durationMs)}
+        {translate('logs:totalDurationValue', {
+          duration: formatDuration(durationMs),
+        })}
       </div>
     </div>
   )

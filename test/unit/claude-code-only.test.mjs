@@ -190,7 +190,7 @@ function protocolHarness({ routing, body, healthMonitor }) {
     requestLog: { start: () => ({ request_id: 'cc-only-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {
       pick: () => {
         throw REACHED

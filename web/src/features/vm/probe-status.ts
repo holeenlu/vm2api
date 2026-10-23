@@ -1,3 +1,5 @@
+import { t as tVm } from '@/i18n'
+
 export type ProbeCheck = {
   at?: string
   probed_at?: string
@@ -21,7 +23,9 @@ export function latestProbe(...records: (ProbeCheck | null | undefined)[]) {
 }
 
 export function probeSourceLabel(source?: string) {
-  return source === 'messages-headers' ? '请求响应头（缓存）' : source || '—'
+  return source === 'messages-headers'
+    ? tVm('vm:probeStatus.responseHeadersCached')
+    : source || '—'
 }
 
 export function probeOutcome(probe: ProbeCheck): string {
@@ -38,10 +42,12 @@ export function probeOutcome(probe: ProbeCheck): string {
       candidates.find(
         (value): value is string =>
           typeof value === 'string' && value.trim().length > 0
-      ) || '探测失败'
+      ) || tVm('vm:probeStatus.probeFailed')
     )
   }
   if (probe.ok === true)
-    return probe.source === 'messages-headers' ? '已读取缓存' : '探测成功'
+    return probe.source === 'messages-headers'
+      ? tVm('vm:probeStatus.readFromCache')
+      : tVm('vm:probeStatus.probeSucceeded')
   return '—'
 }

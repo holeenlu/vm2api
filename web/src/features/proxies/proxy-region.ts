@@ -1,3 +1,4 @@
+import { t as translate, i18n } from '@/i18n'
 import type { VmProxySnap } from '@/types/panel-vm'
 import {
   proxyBindLimit,
@@ -36,19 +37,21 @@ export function proxyInRegion(
   return !filter.city || r.city === filter.city
 }
 
-let regionNames: Intl.DisplayNames | null | undefined
+const namesByLocale = new Map<string, Intl.DisplayNames | null>()
 
-/** 国家代码转中文名；不是两位代码（网关只回了英文国名）就原样显示。 */
+/** 国家代码转当前界面语言；不是两位代码（网关只回了英文国名）就原样显示。 */
 export function regionLabel(country: string): string {
-  if (country === REGION_LOCAL) return '本地出口'
-  if (country === REGION_NONE) return '未测地理'
+  if (country === REGION_LOCAL) return translate('proxies:localExit')
+  if (country === REGION_NONE) return translate('proxies:geoUnchecked')
   if (!/^[A-Z]{2}$/.test(country)) return country
+  let regionNames = namesByLocale.get(i18n.language)
   if (regionNames === undefined) {
     try {
-      regionNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' })
+      regionNames = new Intl.DisplayNames([i18n.language], { type: 'region' })
     } catch {
       regionNames = null
     }
+    namesByLocale.set(i18n.language, regionNames)
   }
   try {
     return regionNames?.of(country) || country
@@ -59,8 +62,8 @@ export function regionLabel(country: string): string {
 
 /** 收起的地区栏里用的短名：国家代码原样，本地 / 未测用两个字，其余截前 3 个字符。 */
 export function regionShort(country: string): string {
-  if (country === REGION_LOCAL) return '本地'
-  if (country === REGION_NONE) return '未测'
+  if (country === REGION_LOCAL) return translate('proxies:local')
+  if (country === REGION_NONE) return translate('proxies:notChecked')
   if (/^[A-Z]{2}$/.test(country)) return country
   return country.slice(0, 3)
 }
@@ -99,7 +102,7 @@ export function regionGroups(
 ): RegionGroup[] {
   const groups = new Map<
     string,
-    RegionGroup & { byCity: Map<string, RegionCity> }
+    Omit<RegionGroup, 'label'> & { byCity: Map<string, RegionCity> }
   >()
   for (const prx of list) {
     const { country, city } = proxyRegion(prx)
@@ -107,7 +110,6 @@ export function regionGroups(
     if (!g) {
       g = {
         country,
-        label: regionLabel(country),
         total: 0,
         count: 0,
         free: 0,
@@ -136,6 +138,10 @@ export function regionGroups(
   return [...groups.values()]
     .map(({ byCity, ...g }) => ({
       ...g,
+      // Preserve a live label even when callers retain this group object.
+      get label() {
+        return regionLabel(g.country)
+      },
       cities:
         byCity.size > 1
           ? [...byCity.values()].sort(
@@ -147,6 +153,6 @@ export function regionGroups(
       (a, b) =>
         rank(a.country) - rank(b.country) ||
         b.total - a.total ||
-        a.label.localeCompare(b.label, 'zh-CN')
+        a.label.localeCompare(b.label, i18n.language)
     )
 }

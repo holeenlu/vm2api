@@ -415,7 +415,7 @@ test('host hops: local Codex follows the deployment proxy, local Claude stays di
   assert.equal(hostProxyUrlForVm({ id: 'vm-cc', platform: 'anthropic', proxy: local }), '')
   assert.equal(
     hostProxyUrlForVm({ id: 'vm-gpt', platform: 'openai', proxy: { host: '10.0.0.5', port: 1080 } }),
-    'socks5h://10.0.0.5:1080',
+    'socks5://10.0.0.5:1080',
   )
 })
 

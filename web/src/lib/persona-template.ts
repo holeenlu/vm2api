@@ -1,8 +1,9 @@
+import { t } from '@/i18n'
 /**
  * JSONL persona / overlay 模板 —— 逐条镜像 gateway
  * `src/lib/identity/persona-template.mjs`（工作区快照 @2026-08-28）。
  *
- * 这里的默认模板、上限常量、占位符白名单、校验文案都是**契约副本**：
+ * 默认模板（含 note）、上限常量、占位符白名单与校验规则都是**契约副本**：
  * 抄错不会报错，只会静默产生错误的出站身份。改动前先比对 gateway 源码。
  *
  * 出站渲染逻辑（previewSystemBlocks / renderOverlayTemplate）在前端只用于
@@ -13,6 +14,7 @@ import type {
   OverlayPreset,
   PersonaPreset,
 } from '@/types/panel-routing'
+import { localizedOption } from '@/lib/locale-format'
 
 /** JSONL 每行解析出来的自由对象。用户输入，形状不可信。 */
 export type RawBlock = Record<string, unknown>
@@ -42,17 +44,17 @@ export const OVERLAY_TEMPLATE_KEYS: readonly OverlayTemplateKey[] = [
 ]
 
 export const PERSONA_PRESET_OPTIONS: [PersonaPreset, string][] = [
-  ['official', '官方提示词'],
-  ['official_full', '官方完整提示词'],
-  ['zero', '0注入'],
-  ['custom', '自定义'],
-  ['official_303', '官方 2.1.303（按模型）'],
+  localizedOption('official', 'persona.official'),
+  localizedOption('official_full', 'persona.officialFull'),
+  localizedOption('zero', 'persona.zero'),
+  localizedOption('custom', 'persona.custom'),
+  localizedOption('official_303', 'persona.official303'),
 ]
 export const OVERLAY_PRESET_OPTIONS: [OverlayPreset, string][] = [
-  ['off', '关闭'],
-  ['official', '官方'],
-  ['minimal', '精简'],
-  ['custom', '自定义'],
+  localizedOption('off', 'persona.overlayOff'),
+  localizedOption('official', 'persona.overlayOfficial'),
+  localizedOption('minimal', 'persona.overlayMinimal'),
+  localizedOption('custom', 'persona.custom'),
 ]
 
 export const PERSONA_TEMPLATE_BLOCK_MAX = 40_000
@@ -74,52 +76,34 @@ export const EMPTY_BLOCK_TEXT = '\u200b'
 
 /** 单一真源：console 提示列与后端 PUT 白名单共用同一张表。 */
 export const PERSONA_TEMPLATE_VARS: [string, string][] = [
-  [
-    'billing',
-    '官方计费归因头整行：cc_version / cc_entrypoint / cch / cc_prompt_id',
-  ],
-  ['billing_semi', '同 billing，但保证以分号结尾，供同一行继续拼接'],
-  [
-    'identity',
-    "官方身份句 You are a Claude agent, built on Anthropic's Claude Agent SDK.",
-  ],
-  [
-    'identity_cli',
-    "交互 CLI 身份句 You are Claude Code, Anthropic's official CLI for Claude.",
-  ],
-  ['identity_compact', '0注入短身份句 You are Anthropic Claude Agent SDK.'],
-  [
-    'reporting',
-    '官方 # Reporting outcomes 整段。cli-node 只在计费和身份都在时把它切成独立段',
-  ],
-  [
-    'dynamic_boundary',
-    '官方动态边界标记。cli-node 用它把前面的静态段标成 global，后面的标成 org，标记本身不出站',
-  ],
-  ['agent_expansion', '短 agent 扩写段'],
-  ['agent_official', '官方 agent 提示词全文'],
-  ['agent_standing', 'agent prompt 常驻约束（按档开关，非空时以换行结尾）'],
-  ['env', '槽位 Environment（含时区），按档开关'],
-  ['caller_agent', '调用方自带的 agent prompt，无则为空'],
-  ['caller_system', '调用方剩余 system（--append-system-prompt），无则为空'],
-  ['env_timezone_only', '只含槽位时区的 Environment 段'],
-  ['env_official', '官方完整 Environment + continuation'],
-  ['timezone', '槽位时区'],
-  ['locale', '槽位 locale'],
-  ['model', '出站 model id'],
-  ['cwd', '调用方 cwd（已清洗）'],
-  ['cli_version', '官方 CLI 版本号'],
-  ['session_id', '出站会话 id'],
-  ['main_prompt_303', '官方 2.1.303 lean 主提示词（记忆目录按槽位填写）'],
-  [
-    'env_303',
-    '官方 2.1.303 Environment 段（槽位身份 + 调用方 cwd / git / shell）',
-  ],
+  localizedOption('billing', 'persona.vars.billing'),
+  localizedOption('billing_semi', 'persona.vars.billingSemi'),
+  localizedOption('identity', 'persona.vars.identity'),
+  localizedOption('identity_cli', 'persona.vars.identityCli'),
+  localizedOption('identity_compact', 'persona.vars.identityCompact'),
+  localizedOption('reporting', 'persona.vars.reporting'),
+  localizedOption('dynamic_boundary', 'persona.vars.dynamicBoundary'),
+  localizedOption('agent_expansion', 'persona.vars.agentExpansion'),
+  localizedOption('agent_official', 'persona.vars.agentOfficial'),
+  localizedOption('agent_standing', 'persona.vars.agentStanding'),
+  localizedOption('env', 'persona.vars.env'),
+  localizedOption('caller_agent', 'persona.vars.callerAgent'),
+  localizedOption('caller_system', 'persona.vars.callerSystem'),
+  localizedOption('env_timezone_only', 'persona.vars.envTimezoneOnly'),
+  localizedOption('env_official', 'persona.vars.envOfficial'),
+  localizedOption('timezone', 'persona.vars.timezone'),
+  localizedOption('locale', 'persona.vars.locale'),
+  localizedOption('model', 'persona.vars.model'),
+  localizedOption('cwd', 'persona.vars.cwd'),
+  localizedOption('cli_version', 'persona.vars.cliVersion'),
+  localizedOption('session_id', 'persona.vars.sessionId'),
+  localizedOption('main_prompt_303', 'persona.vars.mainPrompt303'),
+  localizedOption('env_303', 'persona.vars.env303'),
 ]
 
 export const OVERLAY_TEMPLATE_VARS: [string, string][] = [
-  ['overlay_body', 'body 块拼接结果，只能出现在 wrapper 块'],
-  ['standing', 'persona_standing 常驻约束'],
+  localizedOption('overlay_body', 'persona.vars.overlayBody'),
+  localizedOption('standing', 'persona.vars.standing'),
 ]
 
 const PERSONA_VAR_NAMES = PERSONA_TEMPLATE_VARS.map(([name]) => name)
@@ -546,11 +530,14 @@ export function parsePersonaTemplateLines(text: unknown): {
       parsed = JSON.parse(line)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      errors.push({ line: index + 1, message: `不是合法 JSON：${message}` })
+      errors.push({
+        line: index + 1,
+        message: t('lib:persona.invalidJson', { message }),
+      })
       return
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      errors.push({ line: index + 1, message: '每行必须是一个 JSON 对象' })
+      errors.push({ line: index + 1, message: t('lib:persona.objectPerLine') })
       return
     }
     blocks.push(parsed as RawBlock)
@@ -559,7 +546,7 @@ export function parsePersonaTemplateLines(text: unknown): {
 }
 
 export function formatLineError(err: TemplateLineError): string {
-  return `第 ${err.line} 行${err.message}`
+  return t('lib:persona.lineError', { line: err.line, message: err.message })
 }
 
 /** 块数组 → JSONL。不 pretty print、不排序键（键序即契约）。 */
@@ -588,8 +575,8 @@ function blockText(block: RawBlock): string | null {
 }
 
 /**
- * 校验文案逐字复刻 gateway `validatePersonaTemplate`，
- * 否则「本地过、后端 400」时用户会看到两套说法。
+ * 校验条件与 gateway validatePersonaTemplate 一致；本地 UI 提示按语言翻译。
+ * 后端原始错误保持原文，模板字节、变量白名单和校验顺序不受语言影响。
  */
 export function validatePersonaTemplate(
   blocks: readonly RawBlock[] | null | undefined,
@@ -598,13 +585,16 @@ export function validatePersonaTemplate(
   const errors: string[] = []
   if (blocks == null) return errors
   if (!Array.isArray(blocks)) {
-    errors.push('模板必须是数组')
+    errors.push(t('lib:persona.arrayRequired'))
     return errors
   }
   if (blocks.length > PERSONA_TEMPLATE_BLOCKS_MAX) {
     // 后端在此处 return，前端同样短路以免给出后端不会报的错误
     errors.push(
-      `模板最多 ${PERSONA_TEMPLATE_BLOCKS_MAX} 块，收到 ${blocks.length}`
+      t('lib:persona.tooManyBlocks', {
+        max: PERSONA_TEMPLATE_BLOCKS_MAX,
+        received: blocks.length,
+      })
     )
     return errors
   }
@@ -614,52 +604,71 @@ export function validatePersonaTemplate(
   let total = 0
   let wrappers = 0
   blocks.forEach((block, index) => {
-    const at = `第 ${index + 1} 块`
+    const at = t('lib:persona.blockAt', { index: index + 1 })
     if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      errors.push(`${at} 必须是 JSON 对象`)
+      errors.push(t('lib:persona.blockObject', { at }))
       return
     }
     const text = blockText(block)
     if (text == null) {
-      errors.push(`${at} 缺少字符串 text`)
+      errors.push(t('lib:persona.blockTextRequired', { at }))
       return
     }
     if (text.length > PERSONA_TEMPLATE_BLOCK_MAX) {
-      errors.push(`${at} text 超过 ${PERSONA_TEMPLATE_BLOCK_MAX} 字符`)
+      errors.push(
+        t('lib:persona.blockTooLong', { at, max: PERSONA_TEMPLATE_BLOCK_MAX })
+      )
     }
     total += text.length
     if (overlay) {
       if (block.type !== 'wrapper' && block.type !== 'body') {
-        errors.push(`${at} type 必须是 wrapper 或 body`)
+        errors.push(t('lib:persona.overlayType', { at }))
       }
       if (block.type === 'wrapper') {
         wrappers += 1
         if (!extractTemplateVars(text).includes('overlay_body')) {
-          errors.push(`${at} 是 wrapper，text 必须包含 {{overlay_body}}`)
+          errors.push(
+            t('lib:persona.wrapperBodyRequired', {
+              at,
+              placeholder: '{{overlay_body}}',
+            })
+          )
         }
       } else if (extractTemplateVars(text).includes('overlay_body')) {
-        errors.push(`${at} 是 body，不能使用 {{overlay_body}}`)
+        errors.push(
+          t('lib:persona.bodyPlaceholderForbidden', {
+            at,
+            placeholder: '{{overlay_body}}',
+          })
+        )
       }
     } else if (block.type != null && block.type !== 'text') {
-      errors.push(`${at} type 只能是 text`)
+      errors.push(t('lib:persona.textTypeOnly', { at }))
     }
     for (const name of extractTemplateVars(text)) {
       if (!allowed.includes(name))
-        errors.push(`${at} 使用了未登记的占位符 {{${name}}}`)
+        errors.push(
+          t('lib:persona.unknownPlaceholder', {
+            at,
+            placeholder: '{{' + name + '}}',
+          })
+        )
     }
     if (
       block.cache_control != null &&
       typeof block.cache_control !== 'object'
     ) {
-      errors.push(`${at} cache_control 必须是对象`)
+      errors.push(t('lib:persona.cacheControlObject', { at }))
     }
   })
   if (total > PERSONA_TEMPLATE_TOTAL_MAX) {
-    errors.push(`模板总长超过 ${PERSONA_TEMPLATE_TOTAL_MAX} 字符`)
+    errors.push(
+      t('lib:persona.templateTooLong', { max: PERSONA_TEMPLATE_TOTAL_MAX })
+    )
   }
   // 空数组豁免：它的语义是「用内置预设」
   if (overlay && blocks.length && wrappers !== 1) {
-    errors.push(`overlay 模板必须恰好有一个 wrapper 块，收到 ${wrappers} 个`)
+    errors.push(t('lib:persona.singleWrapper', { received: wrappers }))
   }
   return errors
 }
@@ -714,12 +723,12 @@ export function dropLegacyAutoScope(
   })
 }
 
-/** 请求级变量在预览里用可辨认的占位，不是真实文本。 */
-export const PREVIEW_CALLER_AGENT = '‹调用方 agent prompt›'
-export const PREVIEW_CALLER_SYSTEM = '‹调用方 system›'
+/** 请求级变量在预览里用稳定字段名作为占位标记，不是 UI 文案或真实出站文本。 */
+export const PREVIEW_CALLER_AGENT = '‹caller_agent›'
+export const PREVIEW_CALLER_SYSTEM = '‹caller_system›'
 export const PREVIEW_REQUEST_VARS: Record<string, string> = {
-  locale: '‹槽位 locale›',
-  cwd: '‹调用方 cwd›',
+  locale: '‹locale›',
+  cwd: '‹cwd›',
   session_id: '‹session_id›',
 }
 
@@ -919,11 +928,15 @@ export function protocolPersonaSaveToast(
   const hot =
     kernel && typeof kernel.updated === 'number'
       ? kernel.updated > 0
-        ? `system 提示词已热更新 ${kernel.updated} 个槽`
-        : 'system 提示词的 kernel 配置已一致'
-      : '已写入'
-  if (!inherited) return `已保存 · ${label} · ${hot}`
-  return `已保存 · ${label} · ${inherited} 个槽位改为跟随全局 · ${hot}`
+        ? t('lib:persona.hotUpdated', { count: kernel.updated })
+        : t('lib:persona.kernelConsistent')
+      : t('lib:persona.written')
+  if (!inherited) return t('lib:persona.saved', { label, result: hot })
+  return t('lib:persona.savedInherited', {
+    label,
+    count: inherited,
+    result: hot,
+  })
 }
 
 export function overlayPresetLabel(preset: OverlayPreset): string {

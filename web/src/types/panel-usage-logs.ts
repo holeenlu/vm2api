@@ -2,7 +2,7 @@
  * 滚动日志页（`/logs`）的前后端契约。
  *
  * 形状对齐 claude-code-hub 的 `UsageLogRow` / `UsageLogSummary`，字段口径按
- * vm2api 的 `usage_logs` + JOIN（users / api_keys / vms / accounts /
+ * tapmodels 的 `usage_logs` + JOIN（users / api_keys / vms / accounts /
  * request_attempts）落地。后端：`src/lib/db/repos/usage-logs-view.mjs`，
  * 路由：`src/lib/admin/panel-routes.mjs` 的 `/api/panel/usage-logs*`。
  *
@@ -79,8 +79,10 @@ export type CacheTtlApplied = '5m' | '1h' | 'mixed' | null
 export type ReasoningEffort =
   'none' | 'minimal' | 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-/** 滚动日志的一行。`null` = 本行该字段为空（vm2api 不产出的 hub 字段已整体删去）。 */
+/** 滚动日志的一行。`null` = 本行该字段为空（tapmodels 不产出的 hub 字段已整体删去）。 */
 export type UsageLogRow = {
+  billingStatus?: string
+  groupId?: number | null
   /** `usage_logs.id`（`log_<12hex>`），游标 tiebreaker。 */
   id: string
   requestId: string | null
@@ -188,6 +190,8 @@ export type UsageLogsBatchResult = {
  * 括号内为查询串参数名。分页另带 `cursor_created_at` / `cursor_id` / `limit`(≤100，默认 50)。
  */
 export type UsageLogFilters = {
+  errorsOnly?: boolean
+  groupId?: string
   /** (`user_id`) user 角色由后端强制为本人，忽略下发值。 */
   userId?: string
   /** (`key_id`) */
@@ -265,7 +269,7 @@ export type UsageLogFilterOptions = {
 /** `GET /api/panel/usage-logs/session-suggestions?q=&limit=` 的 `data`：出站会话 id 前缀匹配，最新优先。 */
 export type UsageLogSessionSuggestions = string[]
 
-/** 近 N 分钟内有请求的出站会话（vm2api 只在请求完成时落库，没有「进行中」态）。 */
+/** 近 N 分钟内有请求的出站会话（tapmodels 只在请求完成时落库，没有「进行中」态）。 */
 export type ActiveSession = {
   sessionId: string
   /** 该出站会话最近一行对应的客户端会话 id。 */

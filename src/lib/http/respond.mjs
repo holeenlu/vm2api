@@ -2,6 +2,8 @@
  * Shared HTTP helpers for protocol and panel. SSE headers flush immediately
  * and optionally disable Nagle so Claude Code subagent tokens are not delayed.
  */
+import * as zlib from 'node:zlib'
+import { promisify } from 'node:util'
 import { ErrorCode, ErrorType, makeError } from '../core/errors.mjs'
 import { CORS_ALLOW_HEADERS, corsHeadersForRequest } from './cors.mjs'
 
@@ -63,8 +65,63 @@ function collectBody(req, maxBytes) {
   })
 }
 
+const bodyDecoders = new Map(
+  [
+    ['gzip', zlib.gunzip],
+    ['deflate', zlib.inflate],
+    ['br', zlib.brotliDecompress],
+    ['zstd', zlib.zstdDecompress],
+  ]
+    .filter(([, decode]) => typeof decode === 'function')
+    .map(([name, decode]) => [name, promisify(decode)]),
+)
+
+async function decodeBody(buf, contentEncoding, maxBytes) {
+  const header = String(contentEncoding || '')
+    .trim()
+    .toLowerCase()
+  if (!header) return buf
+  const encodings = header.split(',').map((encoding) => encoding.trim())
+  for (const encoding of encodings) {
+    if (encoding !== 'identity' && !bodyDecoders.has(encoding)) {
+      throw makeError({
+        type: ErrorType.INVALID_REQUEST,
+        code: 'unsupported_content_encoding',
+        message: `Unsupported request Content-Encoding: ${encoding || '(empty)'}`,
+        status: 415,
+      })
+    }
+  }
+  // Content codings are applied in header order. Bound every decoded layer as
+  // well as the wire bytes so a small compressed body cannot bypass the limit.
+  for (const encoding of encodings.reverse()) {
+    if (encoding === 'identity') continue
+    try {
+      buf = await bodyDecoders.get(encoding)(buf, { maxOutputLength: maxBytes })
+    } catch (error) {
+      if (error.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw makeError({
+          type: ErrorType.INVALID_REQUEST,
+          code: ErrorCode.BODY_TOO_LARGE,
+          message: `Decoded request body exceeds limit of ${maxBytes} bytes`,
+          status: 413,
+          details: { max_bytes: maxBytes },
+        })
+      }
+      throw makeError({
+        type: ErrorType.INVALID_REQUEST,
+        code: 'invalid_content_encoding',
+        message: `Request body could not be decoded as ${encoding}`,
+        status: 400,
+      })
+    }
+  }
+  return buf
+}
+
 export function readBody(req, maxBytes) {
-  return collectBody(req, maxBytes).then((buf) => {
+  return collectBody(req, maxBytes).then(async (encoded) => {
+    const buf = await decodeBody(encoded, req.headers?.['content-encoding'], maxBytes)
     const raw = buf.toString('utf8')
     if (!raw) return {}
     try {
