@@ -115,8 +115,8 @@ export class ClusterManager {
     repo,
     dataDir,
     listen = { host: null, port: null },
-    containerName = process.env.VM2API_CONTAINER_NAME,
-    socketDir = process.env.VM2API_CLUSTER_SOCKET_DIR,
+    containerName = process.env.TAPMODELS_CONTAINER_NAME,
+    socketDir = process.env.TAPMODELS_CLUSTER_SOCKET_DIR,
     vmsOnNode = () => [],
     logger = console,
     onNodesChanged = null,
@@ -724,7 +724,7 @@ export class ClusterManager {
   /**
    * SSH user facts for slot placement, cached per live SSH client (a
    * reconnect after `usermod -aG docker` or a key change re-reads them).
-   * `root` is where remote slot trees live: $HOME/.vm2api.
+   * `root` is where remote slot trees live: $HOME/.tapmodels.
    */
   remoteHost(id) {
     const client = this.client(id)

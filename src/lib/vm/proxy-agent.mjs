@@ -1,6 +1,6 @@
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
-import { normalizeSocksHost } from './socks-address.mjs'
+import { normalizeProxyHost } from './proxy-address.mjs'
 
 /**
  * SOCKS agent with an unbracketed socket host. socks-proxy-agent 10.1.0 copies
@@ -9,7 +9,7 @@ import { normalizeSocksHost } from './socks-address.mjs'
  */
 export function createSocksProxyAgent(proxyUrl) {
   const agent = new SocksProxyAgent(proxyUrl)
-  const host = normalizeSocksHost(agent.proxy.host)
+  const host = normalizeProxyHost(agent.proxy.host)
   if (!host) throw new Error('invalid SOCKS proxy host')
   agent.proxy.host = host
   return agent

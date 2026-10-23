@@ -10,6 +10,7 @@ import {
   Server,
   ShieldCheck,
 } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { fmtNum, pct } from '@/lib/format'
 import { opsSince } from '@/lib/ops-window'
 import {
@@ -51,6 +52,8 @@ function AlertChip({
   to: '/import' | '/cluster' | '/overview' | '/logs' | '/vm'
   tone: AlertTone
 }) {
+  useTranslation('overview')
+
   return (
     <Link
       to={to}
@@ -69,6 +72,8 @@ function AlertChip({
 }
 
 export function OverviewPage() {
+  const { t: translate } = useTranslation('overview')
+
   const dash = useQuery(dashboardQueryOptions())
   const usage = useQuery(usageQueryOptions())
   const since = opsSince('1h')
@@ -127,20 +132,41 @@ export function OverviewPage() {
     tone: AlertTone
   }[] = []
   if (available === 0 && withToken)
-    alerts.push({ t: '无可用账号', to: '/import', tone: 'bad' })
-  if (warned > 0)
-    alerts.push({ t: `${warned} 警告`, to: '/vm', tone: 'caution' })
-  if (limited > 0)
-    alerts.push({ t: `${limited} 限制`, to: '/vm', tone: 'warn' })
-  if (noToken > 0 && withToken === 0)
-    alerts.push({ t: '无凭证', to: '/import', tone: 'bad' })
-  if (fableCool > 0)
     alerts.push({
-      t: `Fable 冷却 ${fableCool}`,
+      t: translate('overview:noAvailableAccounts'),
+      to: '/import',
+      tone: 'bad',
+    })
+  if (warned > 0)
+    alerts.push({
+      t: translate('overview:warningAccounts', { count: warned }),
       to: '/vm',
       tone: 'caution',
     })
-  if (errs > 0) alerts.push({ t: `错误 ${errs}`, to: '/logs', tone: 'bad' })
+  if (limited > 0)
+    alerts.push({
+      t: translate('overview:limitedAccounts', { p0: limited }),
+      to: '/vm',
+      tone: 'warn',
+    })
+  if (noToken > 0 && withToken === 0)
+    alerts.push({
+      t: translate('overview:noCredentials'),
+      to: '/import',
+      tone: 'bad',
+    })
+  if (fableCool > 0)
+    alerts.push({
+      t: translate('overview:fableCooldown', { p0: fableCool }),
+      to: '/vm',
+      tone: 'caution',
+    })
+  if (errs > 0)
+    alerts.push({
+      t: translate('overview:errorCount', { p0: errs }),
+      to: '/logs',
+      tone: 'bad',
+    })
 
   return (
     <PageHeader
@@ -155,7 +181,7 @@ export function OverviewPage() {
         <div className='space-y-3'>
           <Card className='shadow-none'>
             <CardContent className='flex flex-wrap items-center gap-6 pt-6'>
-              <HealthDonut score={score} label='健康' />
+              <HealthDonut score={score} label={translate('overview:health')} />
               <div className='min-w-0 flex-1 space-y-2.5'>
                 <HealthBar buckets={buckets} total={vms.length} />
                 <HealthLegend buckets={buckets} />
@@ -169,10 +195,18 @@ export function OverviewPage() {
                           : 'var(--status-none)',
                       }}
                     />
-                    活跃{' '}
-                    <span className='font-medium text-foreground'>
-                      {String(summary.active_vm || '未指定')}
-                    </span>
+                    <Trans
+                      ns='overview'
+                      i18nKey='activeVm'
+                      values={{
+                        name: String(
+                          summary.active_vm || translate('overview:unspecified')
+                        ),
+                      }}
+                      components={{
+                        name: <span className='font-medium text-foreground' />,
+                      }}
+                    />
                   </span>
                   {alerts.map((a) => (
                     <AlertChip key={a.t} t={a.t} to={a.to} tone={a.tone} />
@@ -188,7 +222,7 @@ export function OverviewPage() {
           <div className='grid grid-cols-2 gap-3 lg:grid-cols-4'>
             <KpiCard
               icon={ShieldCheck}
-              label='可用账号'
+              label={translate('overview:availableAccounts')}
               value={
                 <>
                   {available}
@@ -204,7 +238,7 @@ export function OverviewPage() {
             />
             <KpiCard
               icon={Server}
-              label='在线'
+              label={translate('overview:online')}
               value={
                 <>
                   {running}
@@ -218,7 +252,7 @@ export function OverviewPage() {
             />
             <KpiCard
               icon={Gauge}
-              label='5h 峰值'
+              label={translate('overview:fiveHourPeak')}
               value={
                 <>
                   {peak5.toFixed(0)}
@@ -231,9 +265,14 @@ export function OverviewPage() {
             />
             <KpiCard
               icon={Activity}
-              label={`请求 · 缓存 ${cachePct == null ? '—' : `${cachePct.toFixed(0)}%`}`}
+              label={translate('overview:requestsAndCache', {
+                p0: cachePct == null ? '—' : `${cachePct.toFixed(0)}%`,
+              })}
               value={fmtNum(reqs)}
-              hint={`Tokens ${fmtNum(tokensIn)}/${fmtNum(tokensOut)}`}
+              hint={translate('common:tokensInOut', {
+                input: fmtNum(tokensIn),
+                output: fmtNum(tokensOut),
+              })}
               ringPct={cachePct}
               tone='good'
             />

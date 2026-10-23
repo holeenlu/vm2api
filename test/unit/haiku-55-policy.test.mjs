@@ -7,13 +7,13 @@ import { applyModelRequestRules, loadModelPolicy, seedDefaultPolicy } from '../.
 test('haiku 5.5 is in the panel seed and keeps forced tool choice', () => {
   const seed = seedDefaultPolicy()
   const row = seed.models['claude-haiku-5-5']
-  assert.equal(row.params.max_tokens_default, 100000)
-  assert.equal(row.params.max_tokens_cap, 100000)
+  assert.equal(row.params.max_tokens_default, 128000)
+  assert.equal(row.params.max_tokens_cap, 128000)
   assert.equal(row.params.default_effort, 'medium')
-  assert.equal(row.capabilities.context_window, 100000)
+  assert.equal(row.capabilities.context_window, 1000000)
   assert.equal(row.capabilities.supports_effort, true)
   assert.equal(row.betas.pass_context_1m, false)
-  assert.equal(seed.aliases.haiku, 'claude-haiku-4-5-20251001')
+  assert.equal(seed.aliases.haiku, 'claude-haiku-5-5')
 
   const enabled = applyModelRequestRules({
     model: 'claude-haiku-5-5',
@@ -28,7 +28,7 @@ test('haiku 5.5 is in the panel seed and keeps forced tool choice', () => {
     output_config: { effort: 'high' },
     thinking: { type: 'disabled' },
   })
-  assert.deepEqual(kept.thinking, { type: 'disabled' })
+  assert.deepEqual(kept.thinking, { type: 'adaptive' })
 
   const blocked = applyModelRequestRules({
     model: 'claude-haiku-5-5',
@@ -38,7 +38,7 @@ test('haiku 5.5 is in the panel seed and keeps forced tool choice', () => {
   assert.deepEqual(blocked.thinking, { type: 'adaptive' })
 })
 
-test('loading old Haiku 5.5 seed migrates only the old 1M defaults to 100K', () => {
+test('loading old Haiku 5.5 seed migrates only the old 100K defaults to native 1M', () => {
   openDatabase({ dbPath: ':memory:' })
   try {
     const repo = new SettingsRepo()
@@ -47,10 +47,10 @@ test('loading old Haiku 5.5 seed migrates only the old 1M defaults to 100K', () 
       models: {
         'claude-haiku-5-5': {
           display_name: 'Haiku 5.5',
-          capabilities: { context_window: 1000000, supports_effort: true },
+          capabilities: { context_window: 100000, supports_effort: true },
           params: {
-            max_tokens_default: 128000,
-            max_tokens_cap: 128000,
+            max_tokens_default: 100000,
+            max_tokens_cap: 100000,
             default_effort: 'medium',
           },
         },
@@ -59,9 +59,9 @@ test('loading old Haiku 5.5 seed migrates only the old 1M defaults to 100K', () 
     loadModelPolicy({ force: true })
     const stored = repo.get('model_policy')
     const row = stored.models['claude-haiku-5-5']
-    assert.equal(row.capabilities.context_window, 100000)
-    assert.equal(row.params.max_tokens_default, 100000)
-    assert.equal(row.params.max_tokens_cap, 100000)
+    assert.equal(row.capabilities.context_window, 1000000)
+    assert.equal(row.params.max_tokens_default, 128000)
+    assert.equal(row.params.max_tokens_cap, 128000)
     assert.equal(row.params.default_effort, 'medium')
   } finally {
     closeDatabase()

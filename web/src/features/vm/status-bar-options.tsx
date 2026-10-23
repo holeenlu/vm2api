@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { SlidersHorizontal } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -9,11 +10,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { localizedOption } from './localized-option'
 
 export const STATUS_BAR_ITEMS = [
-  ['label', '状态'],
-  ['bar', '可用性'],
-  ['proxy', '代理'],
+  localizedOption('label', 'vm:detailAccountTab.status'),
+  localizedOption('bar', 'vm:statusBarOptions.availability'),
+  localizedOption('proxy', 'vm:detailPage.proxy'),
 ] as const
 
 export type StatusBarKey = (typeof STATUS_BAR_ITEMS)[number][0]
@@ -68,6 +70,8 @@ export function StatusBarOptions({
   show: StatusBarShow
   onToggle: (key: StatusBarKey, next: boolean) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
@@ -76,15 +80,20 @@ export function StatusBarOptions({
           size='sm'
           variant='ghost'
           className='h-7 gap-1 px-1.5 text-xs font-medium text-muted-foreground'
-          title='配置状态栏显示'
-          aria-label='配置状态栏显示'
+          title={tVm('vm:statusBarOptions.configureStatusBar')}
+          aria-label={tVm('vm:statusBarOptions.configureStatusBar')}
         >
-          <SlidersHorizontal className='size-3.5' />
-          显示
+          <Trans
+            ns='vm'
+            i18nKey='statusBarOptions.display'
+            components={{ part0: <SlidersHorizontal className='size-3.5' /> }}
+          />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align='start' className='w-40'>
-        <DropdownMenuLabel>状态栏显示</DropdownMenuLabel>
+        <DropdownMenuLabel>
+          <Trans ns='vm' i18nKey='statusBarOptions.statusBarDisplay' />
+        </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {STATUS_BAR_ITEMS.map(([key, label]) => (
           <DropdownMenuCheckboxItem

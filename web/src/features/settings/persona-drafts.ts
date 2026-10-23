@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { PersonaBlock, PersonaPreset } from '@/types/panel-routing'
 import {
   DEFAULT_OVERLAY_TEMPLATES,
@@ -83,9 +84,11 @@ export function personaDraftStoresEmpty(
 
 export function personaSchemeSummary(text: string, key: PersonaPreset): string {
   const { blocks, errors } = parsePersonaTemplateLines(text)
-  if (errors.length) return `${errors.length} 处错误`
+  if (errors.length)
+    return translate('settings:persona.errorCount', { value1: errors.length })
   const stored = templateOrFollowPreset(blocks, DEFAULT_PERSONA_TEMPLATES, key)
-  if (key === 'custom' && stored.length === 0) return '空 · 回落官方'
-  if (stored.length === 0) return '内置'
-  return `已改 · ${stored.length} 块`
+  if (key === 'custom' && stored.length === 0)
+    return translate('settings:persona.emptyFallback')
+  if (stored.length === 0) return translate('settings:persona.builtIn')
+  return translate('settings:persona.modifiedBlocks', { value1: stored.length })
 }

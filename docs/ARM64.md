@@ -1,14 +1,13 @@
 # 实验性 Linux ARM64 控制平面部署
 
-此方案在 ARM64 主机上原生运行 vm2api 控制平面，并通过 QEMU 运行现有
-`linux/amd64` slot。可以直接使用发布的 ARM64 镜像，也可以从当前源码
-checkout 本机构建。
+此方案在 ARM64 主机上原生运行 tapmodels 控制平面，并通过 QEMU 运行现有
+`linux/amd64` slot。tapmodels 当前仅正式发布 linux/amd64 镜像；ARM64 控制面需从当前源码 checkout 本机构建。
 
 ## 发布物与命名
 
 | 发布物 | amd64 | arm64 |
 | --- | --- | --- |
-| 控制面镜像（单架构） | `ghcr.io/dofastted/vm2api:vX.Y.Z-amd64` | `ghcr.io/dofastted/vm2api:vX.Y.Z-arm64` |
+| 控制面镜像（单架构） | `ghcr.io/holeenlu/tapmodels-gateway:vX.Y.Z.N` | `tapmodels-arm64-control:local（源码构建）` |
 | 控制面镜像（多架构） | `vX.Y.Z` / `latest`，按拉取平台选择 | 同左 |
 | Release 附件 | 无后缀：`kin-kernel`、`cli-node`、`kin-worker` 等 | `kin-worker-linux-arm64`、`kin-egress-linux-arm64` |
 
@@ -18,7 +17,7 @@ kernel、OAuth、CLI 和控制面造机服务 `kin-computer` 只有 amd64，ARM6
 
 版本参数可带架构后缀：`v1.2.3`、`v1.2.3-arm64`、`v1.2.3-aarch64` 都解析为
 版本 `v1.2.3`；后缀只用于核对，与宿主架构不一致时一键脚本和面板都会拒绝。
-一键脚本和面板在 ARM64 上写入 `VM2API_IMAGE_TAG=vX.Y.Z-arm64`，固定单架构
+一键脚本和面板在 ARM64 上写入 `TAPMODELS_IMAGE_TAG=vX.Y.Z-arm64`，固定单架构
 控制面镜像；一键脚本运行 Compose 时忽略宿主的 `DOCKER_DEFAULT_PLATFORM`
 （槽位平台由控制面镜像自己设为 `linux/amd64`）。手动在设置了
 `DOCKER_DEFAULT_PLATFORM=linux/amd64` 的 shell 里运行 Compose 会报平台不匹配，
@@ -60,9 +59,9 @@ Docker 的安装方式参见 [Docker Engine 安装文档](https://docs.docker.co
 与 x86 相同的命令，脚本按 `uname -m` 识别架构：
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
-sudo bash /opt/vm2api/deploy/install.sh status
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- --from-source
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade --from-source
+sudo bash /opt/tapmodels/deploy/install.sh status
 ```
 
 在 ARM64 上脚本额外下载 `deploy/prepare-arm64.py`，启动前准备 QEMU handler
@@ -94,30 +93,30 @@ QEMU 下 slot 进程的 `/proc/<pid>/exe` 指向模拟器，程序路径在 `arg
 python3 deploy/init-arm64-env.py
 ```
 
-默认端口为 `8787`，控制容器名为 `vm2api`，仅绑定 `127.0.0.1`。可用
+默认端口为 `8787`，控制容器名为 `tapmodels`，仅绑定 `127.0.0.1`。可用
 `--port`、`--container-name`、`--bind-host` 调整这些值。若要绑定其他地址，
 应先确认该地址的访问范围和主机网络配置；IPv6 绑定需要宿主机启用 IPv6。
 
 初始化器以排他创建方式写入权限为 `0600` 的 `.env`，生成管理密码、API key
 和数据库密钥，且不输出凭据。它同时写入
 `COMPOSE_FILE=docker-compose.yml:docker-compose.arm64.yml` 与
-`VM2API_HOST_ROOT=<仓库绝对路径>`：裸 `docker compose` 和面板一键更新都
+`TAPMODELS_HOST_ROOT=<仓库绝对路径>`：裸 `docker compose` 和面板一键更新都
 因此使用 ARM64 override 与正确的宿主目录。已有 `.env` 会保留，缺这两项时
 脚本提示需要补的值；面板更新发现 ARM64 源码安装缺 `COMPOSE_FILE` 会拒绝
 执行，避免以基础服务启动到 `./vms`、`./data`。用本地编辑器查看
-`VM2API_ADMIN_PASSWORD` 后登录；不要把 `.env`、凭据或会话信息放入 PR。
+`TAPMODELS_ADMIN_PASSWORD` 后登录；不要把 `.env`、凭据或会话信息放入 PR。
 
 ```sh
-docker compose build vm2api
-docker compose up -d vm2api
+docker compose build tapmodels
+docker compose up -d tapmodels
 ```
 
 一键脚本 `--from-source` 在 ARM64 上同样写入这两项。
 
-override 的默认本地镜像是 `vm2api-arm64-control:local`，可通过
-`VM2API_ARM64_IMAGE` 改名。Compose 使用 `deploy/Dockerfile.arm64-control`
+override 的默认本地镜像是 `tapmodels-arm64-control:local`，可通过
+`TAPMODELS_ARM64_IMAGE` 改名。Compose 使用 `deploy/Dockerfile.arm64-control`
 构建 `linux/arm64` 控制镜像；`DOCKER_DEFAULT_PLATFORM=linux/amd64` 用于
-控制平面启动的 slot。amd64 集群资产置于 `/opt/vm2api/cluster-bin-amd64`。
+控制平面启动的 slot。amd64 集群资产置于 `/opt/tapmodels/cluster-bin-amd64`。
 
 源码构建的持久目录位于仓库下的 `.local/arm64/`（一键镜像安装与 x86 相同，
 在安装目录的 `vms/`、`data/` 等）：
@@ -139,8 +138,8 @@ override 的默认本地镜像是 `vm2api-arm64-control:local`，可通过
 
 ```sh
 docker compose ps
-docker compose logs --tail=100 vm2api
-docker compose exec vm2api node -p process.arch
+docker compose logs --tail=100 tapmodels
+docker compose exec tapmodels node -p process.arch
 python3 deploy/prepare-arm64.py --check
 ```
 
@@ -157,8 +156,8 @@ checkout 中进行；有本地修改时先审查并保留这些修改。
 
 ```sh
 git pull --ff-only
-docker compose build vm2api
-docker compose up -d --no-deps vm2api
+docker compose build tapmodels
+docker compose up -d --no-deps tapmodels
 ```
 
 更新保留原有挂载目录与密钥。完成后重复状态检查及之前成功的实际请求。

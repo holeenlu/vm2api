@@ -1,14 +1,38 @@
+import { t } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { Reveal } from './reveal'
 
 // Product facts, not traffic metrics: the page never shows numbers it cannot back.
 const FACTS = [
-  { value: '3', label: '种标准协议入口' },
-  { value: '1 : 1', label: '槽位与出口代理一一绑定' },
-  { value: '5h · 7d', label: '对齐官方额度窗口调度' },
-  { value: '2', label: '平台：Claude 与 GPT 订阅' },
+  {
+    value: '3',
+    get label() {
+      return t('welcome:protocolCount')
+    },
+  },
+  {
+    value: '1 : 1',
+    get label() {
+      return t('welcome:oneToOneEgress')
+    },
+  },
+  {
+    value: '5h · 7d',
+    get label() {
+      return t('welcome:quotaAligned')
+    },
+  },
+  {
+    value: '2',
+    get label() {
+      return t('welcome:platforms')
+    },
+  },
 ] as const
 
 export function WelcomeStats() {
+  useTranslation('welcome')
+
   return (
     <section className='relative z-10 border-y border-border/40 bg-muted/20 px-6 py-14 md:py-16'>
       <div className='mx-auto grid max-w-6xl grid-cols-2 gap-y-10 md:grid-cols-4'>

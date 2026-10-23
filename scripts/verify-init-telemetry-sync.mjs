@@ -131,7 +131,8 @@ async function fixtureFinalize() {
   )
   record(
     'worker identity is official fake IDs',
-    worker.telemetry?.identity?.device_id === MACHINE &&
+    // Telemetry uses official userID; the VM fingerprint retains machineID.
+    worker.telemetry?.identity?.device_id === USER &&
       worker.telemetry?.identity?.user_id === USER &&
       worker.telemetry?.identity?.source === 'official-cc-init',
   )
@@ -177,11 +178,22 @@ function liveFiles() {
   const routingFile = path.join(projectRoot, 'src/config/routing.json')
   const routing = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
   const occ = normalizeOfficialCcConfig(routing.official_cc)
-  record('routing.json sync_telemetry default on', occ.sync_telemetry === true)
+  record(
+    'routing.json sync_telemetry remains explicit',
+    typeof routing.official_cc?.sync_telemetry === 'boolean' &&
+      occ.sync_telemetry === routing.official_cc.sync_telemetry,
+  )
   const pane = path.join(projectRoot, 'web/src/features/settings/official-cc-pane.tsx')
   const exists = fs.existsSync(pane)
   const html = exists ? fs.readFileSync(pane, 'utf8') : ''
-  const htmlOk = exists && html.includes('occ-') && html.includes('同步遥测') && html.includes('sync_telemetry')
+  const resourceFile = path.join(projectRoot, 'web/src/i18n/locales/zh-CN/settings.json')
+  const messages = fs.existsSync(resourceFile) ? JSON.parse(fs.readFileSync(resourceFile, 'utf8')) : {}
+  const htmlOk =
+    exists &&
+    html.includes('occ-') &&
+    html.includes('settings:official.syncTelemetry') &&
+    html.includes('sync_telemetry') &&
+    messages['official.syncTelemetry'] === '同步遥测'
   record(`Vite official-cc pane ${pane}`, htmlOk)
   return htmlOk
 }
@@ -210,7 +222,7 @@ async function liveMasterRead() {
   const occ = body?.data?.official_cc || body?.official_cc || {}
   record(
     'live GET /api/panel/routing sync_telemetry',
-    res.status === 200 && occ.sync_telemetry !== false,
+    res.status === 200 && typeof occ.sync_telemetry === 'boolean',
     `http ${res.status}`,
   )
 }

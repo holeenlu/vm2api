@@ -1,3 +1,5 @@
+import { t } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   Tooltip,
@@ -36,7 +38,7 @@ export function SeatCells({
   return (
     <div
       role='img'
-      aria-label={`席位 ${u}/${cap}，其中宽限 ${g}`}
+      aria-label={t('common:seatUsage', { used: u, capacity: cap, grace: g })}
       className={cn('flex flex-wrap gap-[3px]', className)}
     >
       {Array.from({ length: cap }, (_, i) => {
@@ -68,6 +70,7 @@ export function SeatCells({
 }
 
 export function SeatLegend({ className }: { className?: string }) {
+  useTranslation('common')
   const item = (swatch: string, text: string) => (
     <span className='inline-flex items-center gap-1'>
       <span className={cn('size-2.5 rounded-[3px] border', swatch)} />
@@ -81,9 +84,9 @@ export function SeatLegend({ className }: { className?: string }) {
         className
       )}
     >
-      {item('border-primary bg-primary', '进行中')}
-      {item('border-primary/70 bg-primary/25', '宽限保留')}
-      {item('border-border bg-muted/60', '空闲')}
+      {item('border-primary bg-primary', t('common:inProgress'))}
+      {item('border-primary/70 bg-primary/25', t('common:graceReserved'))}
+      {item('border-border bg-muted/60', t('common:idle'))}
     </div>
   )
 }
@@ -158,7 +161,7 @@ export function GateBar({
         )}
         style={{ left: `${g}%` }}
       >
-        闸 {Math.round(g)}%
+        {t('common:gatePercent', { percent: Math.round(g) })}
       </span>
       {dots?.map((dot) => {
         const v = Math.max(0, Math.min(100, dot.value))

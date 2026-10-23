@@ -1,4 +1,5 @@
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { credTypeOf } from '@/lib/cred-type'
 import { isCodexVm } from '@/lib/vm-kind'
 import {
@@ -14,6 +15,8 @@ import { useVmTestChat } from '@/features/vm/use-vm-test-chat'
 import { VmTestSchedule } from '@/features/vm/vm-test-schedule'
 
 function TestBody({ vm }: { vm: Vm }) {
+  useTranslation('vm')
+
   const chat = useVmTestChat(vm)
   return (
     <VmTestPanel
@@ -35,16 +38,26 @@ export function VmTestDialog({
   vm: Vm | null
   onOpenChange: (open: boolean) => void
 }) {
+  useTranslation('vm')
+
   return (
     <Dialog open={vm != null} onOpenChange={onOpenChange}>
       <DialogContent className='flex max-h-[88vh] flex-col gap-3 sm:max-w-xl'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2 text-base'>
-            测试链接
-            {vm ? <SlotIdentity vm={vm} compact /> : null}
+            <Trans
+              ns='vm'
+              i18nKey='vmTestDialog.testConnection'
+              components={{
+                part0: <>{vm ? <SlotIdentity vm={vm} compact /> : null}</>,
+              }}
+            />
           </DialogTitle>
           <DialogDescription>
-            发一条真实对话，验证凭证、代理与内核整条链路。
+            <Trans
+              ns='vm'
+              i18nKey='vmTestDialog.sendARealConversationToVerifyTheFullCredentials'
+            />
           </DialogDescription>
         </DialogHeader>
         <div className='-me-3 min-h-0 flex-1 overflow-y-auto pe-3'>

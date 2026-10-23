@@ -4,6 +4,7 @@ import ClaudeCodeColor from '@lobehub/icons/es/ClaudeCode/components/Color'
 import CodexColor from '@lobehub/icons/es/Codex/components/Color'
 import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono'
 import { ArrowRight, BookOpen } from 'lucide-react'
+import { Trans, useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { ApiDemo } from './api-demo'
 import { scrollToSection } from './scroll'
@@ -23,6 +24,8 @@ export function WelcomeHero({
   signedIn: boolean
   baseUrl: string
 }) {
+  const { t } = useTranslation('welcome')
+
   return (
     <section className='relative z-10 overflow-hidden px-6 pt-28 pb-16 md:pt-36 md:pb-24 lg:pb-28'>
       <div
@@ -48,25 +51,29 @@ export function WelcomeHero({
               <span className='absolute inline-flex size-full animate-ping rounded-full bg-blue-400 opacity-75 motion-reduce:animate-none' />
               <span className='relative inline-flex size-1.5 rounded-full bg-blue-500 dark:bg-blue-400' />
             </span>
-            虚拟化号池网关 · 自建部署
+            {t('welcome:heroBadge')}
           </div>
 
           <h1
             className='welcome-fade-up text-[clamp(2.25rem,4.5vw,3.25rem)] leading-[1.15] font-bold tracking-tight'
             style={{ animationDelay: '60ms' }}
           >
-            把订阅号池
-            <br />
-            <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
-              变成标准 API
-            </span>
+            <Trans
+              t={t}
+              i18nKey='welcome:heroTitle'
+              components={{
+                break: <br />,
+                accent: (
+                  <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent' />
+                ),
+              }}
+            />
           </h1>
           <p
             className='welcome-fade-up mt-5 max-w-xl text-base leading-relaxed text-muted-foreground md:text-[15px]'
             style={{ animationDelay: '120ms' }}
           >
-            每个槽位里跑官方客户端，账号与出口一一隔离。对外提供 Anthropic /
-            OpenAI 兼容接口，Claude Code、Codex 和现有 SDK 改个地址就能用。
+            {t('welcome:heroDescription')}
           </p>
 
           <div
@@ -79,7 +86,7 @@ export function WelcomeHero({
                 className='group h-11 rounded-lg px-5 text-sm font-medium'
               >
                 <Link to='/overview'>
-                  进入控制台
+                  {t('welcome:openConsole')}
                   <ArrowRight
                     aria-hidden
                     className='size-4 transition-transform duration-200 group-hover:translate-x-0.5'
@@ -92,7 +99,7 @@ export function WelcomeHero({
                 className='group h-11 rounded-lg px-5 text-sm font-medium'
               >
                 <Link to='/login'>
-                  登录控制台
+                  {t('welcome:signInConsole')}
                   <ArrowRight
                     aria-hidden
                     className='size-4 transition-transform duration-200 group-hover:translate-x-0.5'
@@ -109,7 +116,7 @@ export function WelcomeHero({
                 )
               }
             >
-              {signedIn ? '首配清单' : '快速开始'}
+              {signedIn ? t('welcome:checklist') : t('welcome:quickStart')}
             </Button>
             <Button
               asChild
@@ -125,7 +132,7 @@ export function WelcomeHero({
                   aria-hidden
                   className='size-4 text-muted-foreground/80 transition-colors group-hover:text-foreground'
                 />
-                文档
+                {t('welcome:docs')}
               </a>
             </Button>
           </div>
@@ -135,10 +142,10 @@ export function WelcomeHero({
             style={{ animationDelay: '240ms' }}
           >
             <p className='text-[10px] font-bold tracking-[0.15em] text-muted-foreground/60 uppercase'>
-              常用客户端
+              {t('welcome:popularClients')}
             </p>
             <p className='mt-1 text-xs leading-relaxed text-muted-foreground/70'>
-              改 base URL 与密钥即可接入，不需要插件或补丁。
+              {t('welcome:noPlugins')}
             </p>
             <ul className='mt-4 flex flex-wrap items-center gap-2.5'>
               {CLIENTS.map(({ name, Icon }) => (

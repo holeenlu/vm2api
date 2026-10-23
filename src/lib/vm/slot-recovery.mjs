@@ -561,13 +561,14 @@ function nodeLinkReady(nodeId) {
 }
 
 /**
- * Control-plane boot: a slot recorded as running whose container is gone or
- * exited is booted once, serially. Node slots whose link is not up yet are
- * left to the watchdog.
+ * Control-plane boot: revive missing/exited containers and restore Codex
+ * kernels, which lived in the replaced control plane even when the slot's
+ * container stayed up. Node slots whose link is not up yet are left to the watchdog.
  */
 export async function reviveDownSlots({
   vms,
   powerOn,
+  restoreRuntime = null,
   inspect = inspectSlotContainer,
   linkReady = nodeLinkReady,
   watchdog = null,
@@ -585,14 +586,22 @@ export async function reviveDownSlots({
       logger.warn(`[slot-revive] ${vm.id} inspect failed: ${error?.message || error}`)
       continue
     }
-    if (state.running) continue
+    const restore = state.running && isCodexVm(vm) && typeof restoreRuntime === 'function'
+    if (state.running && !restore) continue
     await watchdog?.hold?.(vm.id)
     try {
-      const result = await powerOn(vm.id)
+      const result = await (restore ? restoreRuntime : powerOn)(vm.id)
       revived.push({ id: vm.id, ok: !!result?.ok, code: result?.code || null })
       if (result?.ok)
-        logger.warn(`[slot-revive] ${vm.id} container was ${state.exists ? state.status : 'missing'}; booted`)
+        logger.warn(
+          restore
+            ? `[slot-revive] ${vm.id} Codex inference runtime restored`
+            : `[slot-revive] ${vm.id} container was ${state.exists ? state.status : 'missing'}; booted`,
+        )
       else logger.warn(`[slot-revive] ${vm.id} boot failed: ${result?.code || ''} ${result?.error || ''}`)
+    } catch (error) {
+      revived.push({ id: vm.id, ok: false, code: error?.code || 'runtime_start_failed' })
+      logger.warn(`[slot-revive] ${vm.id} boot failed: ${error?.message || error}`)
     } finally {
       watchdog?.release?.(vm.id)
     }

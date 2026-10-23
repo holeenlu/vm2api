@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { t as translate } from '@/i18n'
 import type { ProviderChainItem, UsageLogRow } from '@/types/panel-usage-logs'
 import {
   AlertCircle,
@@ -12,13 +13,14 @@ import {
   Server,
   XCircle,
 } from 'lucide-react'
-import { formatDuration } from '@/lib/usage-format'
+import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import { formatDuration, formatTimestamp } from '@/features/logs/display-time'
 import {
   chainItemName,
   chainItemStatus,
@@ -36,6 +38,8 @@ const STATUS_TO_STEP: Record<ChainItemStatus, StepStatus> = {
 }
 
 function Field({ label, value }: { label: string; value: string | null }) {
+  useTranslation('logs')
+
   if (value == null || value === '') return null
   return (
     <div className='flex gap-2'>
@@ -46,50 +50,69 @@ function Field({ label, value }: { label: string; value: string | null }) {
 }
 
 function AttemptDetails({ item }: { item: ProviderChainItem }) {
+  const { t: translate } = useTranslation('logs')
+
   return (
     <div className='space-y-2 text-xs'>
-      <Field label='槽位' value={item.vmName || item.vmId} />
+      <Field label={translate('logs:slot')} value={item.vmName || item.vmId} />
       {item.vmName && item.vmId ? (
-        <Field label='槽位 ID' value={item.vmId} />
+        <Field label={translate('logs:slotId')} value={item.vmId} />
       ) : null}
-      <Field label='账号' value={item.providerName || item.accountId} />
-      <Field label='模型' value={item.model} />
       <Field
-        label='选择方式'
+        label={translate('logs:account')}
+        value={item.providerName || item.accountId}
+      />
+      <Field label={translate('logs:model')} value={item.model} />
+      <Field
+        label={translate('logs:selectionMethod')}
         value={selectionReasonLabel(item.selectionReason)}
       />
       <Field
-        label='上游状态'
+        label={translate('logs:upstreamStatus')}
         value={item.upstreamStatus != null ? String(item.upstreamStatus) : null}
       />
-      <Field label='终态' value={terminalStateLabel(item.terminalState)} />
-      <Field label='错误域' value={item.errorScope} />
-      <Field label='动作' value={item.action} />
       <Field
-        label='已提交下游'
-        value={item.downstreamCommitted ? '是' : '否'}
+        label={translate('logs:terminalState')}
+        value={terminalStateLabel(item.terminalState)}
+      />
+      <Field label={translate('logs:errorDomain')} value={item.errorScope} />
+      <Field label={translate('logs:action')} value={item.action} />
+      <Field
+        label={translate('logs:downstreamCommitted')}
+        value={
+          item.downstreamCommitted
+            ? translate('logs:yes')
+            : translate('logs:no')
+        }
       />
       <Field
-        label='排队等待'
+        label={translate('logs:queueWait')}
         value={item.waitMs != null ? formatDuration(item.waitMs) : null}
       />
       <Field
-        label='首 Token'
+        label={translate('logs:firstToken')}
         value={item.ttftMs != null ? formatDuration(item.ttftMs) : null}
       />
       <Field
-        label='耗时'
+        label={translate('logs:duration')}
         value={item.latencyMs != null ? formatDuration(item.latencyMs) : null}
       />
-      <Field label='开始' value={item.startedAt} />
-      <Field label='结束' value={item.completedAt} />
+      <Field
+        label={translate('logs:start')}
+        value={item.startedAt ? formatTimestamp(item.startedAt) : null}
+      />
+      <Field
+        label={translate('logs:end')}
+        value={item.completedAt ? formatTimestamp(item.completedAt) : null}
+      />
     </div>
   )
 }
 
 function attemptTitle(item: ProviderChainItem, index: number): string {
-  if (index > 0) return `重试 #${item.attemptNumber}`
-  return `尝试: ${chainItemName(item)}`
+  if (index > 0)
+    return translate('logs:retryNumber', { p0: item.attemptNumber })
+  return translate('logs:attemptNumber', { p0: chainItemName(item) })
 }
 
 function attemptSubtitle(item: ProviderChainItem): string | null {
@@ -112,8 +135,8 @@ function attemptIcon(item: ProviderChainItem, index: number) {
 
 /** 纯文本技术时间线，供复制排障。 */
 function formatTimeline(row: UsageLogRow): string {
-  const base = Date.parse(row.providerChain[0]?.startedAt ?? '')
-  return row.providerChain
+  const base = Date.parse((row.providerChain || [])[0]?.startedAt ?? '')
+  return (row.providerChain || [])
     .map((item) => {
       const offset = Number.isFinite(base)
         ? `+${Math.max(0, Date.parse(item.startedAt ?? '') - base) || 0}ms`
@@ -139,23 +162,25 @@ function formatTimeline(row: UsageLogRow): string {
 }
 
 function TechnicalTimeline({ row }: { row: UsageLogRow }) {
+  const { t: translate } = useTranslation('logs')
+
   const [copied, setCopied] = useState(false)
   const timeline = formatTimeline(row)
   return (
     <div className='mt-6 space-y-2 border-t pt-6'>
       <h4 className='flex items-center gap-2 text-sm font-semibold'>
         <Clock className='h-4 w-4 text-slate-600' />
-        技术时间线
+        {translate('logs:technicalTimeline')}
       </h4>
       <Collapsible defaultOpen>
         <CollapsibleTrigger className='text-xs text-muted-foreground hover:text-foreground'>
-          技术时间线
+          {translate('logs:technicalTimeline')}
         </CollapsibleTrigger>
         <CollapsibleContent>
           <div className='group relative mt-2 max-h-[400px] overflow-x-hidden overflow-y-auto rounded-lg border bg-muted/50 p-4'>
             <button
               type='button'
-              title='复制时间线'
+              title={translate('logs:copyTimeline')}
               className={`absolute top-2 right-2 rounded-md border bg-background/80 p-1.5 transition-opacity hover:bg-muted ${copied ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
               onClick={() => {
                 void navigator.clipboard.writeText(timeline).then(() => {
@@ -176,7 +201,9 @@ function TechnicalTimeline({ row }: { row: UsageLogRow }) {
           </div>
           {row.durationMs != null ? (
             <div className='mt-1 text-right text-xs text-muted-foreground'>
-              总耗时: {row.durationMs}ms
+              {translate('logs:totalDurationMilliseconds', {
+                duration: row.durationMs,
+              })}
             </div>
           ) : null}
         </CollapsibleContent>
@@ -193,7 +220,9 @@ export function LogicTraceTab({
   row: UsageLogRow
   initialExpandedIndex?: number
 }) {
-  const chain = row.providerChain
+  const { t: translate } = useTranslation('logs')
+
+  const chain = row.providerChain || []
   const base = Date.parse(chain[0]?.startedAt ?? '')
   const sticky = chain[0]?.selectionReason === 'sticky'
   const vmCount = new Set(chain.map((item) => item.vmId).filter(Boolean)).size
@@ -204,7 +233,9 @@ export function LogicTraceTab({
         <div className='rounded-lg border border-orange-200 bg-orange-50 p-4 dark:border-orange-800 dark:bg-orange-950/20'>
           <div className='mb-2 flex items-center gap-2'>
             <AlertCircle className='h-4 w-4 text-orange-600' />
-            <span className='text-sm font-medium'>拦截信息</span>
+            <span className='text-sm font-medium'>
+              {translate('logs:blockInformation')}
+            </span>
             <Badge
               variant='outline'
               className='border-orange-600 text-orange-600'
@@ -228,7 +259,7 @@ export function LogicTraceTab({
               ) : (
                 <GitBranch className='h-4 w-4 text-blue-600' />
               )}
-              决策链
+              {translate('logs:decisionChain')}
             </h4>
             <div className='flex items-center gap-1'>
               {sticky ? (
@@ -236,11 +267,11 @@ export function LogicTraceTab({
                   variant='outline'
                   className='bg-violet-50 text-[10px] text-violet-700 dark:bg-violet-950/30 dark:text-violet-300'
                 >
-                  粘性会话
+                  {translate('logs:stickySession')}
                 </Badge>
               ) : null}
               <Badge variant='outline' className='text-[10px]'>
-                {vmCount} 个供应商
+                {translate('logs:providerCount', { count: vmCount })}
               </Badge>
             </div>
           </div>
@@ -271,7 +302,7 @@ export function LogicTraceTab({
             <div className='space-y-1'>
               <div className='flex items-center gap-2 text-xs font-medium'>
                 <AlertCircle className='h-4 w-4 text-rose-600' />
-                错误
+                {translate('logs:error')}
               </div>
               <pre className='rounded bg-rose-50 p-2 text-[10px] break-words whitespace-pre-wrap dark:bg-rose-950/20'>
                 {row.errorMessage}
@@ -283,7 +314,7 @@ export function LogicTraceTab({
       ) : row.blockedBy ? null : (
         <div className='py-8 text-center text-muted-foreground'>
           <GitBranch className='mx-auto mb-2 h-8 w-8 opacity-50' />
-          暂无决策数据
+          {translate('logs:noDecisionData')}
         </div>
       )}
     </div>

@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
+import { t as tVm } from '@/i18n'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { Plus, Server } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { FleetGroup } from '@/lib/vm-status'
@@ -18,16 +20,48 @@ import { VmUnit } from '@/features/vm/vm-rack-unit'
 
 /** 机架头的构成条按六档细分（吊销与无效分开着色），分区段落才合并。 */
 const GROUP_SWATCH: { key: FleetGroup; label: string; color: string }[] = [
-  { key: 'pool', label: '在池', color: 'var(--status-ok-solid)' },
-  { key: 'restricted', label: '受限', color: 'var(--status-warn-solid)' },
-  { key: 'off', label: '关闭调用', color: 'var(--status-none)' },
+  {
+    key: 'pool',
+    get label() {
+      return tVm('vm:vmRackModel.inPool')
+    },
+    color: 'var(--status-ok-solid)',
+  },
+  {
+    key: 'restricted',
+    get label() {
+      return tVm('vm:vmRackModel.restricted')
+    },
+    color: 'var(--status-warn-solid)',
+  },
+  {
+    key: 'off',
+    get label() {
+      return tVm('vm:vmRackModel.requestsDisabled')
+    },
+    color: 'var(--status-none)',
+  },
   {
     key: 'none',
-    label: '未使用',
+    get label() {
+      return tVm('vm:vmRackModel.unused')
+    },
     color: 'color-mix(in oklch, var(--status-none) 55%, transparent)',
   },
-  { key: 'bad', label: '无效凭证', color: 'var(--status-bad-solid)' },
-  { key: 'revoke', label: '已吊销', color: 'var(--red-4)' },
+  {
+    key: 'bad',
+    get label() {
+      return tVm('vm:vmRackBlade.invalidCredentials')
+    },
+    color: 'var(--status-bad-solid)',
+  },
+  {
+    key: 'revoke',
+    get label() {
+      return tVm('vm:vmRack.revoked')
+    },
+    color: 'var(--red-4)',
+  },
 ]
 
 const BLADE_MIN: Record<RackSize, string> = {
@@ -43,6 +77,8 @@ function RackHeader({
   rack: Rack
   accounts?: UsageAccountRow[]
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const t = rackTotals(rack.vms, accounts)
   const groups = GROUP_SWATCH.filter((g) => t.groups[g.key] > 0)
   return (
@@ -53,7 +89,7 @@ function RackHeader({
           {rack.label}
         </h2>
         <span className='ps-6 font-mono text-[11.5px] text-[color:var(--text-tertiary)]'>
-          {rack.nodeId ? rack.nodeId : '控制面本机'}
+          {rack.nodeId ? rack.nodeId : tVm('vm:vmRack.controlPlaneHost')}
         </span>
       </div>
       <div className='grid min-w-0 gap-1.5'>
@@ -90,7 +126,9 @@ function RackHeader({
       <dl className='m-0 flex gap-5 md:col-span-2 xl:col-span-1'>
         {t.seatsMax > 0 ? (
           <div className='grid min-w-16 gap-0.5'>
-            <dt className='text-[11.5px] text-muted-foreground'>席位</dt>
+            <dt className='text-[11.5px] text-muted-foreground'>
+              <Trans ns='vm' i18nKey='vmRackBlade.seats' />
+            </dt>
             <dd className='m-0 text-[15px] font-[620] tracking-[-0.015em] tabular-nums'>
               {t.seatsUsed}/{t.seatsMax}
             </dd>
@@ -109,7 +147,7 @@ function RackHeader({
               {fmtUsd(r.cost, r.cost >= 100 ? 0 : 2)}
             </dd>
             <dd className='m-0 font-mono text-[11px] text-[color:var(--text-tertiary)] tabular-nums'>
-              {fmtNum(r.tokens)} tok
+              {fmtNum(r.tokens)} <Trans ns='vm' i18nKey='units.tokensShort' />
             </dd>
           </div>
         ))}
@@ -136,9 +174,11 @@ export function VmRack({
   size: RackSize
   onCreate?: () => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   // 倒计时精度到分钟即可；整个机架共用一个时钟，不在每块刀片各起计时器。
   const now = useNow(60_000)
-  const racks = useMemo(() => buildRacks(vms, filter), [vms, filter])
+  const racks = useMemo(() => buildRacks(vms, filter, tVm), [vms, filter, tVm])
   return (
     <div className='grid gap-3.5'>
       {racks.map((rack) => (
@@ -208,8 +248,13 @@ export function VmRack({
                   'inline-flex h-7 items-center gap-1.5 rounded-lg border border-dashed px-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
                 )}
               >
-                <Plus className='size-3.5' aria-hidden='true' />
-                创建槽位
+                <Trans
+                  ns='vm'
+                  i18nKey='vmRack.createSlot'
+                  components={{
+                    part0: <Plus className='size-3.5' aria-hidden='true' />,
+                  }}
+                />
               </button>
             </div>
           ) : null}

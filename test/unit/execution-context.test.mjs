@@ -78,7 +78,7 @@ test('resolveVmProxyUrl stays off unless proxy_cli_enabled', () => {
       proxy_cli_enabled: true,
       proxy: { host: '10.0.0.1', port: 1080, username: 'u', password: 'p' },
     }),
-    'socks5h://u:p@10.0.0.1:1080',
+    'socks5://u:p@10.0.0.1:1080',
   )
 })
 

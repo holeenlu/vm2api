@@ -144,6 +144,7 @@ test('empty unofficial system still writes the official full prompt', () => {
   assert.equal(out.system[0].cache_control, undefined)
   assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
   assert.equal(out.system[2].text, CRS_REPORTING_OUTCOMES)
+  assert.equal(out.system[2].cache_control, undefined)
   assert.equal(out.system[3].text, CRS_OFFICIAL_AGENT_PROMPT)
   assert.deepEqual(out.system[3].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.match(out.system[4].text, /# Text output/)
