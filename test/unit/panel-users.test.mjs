@@ -115,7 +115,7 @@ function seedOwnedVm(project, id, owner, extra = {}) {
   return vm
 }
 
-test('deleting a user reclaims assigned VMs while preserving private and unrelated slots', (t) => {
+test('deleting a customer preserves infrastructure provenance and does not publish private slots', (t) => {
   const { dir, db, store } = tmpStore()
   t.after(() => {
     db.close()
@@ -132,13 +132,8 @@ test('deleting a user reclaims assigned VMs while preserving private and unrelat
   assert.equal(store.getById(user.id), null)
   const read = (id) => JSON.parse(fs.readFileSync(path.join(dir, 'vms', `${id}.json`), 'utf8'))
   const reclaimed = read('assigned')
-  assert.equal(reclaimed.owner_user_id, null)
-  assert.equal(reclaimed.origin, 'platform')
-  const { updated_at, ...rest } = reclaimed
-  assert.ok(updated_at)
-  assert.deepEqual(rest, { ...assigned, owner_user_id: null, origin: 'platform' })
-  assert.equal(read('legacy').owner_user_id, null)
-  assert.equal(read('legacy').origin, 'platform')
+  assert.deepEqual(reclaimed, assigned)
+  assert.equal(read('legacy').owner_user_id, user.id)
   assert.deepEqual(read('private'), privateVm)
   assert.deepEqual(read('other'), otherVm)
   assert.deepEqual(read('public'), publicVm)
@@ -162,7 +157,7 @@ test('rejected user deletions leave assigned VMs with their owners', (t) => {
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'vms', 'admin-vm.json'), 'utf8')), adminVm)
 })
 
-test('a VM write failure does not soft-delete the user', (t) => {
+test('customer deletion never writes VM files', (t) => {
   const { dir, db, store } = tmpStore()
   t.after(() => {
     db.close()
@@ -174,7 +169,7 @@ test('a VM write failure does not soft-delete the user', (t) => {
     throw new Error('simulated VM write failure')
   })
 
-  assert.throws(() => store.remove(user.id), /simulated VM write failure/)
-  assert.ok(store.getById(user.id))
+  assert.equal(store.remove(user.id), true)
+  assert.equal(store.getById(user.id), null)
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'vms', 'assigned.json'), 'utf8')), assigned)
 })

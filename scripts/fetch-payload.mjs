@@ -10,7 +10,8 @@
  *   node scripts/fetch-payload.mjs --pin TAG      re-hash local files into the
  *                                                 manifest and point it at release TAG
  *
- * VM2API_PAYLOAD_BASE_URL overrides https://github.com/<repo>/releases/download.
+ * TAPMODELS_PAYLOAD_BASE_URL overrides https://github.com/<repo>/releases/download.
+ * A file may pin its own release when a shared payload tag was republished.
  */
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -50,6 +51,7 @@ if (opts.pin) {
     if (buf === null) throw new Error(`${file.path} is missing; cannot pin`)
     file.size = buf.length
     file.sha256 = sha256(buf)
+    delete file.release
   }
   manifest.release = opts.pin
   fs.writeFileSync(opts.manifest, `${JSON.stringify(manifest, null, 2)}\n`)
@@ -77,15 +79,14 @@ if (opts.pin) {
   }
   console.log(`payload ok (${manifest.release}, ${manifest.files.length} files)`)
 } else {
-  const base = (process.env.VM2API_PAYLOAD_BASE_URL || `https://github.com/${manifest.repo}/releases/download`).replace(
-    /\/+$/,
-    '',
-  )
+  const base = (
+    process.env.TAPMODELS_PAYLOAD_BASE_URL || `https://github.com/${manifest.repo}/releases/download`
+  ).replace(/\/+$/, '')
   const downloads = new Map()
   for (const file of manifest.files) {
     const target = path.join(opts.dest, file.path)
     if (matches(readLocal(file), file)) continue
-    const url = `${base}/${manifest.release}/${file.asset}`
+    const url = `${base}/${file.release || manifest.release}/${file.asset}`
     if (!downloads.has(url)) {
       const res = await fetch(url)
       if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`)

@@ -1,6 +1,11 @@
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  redirect,
+  useNavigate,
+  useLocation,
+} from '@tanstack/react-router'
 import { useAuthStore } from '@/stores/auth-store'
 import { ApiError } from '@/lib/api'
 import { hasSession } from '@/lib/session'
@@ -21,6 +26,7 @@ export const Route = createFileRoute('/_authenticated')({
 
 function Authenticated() {
   const navigate = useNavigate()
+  const location = useLocation()
   const meQuery = useQuery(meQueryOptions())
   const setMe = useAuthStore((s) => s.setMe)
   const signOut = useAuthStore((s) => s.signOut)
@@ -33,8 +39,19 @@ function Authenticated() {
       navigate({ to: '/login' })
     }
   }, [meQuery.error, signOut, navigate])
+  useEffect(() => {
+    const view = location.pathname.split('/')[1]
+    if (meQuery.data && view && !meQuery.data.views?.includes(view))
+      navigate({
+        to: meQuery.data.role === 'user' ? '/statistics' : '/overview',
+        replace: true,
+      })
+  }, [meQuery.data, location.pathname, navigate])
   if (meQuery.error instanceof ApiError && meQuery.error.status === 401) {
     return null
   }
+  const view = location.pathname.split('/')[1]
+  if (!meQuery.data || (view && !meQuery.data.views?.includes(view)))
+    return null
   return <AuthenticatedLayout headerActions={<FleetActions />} />
 }

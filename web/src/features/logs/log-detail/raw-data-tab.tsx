@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type { RequestLogItem } from '@/types/panel-logs'
 import { Check, Copy } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { maskPresentedKey } from '@/lib/log-mute'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -39,36 +41,69 @@ function present(value: unknown): boolean {
 function sections(item: RequestLogItem): Section[] {
   const res = item.response ?? null
   const all: Section[] = [
-    { id: 'inbound_body', label: '入站请求体', value: item.inbound_body },
-    { id: 'headers', label: '入站请求头', value: item.headers },
-    { id: 'outbound_body', label: '出站请求体', value: item.outbound_body },
+    {
+      id: 'inbound_body',
+      label: translate('logs:inboundBody'),
+      value: item.inbound_body,
+    },
+    {
+      id: 'headers',
+      label: translate('logs:inboundHeaders'),
+      value: item.headers,
+    },
+    {
+      id: 'outbound_body',
+      label: translate('logs:outboundBody'),
+      value: item.outbound_body,
+    },
     {
       id: 'outbound_headers',
-      label: '出站请求头',
+      label: translate('logs:outboundHeaders'),
       value: item.outbound_headers,
     },
     {
       id: 'response_body',
-      label: '响应体',
+      label: translate('logs:responseBody'),
       value: res?.body,
       note: res
-        ? `${res.bytes.toLocaleString()} 字节${res.truncated ? ' · 已截断' : ''}`
+        ? translate(
+            res.truncated ? 'logs:bodyBytesTruncated' : 'logs:bodyBytes',
+            { count: res.bytes }
+          )
         : undefined,
     },
-    { id: 'response_headers', label: '响应头', value: res?.headers },
-    { id: 'hop_meta', label: '链路元数据', value: item.hop_meta },
+    {
+      id: 'response_headers',
+      label: translate('logs:responseHeaders'),
+      value: res?.headers,
+    },
+    {
+      id: 'hop_meta',
+      label: translate('logs:chainMetadata'),
+      value: item.hop_meta,
+    },
     {
       id: 'cache_continuity',
-      label: '缓存连续性',
+      label: translate('logs:cacheContinuity'),
       value: item.cache_continuity,
     },
-    { id: 'cache_prefix', label: '缓存前缀', value: item.cache_prefix },
-    { id: 'classifier', label: '分类器', value: item.classifier },
+    {
+      id: 'cache_prefix',
+      label: translate('logs:cachePrefix'),
+      value: item.cache_prefix,
+    },
+    {
+      id: 'classifier',
+      label: translate('logs:classifier'),
+      value: item.classifier,
+    },
   ]
   return all.filter((s) => present(s.value))
 }
 
 function CopyButton({ text }: { text: string }) {
+  const { t: translate } = useTranslation('logs')
+
   const [copied, setCopied] = useState(false)
   return (
     <Button
@@ -84,7 +119,7 @@ function CopyButton({ text }: { text: string }) {
       }}
     >
       {copied ? <Check className='h-3 w-3' /> : <Copy className='h-3 w-3' />}
-      {copied ? '已复制' : '复制'}
+      {copied ? translate('logs:copied') : translate('logs:copy')}
     </Button>
   )
 }
@@ -100,6 +135,8 @@ export function RawDataTab({
   requestId: string | null
   logMode: 'normal' | 'debug' | null
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const detail = useQuery(requestLogQueryOptions(requestId ?? '', !!requestId))
   const item = detail.data?.item as RequestLogItem | undefined
   const list = item ? sections(item) : []
@@ -107,25 +144,33 @@ export function RawDataTab({
 
   if (!requestId) {
     return (
-      <p className='text-sm text-muted-foreground'>该请求没有 Request ID。</p>
+      <p className='text-sm text-muted-foreground'>
+        {translate('logs:missingRequestId')}
+      </p>
     )
   }
   if (detail.isLoading) {
-    return <p className='text-sm text-muted-foreground'>加载原始数据…</p>
+    return (
+      <p className='text-sm text-muted-foreground'>
+        {translate('logs:loadingRawData')}
+      </p>
+    )
   }
   if (!list.length) {
     return (
       <div className='space-y-2 rounded-lg border border-dashed p-6 text-sm text-muted-foreground'>
         <p>
           {logMode === 'debug'
-            ? '这条 debug 记录没有可展示的原始数据（可能已过 debug 保留期）。'
-            : '该请求未开启 debug 采样，没有保存原始请求体与响应体。'}
+            ? translate('logs:debugDataUnavailable')
+            : translate('logs:debugNotEnabled')}
         </p>
         <p className='text-xs'>
-          在「设置 → 日志」把模式切到
-          Debug，之后的请求会保存入站/出站请求体和返回给客户端的响应。 请求时带{' '}
-          <code>x-kin-debug: 1</code>{' '}
-          只保存入站请求体与响应，出站请求体（含网关改写）不保存。
+          <Trans
+            ns='logs'
+            i18nKey='debugSamplingHelp'
+            values={{}}
+            components={{ code: <code /> }}
+          />
         </p>
       </div>
     )
@@ -138,18 +183,24 @@ export function RawDataTab({
       <div className='flex flex-wrap items-center gap-2 text-xs'>
         {item?.upstream_status != null && item.upstream_status !== '' ? (
           <Badge variant='outline' className='font-mono'>
-            上游 {String(item.upstream_status)}
+            {translate('logs:upstreamStatusBadge', {
+              status: String(item.upstream_status),
+            })}
           </Badge>
         ) : null}
         {item?.response?.status != null ? (
           <Badge variant='outline' className='font-mono'>
-            返回 {item.response.status}
+            {translate('logs:responseStatusBadge', {
+              status: item.response.status,
+            })}
           </Badge>
         ) : null}
         {item?.api_key_presented ? (
           // 入站 Key 是攻击者可控的明文：只渲染掩码，不设 title、不提供复制。
           <Badge variant='outline' className='font-mono'>
-            入站 Key {maskPresentedKey(item.api_key_presented)}
+            {translate('logs:inboundKeyBadge', {
+              key: maskPresentedKey(item.api_key_presented),
+            })}
           </Badge>
         ) : null}
       </div>

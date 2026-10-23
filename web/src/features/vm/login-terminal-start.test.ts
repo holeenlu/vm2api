@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
@@ -54,14 +55,14 @@ describe('official login from an empty import slot', () => {
   it('does not auto-allocate an exit when the user has not selected one', async () => {
     await expect(
       prepareLoginTerminal({ id: 'vm-empty', status: 'stopped' })
-    ).rejects.toThrow('请先为槽位绑定出口')
+    ).rejects.toThrow(t('vm:credentialPanel.loginExitRequired'))
     expect(request).not.toHaveBeenCalled()
   })
 
   it('honors an authoritative rejection even when stale proxy fields remain', async () => {
     await expect(
       prepareLoginTerminal({ ...slot, can_import_credential: false })
-    ).rejects.toThrow('请先为槽位绑定出口')
+    ).rejects.toThrow(t('vm:credentialPanel.loginExitRequired'))
     expect(request).not.toHaveBeenCalled()
   })
 

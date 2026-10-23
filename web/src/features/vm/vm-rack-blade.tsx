@@ -4,9 +4,11 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+import { t as tVm } from '@/i18n'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { Download, Link2, RefreshCw } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { credEndpointLabel, credEndpointOf } from '@/lib/cred-type'
 import { fmtAgo, fmtNum, fmtUsd } from '@/lib/format'
 import { tierVisual } from '@/lib/tier-visual'
@@ -41,6 +43,7 @@ import {
   zoneOf,
   type BladeState,
 } from '@/features/vm/vm-rack-model'
+import { VmGroupLabels } from './vm-groups'
 
 export type RackSize = 's' | 'm' | 'l'
 
@@ -65,6 +68,8 @@ export function tierStyle(vm: Vm): CSSProperties | undefined {
 }
 
 export function TierBadge({ vm, className }: { vm: Vm; className?: string }) {
+  useTranslation('vm')
+
   const skin = tierVisual(vm)
   if (skin.key === 'none') return null
   return (
@@ -108,6 +113,8 @@ export function BladeControls({
   vm: Vm
   className?: string
 }) {
+  useTranslation('vm')
+
   return (
     <div
       className={cn('ms-auto flex items-center gap-0.5', className)}
@@ -131,6 +138,8 @@ export function VmSeats({
   vm: Vm
   compact?: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   if (vm.seats_max == null) return null
   const used = Number(vm.seats_used) || 0
   const max = Number(vm.seats_max) || 0
@@ -143,7 +152,11 @@ export function VmSeats({
       className='inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap'
       title={seatTitle(vm)}
     >
-      {compact ? null : <span>席位</span>}
+      {compact ? null : (
+        <span>
+          <Trans ns='vm' i18nKey='vmRackBlade.seats' />
+        </span>
+      )}
       <span
         aria-hidden='true'
         className={cn(
@@ -175,7 +188,9 @@ export function VmSeats({
       </span>
       {queued ? (
         <span className='font-medium text-[color:var(--status-warn)] tabular-nums'>
-          {compact ? `+${queued}` : `排队 ${queued}`}
+          {compact
+            ? `+${queued}`
+            : tVm('vm:vmRackBlade.queued', { queued: queued })}
         </span>
       ) : null}
     </span>
@@ -184,6 +199,8 @@ export function VmSeats({
 
 /** 一行规格：调用形式 · 形态 · 节点 · 出口。替代原先五枚边框 chip。 */
 function SpecLine({ vm }: { vm: Vm }) {
+  useTranslation('vm')
+
   const lane = credEndpointOf(vm)
   const parts = [
     lane === 'none' ? null : credEndpointLabel(lane),
@@ -219,6 +236,8 @@ function Callout({
   children?: ReactNode
   action: ReactNode
 }) {
+  useTranslation('vm')
+
   return (
     <div
       className={cn(
@@ -252,6 +271,8 @@ function CalloutAction({
   children: ReactNode
   onClick: () => void
 }) {
+  useTranslation('vm')
+
   return (
     <button
       type='button'
@@ -269,7 +290,14 @@ function lifeLine(vm: Vm, accounts?: UsageAccountRow[]) {
   if (!cost) return null
   return (
     <span className='font-mono text-[11.5px] text-muted-foreground tabular-nums'>
-      总计 {fmtUsd(cost, 2)} · {fmtNum(vmTotalTokens(vm, accounts))} tok
+      <Trans
+        ns='vm'
+        i18nKey='vmRackBlade.totalTok'
+        values={{
+          formattedUsd: fmtUsd(cost, 2),
+          formattedNum: fmtNum(vmTotalTokens(vm, accounts)),
+        }}
+      />
     </span>
   )
 }
@@ -283,6 +311,8 @@ export function BladeCallout({
   accounts?: UsageAccountRow[]
   state: BladeState
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const actions = useVmActions()
   const canCred = useVmPerms().credential
   if (state === 'dead') {
@@ -291,14 +321,19 @@ export function BladeCallout({
     return (
       <Callout
         tone='bad'
-        title={`${credentialStatus(vm).text || '无效凭证'}${ago ? ` · ${ago}` : ''}`}
+        title={tVm('vm:detailTestTab.summary', {
+          value1:
+            credentialStatus(vm).text ||
+            tVm('vm:vmRackBlade.invalidCredentials'),
+          value2: ago ? ` · ${ago}` : '',
+        })}
         action={
           canCred ? (
             <CalloutAction
               icon={<Link2 />}
               onClick={() => actions.openReauth(vm)}
             >
-              重新授权
+              <Trans ns='vm' i18nKey='vmRackBlade.reauthorize' />
             </CalloutAction>
           ) : null
         }
@@ -316,38 +351,48 @@ export function BladeCallout({
     return (
       <Callout
         tone='none'
-        title='未绑定账号'
+        title={tVm('vm:vmRackBlade.noAccountBound')}
         action={
           canCred ? (
             <CalloutAction
               icon={<Download />}
               onClick={() => actions.openReauth(vm)}
             >
-              绑定凭证
+              <Trans ns='vm' i18nKey='vmRackBlade.bindCredentials' />
             </CalloutAction>
           ) : null
         }
       >
-        <span>绑定后进入探测，再按结果入池。</span>
+        <span>
+          <Trans
+            ns='vm'
+            i18nKey='vmRackBlade.afterBindingProbeTheSlotAndAddItTo'
+          />
+        </span>
       </Callout>
     )
   }
   return (
     <Callout
       tone='caution'
-      title='额度未探测'
+      title={tVm('vm:vmRackBlade.quotaNotProbed')}
       action={
         canCred ? (
           <CalloutAction
             icon={<RefreshCw />}
             onClick={() => actions.refreshToken(vm)}
           >
-            刷新并探测
+            <Trans ns='vm' i18nKey='vmRackBlade.refreshAndProbe' />
           </CalloutAction>
         ) : null
       }
     >
-      <span>未探测的槽不计入可用余量。</span>
+      <span>
+        <Trans
+          ns='vm'
+          i18nKey='vmRackBlade.unprobedSlotsAreExcludedFromAvailableQuota'
+        />
+      </span>
       {lifeLine(vm, accounts)}
     </Callout>
   )
@@ -366,6 +411,8 @@ function BladeUsage({
   accounts?: UsageAccountRow[]
   now: number
 }) {
+  useTranslation('vm')
+
   return (
     <div className='@container grid min-w-0 content-start gap-1.5'>
       <div className='grid min-w-0 gap-x-3 gap-y-2 @min-[24rem]:grid-cols-[minmax(0,1fr)_auto]'>
@@ -382,6 +429,8 @@ function BladeUsage({
 }
 
 function QuotaRow({ vm, now }: { vm: Vm; now: number }) {
+  useTranslation('vm')
+
   return (
     <div
       className='-ms-1.5'
@@ -413,7 +462,7 @@ export const VmBlade = memo(function VmBlade({
     <article
       role='button'
       tabIndex={0}
-      aria-label={`查看 ${vm.id} 详情`}
+      aria-label={tVm('vm:vmListTable.viewDetailsFor', { id: vm.id })}
       style={tierStyle(vm)}
       className={cn(
         'relative grid min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_1fr_auto] rounded-[10px] shadow-[inset_0_0_0_1px_var(--hairline)] transition-[background-color,box-shadow] duration-150 ease-out hover:bg-muted hover:shadow-[inset_0_0_0_1px_var(--border)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring',
@@ -464,6 +513,7 @@ export const VmBlade = memo(function VmBlade({
         ) : null}
       </div>
       <SpecLine vm={vm} />
+      <VmGroupLabels vm={vm} />
       {state === 'live' ? (
         <BladeUsage vm={vm} accounts={accounts} now={now} />
       ) : state === 'unprobed' ? (

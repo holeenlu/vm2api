@@ -172,6 +172,9 @@ test('slot oauth guard prevents node-fetch Anthropic host calls', () => {
   }
   visit(srcRoot)
   for (const file of files) {
+    // Explicitly authorized proxy diagnostics send anonymous GETs, never OAuth
+    // refresh/inference. proxy-quality.test verifies method, headers and no body.
+    if (path.relative(srcRoot, file) === 'lib/vm/proxy-quality.mjs') continue
     const source = fs.readFileSync(file, 'utf8')
     const hasNodeFetch = source.includes('node-fetch')
     const hasAnthropicHost =

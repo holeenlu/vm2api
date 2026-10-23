@@ -400,6 +400,29 @@ test('create writes the requested locale into the slot and its fingerprint', asy
   }
 })
 
+for (const timezone of [undefined, 'America/New_York']) {
+  test(`Taiwan locale creation preserves ${timezone ? 'manual' : 'automatic'} timezone selection`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-zh-tw-'))
+    try {
+      const { handlePanel, response } = makeCreateHandler(root, {
+        start: false,
+        auto_allocate_proxy: false,
+        locale: 'zh_TW.UTF-8',
+        timezone,
+      })
+      await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
+      assert.equal(response.status, 200)
+      const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', response.body.data.vm.id + '.json'), 'utf8'))
+      assert.equal(saved.locale, 'zh_TW.UTF-8')
+      assert.equal(saved.fingerprint.locale, 'zh_TW.UTF-8')
+      assert.equal(saved.timezone, timezone || null)
+      assert.equal(saved.timezone_source, timezone ? 'manual' : 'auto')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
 test('create rejects an unknown locale before writing the slot', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-locale-bad-'))
   try {
@@ -413,7 +436,7 @@ test('create rejects an unknown locale before writing the slot', async () => {
   }
 })
 
-test('GET /vms/create-options is available to a tenant user', async () => {
+test('GET /vms/create-options is available to an operations user', async () => {
   const response = {}
   const handlePanel = createPanelHandler({
     cfg: { paths: { project: os.tmpdir() } },
@@ -422,7 +445,7 @@ test('GET /vms/create-options is available to a tenant user', async () => {
     requireAuth(req) {
       req.panelUser = 'tenant'
       req.apiKeyKind = 'session'
-      req.panelRole = 'user'
+      req.panelRole = 'super'
       req.panelUserId = 'u-1'
       return true
     },

@@ -20,29 +20,29 @@ describe('vmPermsFor follows panel-acl roles', () => {
     })
   })
 
-  it('tenant cannot read dashboard, delete slots, or manage the slot, but can power, test and import', () => {
+  it('customer has no infrastructure privileges', () => {
     const p = vmPermsFor('user')
     expect(p.known).toBe(true)
     expect(p.admin).toBe(false)
     expect(p.dashboard).toBe(false)
-    expect(p.power).toBe(true)
-    expect(p.test).toBe(true)
+    expect(p.power).toBe(false)
+    expect(p.test).toBe(false)
     // The backend only serves GET /api/panel/test-models to admins.
     expect(p.testModels).toBe(false)
-    expect(p.credential).toBe(true)
+    expect(p.credential).toBe(false)
     expect(p.remove).toBe(false)
   })
 
-  it('super only reads dashboard and toggles scheduling', () => {
+  it('super maintains resources without administrator-only powers', () => {
     const p = vmPermsFor('super')
     expect(p).toMatchObject({
       known: true,
       admin: false,
       dashboard: true,
-      power: false,
-      test: false,
-      credential: false,
-      remove: false,
+      power: true,
+      test: true,
+      credential: true,
+      remove: true,
     })
   })
 
@@ -65,16 +65,12 @@ describe('vmDetailTabs', () => {
       'ops',
       'seed',
     ])
-    expect(vmDetailTabs(vmPermsFor('user'))).toEqual([
-      'overview',
-      'account',
-      'proxy',
-      'test',
-    ])
+    expect(vmDetailTabs(vmPermsFor('user'))).toEqual([])
     expect(vmDetailTabs(vmPermsFor('super'))).toEqual([
       'overview',
       'account',
       'proxy',
+      'test',
     ])
   })
 
@@ -82,8 +78,8 @@ describe('vmDetailTabs', () => {
     const tabs = vmDetailTabs(vmPermsFor('user'))
     expect(visibleTab('ops', tabs)).toBe('overview')
     expect(visibleTab('seed', tabs)).toBe('overview')
-    expect(visibleTab('test', tabs)).toBe('test')
-    expect(visibleTab('proxy', tabs)).toBe('proxy')
+    expect(visibleTab('test', tabs)).toBe('overview')
+    expect(visibleTab('proxy', tabs)).toBe('overview')
   })
 })
 

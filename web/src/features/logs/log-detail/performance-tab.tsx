@@ -1,14 +1,16 @@
+import { t as translate } from '@/i18n'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { Clock, Gauge, Zap } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   calculateOutputRate,
-  formatDuration,
   formatTokenAmount,
   shouldHideOutputRate,
 } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { CircularProgress } from '@/components/ui/circular-progress'
+import { formatDuration } from '@/features/logs/display-time'
 import { queueWaitMs } from '../log-display'
 import { LatencyBreakdownBar } from './latency-breakdown-bar'
 
@@ -19,22 +21,30 @@ const ASSESSMENTS: Record<
   Assessment
 > = {
   excellent: {
-    label: '优秀',
+    get label() {
+      return translate('logs:excellent')
+    },
     color: 'text-emerald-600',
     bg: 'bg-emerald-50 dark:bg-emerald-950/20',
   },
   good: {
-    label: '良好',
+    get label() {
+      return translate('logs:good')
+    },
     color: 'text-blue-600',
     bg: 'bg-blue-50 dark:bg-blue-950/20',
   },
   warning: {
-    label: '警告',
+    get label() {
+      return translate('logs:warning')
+    },
     color: 'text-amber-600',
     bg: 'bg-amber-50 dark:bg-amber-950/20',
   },
   poor: {
-    label: '较差',
+    get label() {
+      return translate('logs:poor')
+    },
     color: 'text-rose-600',
     bg: 'bg-rose-50 dark:bg-rose-950/20',
   },
@@ -55,6 +65,8 @@ function PerformanceGauge({
   display: string
   assessment: Assessment
 }) {
+  useTranslation('logs')
+
   return (
     <div
       className={cn(
@@ -93,17 +105,19 @@ function PerformanceGauge({
 }
 
 export function PerformanceTab({ row }: { row: UsageLogRow }) {
+  const { t: translate } = useTranslation('logs')
+
   const { ttftMs, durationMs, outputTokens } = row
   const rate = calculateOutputRate(outputTokens, durationMs, ttftMs)
   const showRate =
     rate != null && !shouldHideOutputRate(rate, durationMs, ttftMs)
-  const wait = queueWaitMs(row.providerChain)
+  const wait = queueWaitMs(row.providerChain || [])
 
   if (ttftMs == null && durationMs == null) {
     return (
       <div className='py-8 text-center text-muted-foreground'>
         <Gauge className='mx-auto mb-2 h-8 w-8 opacity-50' />
-        暂无性能数据
+        {translate('logs:noPerformanceData')}
       </div>
     )
   }
@@ -133,14 +147,20 @@ export function PerformanceTab({ row }: { row: UsageLogRow }) {
     : null
 
   const rows: [string, string][] = []
-  if (wait != null) rows.push(['排队等待', formatDuration(wait)])
+  if (wait != null)
+    rows.push([translate('logs:queueWait'), formatDuration(wait)])
   if (ttftMs != null)
-    rows.push(['首 Token 时间（TTFT）', formatDuration(ttftMs)])
+    rows.push([translate('logs:ttftTitle'), formatDuration(ttftMs)])
   if (ttftMs != null && durationMs != null)
-    rows.push(['生成时间', formatDuration(durationMs - ttftMs)])
-  if (durationMs != null) rows.push(['总耗时', formatDuration(durationMs)])
-  rows.push(['输出 Tokens', formatTokenAmount(outputTokens)])
-  if (showRate) rows.push(['输出速率', `${rate.toFixed(1)} tok/s`])
+    rows.push([
+      translate('logs:generationTime'),
+      formatDuration(durationMs - ttftMs),
+    ])
+  if (durationMs != null)
+    rows.push([translate('logs:totalDuration'), formatDuration(durationMs)])
+  rows.push([translate('logs:outputTokens'), formatTokenAmount(outputTokens)])
+  if (showRate)
+    rows.push([translate('logs:outputRate'), `${rate.toFixed(1)} tok/s`])
 
   return (
     <div className='space-y-6'>
@@ -151,7 +171,7 @@ export function PerformanceTab({ row }: { row: UsageLogRow }) {
               value={ttftMs}
               max={3000}
               icon={Clock}
-              label='首 Token 时间'
+              label={translate('logs:ttft')}
               display={formatDuration(ttftMs)}
               assessment={ttftAssessment}
             />
@@ -161,7 +181,7 @@ export function PerformanceTab({ row }: { row: UsageLogRow }) {
               value={rate}
               max={100}
               icon={Zap}
-              label='输出速率'
+              label={translate('logs:outputRate')}
               display={`${rate.toFixed(1)} tok/s`}
               assessment={rateAssessment}
             />
@@ -172,7 +192,7 @@ export function PerformanceTab({ row }: { row: UsageLogRow }) {
         <div className='space-y-2'>
           <h4 className='flex items-center gap-2 text-sm font-semibold'>
             <Gauge className='h-4 w-4 text-purple-600' />
-            延迟分解
+            {translate('logs:latencyBreakdown')}
           </h4>
           <div className='rounded-lg border bg-card p-4'>
             <LatencyBreakdownBar
@@ -184,7 +204,9 @@ export function PerformanceTab({ row }: { row: UsageLogRow }) {
         </div>
       ) : null}
       <div className='space-y-2'>
-        <h4 className='text-sm font-semibold'>性能数据</h4>
+        <h4 className='text-sm font-semibold'>
+          {translate('logs:performanceData')}
+        </h4>
         <div className='divide-y rounded-lg border bg-card'>
           {rows.map(([label, value]) => (
             <div

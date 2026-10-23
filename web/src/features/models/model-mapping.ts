@@ -13,12 +13,12 @@ export type MappingRow = { alias: string; target: string; fixed: boolean }
 export type AliasProblem =
   'empty' | 'whitespace' | 'duplicate' | 'anthropic' | 'image_tool'
 
-export const ALIAS_PROBLEM_TEXT: Record<AliasProblem, string> = {
-  empty: '别名不能为空',
-  whitespace: '别名不能包含空白',
-  duplicate: '别名重复',
-  anthropic: 'Anthropic 模型名会劫持 Claude 请求',
-  image_tool: '图像模型不能映射',
+export const ALIAS_PROBLEM_KEYS: Record<AliasProblem, string> = {
+  empty: 'models:aliasEmpty',
+  whitespace: 'models:aliasWhitespace',
+  duplicate: 'models:aliasDuplicate',
+  anthropic: 'models:aliasAnthropic',
+  image_tool: 'models:aliasImage',
 }
 
 /** codex-auto-review first and fixed; the rest in stored order. */

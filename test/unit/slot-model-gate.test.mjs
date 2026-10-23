@@ -19,7 +19,7 @@ test('empty allowlist inherits all models', () => {
 
 test('allowlist matches aliases and dated prefixes', () => {
   assert.equal(modelMatchesAllowlist('claude-fable-5-20260801', ['claude-fable-5']), true)
-  assert.equal(modelMatchesAllowlist('claude-fable-5', ['fable']), true)
+  assert.equal(modelMatchesAllowlist('claude-fable-5-1', ['fable']), true)
   assert.equal(modelMatchesAllowlist('claude-opus-5', ['claude-sonnet-5']), false)
 })
 
@@ -98,10 +98,10 @@ test('parseAllowedModelsPatch rejects unknown ids', () => {
 })
 
 test('parseAllowedModelsPatch accepts GPT ids for Codex VMs', () => {
-  const gpt = parseAllowedModelsPatch(['gpt-5.4'], { platform: 'openai' })
+  const gpt = parseAllowedModelsPatch(['gpt-6.1-sol'], { platform: 'openai' })
   assert.equal(gpt.ok, true)
-  assert.deepEqual(gpt.value, ['gpt-5.4'])
-  const mixed = parseAllowedModelsPatch(['gpt-5.4'], {})
+  assert.deepEqual(gpt.value, ['gpt-6.1-sol'])
+  const mixed = parseAllowedModelsPatch(['gpt-6.1-sol'], {})
   assert.equal(mixed.ok, false)
 })
 

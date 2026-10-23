@@ -7,6 +7,7 @@ import type { UsageLogFilters } from '@/types/panel-usage-logs'
  */
 export type LogsSearch = {
   userId?: string
+  groupId?: string
   keyId?: string
   /** 供应商 = 槽位。 */
   vmId?: string
@@ -34,6 +35,7 @@ export type LogsSearch = {
 /** 筛选面板编辑的草稿形状；`kind=error` 在这里已折叠成 `excludeStatus200`。 */
 export type LogsFilterState = {
   userId?: string
+  groupId?: string
   keyId?: string
   vmId?: string
   sessionId?: string
@@ -82,6 +84,7 @@ export function validateLogsSearch(
   const minRetry = search.minRetry == null ? undefined : int(search.minRetry)
   return {
     userId: str(search.userId),
+    groupId: str(search.groupId),
     keyId: str(search.keyId),
     vmId: str(search.vmId),
     sessionId: str(search.sessionId),
@@ -103,6 +106,7 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
   const exclude = search.statusCode === '!200' || search.kind === 'error'
   return {
     userId: search.userId,
+    groupId: search.groupId,
     keyId: search.keyId,
     vmId: search.vmId,
     sessionId: search.sessionId,
@@ -125,6 +129,7 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
 export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   const out: LogsSearch = {}
   if (filters.userId) out.userId = filters.userId
+  if (filters.groupId) out.groupId = filters.groupId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
   if (filters.sessionId?.trim()) out.sessionId = filters.sessionId.trim()
@@ -152,6 +157,7 @@ export function filtersToApi(
 ): UsageLogFilters {
   const out: UsageLogFilters = {}
   if (filters.userId) out.userId = filters.userId
+  if (filters.groupId) out.groupId = filters.groupId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
   if (filters.sessionId) out.sessionId = filters.sessionId
@@ -182,6 +188,8 @@ export function usageLogFiltersQuery(
     if (value !== undefined && value !== '') qs.set(key, String(value))
   }
   set('user_id', filters.userId)
+  if (filters.errorsOnly) qs.set('errors_only', '1')
+  set('group_id', filters.groupId)
   set('key_id', filters.keyId)
   set('vm_id', filters.vmId)
   set('account_id', filters.accountId)
@@ -208,6 +216,7 @@ export function activeFilterCount(filters: LogsFilterState): number {
   let count = 0
   if (filters.startTime != null || filters.endTime != null) count++
   if (filters.userId) count++
+  if (filters.groupId) count++
   if (filters.keyId) count++
   if (filters.vmId) count++
   if (filters.sessionId) count++
