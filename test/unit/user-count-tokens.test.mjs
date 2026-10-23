@@ -1,8 +1,11 @@
-import test from 'node:test'
-import assert from 'node:assert/strict'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import test from 'node:test'
+import assert from 'node:assert/strict'
 import {
   parseCountTokensBody,
   buildUsageView,
@@ -121,11 +124,20 @@ test('setup-token count_tokens hops and returns input_tokens', async () => {
   assert.equal(cap.calls[0].body.five_hour, undefined)
 })
 
-test('a platform-scoped key cannot count tokens on the other platform and peeks only its VMs', async () => {
-  const scopedReq = (group_type) => ({
-    apiKeyKind: 'managed',
-    apiKeyRecord: { group_type, allowed_vms: '["vm-02"]' },
+test('a platform-scoped key cannot count tokens on the other platform and peeks only its VMs', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'count-scope-'))
+  const db = openDatabase({ dataDir: dir })
+  t.after(() => {
+    closeDatabase()
+    fs.rmSync(dir, { recursive: true, force: true })
   })
+  const groups = new GroupsRepo(db)
+  const claude = groups.create({ name: 'claude', platform: 'anthropic' }),
+    openai = groups.create({ name: 'gpt', platform: 'openai' })
+  groups.assignResource('vm', 'vm-02', [claude.id], 0)
+  const keys = new ApiKeyStore({ db })
+  const records = { openai: keys.create({ group_id: openai.id }), anthropic: keys.create({ group_id: claude.id }) }
+  const scopedReq = (group_type) => ({ apiKeyKind: 'managed', apiKeyRecord: records[group_type] })
   const cap = jsonCapture()
   const seen = []
   const deps = {
@@ -148,7 +160,8 @@ test('a platform-scoped key cannot count tokens on the other platform and peeks 
   assert.equal(seen.length, 0)
   await handleUserCountTokens(scopedReq('anthropic'), {}, deps)
   assert.equal(cap.calls[1].status, 200)
-  assert.deepEqual(seen[0], { group_type: 'anthropic', allowed_vms: ['vm-02'], vm_pool_id: null })
+  assert.equal(seen[0].group_id, claude.id)
+  assert.deepEqual(seen[0].allowed_vms, ['vm-02'])
 })
 
 test('distill count_tokens returns distill_blocked and never peeks or hops', async () => {
@@ -458,16 +471,16 @@ function usageDeps(root, overrides = {}) {
   }
 }
 
-const tenantReq = (extra = {}) => ({
+const platformReq = (extra = {}) => ({
   url: '/v1/usage',
   headers: {},
   apiKeyKind: 'managed',
-  apiKeyRecord: { id: 'k1', user_id: 'u1' },
+  apiKeyRecord: { id: 'k1', user_id: 'admin1' },
   ...extra,
 })
-const tenantUsers = { users: { getById: () => ({ role: 'user' }) } }
+const platformUsers = { users: { getById: () => ({ role: 'admin' }) } }
 const CODEX_VM = {
-  owner_user_id: 'u1',
+  owner_user_id: null,
   platform: 'openai',
   family: 'codex',
   codex: { has_access: true, usage: CODEX_USAGE },
@@ -476,7 +489,7 @@ const CODEX_VM = {
 test('usage keeps the next Claude account and tags its platform', async (t) => {
   const root = usageProject(t, [{ id: 'vm-x', ...CODEX_VM }])
   const { cap, deps, peeks } = usageDeps(root, {
-    apiKeyStore: tenantUsers,
+    apiKeyStore: platformUsers,
     getPoolScheduler: () => ({
       peekAccount: async () => ({
         ok: true,
@@ -487,7 +500,7 @@ test('usage keeps the next Claude account and tags its platform', async (t) => {
       }),
     }),
   })
-  await handleUserUsage(tenantReq(), {}, deps)
+  await handleUserUsage(platformReq(), {}, deps)
   assert.equal(cap.calls[0].status, 200, JSON.stringify(cap.calls[0].body))
   assert.equal(cap.calls[0].body.platform, 'anthropic')
   assert.equal(cap.calls[0].body.five_hour.utilization, 20)
@@ -499,8 +512,8 @@ test('usage reads Codex windows when the caller has no Claude account', async (t
     { id: 'vm-x', ...CODEX_VM },
     { id: 'vm-x-other', ...CODEX_VM, owner_user_id: 'u2' },
   ])
-  const { cap, deps, peeks } = usageDeps(root, { apiKeyStore: tenantUsers })
-  await handleUserUsage(tenantReq(), {}, deps)
+  const { cap, deps, peeks } = usageDeps(root, { apiKeyStore: platformUsers })
+  await handleUserUsage(platformReq(), {}, deps)
   const body = cap.calls[0].body
   assert.equal(cap.calls[0].status, 200, JSON.stringify(body))
   assert.equal(peeks(), 1)
@@ -510,17 +523,17 @@ test('usage reads Codex windows when the caller has no Claude account', async (t
   assert.equal(body.seven_day.utilization, 10)
 })
 
-test('usage never reads another owner Codex slot', async (t) => {
+test('platform usage never reads an unmigrated private Codex slot', async (t) => {
   const root = usageProject(t, [{ id: 'vm-x-other', ...CODEX_VM, owner_user_id: 'u2' }])
-  const { cap, deps } = usageDeps(root, { apiKeyStore: tenantUsers })
-  await handleUserUsage(tenantReq(), {}, deps)
+  const { cap, deps } = usageDeps(root, { apiKeyStore: platformUsers })
+  await handleUserUsage(platformReq(), {}, deps)
   assert.equal(cap.calls[0].status, 503)
 })
 
 test('usage platform filter picks one side and rejects unknown values', async (t) => {
   const root = usageProject(t, [{ id: 'vm-x', ...CODEX_VM }])
   const { cap, deps, peeks } = usageDeps(root, {
-    apiKeyStore: tenantUsers,
+    apiKeyStore: platformUsers,
     getPoolScheduler: () => ({
       peekAccount: async () => ({
         ok: true,
@@ -531,11 +544,11 @@ test('usage platform filter picks one side and rejects unknown values', async (t
       }),
     }),
   })
-  await handleUserUsage(tenantReq({ url: '/v1/usage?platform=openai' }), {}, deps)
+  await handleUserUsage(platformReq({ url: '/v1/usage?platform=openai' }), {}, deps)
   assert.equal(cap.calls[0].body.platform, 'openai')
-  await handleUserUsage(tenantReq({ url: '/v1/usage?platform=claude' }), {}, deps)
+  await handleUserUsage(platformReq({ url: '/v1/usage?platform=claude' }), {}, deps)
   assert.equal(cap.calls[1].body.platform, 'anthropic')
-  await handleUserUsage(tenantReq({ url: '/v1/usage?platform=gemini' }), {}, deps)
+  await handleUserUsage(platformReq({ url: '/v1/usage?platform=gemini' }), {}, deps)
   assert.equal(cap.calls[2].status, 400)
   assert.equal(cap.calls[2].body.error.code, 'invalid_platform')
   assert.equal(peeks(), 0)

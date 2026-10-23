@@ -1,11 +1,11 @@
 # 控制面容器 + 宿主机 Docker 管槽位。
-# 镜像直接拉取，不在用户机器上构建；仓库目录不再限定 /opt/vm2api：
-# 槽容器的 -v 源路径由控制面自省 `docker inspect vm2api` 的 Mounts 换算成宿主路径。
+# 镜像直接拉取，不在用户机器上构建；仓库目录不再限定 /opt/tapmodels：
+# 槽容器的 -v 源路径由控制面自省 `docker inspect tapmodels` 的 Mounts 换算成宿主路径。
 # 本地开发要构建镜像：docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 services:
-  vm2api:
-    image: ${VM2API_IMAGE:-ghcr.io/dofastted/vm2api}:${VM2API_IMAGE_TAG:-latest}
-    container_name: ${VM2API_CONTAINER_NAME:-vm2api}
+  tapmodels:
+    image: ${TAPMODELS_IMAGE:-ghcr.io/holeenlu/tapmodels-gateway}:${TAPMODELS_IMAGE_TAG:-latest}
+    container_name: ${TAPMODELS_CONTAINER_NAME:-tapmodels}
     restart: unless-stopped
     init: true
     network_mode: host
@@ -15,24 +15,24 @@ services:
     env_file:
       - .env
     environment:
-      KIN_PROJECT_ROOT: /opt/vm2api
-      KIN_DATA_DIR: /opt/vm2api/data
-      KIN_KERNEL_BIN: /opt/vm2api/bin/kin-kernel
-      KIN_EGRESS_BIN: /opt/vm2api/bin/kin-egress
-      KIN_WORKER_BIN: /opt/vm2api/bin/kin-worker
-      KIN_CODEX_KERNEL_BIN: /opt/vm2api/bin/kin-codex-kernel
-      KIN_OAUTH_AUTH_BIN: /opt/vm2api/bin/kin-oauth-auth
-      KIN_COMPUTER_BIN: ${KIN_COMPUTER_BIN:-/opt/vm2api/bin/kin-computer}
+      KIN_PROJECT_ROOT: /opt/tapmodels
+      KIN_DATA_DIR: /opt/tapmodels/data
+      KIN_KERNEL_BIN: /opt/tapmodels/bin/kin-kernel
+      KIN_EGRESS_BIN: /opt/tapmodels/bin/kin-egress
+      KIN_WORKER_BIN: /opt/tapmodels/bin/kin-worker
+      KIN_CODEX_KERNEL_BIN: /opt/tapmodels/bin/kin-codex-kernel
+      KIN_OAUTH_AUTH_BIN: /opt/tapmodels/bin/kin-oauth-auth
+      KIN_COMPUTER_BIN: ${KIN_COMPUTER_BIN:-/opt/tapmodels/bin/kin-computer}
       KIN_AUTO_SYNC_WRAP: ${KIN_AUTO_SYNC_WRAP:-1}
-      # 自省容器名；VM2API_HOST_ROOT 可显式覆盖宿主安装目录。
-      VM2API_CONTAINER_NAME: ${VM2API_CONTAINER_NAME:-vm2api}
-      VM2API_HOST_ROOT: ${VM2API_HOST_ROOT:-}
+      # 自省容器名；TAPMODELS_HOST_ROOT 可显式覆盖宿主安装目录。
+      TAPMODELS_CONTAINER_NAME: ${TAPMODELS_CONTAINER_NAME:-tapmodels}
+      TAPMODELS_HOST_ROOT: ${TAPMODELS_HOST_ROOT:-}
       HOST: 0.0.0.0
       PORT: ${PORT:-8787}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./vms:/opt/vm2api/vms
-      - ./data:/opt/vm2api/data
-      - ./bin:/opt/vm2api/bin
-      - ./share:/opt/vm2api/share
-      - ./src/config:/opt/vm2api/src/config
+      - ./vms:/opt/tapmodels/vms
+      - ./data:/opt/tapmodels/data
+      - ./bin:/opt/tapmodels/bin
+      - ./share:/opt/tapmodels/share
+      - ./src/config:/opt/tapmodels/src/config

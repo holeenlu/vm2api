@@ -1,24 +1,27 @@
 import { useState } from 'react'
 import { ArrowUpRight, Check } from 'lucide-react'
+import { Trans, useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { CopyButton, CopyChip } from '@/components/copy-chip'
 import { Reveal } from './reveal'
 import { docsHref } from './steps'
 
-const NOTES = [
-  '密钥用控制台签发的 sk-vm-…，明文只显示一次。',
-  'Master 的 VM2API_API_KEY 能改面板，不要写进客户端。',
-  'Claude Code 的 base URL 填主机；Codex 与 OpenAI SDK 填主机加 /v1。',
-] as const
-
 export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
+  const { t } = useTranslation('welcome')
+
+  const NOTES = [
+    t('welcome:keySecurity'),
+    t('welcome:masterSecurity'),
+    t('welcome:baseUrlHelp'),
+  ] as const
+
   const base = baseUrl.replace(/\/$/, '') || location.origin
   const tabs = [
     {
       id: 'claude',
       label: 'Claude Code',
       file: 'shell',
-      hint: 'ANTHROPIC_BASE_URL 是主机，不要带 /v1',
+      hint: t('welcome:claudeBaseHint'),
       code: [
         `export ANTHROPIC_BASE_URL=${base}`,
         'export ANTHROPIC_AUTH_TOKEN=sk-vm-xxxx',
@@ -29,15 +32,15 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
       id: 'codex',
       label: 'Codex',
       file: '~/.codex/config.toml',
-      hint: 'env_key 指向 VM2API_KEY，不是 Master 的 VM2API_API_KEY',
+      hint: t('welcome:codexKeyHint'),
       code: [
         'model = "gpt-5.4"',
-        'model_provider = "vm2api"',
+        'model_provider = "tapmodels"',
         '',
-        '[model_providers.vm2api]',
-        'name = "vm2api"',
+        '[model_providers.tapmodels]',
+        'name = "tapmodels"',
         `base_url = "${base}/v1"`,
-        'env_key = "VM2API_KEY"',
+        'env_key = "TAPMODELS_KEY"',
         'wire_api = "responses"',
       ].join('\n'),
     },
@@ -45,7 +48,7 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
       id: 'curl',
       label: 'curl',
       file: 'POST /v1/messages',
-      hint: '鉴权通过且有可调度槽位时返回 content',
+      hint: t('welcome:curlHint'),
       code: [
         `curl -sS ${base}/v1/messages \\`,
         '  -H "Authorization: Bearer sk-vm-xxxx" \\',
@@ -69,15 +72,17 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
       <div className='mx-auto grid max-w-6xl items-start gap-12 lg:grid-cols-12 lg:gap-10'>
         <Reveal className='lg:col-span-5'>
           <p className='mb-3 text-xs font-medium tracking-widest text-muted-foreground uppercase'>
-            客户端接入
+            {t('welcome:clientIntegration')}
           </p>
           <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-3xl'>
-            改一个地址，
-            <br />
-            现有工具直接用
+            <Trans
+              t={t}
+              i18nKey='welcome:clientsTitle'
+              components={{ break: <br /> }}
+            />
           </h2>
           <p className='mt-4 max-w-md text-sm leading-relaxed text-muted-foreground'>
-            这台网关的入口：
+            {t('welcome:gatewayEndpoint')}
           </p>
           <div className='mt-2'>
             <CopyChip text={`${base}/v1`} className='rounded-lg px-3 py-1.5' />
@@ -101,7 +106,7 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
             rel='noreferrer'
             className='mt-6 inline-flex items-center gap-1 rounded-md text-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
           >
-            完整接入说明
+            {t('welcome:fullIntegrationGuide')}
             <ArrowUpRight aria-hidden className='size-3.5 opacity-70' />
           </a>
         </Reveal>
@@ -114,7 +119,7 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
           <div className='overflow-hidden rounded-2xl border border-border/60 bg-white/95 shadow-[0_20px_50px_-25px_rgba(15,23,42,0.18)] dark:border-white/[0.06] dark:bg-[#0b0f17]/95 dark:shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)]'>
             <div
               role='tablist'
-              aria-label='客户端配置'
+              aria-label={t('welcome:clientConfig')}
               className='flex items-center gap-1 border-b border-border/50 px-2 sm:px-3 dark:border-white/[0.05]'
             >
               {tabs.map((t, i) => (
@@ -136,7 +141,7 @@ export function WelcomeClientSnippets({ baseUrl }: { baseUrl: string }) {
               ))}
               <CopyButton
                 text={tab.code}
-                label={`复制 ${tab.label} 配置`}
+                label={t('welcome:copyConfig', { client: tab.label })}
                 className='ms-auto'
               />
             </div>

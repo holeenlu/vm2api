@@ -1,6 +1,8 @@
+import { i18n, t } from '@/i18n'
 import type { Dashboard } from '@/types/panel-overview'
 import type { StatusTone } from '@/types/status'
 import { fmtCountdown, pct } from '@/lib/format'
+import { fixedNumber } from '@/lib/locale-format'
 import { fablePlanDenied, windowLimited } from '@/lib/vm-status'
 
 /**
@@ -29,10 +31,10 @@ function num(v: unknown): number {
 
 function relMs(ms: number): string {
   const s = Math.round(Math.abs(ms) / 1000)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.round(s / 60)}m`
-  if (s < 86400) return `${Math.round(s / 3600)}h`
-  return `${Math.round(s / 86400)}d`
+  if (s < 60) return `${fixedNumber(s, 0)}s`
+  if (s < 3600) return `${fixedNumber(Math.round(s / 60), 0)}m`
+  if (s < 86400) return `${fixedNumber(Math.round(s / 3600), 0)}h`
+  return `${fixedNumber(Math.round(s / 86400), 0)}d`
 }
 
 /** 重置/过期时间统一转 ms：秒级 epoch、毫秒 epoch、日期串都收。 */
@@ -57,30 +59,38 @@ export function expiresAtToMs(v: unknown): number {
  * 已到点但后端还没刷新窗口时返回「已过重置」。
  */
 export function resetCountdown(v: unknown, now = Date.now()): string | null {
-  const t = expiresAtToMs(v)
-  if (!t) return null
-  const left = t - now
-  if (left <= 0) return '已过重置'
+  const timestamp = expiresAtToMs(v)
+  if (!timestamp) return null
+  const left = timestamp - now
+  if (left <= 0) return t('lib:fable.resetPassed')
   return fmtCountdown(left)
 }
 
 /** 重置时刻 `MM-DD HH:mm:ss`。列表用量列要「什么时候重置」，倒计时不够。 */
 export function fmtResetClock(v: unknown): string | null {
-  const t = expiresAtToMs(v)
-  if (!t) return null
-  const d = new Date(t)
+  const timestamp = expiresAtToMs(v)
+  if (!timestamp) return null
+  const d = new Date(timestamp)
   if (!Number.isFinite(d.getTime())) return null
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(d)
 }
 
 /** "剩 X 后重置" / "已过重置"。对齐 index.html 的 `fmtReset`。 */
 export function fmtReset(v: unknown): string {
   if (!v) return ''
-  const t = expiresAtToMs(v)
-  if (!t) return String(v)
-  const d = t - Date.now()
-  return d >= 0 ? `${relMs(d)} 后重置` : '已过重置'
+  const timestamp = expiresAtToMs(v)
+  if (!timestamp) return String(v)
+  const d = timestamp - Date.now()
+  return d >= 0
+    ? t('lib:fable.resetIn', { duration: relMs(d) })
+    : t('lib:fable.resetPassed')
 }
 
 /** 用量/环形图着色阈值。对齐 index.html 的 `barColor`（100/95/85 三档）。 */
@@ -145,15 +155,16 @@ export function fableProbeLabel(
   tierKey: string
 ): string {
   const fb = subject.fable as Record<string, unknown> | undefined
-  if (tierKey === 'pro') return 'Pro 无 Fable'
+  if (tierKey === 'pro') return t('lib:fable.proUnavailable')
   // 落盘 Max 但 Fable 被拒：套餐没带 Fable 权限，不是 Pro。
-  if (fablePlanDenied(fb)) return '无 Fable 权限'
-  if (!fb) return '未探测'
-  if (fb.banned) return '账号拒'
-  if (fableWeeklyFull(subject, tierKey)) return '周额度满'
-  if (fb.ok) return '可用'
+  if (fablePlanDenied(fb)) return t('lib:fable.accessDenied')
+  if (!fb) return t('lib:fable.notProbed')
+  if (fb.banned) return t('lib:fable.accountDenied')
+  if (fableWeeklyFull(subject, tierKey)) return t('lib:fable.weeklyFull')
+  if (fb.ok) return t('lib:status.available')
   const err = String(fb.error || '')
-  if (/invalid_grant|refresh token|oauth refresh/i.test(err)) return '未探测'
+  if (/invalid_grant|refresh token|oauth refresh/i.test(err))
+    return t('lib:fable.notProbed')
   return String(fb.error || '—')
 }
 
@@ -168,22 +179,34 @@ export function fableState(
 ): { usedPct: number | null; tone: StatusTone } {
   const fb = subject.fable as Record<string, unknown> | undefined
   if (fb?.banned)
-    return { usedPct: null, tone: { key: 'bad', cls: 'bad', text: '拒' } }
+    return {
+      usedPct: null,
+      tone: { key: 'bad', cls: 'bad', text: t('lib:fable.denied') },
+    }
   const used = fableUsedOf(subject, tierKey)
   if (used != null) {
     const u = pct(used)
     return {
       usedPct: u,
-      tone: { key: 'ok', cls: 'ok', text: `${u.toFixed(1)}%` },
+      tone: { key: 'ok', cls: 'ok', text: `${fixedNumber(u, 1)}%` },
     }
   }
   if (!fb)
-    return { usedPct: null, tone: { key: 'none', cls: 'none', text: '未探测' } }
+    return {
+      usedPct: null,
+      tone: { key: 'none', cls: 'none', text: t('lib:fable.notProbed') },
+    }
   if (fableWeeklyFull(subject, tierKey)) {
-    return { usedPct: null, tone: { key: 'warn', cls: 'warn', text: '满' } }
+    return {
+      usedPct: null,
+      tone: { key: 'warn', cls: 'warn', text: t('lib:fable.full') },
+    }
   }
   if (fb.ok)
-    return { usedPct: null, tone: { key: 'ok', cls: 'ok', text: '可用' } }
+    return {
+      usedPct: null,
+      tone: { key: 'ok', cls: 'ok', text: t('lib:status.available') },
+    }
   return { usedPct: null, tone: { key: 'none', cls: 'none', text: '—' } }
 }
 
@@ -282,8 +305,20 @@ export function concInfo(
   const hot = !cooling && fmax > 0 && fin >= fmax
   const sess = sessionCapOf(subject)
   const title = cooling
-    ? `Fable 冷却${subject.fable_cooldown_reason ? ' · ' + String(subject.fable_cooldown_reason) : ''}`
-    : `账号 ${inf}/${max} · Fable ${fin}/${fmax}${sess ? ` · 会话 ${sess.active}/${sess.max}` : ''}`
+    ? t('lib:fable.cooldown') +
+      (subject.fable_cooldown_reason
+        ? ' · ' + String(subject.fable_cooldown_reason)
+        : '')
+    : t('lib:fable.accountConcurrency', {
+        inflight: inf,
+        max,
+        fableInflight: fin,
+        fableMax: fmax,
+      }) +
+      (sess
+        ? ' · ' +
+          t('lib:fable.sessions', { active: sess.active, max: sess.max })
+        : '')
   return { max, inf, fmax, fin, cooling, hot, title }
 }
 
@@ -325,9 +360,10 @@ export function vmCost(subject: FableSubject): VmCostSummary {
 export function extraUsageText(ex: unknown): string {
   if (!ex || typeof ex !== 'object') return '—'
   const e = ex as Record<string, unknown>
-  const on = e.is_enabled ? '开' : '关'
-  const u = e.utilization != null ? `${pct(e.utilization).toFixed(0)}%` : '—'
-  return `${on} · ${u}${e.status ? ' · ' + String(e.status) : ''}`
+  const on = e.is_enabled ? t('lib:common.on') : t('lib:common.off')
+  const u =
+    e.utilization != null ? `${fixedNumber(pct(e.utilization), 0)}%` : '—'
+  return `${on} · ${u}${e.status ? ' · ' + usageStatusLabel(e.status) : ''}`
 }
 
 /**
@@ -350,12 +386,16 @@ export function fableCardInfo(
   const used = fableUsedOf(subject, tierKey)
   const reset = String(subject.reset_7d_oi || fb?.reset || '')
   const bits: string[] = [
-    `并发 ${num(subject.fable_inflight)}/${num(subject.fable_max) || fableCapValue}`,
+    t('lib:fable.concurrency', {
+      inflight: num(subject.fable_inflight),
+      max: num(subject.fable_max) || fableCapValue,
+    }),
   ]
   const coolUntil = num(subject.fable_cooldown_until)
-  if (coolUntil && coolUntil > Date.now()) bits.push('冷却中')
-  if (fb?.banned) bits.unshift('账号拒')
-  else if (fableWeeklyFull(subject, tierKey)) bits.unshift('周额度满')
+  if (coolUntil && coolUntil > Date.now()) bits.push(t('lib:status.cooldown'))
+  if (fb?.banned) bits.unshift(t('lib:fable.accountDenied'))
+  else if (fableWeeklyFull(subject, tierKey))
+    bits.unshift(t('lib:fable.weeklyFull'))
 
   if (used != null) {
     return { usedPct: pct(used), reset, bits, badgeText: '', badgeCls: 'ok' }
@@ -397,4 +437,19 @@ export function weeklySplitInfo(
     fableRemain,
     fableFill: Math.min(100, (fableUsed / share) * 100),
   }
+}
+
+/** Known quota-window codes are display labels; unknown provider text passes through. */
+function usageStatusLabel(value: unknown): string {
+  const raw = String(value)
+  const keys: Record<string, string> = {
+    allowed: 'allowed',
+    allowed_warning: 'allowedWarning',
+    warning: 'warning',
+    rejected: 'rejected',
+    rate_limited: 'rateLimited',
+  }
+  return Object.prototype.hasOwnProperty.call(keys, raw)
+    ? t('lib:status.' + keys[raw])
+    : raw
 }

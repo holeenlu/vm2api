@@ -1,3 +1,6 @@
+import { i18n } from '@/i18n'
+import { fixedNumber } from '@/lib/locale-format'
+
 /**
  * 用量数字的统一格式化，口径移植自 claude-code-hub
  * （`token.ts` / `currency.ts` / `performance-formatter.ts`）。
@@ -13,19 +16,19 @@ const TOKEN_FORMAT: Intl.NumberFormatOptions = {
 export function formatTokenAmount(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '-'
   const abs = Math.abs(n)
-  if (abs < 1000) return n.toLocaleString(undefined, TOKEN_FORMAT)
+  if (abs < 1000) return n.toLocaleString(i18n.resolvedLanguage, TOKEN_FORMAT)
   if (abs < 1_000_000)
-    return `${(n / 1000).toLocaleString(undefined, TOKEN_FORMAT)}K`
-  return `${(n / 1_000_000).toLocaleString(undefined, TOKEN_FORMAT)}M`
+    return `${(n / 1000).toLocaleString(i18n.resolvedLanguage, TOKEN_FORMAT)}K`
+  return `${(n / 1_000_000).toLocaleString(i18n.resolvedLanguage, TOKEN_FORMAT)}M`
 }
 
-/** `$` + 固定小数位（en-US 千分位）；空值按 0 计，与 hub 一致。 */
+/** `$` + 固定小数位（当前语言的千分位）；空值按 0 计，与 hub 一致。 */
 export function formatCurrency(
   v: number | null | undefined,
   digits = 2
 ): string {
   const value = v != null && Number.isFinite(v) ? v : 0
-  return `$${value.toLocaleString('en-US', {
+  return `$${value.toLocaleString(i18n.resolvedLanguage, {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   })}`
@@ -34,12 +37,12 @@ export function formatCurrency(
 /** ≥1000ms 显示 `1.23s`，否则 `850ms`；空值 `-`。 */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return '-'
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
-  return `${Math.round(ms)}ms`
+  if (ms >= 1000) return `${fixedNumber(ms / 1000, 2)}s`
+  return `${fixedNumber(Math.round(ms), 0)}ms`
 }
 
 /**
- * 输出速率 tok/s。生成窗口以首 token 为起点（vm2api 没有独立的 TTFB，
+ * 输出速率 tok/s。生成窗口以首 token 为起点（tapmodels 没有独立的 TTFB，
  * hub 用 firstByteMs 的位置这里用 TTFT）；任一输入缺失或窗口非正返回 null。
  */
 export function calculateOutputRate(

@@ -1124,6 +1124,7 @@ unixTest('streamGoWorker scrapes usage from SSE when trailers are missing', asyn
       body: { model: 'claude-sonnet-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
       onEvent: () => {},
     })
+    assert.equal(result.usageComplete, true)
     assert.equal(result.usage.input_tokens, 80)
     assert.equal(result.usage.output_tokens, 6)
     assert.equal(result.usage.cache_read_input_tokens, 20)
@@ -1155,6 +1156,7 @@ unixTest('streamGoWorker merges SSE cache details into a totals-only usage trail
       body: { model: 'gpt-5.4', stream: true, input: [] },
       onEvent: () => {},
     })
+    assert.equal(result.usageComplete, true)
     assert.equal(result.usage.input_tokens, 120)
     assert.equal(result.usage.output_tokens, 9)
     assert.equal(result.usage.input_tokens_details.cached_tokens, 8)
@@ -1263,4 +1265,40 @@ test('workerHealth fails closed when socket is absent', async () => {
     { timeoutMs: 20 },
   )
   assert.equal(result.ok, false)
+})
+
+unixTest('cancelled VM streams preserve final usage evidence but never finalize initial counters', async () => {
+  for (const complete of [false, true]) {
+    const observed = gate()
+    const fx = await fixture(async (req, res) => {
+      if (req.url === '/internal/v1/cancel') return res.end('{"ok":true}')
+      res.setHeader('content-type', 'text/event-stream')
+      writeData(res, { type: 'message_start', message: { usage: { input_tokens: 100, output_tokens: 0 } } })
+      writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'answer' } })
+      if (complete)
+        writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 25 } })
+      await observed.ready
+    })
+    try {
+      const controller = new AbortController()
+      const pending = streamGoWorker({
+        exec: fx.exec,
+        signal: controller.signal,
+        timeoutMs: 1000,
+        body: { model: 'claude-sonnet-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+        onEvent(line) {
+          if (String(line).includes(complete ? 'message_delta' : 'text_delta')) observed.release()
+        },
+      })
+      await observed.ready
+      controller.abort()
+      const result = await pending
+      assert.equal(result.body.error.code, 'client_cancelled')
+      assert.equal(result.usageComplete, complete)
+      assert.equal(result.usage.input_tokens, 100)
+      assert.equal(result.usage.output_tokens, complete ? 25 : 0)
+    } finally {
+      await fx.close()
+    }
+  }
 })

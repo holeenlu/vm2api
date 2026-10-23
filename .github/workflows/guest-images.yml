@@ -8,6 +8,7 @@ on:
       - 'docker/kin-os/**'
       - 'docker/kin-kvm/**'
       - '.github/workflows/guest-images.yml'
+      - 'scripts/release/guest_publish_guard.py'
   workflow_dispatch:
 
 concurrency:
@@ -16,10 +17,29 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
+  changes:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      publish: ${{ steps.guard.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check actual tree changes and reject history-rewrite publication
+        id: guard
+        run: python3 scripts/release/guest_publish_guard.py
+
   guest:
+    needs: changes
+    if: needs.changes.outputs.publish == 'true'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -60,6 +80,11 @@ jobs:
 
   # URLs must match src/lib/vm/os-catalog.mjs kvm.cloud_image.
   kvm:
+    needs: changes
+    if: needs.changes.outputs.publish == 'true'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:

@@ -41,7 +41,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates iptables iproute2 python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
-WORKDIR /opt/vm2api
+WORKDIR /opt/tapmodels
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY src ./src
@@ -49,38 +49,38 @@ COPY scripts ./scripts
 COPY VERSION CHANGELOG.md ./
 COPY docker/kin-os ./docker/kin-os
 COPY --from=web /src/web/dist ./web/dist
-COPY --from=payload /payload/bin/ /opt/vm2api/image-bin/
-COPY --from=helpers /out/amd64/ /opt/vm2api/cluster-bin-amd64/
-COPY share/wrap-cli /opt/vm2api/image-wrap-cli/
-COPY --from=payload /payload/share/wrap-cli/ /opt/vm2api/image-wrap-cli/
-COPY --from=payload /payload/share/crag/ /opt/vm2api/image-crag/
+COPY --from=payload /payload/bin/ /opt/tapmodels/image-bin/
+COPY --from=helpers /out/amd64/ /opt/tapmodels/cluster-bin-amd64/
+COPY share/wrap-cli /opt/tapmodels/image-wrap-cli/
+COPY --from=payload /payload/share/wrap-cli/ /opt/tapmodels/image-wrap-cli/
+COPY --from=payload /payload/share/crag/ /opt/tapmodels/image-crag/
 # Only the remaining x86 executables need these libraries and loader under QEMU.
 COPY --from=amd64-runtime /usr/lib/x86_64-linux-gnu/ /usr/lib/x86_64-linux-gnu/
 COPY --from=amd64-runtime /usr/lib64/ /usr/lib64/
 RUN test -e /lib64 || ln -s usr/lib64 /lib64
 # The standard entrypoint refreshes bind-mounted helpers from image-bin on boot.
-COPY --from=helpers /out/kin-egress /out/kin-worker /out/kin-api-kernel /opt/vm2api/image-bin/
-COPY scripts/docker-entrypoint.sh /usr/local/bin/vm2api-entrypoint
-RUN chmod 755 /usr/local/bin/vm2api-entrypoint /opt/vm2api/image-bin/* \
-    /opt/vm2api/image-wrap-cli/cli-node /opt/vm2api/image-wrap-cli/cc-node \
-    && rm -f /opt/vm2api/src/lib/oauth/auth.js \
-    && cp -a /opt/vm2api/src/config /opt/vm2api/image-config \
-    && mkdir -p /opt/vm2api/vms /opt/vm2api/data /opt/vm2api/bin /opt/vm2api/share
+COPY --from=helpers /out/kin-egress /out/kin-worker /out/kin-api-kernel /opt/tapmodels/image-bin/
+COPY scripts/docker-entrypoint.sh /usr/local/bin/tapmodels-entrypoint
+RUN chmod 755 /usr/local/bin/tapmodels-entrypoint /opt/tapmodels/image-bin/* \
+    /opt/tapmodels/image-wrap-cli/cli-node /opt/tapmodels/image-wrap-cli/cc-node \
+    && rm -f /opt/tapmodels/src/lib/oauth/auth.js \
+    && cp -a /opt/tapmodels/src/config /opt/tapmodels/image-config \
+    && mkdir -p /opt/tapmodels/vms /opt/tapmodels/data /opt/tapmodels/bin /opt/tapmodels/share
 ENV NODE_ENV=production \
     HOST=127.0.0.1 \
     PORT=8787 \
-    KIN_PROJECT_ROOT=/opt/vm2api \
-    KIN_DATA_DIR=/opt/vm2api/data \
-    KIN_KERNEL_BIN=/opt/vm2api/bin/kin-kernel \
-    KIN_EGRESS_BIN=/opt/vm2api/bin/kin-egress \
-    KIN_WORKER_BIN=/opt/vm2api/bin/kin-worker \
-    KIN_CODEX_KERNEL_BIN=/opt/vm2api/bin/kin-codex-kernel \
-    KIN_OAUTH_AUTH_BIN=/opt/vm2api/bin/kin-oauth-auth \
-    KIN_COMPUTER_BIN=/opt/vm2api/bin/kin-computer \
-    KIN_API_KERNEL_BIN=/opt/vm2api/bin/kin-api-kernel \
-    KIN_CLUSTER_WORKER_BIN=/opt/vm2api/cluster-bin-amd64/kin-worker \
-    KIN_CLUSTER_EGRESS_BIN=/opt/vm2api/cluster-bin-amd64/kin-egress \
-    KIN_CLUSTER_GATE_BIN=/opt/vm2api/cluster-bin-amd64/kin-slot-gate \
+    KIN_PROJECT_ROOT=/opt/tapmodels \
+    KIN_DATA_DIR=/opt/tapmodels/data \
+    KIN_KERNEL_BIN=/opt/tapmodels/bin/kin-kernel \
+    KIN_EGRESS_BIN=/opt/tapmodels/bin/kin-egress \
+    KIN_WORKER_BIN=/opt/tapmodels/bin/kin-worker \
+    KIN_CODEX_KERNEL_BIN=/opt/tapmodels/bin/kin-codex-kernel \
+    KIN_OAUTH_AUTH_BIN=/opt/tapmodels/bin/kin-oauth-auth \
+    KIN_COMPUTER_BIN=/opt/tapmodels/bin/kin-computer \
+    KIN_API_KERNEL_BIN=/opt/tapmodels/bin/kin-api-kernel \
+    KIN_CLUSTER_WORKER_BIN=/opt/tapmodels/cluster-bin-amd64/kin-worker \
+    KIN_CLUSTER_EGRESS_BIN=/opt/tapmodels/cluster-bin-amd64/kin-egress \
+    KIN_CLUSTER_GATE_BIN=/opt/tapmodels/cluster-bin-amd64/kin-slot-gate \
     DOCKER_DEFAULT_PLATFORM=linux/amd64
 EXPOSE 8787
-ENTRYPOINT ["/usr/local/bin/vm2api-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/tapmodels-entrypoint"]

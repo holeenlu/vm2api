@@ -1,6 +1,11 @@
+import { i18n } from '@/i18n'
 import type { Vm, VmDetailPayload } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { slotState } from './telemetry-slot-state'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 const vm = (patch: Partial<Vm> = {}): Vm => ({
   id: 'vm-1',

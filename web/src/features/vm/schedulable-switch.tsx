@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { expiresAtToMs } from '@/lib/fable-status'
@@ -17,7 +19,7 @@ import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
 function formatRestrictionUntil(until: number | null | undefined): string {
   const ms = expiresAtToMs(until)
   if (!ms) return ''
-  return new Date(ms).toLocaleString()
+  return new Date(ms).toLocaleString(i18n.language)
 }
 
 export function vmSchedulableProps(vm: Vm) {
@@ -46,6 +48,8 @@ export function SchedulableSwitch({
   restrictionReason?: string | null
   className?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const restricted = scheduleState === 'restricted'
   const [optimistic, setOptimistic] = useState<boolean | null>(null)
@@ -58,7 +62,11 @@ export function SchedulableSwitch({
       }),
     onMutate: (next) => setOptimistic(next),
     onSuccess: async (_data, next) => {
-      toast.success(next ? '已开启调度' : '已关闭调度')
+      toast.success(
+        next
+          ? tVm('vm:schedulableSwitch.schedulingEnabled')
+          : tVm('vm:schedulableSwitch.schedulingDisabled')
+      )
       await Promise.all([
         qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
@@ -76,11 +84,13 @@ export function SchedulableSwitch({
   const tooltip =
     restricted && checked
       ? untilText
-        ? `调度开，当前受限至 ${untilText}`
-        : '调度开，当前受限'
+        ? tVm('vm:schedulableSwitch.schedulingEnabledRestrictedUntil', {
+            untilText: untilText,
+          })
+        : tVm('vm:schedulableSwitch.schedulingEnabledCurrentlyRestricted')
       : checked
-        ? '点击关闭调度'
-        : '点击开启调度'
+        ? tVm('vm:schedulableSwitch.clickToDisableScheduling')
+        : tVm('vm:schedulableSwitch.clickToEnableScheduling')
 
   return (
     <Tooltip>

@@ -1,6 +1,6 @@
 import type { ProviderChainItem, UsageLogRow } from '@/types/panel-usage-logs'
 import { CheckCircle, InfoIcon, Link2, RefreshCw, XCircle } from 'lucide-react'
-import { formatDuration } from '@/lib/usage-format'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -14,6 +14,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { formatDuration } from '@/features/logs/display-time'
 import {
   chainItemName,
   chainItemStatus,
@@ -48,6 +49,8 @@ const STATUS_STYLE: Record<
 }
 
 function UpstreamStatusBadge({ code }: { code: number }) {
+  useTranslation('logs')
+
   return (
     <Badge
       variant='outline'
@@ -80,6 +83,8 @@ function SingleAttempt({
   name: string
   item: ProviderChainItem | undefined
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const sticky = item?.selectionReason === 'sticky'
   return (
     <Tooltip delayDuration={300}>
@@ -103,25 +108,31 @@ function SingleAttempt({
             <div className='grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]'>
               {item.providerName ? (
                 <span className='col-span-2'>
-                  <span className='opacity-70'>账号 </span>
+                  <span className='opacity-70'>
+                    {translate('logs:account')}
+                  </span>
                   {item.providerName}
                 </span>
               ) : null}
               {selectionReasonLabel(item.selectionReason) ? (
                 <span>
-                  <span className='opacity-70'>选择方式 </span>
+                  <span className='opacity-70'>
+                    {translate('logs:selectionMethod')}
+                  </span>
                   {selectionReasonLabel(item.selectionReason)}
                 </span>
               ) : null}
               {item.latencyMs != null ? (
                 <span>
-                  <span className='opacity-70'>耗时 </span>
+                  <span className='opacity-70'>
+                    {translate('logs:duration')}
+                  </span>
                   {formatDuration(item.latencyMs)}
                 </span>
               ) : null}
               {item.waitMs ? (
                 <span>
-                  <span className='opacity-70'>排队 </span>
+                  <span className='opacity-70'>{translate('logs:queued')}</span>
                   {formatDuration(item.waitMs)}
                 </span>
               ) : null}
@@ -135,7 +146,7 @@ function SingleAttempt({
 
 /**
  * 供应商单元格 + 决策链 popover（hub `ProviderChainPopover` 的串行重试分支）。
- * vm2api 的每条 request_attempts 都是一次真实上游请求，按 attemptNumber 排序。
+ * tapmodels 的每条 request_attempts 都是一次真实上游请求，按 attemptNumber 排序。
  */
 export function ProviderChainPopover({
   row,
@@ -144,7 +155,9 @@ export function ProviderChainPopover({
   row: UsageLogRow
   onChainItemClick: (index: number) => void
 }) {
-  const chain = row.providerChain
+  const { t: translate } = useTranslation('logs')
+
+  const chain = row.providerChain || []
   const name = finalProviderName(row)
   if (chain.length <= 1) return <SingleAttempt name={name} item={chain[0]} />
 
@@ -155,12 +168,15 @@ export function ProviderChainPopover({
           type='button'
           variant='ghost'
           className='h-auto w-full min-w-0 p-0 font-normal hover:bg-transparent'
-          aria-label={`${name} - ${chain.length}次`}
+          aria-label={translate('logs:providerAttempts', {
+            p0: name,
+            count: chain.length,
+          })}
         >
           <span className='flex w-full min-w-0 items-center gap-1'>
             <span className='min-w-0 truncate'>{name}</span>
             <Badge variant='secondary' className='shrink-0 px-1 text-[10px]'>
-              {chain.length}次
+              {translate('logs:attemptCount', { count: chain.length })}
             </Badge>
             <InfoIcon className='h-3 w-3 shrink-0 text-muted-foreground' />
           </span>
@@ -173,10 +189,10 @@ export function ProviderChainPopover({
         <div className='border-b p-3'>
           <div className='flex items-center justify-between'>
             <h4 className='flex items-center gap-1.5 text-sm font-semibold'>
-              供应商决策链
+              {translate('logs:providerDecisionChain')}
             </h4>
             <Badge variant='outline' className='text-[10px]'>
-              {chain.length} 次
+              {translate('logs:attemptCount', { count: chain.length })}
             </Badge>
           </div>
         </div>
@@ -238,7 +254,7 @@ export function ProviderChainPopover({
         </div>
         <div className='border-t bg-muted/30 p-2'>
           <p className='text-center text-[10px] text-muted-foreground'>
-            点击步骤查看详情
+            {translate('logs:clickStepDetails')}
           </p>
         </div>
       </PopoverContent>
@@ -254,6 +270,8 @@ export function ProviderCell({
   row: UsageLogRow
   onChainItemClick: (index: number) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   if (row.blockedBy) {
     return (
       <span
@@ -261,7 +279,7 @@ export function ProviderCell({
         title={row.blockedReason ?? row.blockedBy}
       >
         <span className='h-1.5 w-1.5 rounded-full bg-orange-600 dark:bg-orange-400' />
-        被拦截
+        {translate('logs:blocked')}
       </span>
     )
   }
@@ -279,9 +297,10 @@ export function ProviderCell({
               'shrink-0 px-1 py-0 text-[10px]',
               multiplierBadgeClass(multiplier)
             )}
-            title='分组倍率'
+            title={translate('logs:groupMultiplier')}
           >
-            x{multiplier.toFixed(2)}
+            {translate('logs:multiplierSymbol')}
+            {multiplier.toFixed(2)}
           </Badge>
         ) : null}
       </div>
