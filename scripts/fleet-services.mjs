@@ -1,6 +1,6 @@
 import { runFleetUpdate } from '../src/lib/vm/fleet-update.mjs'
 
-const root = process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api'
+const root = process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/tapmodels'
 const concurrency = Number(process.argv[3] || 4)
 const report = await runFleetUpdate(root, {
   action: 'telemetry',

@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { VmProxySnap } from '@/types/panel-vm'
 import { type LocalProxyLabelOpts, proxyHostLabel } from '@/lib/vm-status'
 
@@ -14,6 +15,8 @@ export const PROXY_HEALTH_KEYS = [
 export type ProxyHealthKey = (typeof PROXY_HEALTH_KEYS)[number]
 
 export function proxyHealthKey(prx: VmProxySnap): ProxyHealthKey {
+  if (prx.blocked_reason === 'proxy_expired' || prx.status === 'expired')
+    return 'dead'
   if (prx.blocked_reason) return 'off'
   if (prx.enabled === false) return 'off'
   if (prx.status === 'dead') return 'dead'
@@ -42,15 +45,19 @@ export function proxyLocalNodeId(prx: VmProxySnap): string | null {
 }
 
 /** 本地代理 = 槽位所在那台机器自己的公网出口。 */
-export const LOCAL_PROXY_HINT = '本地代理'
+export const localProxyHint = () => translate('proxies:localProxy')
 
 /** 本地代理的出口与探测都在它自己那台 VPS 上。 */
 export function localProxyExitText(prx: VmProxySnap): string {
-  return proxyLocalNodeId(prx) ? '出口为该节点本机' : '控制面本机出口'
+  return proxyLocalNodeId(prx)
+    ? translate('proxies:nodeExit')
+    : translate('proxies:controlPlaneExit')
 }
 
 export function localProxyProbeText(prx: VmProxySnap): string {
-  return proxyLocalNodeId(prx) ? '经节点本机探测' : '控制面本机探测'
+  return proxyLocalNodeId(prx)
+    ? translate('proxies:nodeProbe')
+    : translate('proxies:controlPlaneProbe')
 }
 
 /** 本地代理固定排第一，其余保持原相对顺序。 */
@@ -114,11 +121,15 @@ export function proxyIsInvalid(prx: VmProxySnap | undefined): boolean {
 }
 
 export function proxyStatusLabel(prx: VmProxySnap): string {
-  if (prx.blocked_reason === 'ipv6_disabled') return 'IPv6 已关闭'
-  if (prx.enabled === false || prx.status === 'dead') return '失效'
-  if (prx.status === 'fail') return '失败'
-  if (prx.status === 'ok') return '正常'
-  return '未测'
+  if (prx.blocked_reason === 'proxy_expired' || prx.status === 'expired')
+    return translate('proxies:expired')
+  if (prx.blocked_reason === 'ipv6_disabled')
+    return translate('proxies:ipv6Disabled')
+  if (prx.enabled === false || prx.status === 'dead')
+    return translate('proxies:invalidStatus')
+  if (prx.status === 'fail') return translate('proxies:failure')
+  if (prx.status === 'ok') return translate('proxies:healthy')
+  return translate('proxies:notChecked')
 }
 
 /**
@@ -141,7 +152,7 @@ export function proxyOptionLabel(
         typeof opts === 'object' &&
         opts.revealNode &&
         !!(opts.nodeName || opts.nodeId))
-    const exit = nodeExit ? '出口为该节点本机' : LOCAL_PROXY_HINT
+    const exit = nodeExit ? translate('proxies:nodeExit') : localProxyHint()
     return `${proxyLabel(prx, opts)} · ${exit} · ${used}/${limit}`
   }
   const lat = prx.latency_ms != null ? `${prx.latency_ms}ms` : '—'
@@ -297,11 +308,21 @@ export function sortedProxies(
 }
 
 export const PROXY_HEALTH_LABEL: Record<ProxyHealthKey, string> = {
-  ok: '正常',
-  unknown: '未测',
-  fail: '失败',
-  dead: '失效',
-  off: '已禁用',
+  get ok() {
+    return translate('proxies:healthy')
+  },
+  get unknown() {
+    return translate('proxies:notChecked')
+  },
+  get fail() {
+    return translate('proxies:failure')
+  },
+  get dead() {
+    return translate('proxies:invalidStatus')
+  },
+  get off() {
+    return translate('proxies:disabled')
+  },
 }
 
 /** 列表筛选：健康档 + 两个席位档。左侧席位图图例与右侧工具条共用这一套。 */

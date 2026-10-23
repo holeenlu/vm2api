@@ -23,7 +23,7 @@ import tempfile
 
 IMAGE = "tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0"
 NAME = "qemu-x86_64"
-QEMU = Path("/usr/local/libexec/vm2api/qemu-x86_64")
+QEMU = Path("/usr/local/libexec/tapmodels/qemu-x86_64")
 CONF = Path("/etc/binfmt.d/qemu-x86_64.conf")
 KERNEL = Path("/proc/sys/fs/binfmt_misc")
 MAGIC = bytes.fromhex("7f454c4602010100000000000000000002003e00")
@@ -208,7 +208,7 @@ class Operations:
             container = self.run(["docker", "create", "--platform=linux/arm64", IMAGE]).decode().strip()
             if not re.fullmatch(r"[0-9a-f]{12,64}", container):
                 raise PrepareError("Docker did not return a valid container ID")
-            with tempfile.TemporaryDirectory(prefix="vm2api-arm64-") as directory:
+            with tempfile.TemporaryDirectory(prefix="tapmodels-arm64-") as directory:
                 destination = Path(directory) / NAME
                 self.run(["docker", "cp", f"{container}:/usr/bin/{NAME}", str(destination)])
                 if destination.is_symlink() or not destination.is_file():

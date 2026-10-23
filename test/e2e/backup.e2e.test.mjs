@@ -177,7 +177,7 @@ test('restore rebinds billing, API scheduler, and routing config without restart
     assert.ok(modelIds.includes('backup-model'))
     assert.ok(!modelIds.includes('mutated-model'))
 
-    const requestId = `restore-rebind-${Date.now()}`
+    let requestId = 'restore-rebind-' + Date.now()
     const inference = await api(gw, 'POST', '/v1/messages', {
       headers: { 'x-request-id': requestId },
       body: {
@@ -187,6 +187,7 @@ test('restore rebinds billing, API scheduler, and routing config without restart
       },
     })
     assert.equal(inference.status, 200, inference.text)
+    requestId = inference.headers.get('x-request-id')
     const logs = await api(gw, 'GET', `/api/panel/request-logs?q=${requestId}&limit=10`)
     assert.equal(logs.status, 200, logs.text)
     const row = (logs.json.items || []).find((item) => item.request_id === requestId)

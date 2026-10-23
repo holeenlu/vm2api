@@ -11,7 +11,7 @@ import { dockerPing, sshDocker } from '../../src/lib/cluster/docker-remote.mjs'
 import { ClusterNodesRepo } from '../../src/lib/db/repos/cluster-nodes-repo.mjs'
 
 const { Server, utils } = ssh2
-const schema = ['026_cluster_nodes.sql', '039_cluster_node_direct_links.sql']
+const schema = ['026_cluster_nodes.sql', '045_cluster_node_direct_links.sql']
   .map((name) => fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   .join('\n')
 const key = () => utils.generateKeyPairSync('ecdsa', { bits: 256 })
@@ -155,7 +155,7 @@ async function fixture(t, opts = {}) {
 function slot(remote, runtime = 'docker') {
   const id = 'vm-a'
   const cid = 'container-a'
-  const dir = '/home/u/.vm2api/vms/vm-a'
+  const dir = '/home/u/.tapmodels/vms/vm-a'
   const vm = {
     id,
     node_id: 'node-a',
@@ -163,7 +163,7 @@ function slot(remote, runtime = 'docker') {
   }
   remote.state.containers.set(cid, {
     Id: cid,
-    Config: { Labels: { 'kin.vm.id': id, 'vm2api.cluster': '1' } },
+    Config: { Labels: { 'kin.vm.id': id, 'tapmodels.cluster': '1' } },
     Mounts: [
       { Type: 'bind', Source: `${dir}/run`, Destination: runtime === 'kvm' ? '/slot/run' : '/run/kin' },
       { Type: 'bind', Source: `${dir}/cli-home`, Destination: runtime === 'kvm' ? '/slot/home' : '/home/kincli' },

@@ -1,3 +1,4 @@
+import { hasCompleteUsage, createUsageEvidence } from './usage-evidence.mjs'
 /**
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
@@ -5,7 +6,7 @@ import path from 'node:path'
 import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
-import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { keyAllowsVm, keyAllowsModel, keyScopeFromRequest, groupScopeDenial } from '../admin/key-scope.mjs'
 import { ownerScopeFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
 import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { restrictCodexClient } from './codex-restriction.mjs'
@@ -219,8 +220,10 @@ export function pickCodexCandidates(
   const model = body?.model || null
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
   const scope = keyScopeFromRequest(req)
-  const poolDenial = vmPoolDenial(scope)
-  if (poolDenial) return { error: 'vm_pool_unavailable', message: poolDenial.message, ids: [], candidates: [] }
+  if (!keyAllowsModel(scope, model))
+    return { error: 'group_unavailable', message: '当前分组无权调用该模型', ids: [], candidates: [] }
+  const poolDenial = groupScopeDenial(scope)
+  if (poolDenial) return { error: 'group_unavailable', message: poolDenial.message, ids: [], candidates: [] }
   if (scope.group_type === 'anthropic') return { error: 'key_group_mismatch', ids: [], candidates: [] }
   if (pin) {
     const vm = getVm(projectRoot, pin)
@@ -247,8 +250,8 @@ export function pickCodexCandidates(
     (vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm),
   )
   const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
-  if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
-    return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
+  if (scope.group_id && vms.length === 0 && !continuesResponse) {
+    return { error: 'group_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
   }
   const ordered = orderCodexSessionSlots(continuesResponse ? vms.filter((vm) => vm.id === bound.vmId) : vms, {
     boundVmId: bound?.vmId || null,
@@ -757,6 +760,7 @@ export async function handleCodexProtocol({
         const nameSseEvent = createResponsesSseEventNamer()
         let responseServiceTier = null
         let streamedUsage = null
+        const evidence = createUsageEvidence()
         let streamedImageUsage = null
         let conversionError = null
         const attemptStartedAt = Date.now()
@@ -789,7 +793,19 @@ export async function handleCodexProtocol({
         let hopEmitted = false
         const runHop = () =>
           runCodexKernelHop({
-            hop,
+            hop: (args) => {
+              const live = keyScopeFromRequest(req)
+              if (
+                !keyAllowsModel(live, pickOpts.body?.model || inbound?.model || converted.body.model) ||
+                !keyAllowsVm(live, vm)
+              )
+                return {
+                  ok: false,
+                  status: 403,
+                  body: { error: { code: 'group_unavailable', message: '当前授权已失效' } },
+                }
+              return hop(args)
+            },
             args: {
               exec: execFor(projectRoot, vm),
               signal: gone.signal,
@@ -808,6 +824,7 @@ export async function handleCodexProtocol({
             },
             onEvent: async (line) => {
               hopEmitted = true
+              evidence.line(line)
               if (conversionError) return
               const tier = serviceTierFromSseLine(line)
               if (tier) responseServiceTier = tier
@@ -883,7 +900,18 @@ export async function handleCodexProtocol({
         }
         last = result
         const hopUsage = result.usage || result.body?.usage || result.body?.response?.usage || null
-        const usage = preferUsage(hopUsage, streamedUsage)
+        const reported = evidence.snapshot()
+        const usage = reported.usageComplete
+          ? reported.usage
+          : result.usageComplete
+            ? hopUsage
+            : preferUsage(hopUsage, streamedUsage)
+        logBag.usage_complete = reported.usageComplete || result.usageComplete === true
+        logBag.usage = disjointOpenaiUsage(usage)
+        const imageUsage =
+          result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
+        if (imageUsage) logBag.image_usage = imageUsage
+        logBag.upstream_model = converted.body.model
         // Responses SSE is not a Claude assistant message, so the stream client
         // reports ok:false / incomplete. A 200 hop that carried tokens still billed.
         const delivered = !conversionError && (result?.ok || (Number(result?.status) === 200 && usageTokens(usage) > 0))
@@ -895,9 +923,6 @@ export async function handleCodexProtocol({
           const disjoint = extracted ? openaiAnthropicUsageFromExtract(extracted) : null
           const logged = disjointOpenaiUsage(usage && serviceTier ? { ...usage, service_tier: serviceTier } : usage)
           logBag.usage = logged
-          const imageUsage =
-            result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
-          if (imageUsage) logBag.image_usage = imageUsage
           logBag.input_tokens = disjoint?.input_tokens ?? usage?.input_tokens ?? usage?.prompt_tokens ?? null
           logBag.output_tokens = disjoint?.output_tokens ?? usage?.output_tokens ?? usage?.completion_tokens ?? null
           logBag.cache_read_tokens =
@@ -914,6 +939,9 @@ export async function handleCodexProtocol({
             null
           reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
           logBag.final_state = result?.ok ? result.terminalState || 'verified' : 'verified'
+          const imageUsage =
+            result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
+          if (imageUsage) logBag.image_usage = imageUsage
           logBag.upstream_model = converted.body.model
           if (hops > 1) logBag.codex_failed_over = true
           if (!stream) {
@@ -995,11 +1023,11 @@ function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
       },
     })
   }
-  if (picked.error === 'vm_pool_unavailable') {
+  if (picked.error === 'group_unavailable') {
     return json(res, 403, {
       error: {
         type: 'permission_error',
-        code: 'vm_pool_unavailable',
+        code: 'group_unavailable',
         message: picked.message || '账号池不可用',
       },
     })
@@ -1443,6 +1471,7 @@ export async function handleCodexImages({
     logBag.error_code = payload?.error?.code || `upstream_${last.status}`
   } else if (payload?.usage && typeof payload.usage === 'object') {
     logBag.image_usage = payload.usage
+    logBag.usage_complete = hasCompleteUsage(payload.usage)
   }
   return json(res, last.status, payload)
 }

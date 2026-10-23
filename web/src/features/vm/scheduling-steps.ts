@@ -1,6 +1,7 @@
-/** 并发档位；0 = 不限（只在单槽覆盖里给出，分档默认至少 1）。 */
+import { localizedOption } from './localized-option'
+
 export const CONC_STEPS: [number, string][] = [
-  [0, '不限'],
+  localizedOption(0, 'vm:schedulingSteps.unlimited'),
   [1, '1'],
   [2, '2'],
   [4, '4'],
@@ -12,7 +13,7 @@ export const CONC_STEPS: [number, string][] = [
 ]
 
 export const RPM_STEPS: [number, string][] = [
-  [0, '不限'],
+  localizedOption(0, 'vm:schedulingSteps.unlimited'),
   [10, '10'],
   [15, '15'],
   [20, '20'],

@@ -1,7 +1,64 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
 import { pct } from '@/lib/format'
 import { isCodexVm } from '@/lib/vm-kind'
+
+// Gateway availability/cred_status still includes Chinese text and legacy string-only
+// snapshots. Parse those raw fields only; remove this compatibility when the API no
+// longer emits them. Translated display text must never feed status predicates.
+const BACKEND_STATUS_LABELS: Record<string, string> = {
+  无凭证: 'noCredentials',
+  可用: 'available',
+  不可用: 'unavailable',
+  已吊销: 'revoked',
+  被吊销: 'revokedPassive',
+  无效凭证: 'invalidCredentials',
+  探测失败: 'probeFailed',
+  已过期: 'expired',
+  有效: 'valid',
+  即将过期: 'expiringSoon',
+  冷却中: 'cooldown',
+  调度关: 'schedulingOff',
+  额度限制: 'quotaLimited',
+  临近闸线: 'nearGate',
+  休息时段: 'restPeriod',
+  '5h 限制': 'limit5h',
+  '7d 限制': 'limit7d',
+  普通限制: 'regularLimited',
+  '5h 警告': 'warning5h',
+  '7d 警告': 'warning7d',
+  警告: 'warning',
+  鉴权冷却: 'authCooldown',
+  过载冷却: 'overloadCooldown',
+  限流中: 'rateLimited',
+  revoke: 'revoked',
+}
+
+function backendStatusLabel(raw: string, fallback = raw): string {
+  const key = Object.prototype.hasOwnProperty.call(BACKEND_STATUS_LABELS, raw)
+    ? BACKEND_STATUS_LABELS[raw]
+    : ''
+  return key ? t('lib:status.' + key) : raw || fallback
+}
+
+function availabilityLabel(vm: Vm, fallback: string): string {
+  const a = vm.availability
+  const reason = String(a?.reason || '')
+  if (/^quota_5h/.test(reason)) return t('lib:status.limit5h')
+  if (/^quota_7d/.test(reason)) return t('lib:status.limit7d')
+  if (reason === 'weekly_split_regular') return t('lib:status.regularLimited')
+  if (reason === 'auth_cooldown') return t('lib:status.authCooldown')
+  if (reason === 'overloaded') return t('lib:status.overloadCooldown')
+  if (reason === 'rate_limited') return t('lib:status.rateLimited')
+  const drain = /^gate_(5h|7d)_draining$/.exec(reason)
+  if (drain) return t('lib:status.nearGateWindow', { window: drain[1] })
+  const raw = String(a?.text || '')
+  const legacyDrain = /^(5h|7d) 临近闸线$/.exec(raw)
+  if (legacyDrain)
+    return t('lib:status.nearGateWindow', { window: legacyDrain[1] })
+  return backendStatusLabel(raw, fallback)
+}
 
 function credTextOf(vm: Vm): { text: string; key: string; tone: string } {
   const cred = vm.cred_status
@@ -170,8 +227,12 @@ function invalidCredTone(vm: Vm | undefined): StatusTone {
   return {
     cls: 'bad',
     key: revoked ? 'revoke' : 'bad',
-    text: revoked ? '已吊销' : '无效凭证',
-    label: revoked ? '已吊销' : '无效凭证',
+    text: revoked
+      ? t('lib:status.revoked')
+      : t('lib:status.invalidCredentials'),
+    label: revoked
+      ? t('lib:status.revoked')
+      : t('lib:status.invalidCredentials'),
   }
 }
 
@@ -180,22 +241,38 @@ function ticketExpiredDead(vm: Vm): boolean {
 }
 
 function transportFailTone(): StatusTone {
-  return { cls: 'caution', key: 'caution', text: '探测失败', label: '探测失败' }
+  return {
+    cls: 'caution',
+    key: 'caution',
+    text: t('lib:status.probeFailed'),
+    label: t('lib:status.probeFailed'),
+  }
 }
 
 export function credExpiry(vm: Vm): StatusTone & { ms: number | null } {
   if (!vm.has_token)
-    return { cls: 'none', key: 'none', text: '无凭证', ms: null }
+    return {
+      cls: 'none',
+      key: 'none',
+      text: t('lib:status.noCredentials'),
+      ms: null,
+    }
   const worker = vm.worker_credential || {}
   const raw = worker.expires_at || vm.expires_at
   const ms = typeof raw === 'number' ? raw : Date.parse(String(raw || ''))
   if (!Number.isFinite(ms))
-    return { cls: 'ok', key: 'ok', text: '有效', ms: null }
+    return { cls: 'ok', key: 'ok', text: t('lib:status.valid'), ms: null }
   const left = ms - Date.now()
-  if (left <= 0) return { cls: 'bad', key: 'bad', text: '已过期', ms }
+  if (left <= 0)
+    return { cls: 'bad', key: 'bad', text: t('lib:status.expired'), ms }
   if (left < 60 * 60 * 1000)
-    return { cls: 'caution', key: 'caution', text: '即将过期', ms }
-  return { cls: 'ok', key: 'ok', text: '有效', ms }
+    return {
+      cls: 'caution',
+      key: 'caution',
+      text: t('lib:status.expiringSoon'),
+      ms,
+    }
+  return { cls: 'ok', key: 'ok', text: t('lib:status.valid'), ms }
 }
 
 /**
@@ -235,19 +312,22 @@ export function vmCircuit(
 
 export function vmCircuitTitle(vm: Vm | undefined, now = Date.now()): string {
   const c = vmCircuit(vm, now)
-  if (!c) return '熔断关闭'
-  if (c.state === 'half_open')
-    return '熔断半开 · 下一个请求作为探测，成功即恢复'
+  if (!c) return t('lib:status.circuitClosed')
+  if (c.state === 'half_open') return t('lib:status.circuitHalfOpenTitle')
   const sec = Math.max(1, Math.ceil(c.left / 1000))
-  return `熔断中 · 连续 ${c.failures}/${c.threshold} 次 5xx · ${sec}s 后放行探测`
+  return t('lib:status.circuitOpenTitle', {
+    failures: c.failures,
+    threshold: c.threshold,
+    seconds: sec,
+  })
 }
 
 function circuitTone(vm: Vm | undefined): StatusTone | null {
   const c = vmCircuit(vm)
   if (!c) return null
   return c.state === 'open'
-    ? { key: 'circuit', text: '熔断中', cls: 'bad' }
-    : { key: 'circuit', text: '熔断探测', cls: 'caution' }
+    ? { key: 'circuit', text: t('lib:status.circuitOpen'), cls: 'bad' }
+    : { key: 'circuit', text: t('lib:status.circuitProbe'), cls: 'caution' }
 }
 
 export function vmCooldown(
@@ -268,18 +348,27 @@ export function seatTitle(vm: Vm): string {
   const grace = Number(vm.seats_grace) || 0
   const queued = Number(vm.queue_depth) || 0
   const conc = Number(vm.conc_waiting) || 0
-  const parts = [`席位 ${used}/${Number(vm.seats_max) || 0}`]
-  if (grace) parts.push(`宽限保留 ${grace}`)
-  if (queued) parts.push(`排队 ${queued}${conc ? `（等并发 ${conc}）` : ''}`)
+  const parts = [
+    t('lib:status.seats', { used, max: Number(vm.seats_max) || 0 }),
+  ]
+  if (grace) parts.push(t('lib:status.graceSeats', { count: grace }))
+  if (queued)
+    parts.push(
+      t('lib:status.queued', { count: queued }) +
+        (conc ? t('lib:status.concurrencyWait', { count: conc }) : '')
+    )
   return parts.join(' · ')
 }
 
 export function vmCooldownTitle(vm: Vm): string {
   const cool = vmCooldown(vm)
-  if (!cool) return '无冷却'
+  if (!cool) return t('lib:status.noCooldown')
   const sec = Math.max(1, Math.ceil(cool.left / 1000))
   const wait = sec < 60 ? `${sec}s` : `${Math.ceil(sec / 60)}m`
-  return `冷却中 ${wait}${cool.reason ? ` · ${cool.reason}` : ''}`
+  return (
+    t('lib:status.cooldownRemaining', { wait }) +
+    (cool.reason ? ' · ' + cool.reason : '')
+  )
 }
 
 export function accountStatus(vm: Vm | undefined): StatusTone {
@@ -291,21 +380,31 @@ export function accountStatus(vm: Vm | undefined): StatusTone {
     const a = vm.availability
     // 8 个 key 的完整映射，对齐 index.html 的 accountStatus。
     const fallback: Record<typeof a.key, string> = {
-      none: '无凭证',
-      ok: '可用',
-      off: '调度关',
-      cool: '冷却中',
-      quota: '额度限制',
-      drain: '临近闸线',
-      bad: '无效凭证',
-      rest: '休息时段',
+      none: t('lib:status.noCredentials'),
+      ok: t('lib:status.available'),
+      off: t('lib:status.schedulingOff'),
+      cool: t('lib:status.cooldown'),
+      quota: t('lib:status.quotaLimited'),
+      drain: t('lib:status.nearGate'),
+      bad: t('lib:status.invalidCredentials'),
+      rest: t('lib:status.restPeriod'),
     }
     // 与 poolStatus 同口径：off 只表达调度意图，凭证死活先于它判。
     if (a.key === 'off') {
       if (!vm.has_token)
-        return { cls: 'none', key: 'none', text: '无凭证', label: '无凭证' }
+        return {
+          cls: 'none',
+          key: 'none',
+          text: t('lib:status.noCredentials'),
+          label: t('lib:status.noCredentials'),
+        }
       if (ticketExpiredDead(vm))
-        return { cls: 'bad', key: 'bad', text: '已过期', label: '已过期' }
+        return {
+          cls: 'bad',
+          key: 'bad',
+          text: t('lib:status.expired'),
+          label: t('lib:status.expired'),
+        }
     }
     const cls =
       a.key === 'ok'
@@ -319,11 +418,13 @@ export function accountStatus(vm: Vm | undefined): StatusTone {
               : a.key === 'none'
                 ? 'none'
                 : 'bad'
-    const text = a.text || fallback[a.key]
+    const text = availabilityLabel(vm, fallback[a.key])
     return { cls, key: a.key, text, label: text }
   }
-  if (!vm?.has_token) return { cls: 'none', key: 'none', text: '无凭证' }
-  if (vmCooldown(vm)) return { cls: 'caution', key: 'caution', text: '冷却中' }
+  if (!vm?.has_token)
+    return { cls: 'none', key: 'none', text: t('lib:status.noCredentials') }
+  if (vmCooldown(vm))
+    return { cls: 'caution', key: 'caution', text: t('lib:status.cooldown') }
   const fb = vm.fable || {}
   const exp = credExpiry(vm)
   if (
@@ -332,18 +433,19 @@ export function accountStatus(vm: Vm | undefined): StatusTone {
     exp.cls !== 'ok' &&
     exp.cls !== 'caution'
   ) {
-    return { cls: 'bad', key: 'bad', text: '被吊销' }
+    return { cls: 'bad', key: 'bad', text: t('lib:status.revokedPassive') }
   }
-  if (ticketExpiredDead(vm)) return { cls: 'bad', key: 'bad', text: '已过期' }
+  if (ticketExpiredDead(vm))
+    return { cls: 'bad', key: 'bad', text: t('lib:status.expired') }
   const u5 = pct(vm.utilization_5h)
   const u7 = pct(vm.utilization_7d)
   if (windowLimited(vm.status_5h, u5))
-    return { cls: 'warn', key: 'warn', text: '5h 限制' }
+    return { cls: 'warn', key: 'warn', text: t('lib:status.limit5h') }
   if (windowLimited(vm.status_7d, u7))
-    return { cls: 'warn', key: 'warn', text: '7d 限制' }
+    return { cls: 'warn', key: 'warn', text: t('lib:status.limit7d') }
   const split = vm.weekly_split
   if (split?.enabled && split.mode === 'fable_only') {
-    return { cls: 'warn', key: 'warn', text: '普通限制' }
+    return { cls: 'warn', key: 'warn', text: t('lib:status.regularLimited') }
   }
   const cred = credTextOf(vm)
   const staleRevoke = probeOlderThanRefresh(vm)
@@ -351,29 +453,37 @@ export function accountStatus(vm: Vm | undefined): StatusTone {
   // leftover 无效凭证 / 探测失败 不能盖掉活票或传输层失败。
   if (!fableOnly && !staleRevoke && !probeOverridesGrant(vm)) {
     if (cred.key === 'bad' || cred.tone === 'bad') {
-      return { cls: 'bad', key: 'bad', text: cred.text || '无效凭证' }
+      return {
+        cls: 'bad',
+        key: 'bad',
+        text: backendStatusLabel(cred.text, t('lib:status.invalidCredentials')),
+      }
     }
     if (/不可用/.test(cred.text))
-      return { cls: 'bad', key: 'bad', text: cred.text }
+      return { cls: 'bad', key: 'bad', text: backendStatusLabel(cred.text) }
     if (
       /冷却|限制/.test(cred.text) &&
       (windowLimited(vm.status_5h, u5) || windowLimited(vm.status_7d, u7))
     ) {
-      return { cls: 'warn', key: 'warn', text: cred.text }
+      return { cls: 'warn', key: 'warn', text: backendStatusLabel(cred.text) }
     }
   }
   if (isTransportProbe(vm) && !isUsageProbeOk(vm)) return transportFailTone()
   if (windowWarn(vm.status_5h, u5) || vm.near_limit) {
-    return { cls: 'caution', key: 'caution', text: '5h 警告' }
+    return { cls: 'caution', key: 'caution', text: t('lib:status.warning5h') }
   }
   if (windowWarn(vm.status_7d, u7))
-    return { cls: 'caution', key: 'caution', text: '7d 警告' }
+    return { cls: 'caution', key: 'caution', text: t('lib:status.warning7d') }
   if (!fableOnly) {
     if (
       /警告|探测失败/.test(cred.text) ||
       (cred.key === 'warn' && !/限制|冷却/.test(cred.text))
     ) {
-      return { cls: 'caution', key: 'caution', text: cred.text || '警告' }
+      return {
+        cls: 'caution',
+        key: 'caution',
+        text: backendStatusLabel(cred.text, t('lib:status.warning')),
+      }
     }
     if (/限制|冷却/.test(cred.text) || cred.key === 'warn') {
       const soft =
@@ -385,13 +495,17 @@ export function accountStatus(vm: Vm | undefined): StatusTone {
         return {
           cls: 'caution',
           key: 'caution',
-          text: cred.text.replace('限制', '警告'),
+          text: t(
+            /5h/.test(cred.text)
+              ? 'lib:status.warning5h'
+              : 'lib:status.warning7d'
+          ),
         }
       }
-      return { cls: 'warn', key: 'warn', text: cred.text }
+      return { cls: 'warn', key: 'warn', text: backendStatusLabel(cred.text) }
     }
   }
-  return { cls: 'ok', key: 'ok', text: '可用' }
+  return { cls: 'ok', key: 'ok', text: t('lib:status.available') }
 }
 
 /**
@@ -410,12 +524,18 @@ export function credentialStatus(vm: Vm | undefined): StatusTone {
   const base = accountStatus(vm)
   // 休息时段同理是调度意图（排班），不是凭证状态。
   if (base.key !== 'off' && base.key !== 'rest') return base
-  if (!vm?.has_token) return { cls: 'none', key: 'none', text: '无凭证' }
+  if (!vm?.has_token)
+    return { cls: 'none', key: 'none', text: t('lib:status.noCredentials') }
   const exp = credExpiry(vm)
-  if (exp.cls === 'bad') return { cls: 'bad', key: 'bad', text: '已过期' }
+  if (exp.cls === 'bad')
+    return { cls: 'bad', key: 'bad', text: t('lib:status.expired') }
   if (exp.cls === 'caution')
-    return { cls: 'caution', key: 'caution', text: '即将过期' }
-  return { cls: 'ok', key: 'ok', text: '凭证有效' }
+    return {
+      cls: 'caution',
+      key: 'caution',
+      text: t('lib:status.expiringSoon'),
+    }
+  return { cls: 'ok', key: 'ok', text: t('lib:status.credentialsValid') }
 }
 
 function leftoverQuotaOff(vm: Vm | undefined): boolean {
@@ -430,11 +550,12 @@ export function isRestrictedSchedule(vm: Vm | undefined): boolean {
   return vm.schedule_state === 'restricted' || leftoverQuotaOff(vm)
 }
 
-export function scheduleStateLabel(vm: Vm | undefined): '开' | '受限' | '关' {
-  if (!vm) return '关'
-  if (isRestrictedSchedule(vm)) return '受限'
-  if (vm.schedule_state === 'off' || vm.schedulable === false) return '关'
-  return '开'
+export function scheduleStateLabel(vm: Vm | undefined): string {
+  if (!vm) return t('lib:common.off')
+  if (isRestrictedSchedule(vm)) return t('lib:status.restricted')
+  if (vm.schedule_state === 'off' || vm.schedulable === false)
+    return t('lib:common.off')
+  return t('lib:common.on')
 }
 
 export function restrictionUntilOf(vm: Vm | undefined): number | null {
@@ -447,24 +568,25 @@ export function restrictionUntilOf(vm: Vm | undefined): number | null {
 
 /** 详情冷却格与限制态共用同一套文案，不另起一套冷却系统。 */
 export function restrictionCopy(vm: Vm | undefined): string {
-  if (!vm) return '无限制'
+  if (!vm) return t('lib:status.unrestricted')
   const restricted = restrictionTone(vm)
   if (restricted) return restricted.text
-  if (vmCooldown(vm)) return restrictionLabel(vm, '冷却中')
-  return '无限制'
+  if (vmCooldown(vm)) return restrictionLabel(vm, t('lib:status.cooldown'))
+  return t('lib:status.unrestricted')
 }
 
 function restrictionLabel(vm: Vm, fallback: string): string {
   const raw = String(vm.availability?.text || '').trim()
-  if (raw && raw !== '调度关' && vm.availability?.key !== 'off') return raw
+  if (raw && raw !== '调度关' && vm.availability?.key !== 'off')
+    return availabilityLabel(vm, fallback)
   const reason = String(
     vm.restriction_reason ||
       vm.availability?.reason ||
       vm.schedule_disabled_reason ||
       ''
   )
-  if (/quota_5h/.test(reason)) return '5h 限制'
-  if (/quota_7d/.test(reason)) return '7d 限制'
+  if (/quota_5h/.test(reason)) return t('lib:status.limit5h')
+  if (/quota_7d/.test(reason)) return t('lib:status.limit7d')
   return fallback
 }
 
@@ -478,7 +600,7 @@ function restrictionTone(vm: Vm | undefined): StatusTone | null {
     if (vm.availability?.key === 'rest' || /rest_period/.test(reason)) {
       return {
         key: 'rest',
-        text: restrictionLabel(vm, '休息时段'),
+        text: restrictionLabel(vm, t('lib:status.restPeriod')),
         cls: 'caution',
       }
     }
@@ -488,13 +610,13 @@ function restrictionTone(vm: Vm | undefined): StatusTone | null {
     ) {
       return {
         key: 'cool',
-        text: restrictionLabel(vm, '冷却中'),
+        text: restrictionLabel(vm, t('lib:status.cooldown')),
         cls: 'caution',
       }
     }
     return {
       key: 'quota',
-      text: restrictionLabel(vm, '额度限制'),
+      text: restrictionLabel(vm, t('lib:status.quotaLimited')),
       cls: 'warn',
     }
   }
@@ -506,7 +628,7 @@ function seatsFullTone(vm: Vm | undefined): StatusTone | null {
   if (!vm || vm.seats_max == null) return null
   const max = Number(vm.seats_max) || 0
   if (max <= 0 || (Number(vm.seats_used) || 0) < max) return null
-  return { key: 'seats', text: '席位满', cls: 'caution' }
+  return { key: 'seats', text: t('lib:status.seatsFull'), cls: 'caution' }
 }
 
 /**
@@ -526,41 +648,82 @@ export function poolStatus(vm: Vm | undefined): StatusTone {
     if (circuit) return circuit
   }
   if (vm?.schedule_state === 'off') {
-    if (!vm.has_token) return { key: 'none', text: '无凭证', cls: 'none' }
-    if (ticketExpiredDead(vm)) return { key: 'bad', text: '已过期', cls: 'bad' }
-    return { key: 'off', text: '调度关', cls: 'off' }
+    if (!vm.has_token)
+      return { key: 'none', text: t('lib:status.noCredentials'), cls: 'none' }
+    if (ticketExpiredDead(vm))
+      return { key: 'bad', text: t('lib:status.expired'), cls: 'bad' }
+    return { key: 'off', text: t('lib:status.schedulingOff'), cls: 'off' }
   }
 
   if (vm?.availability?.key && !probeTaintedAvailability(vm)) {
     const a = vm.availability
     if (a.key === 'none')
-      return { key: 'none', text: a.text || '无凭证', cls: 'none' }
+      return {
+        key: 'none',
+        text: availabilityLabel(vm, t('lib:status.noCredentials')),
+        cls: 'none',
+      }
     if (a.key === 'bad')
-      return { key: 'bad', text: a.text || '无效凭证', cls: 'bad' }
+      return {
+        key: 'bad',
+        text: availabilityLabel(vm, t('lib:status.invalidCredentials')),
+        cls: 'bad',
+      }
     // 后端把「运维关调度」也编成 off，于是一台票已经废了的槽会显示成「调度关」，
     // 混在关闭调用里等着被人当好号重新打开。off 只该表达调度意图，凭证死活
     // 先于它判：没票 → 未使用，过期 → 无效凭证，其余才是真正的「调度关」。
     if (a.key === 'off') {
-      if (!vm.has_token) return { key: 'none', text: '无凭证', cls: 'none' }
+      if (!vm.has_token)
+        return { key: 'none', text: t('lib:status.noCredentials'), cls: 'none' }
       if (ticketExpiredDead(vm))
-        return { key: 'bad', text: '已过期', cls: 'bad' }
-      return { key: 'off', text: a.text || '调度关', cls: 'off' }
+        return { key: 'bad', text: t('lib:status.expired'), cls: 'bad' }
+      return {
+        key: 'off',
+        text: availabilityLabel(vm, t('lib:status.schedulingOff')),
+        cls: 'off',
+      }
     }
     if (a.key === 'quota') {
-      return { key: 'quota', text: a.text || '额度限制', cls: 'warn' }
+      return {
+        key: 'quota',
+        text: availabilityLabel(vm, t('lib:status.quotaLimited')),
+        cls: 'warn',
+      }
     }
     if (a.key === 'rest')
-      return { key: 'rest', text: a.text || '休息时段', cls: 'caution' }
+      return {
+        key: 'rest',
+        text: availabilityLabel(vm, t('lib:status.restPeriod')),
+        cls: 'caution',
+      }
     if (a.key === 'cool' || vmCooldown(vm))
-      return { key: 'cool', text: a.text || '冷却中', cls: 'caution' }
+      return {
+        key: 'cool',
+        text: availabilityLabel(vm, t('lib:status.cooldown')),
+        cls: 'caution',
+      }
     if (a.key === 'drain')
-      return { key: 'drain', text: a.text || '临近闸线', cls: 'caution' }
-    if (!a.usable) return { key: 'bad', text: a.text || '无效凭证', cls: 'bad' }
+      return {
+        key: 'drain',
+        text: availabilityLabel(vm, t('lib:status.nearGate')),
+        cls: 'caution',
+      }
+    if (!a.usable)
+      return {
+        key: 'bad',
+        text: availabilityLabel(vm, t('lib:status.invalidCredentials')),
+        cls: 'bad',
+      }
     return (
-      seatsFullTone(vm) || { key: 'pool', text: a.text || '可用', cls: 'ok' }
+      seatsFullTone(vm) || {
+        key: 'pool',
+        text: availabilityLabel(vm, t('lib:status.available')),
+        cls: 'ok',
+      }
     )
   }
-  if (!vm?.has_token) return { key: 'none', text: '无凭证', cls: 'none' }
+  if (!vm?.has_token)
+    return { key: 'none', text: t('lib:status.noCredentials'), cls: 'none' }
   const fb = vm.fable || {}
   const exp = credExpiry(vm)
   if (
@@ -569,30 +732,38 @@ export function poolStatus(vm: Vm | undefined): StatusTone {
     exp.cls !== 'ok' &&
     exp.cls !== 'caution'
   ) {
-    return { key: 'bad', text: '被吊销', cls: 'bad' }
+    return { key: 'bad', text: t('lib:status.revokedPassive'), cls: 'bad' }
   }
   // 过期无 refresh 才是死票。有 refresh 时 leftover 过期 access 仍可刷。
-  if (ticketExpiredDead(vm)) return { key: 'bad', text: '已过期', cls: 'bad' }
+  if (ticketExpiredDead(vm))
+    return { key: 'bad', text: t('lib:status.expired'), cls: 'bad' }
   if (vm.schedulable === false)
-    return { key: 'off', text: '调度关', cls: 'off' }
-  if (vmCooldown(vm)) return { key: 'cool', text: '冷却中', cls: 'caution' }
+    return { key: 'off', text: t('lib:status.schedulingOff'), cls: 'off' }
+  if (vmCooldown(vm))
+    return { key: 'cool', text: t('lib:status.cooldown'), cls: 'caution' }
   const u5 = pct(vm.utilization_5h)
   const u7 = pct(vm.utilization_7d)
   if (windowLimited(vm.status_5h, u5))
-    return { key: 'quota', text: '5h 限制', cls: 'warn' }
+    return { key: 'quota', text: t('lib:status.limit5h'), cls: 'warn' }
   if (windowLimited(vm.status_7d, u7))
-    return { key: 'quota', text: '7d 限制', cls: 'warn' }
+    return { key: 'quota', text: t('lib:status.limit7d'), cls: 'warn' }
   const split = vm.weekly_split
   if (split?.enabled && split.mode === 'fable_only') {
-    return { key: 'quota', text: '普通限制', cls: 'warn' }
+    return { key: 'quota', text: t('lib:status.regularLimited'), cls: 'warn' }
   }
   if (windowWarn(vm.status_5h, u5) || vm.near_limit) {
-    return { key: 'quota', text: '5h 警告', cls: 'caution' }
+    return { key: 'quota', text: t('lib:status.warning5h'), cls: 'caution' }
   }
   if (windowWarn(vm.status_7d, u7))
-    return { key: 'quota', text: '7d 警告', cls: 'caution' }
+    return { key: 'quota', text: t('lib:status.warning7d'), cls: 'caution' }
   if (isTransportProbe(vm) && !isUsageProbeOk(vm)) return transportFailTone()
-  return seatsFullTone(vm) || { key: 'pool', text: '在池', cls: 'ok' }
+  return (
+    seatsFullTone(vm) || {
+      key: 'pool',
+      text: t('lib:status.inPool'),
+      cls: 'ok',
+    }
+  )
 }
 
 /**
@@ -706,8 +877,7 @@ export function fleetGroup(vm: Vm): FleetGroup {
   if (k === 'off') return 'off'
   if (isRestrictedSchedule(vm) || k === 'cool' || k === 'rest')
     return 'restricted'
-  if (k === 'quota' && !/警告/.test(String(status.text || '')))
-    return 'restricted'
+  if (k === 'quota' && status.cls !== 'caution') return 'restricted'
   return 'pool'
 }
 
@@ -812,10 +982,11 @@ function isLocalProxyLabelOpts(value: unknown): value is LocalProxyLabelOpts {
 export function localProxyText(
   opts?: LocalProxyLabelOpts | string | null
 ): string {
-  if (!isLocalProxyLabelOpts(opts) || !opts.revealNode) return 'local代理'
+  if (!isLocalProxyLabelOpts(opts) || !opts.revealNode)
+    return t('lib:proxy.local')
   const name =
     String(opts.nodeName || '').trim() || String(opts.nodeId || '').trim()
-  return name ? `${name}local代理` : '当前VPS local代理'
+  return name ? t('lib:proxy.localNode', { name }) : t('lib:proxy.localVps')
 }
 
 /** Prefer the API's `node_name` field (present only for admin). */

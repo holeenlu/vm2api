@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { VIEW_TITLES } from '@/config/nav'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { fmtBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -13,18 +13,12 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { EmptyState } from '@/components/empty-state'
 import { PageHeader } from '@/components/page-header'
 import { CardGridSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { dataplaneLabel } from '@/features/vm/dataplane-contract'
 import {
@@ -108,6 +102,8 @@ function DataplaneOption({
   disabled?: boolean
   children?: ReactNode
 }) {
+  const { t } = useTranslation('wrap')
+
   return (
     <div
       className={cn(
@@ -127,7 +123,9 @@ function DataplaneOption({
           <span className='flex items-center justify-between gap-2'>
             <span className='text-sm leading-none font-medium'>{title}</span>
             {current ? (
-              <span className='text-xs text-muted-foreground'>当前</span>
+              <span className='text-xs text-muted-foreground'>
+                {t('wrap:current')}
+              </span>
             ) : null}
           </span>
           <span className='block text-xs leading-snug text-muted-foreground'>
@@ -166,20 +164,24 @@ function slotFailure(report: WrapSyncReport, id: string) {
 }
 
 function HopProgress({ job }: { job: HopJob }) {
+  const { t } = useTranslation('wrap')
+
   const label =
     job.phase === 'download'
-      ? '拉取 GitHub wrap kernel、cli-node、cc-node 和 crag kernel'
+      ? t('wrap:fetchProgress')
       : job.phase === 'done'
         ? job.failed.length
-          ? `内核重装结束，失败 ${job.failed.length}`
-          : `最新内核已重装 ${job.done}/${job.total}`
-        : `正在按当前数据面换 ${job.current || '槽'} 的内核`
+          ? t('wrap:reinstallDoneFailed', { count: job.failed.length })
+          : t('wrap:reinstallDone', { done: job.done, count: job.total })
+        : t('wrap:reinstallProgress', { slot: job.current || t('wrap:slot') })
   return (
     <div className='space-y-1.5'>
       <div className='flex items-center justify-between gap-3 text-xs text-muted-foreground'>
         <span>{label}</span>
         <span>
-          {job.phase === 'download' ? '下载中' : `${job.done}/${job.total}`}
+          {job.phase === 'download'
+            ? t('wrap:downloading')
+            : `${job.done}/${job.total}`}
         </span>
       </div>
       <Progress
@@ -189,7 +191,7 @@ function HopProgress({ job }: { job: HopJob }) {
       />
       {job.failed.length ? (
         <p className='text-xs text-destructive'>
-          失败：{job.failed.join('、')}
+          {t('wrap:failedSlots', { slots: job.failed.join(', ') })}
         </p>
       ) : null}
     </div>
@@ -197,11 +199,13 @@ function HopProgress({ job }: { job: HopJob }) {
 }
 
 function Flag({ ok, label }: { ok?: boolean; label: string }) {
+  const { t } = useTranslation('wrap')
+
   return (
     <div className='flex items-center justify-between gap-2 text-sm'>
       <span className='text-muted-foreground'>{label}</span>
       <span className={ok ? 'text-foreground' : 'text-destructive'}>
-        {ok ? '有' : '缺'}
+        {ok ? t('wrap:present') : t('wrap:missing')}
       </span>
     </div>
   )
@@ -214,28 +218,30 @@ function KernelPayload({
   payload?: WrapKernelPayload | null
   kind?: 'kernel' | 'cli'
 }) {
+  const { t } = useTranslation('wrap')
+
   const label =
     payload?.source === 'configured'
-      ? '仓内最新 kernel'
+      ? t('wrap:repositoryKernel')
       : payload?.source === 'sample'
         ? kind === 'cli'
-          ? '仓内 CLI'
-          : '母样本 kernel'
+          ? t('wrap:repositoryCli')
+          : t('wrap:sampleKernel')
         : kind === 'cli'
-          ? '未找到 CLI'
-          : '未找到 kernel'
+          ? t('wrap:cliNotFound')
+          : t('wrap:kernelNotFound')
   return (
     <div className='space-y-2 text-sm'>
       <div className='flex items-center justify-between gap-2'>
-        <span className='text-muted-foreground'>来源</span>
+        <span className='text-muted-foreground'>{t('wrap:source')}</span>
         <span className='font-medium'>{label}</span>
       </div>
       <div className='flex items-center justify-between gap-2'>
-        <span className='text-muted-foreground'>文件</span>
+        <span className='text-muted-foreground'>{t('wrap:file')}</span>
         <code className='text-xs'>{kernelPathLabel(payload?.path)}</code>
       </div>
       <div className='flex items-center justify-between gap-2'>
-        <span className='text-muted-foreground'>大小</span>
+        <span className='text-muted-foreground'>{t('wrap:size')}</span>
         <span className='font-mono text-xs'>
           {payload?.size ? fmtBytes(payload.size) : '—'}
         </span>
@@ -249,10 +255,12 @@ function KernelPayload({
 }
 
 export function WrapSamplePage() {
+  const { t } = useTranslation('wrap')
+
   const qc = useQueryClient()
   const sample = useQuery(wrapSampleQueryOptions())
   const dash = useQuery(dashboardQueryOptions())
-  const vms: Vm[] = dash.data?.vms || []
+  const vms = useMemo<Vm[]>(() => dash.data?.vms || [], [dash.data?.vms])
   const [restart, setRestart] = useState(true)
   const [selected, setSelected] = useState<string[]>([])
   const [pendingDataplane, setPendingDataplane] = useState<
@@ -327,7 +335,11 @@ export function WrapSamplePage() {
           failed.push(
             report
               ? slotFailure(report, id)
-              : `${id}（${error instanceof Error ? error.message : '失败'}）`
+              : t('wrap:slotFailure', {
+                  id,
+                  reason:
+                    error instanceof Error ? error.message : t('wrap:failed'),
+                })
           )
         }
       }
@@ -340,17 +352,30 @@ export function WrapSamplePage() {
         failed: [...failed],
       })
       if (failed.length) {
-        toast.error(`内核重装 ${ids.length - failed.length}/${ids.length}`)
+        toast.error(
+          t('wrap:reinstalledCount', {
+            done: ids.length - failed.length,
+            count: ids.length,
+          })
+        )
       } else {
-        toast.success(`内核重装 ${ids.length}/${ids.length}`)
+        toast.success(
+          t('wrap:reinstalledCount', { done: ids.length, count: ids.length })
+        )
       }
       await invalidate()
     } catch (error) {
       if (!alive()) return
-      toast.error(error instanceof Error ? error.message : '内核重装失败')
+      toast.error(
+        error instanceof Error ? error.message : t('wrap:reinstallFailed')
+      )
       setHopJob((cur) =>
         cur
-          ? { ...cur, phase: 'done', failed: failed.length ? failed : ['下载'] }
+          ? {
+              ...cur,
+              phase: 'done',
+              failed: failed.length ? failed : [t('wrap:download')],
+            }
           : cur
       )
     } finally {
@@ -361,7 +386,7 @@ export function WrapSamplePage() {
   const promote = useMutation({
     mutationFn: (id: string) => promoteWrapSample(id),
     onSuccess: async (_data, id) => {
-      toast.success(`已把 ${id} 收成母本`)
+      toast.success(t('wrap:promoted', { id }))
       setPromoteId(null)
       await invalidate()
     },
@@ -371,7 +396,7 @@ export function WrapSamplePage() {
   const make = useMutation({
     mutationFn: () => makeWrapSample({ glibc_vm: glibcVm || undefined }),
     onSuccess: async () => {
-      toast.success('已重整 wrap 文件')
+      toast.success(t('wrap:wrapRebuilt'))
       setMakeOpen(false)
       await invalidate()
     },
@@ -381,7 +406,7 @@ export function WrapSamplePage() {
   const upload = useMutation({
     mutationFn: (file: File) => uploadKernelBinary(file),
     onSuccess: async () => {
-      toast.success('已写入仓内 wrap kernel。再重装铺到槽')
+      toast.success(t('wrap:wrapUploaded'))
       setUploadFile(null)
       await invalidate()
     },
@@ -393,15 +418,17 @@ export function WrapSamplePage() {
       setReleaseOpen(false)
       const tag = result.release?.tag || 'Release'
       const cli = result.release?.cli_node_size
-        ? `，cli-node ${fmtBytes(result.release.cli_node_size)}`
+        ? `, cli-node ${fmtBytes(result.release.cli_node_size)}`
         : ''
       const cc = result.release?.cc_node_size
-        ? `，cc-node ${fmtBytes(result.release.cc_node_size)}`
+        ? `, cc-node ${fmtBytes(result.release.cc_node_size)}`
         : ''
       const crag = result.release?.crag_size
-        ? `，crag ${fmtBytes(result.release.crag_size)}`
+        ? `, crag ${fmtBytes(result.release.crag_size)}`
         : ''
-      toast.success(`已下载 ${tag}${cli}${cc}${crag}。尚未铺到槽`)
+      toast.success(
+        t('wrap:downloadedRelease', { release: tag + cli + cc + crag })
+      )
       await invalidate()
     },
     onError: async (error: Error) => {
@@ -424,9 +451,7 @@ export function WrapSamplePage() {
         return Boolean(vm && !isCodexVm(vm))
       })
       if (selected.length && !ids.length) {
-        return Promise.reject(
-          new Error('所选槽都是 Codex，Claude 内核切不到它们')
-        )
+        return Promise.reject(new Error(t('wrap:onlyCodexSelected')))
       }
       return setKernelDataplane({
         dataplane: next,
@@ -439,14 +464,19 @@ export function WrapSamplePage() {
       setPendingDataplane(null)
       const failed = Number(report.failed_count || 0)
       if (failed) {
-        toast.error(`已切 ${next}，${syncReportSummary(report)}`)
+        toast.error(
+          t('wrap:switchedSummary', {
+            dataplane: next,
+            summary: syncReportSummary(report),
+          })
+        )
       } else {
         toast.success(
           next === 'crag'
-            ? '已切换到 crag + cc-node'
+            ? t('wrap:switchedCrag')
             : next === 'cc'
-              ? '已切换到 cc-node + kernel'
-              : '已切换到 cli-node + kernel'
+              ? t('wrap:switchedCc')
+              : t('wrap:switchedWrap')
         )
       }
     },
@@ -455,7 +485,12 @@ export function WrapSamplePage() {
       const report = syncReportFromError(error)
       if (report) {
         setPendingDataplane(null)
-        toast.error(`已切 ${next}，${syncReportSummary(report)}`)
+        toast.error(
+          t('wrap:switchedSummary', {
+            dataplane: next,
+            summary: syncReportSummary(report),
+          })
+        )
       } else {
         toast.error(error.message)
       }
@@ -465,7 +500,7 @@ export function WrapSamplePage() {
   const uploadCrag = useMutation({
     mutationFn: (file: File) => uploadCragKernelBinary(file),
     onSuccess: async () => {
-      toast.success('已写入 Crag kernel。再点切换铺到槽')
+      toast.success(t('wrap:cragUploaded'))
       await invalidate()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -481,11 +516,11 @@ export function WrapSamplePage() {
   const pickKernelFile = (file?: File) => {
     if (!file) return
     if (file.size > MAX_KERNEL_UPLOAD_BYTES) {
-      toast.error('kernel 不能超过 32MB')
+      toast.error(t('wrap:uploadTooLarge'))
       return
     }
     if (!file.size) {
-      toast.error('kernel 文件为空')
+      toast.error(t('wrap:emptyKernel'))
       return
     }
     setUploadFile(file)
@@ -496,8 +531,8 @@ export function WrapSamplePage() {
 
   return (
     <PageHeader
-      title={VIEW_TITLES.wrap}
-      description='切换数据面和重装内核。重装不改凭证、不改代理、不删容器。'
+      title={t('wrap:title')}
+      description={t('wrap:description')}
       extra={
         <div className='flex flex-wrap gap-2'>
           <input
@@ -516,7 +551,7 @@ export function WrapSamplePage() {
             loading={releaseUpdate.isPending}
             onClick={() => setReleaseOpen(true)}
           >
-            拉取 wrap/crag
+            {t('wrap:fetchKernels')}
           </Button>
           <Button
             size='sm'
@@ -525,7 +560,7 @@ export function WrapSamplePage() {
             loading={upload.isPending}
             onClick={() => fileRef.current?.click()}
           >
-            本地上传
+            {t('wrap:localUpload')}
           </Button>
           <Button
             size='sm'
@@ -534,7 +569,7 @@ export function WrapSamplePage() {
             loading={make.isPending}
             onClick={() => setMakeOpen(true)}
           >
-            重整母本
+            {t('wrap:rebuildSample')}
           </Button>
           <Button
             size='sm'
@@ -543,8 +578,8 @@ export function WrapSamplePage() {
             onClick={() => openHop(reinstallIds, true)}
           >
             {selected.length
-              ? `重装当前内核 ${selected.length}`
-              : '重装当前内核'}
+              ? t('wrap:reinstallSelected', { count: selected.length })
+              : t('wrap:reinstallCurrent')}
           </Button>
         </div>
       }
@@ -557,15 +592,15 @@ export function WrapSamplePage() {
         }
       >
         <p className='mb-4 max-w-3xl text-sm leading-relaxed text-muted-foreground'>
-          三种搭配，点卡片切换。默认是 <code>cli-node + kernel</code>
-          （一进程 20 native 槽）。<code>cc-node + kernel</code> 用同一份 wrap
-          kernel。<code>crag + cc-node</code> 用 crag kernel，claude_bin
-          指向仓内 cc-node。未勾选槽时改全局默认；勾选后只切这些 Claude
-          槽。Codex 不动。不改凭证、不删容器。
+          <Trans
+            t={t}
+            i18nKey='wrap:dataplaneDescription'
+            components={{ wrap: <code />, cc: <code />, crag: <code /> }}
+          />
         </p>
         <Card className='mb-4'>
           <CardHeader>
-            <CardTitle>内核</CardTitle>
+            <CardTitle>{t('wrap:kernel')}</CardTitle>
           </CardHeader>
           <CardContent className='space-y-3'>
             <RadioGroup
@@ -582,7 +617,7 @@ export function WrapSamplePage() {
               <DataplaneOption
                 value='wrap'
                 title='cli-node + kernel'
-                desc='默认。patched cli-node，一进程 20 native 槽。kernel.json.claude_bin 指向仓内 cli-node。'
+                desc={t('wrap:wrapOptionHint')}
                 current={data?.dataplane !== 'cc' && data?.dataplane !== 'crag'}
                 disabled={!data?.ok}
               >
@@ -597,7 +632,7 @@ export function WrapSamplePage() {
               <DataplaneOption
                 value='cc'
                 title='cc-node + kernel'
-                desc='同一份 wrap kernel。claude_bin 指向仓内 cc-node。'
+                desc={t('wrap:ccOptionHint')}
                 current={data?.dataplane === 'cc'}
                 disabled={!data?.cc_node?.size}
               >
@@ -612,7 +647,7 @@ export function WrapSamplePage() {
               <DataplaneOption
                 value='crag'
                 title='crag + cc-node'
-                desc='crag kernel，一进程多槽。claude_bin 指向仓内 cc-node。'
+                desc={t('wrap:cragOptionHint')}
                 current={data?.dataplane === 'crag'}
                 disabled={!data?.crag?.ok || !data?.cc_node?.size}
               >
@@ -631,7 +666,7 @@ export function WrapSamplePage() {
                     event.target.value = ''
                     if (!file) return
                     if (file.size > MAX_KERNEL_UPLOAD_BYTES) {
-                      toast.error('kernel 不能超过 32MB')
+                      toast.error(t('wrap:uploadTooLarge'))
                       return
                     }
                     uploadCrag.mutate(file)
@@ -647,7 +682,7 @@ export function WrapSamplePage() {
                     cragFileRef.current?.click()
                   }}
                 >
-                  上传 Crag ELF
+                  {t('wrap:uploadCrag')}
                 </Button>
               </DataplaneOption>
             </RadioGroup>
@@ -656,7 +691,7 @@ export function WrapSamplePage() {
                 checked={restart}
                 onCheckedChange={(v) => setRestart(v === true)}
               />
-              <label>切换后重启 rust kernel，让槽用上对应二进制</label>
+              <label>{t('wrap:restartAfterSwitch')}</label>
             </div>
           </CardContent>
         </Card>
@@ -664,7 +699,7 @@ export function WrapSamplePage() {
         <div className='grid gap-4 lg:grid-cols-2'>
           <Card>
             <CardHeader>
-              <CardTitle>wrap 文件</CardTitle>
+              <CardTitle>{t('wrap:wrapFiles')}</CardTitle>
             </CardHeader>
             <CardContent className='space-y-2'>
               {data?.meta?.release_tag ? (
@@ -676,7 +711,9 @@ export function WrapSamplePage() {
                 </div>
               ) : null}
               <div className='flex items-center justify-between gap-2 text-sm'>
-                <span className='text-muted-foreground'>目录</span>
+                <span className='text-muted-foreground'>
+                  {t('wrap:directory')}
+                </span>
                 <code className='text-xs'>{sampleDirLabel(data?.dir)}</code>
               </div>
               <Flag ok={data?.wrapper} label='kernel wrapper' />
@@ -685,14 +722,10 @@ export function WrapSamplePage() {
           </Card>
           <Card>
             <CardHeader>
-              <CardTitle>内核重装</CardTitle>
+              <CardTitle>{t('wrap:reinstallKernel')}</CardTitle>
             </CardHeader>
             <CardContent className='space-y-3 text-sm leading-relaxed text-muted-foreground'>
-              <p>
-                按各槽当前数据面铺内核：cli-node + kernel、cc-node + kernel，或
-                crag + cc-node。可先从 GitHub Release 拉 linux amd64
-                文件。不改凭证、不改 SOCKS、不删容器。
-              </p>
+              <p>{t('wrap:reinstallDescription')}</p>
               <Button
                 size='sm'
                 disabled={!complete || vms.length === 0 || hopBusy}
@@ -704,7 +737,7 @@ export function WrapSamplePage() {
                   )
                 }
               >
-                一键全部重装最新内核
+                {t('wrap:reinstallAllLatest')}
               </Button>
               {hopJob ? <HopProgress job={hopJob} /> : null}
             </CardContent>
@@ -713,13 +746,13 @@ export function WrapSamplePage() {
 
         <Card className='mt-4'>
           <CardHeader>
-            <CardTitle>槽位</CardTitle>
+            <CardTitle>{t('wrap:slots')}</CardTitle>
           </CardHeader>
           <CardContent>
             {vms.length === 0 ? (
               <EmptyState
-                reason='还没有槽位。'
-                actionLabel='去虚拟机'
+                reason={t('wrap:noSlots')}
+                actionLabel={t('wrap:goToVms')}
                 to='/vm'
               />
             ) : (
@@ -727,13 +760,19 @@ export function WrapSamplePage() {
                 <table className='w-full text-sm'>
                   <thead className='text-left text-muted-foreground'>
                     <tr>
-                      <th className='w-8 py-2 font-medium'>选</th>
-                      <th className='py-2 font-medium'>槽</th>
+                      <th className='w-8 py-2 font-medium'>
+                        {t('wrap:select')}
+                      </th>
+                      <th className='py-2 font-medium'>{t('wrap:slot')}</th>
                       <th className='py-2 font-medium'>OS</th>
-                      <th className='py-2 font-medium'>引擎</th>
-                      <th className='py-2 font-medium'>内核</th>
-                      <th className='py-2 font-medium'>母本</th>
-                      <th className='py-2 text-right font-medium'>动作</th>
+                      <th className='py-2 font-medium'>{t('wrap:engine')}</th>
+                      <th className='py-2 font-medium'>{t('wrap:kernel')}</th>
+                      <th className='py-2 font-medium'>
+                        {t('wrap:baseSample')}
+                      </th>
+                      <th className='py-2 text-right font-medium'>
+                        {t('wrap:actions')}
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -747,7 +786,7 @@ export function WrapSamplePage() {
                             <Checkbox
                               checked={selected.includes(vm.id)}
                               onCheckedChange={(v) => toggle(vm.id, v === true)}
-                              aria-label={`选择 ${vm.id}`}
+                              aria-label={t('wrap:selectSlot', { id: vm.id })}
                             />
                           </td>
                           <td className='py-2 font-mono text-xs'>
@@ -773,7 +812,11 @@ export function WrapSamplePage() {
                               : dataplaneLabel(dataplaneOf(vm))}
                           </td>
                           <td className='py-2 text-muted-foreground'>
-                            {source ? '当前母本' : rust ? '可收成' : '只收文件'}
+                            {source
+                              ? t('wrap:currentSample')
+                              : rust
+                                ? t('wrap:canPromote')
+                                : t('wrap:filesOnly')}
                           </td>
                           <td className='py-2'>
                             <div className='flex justify-end gap-2'>
@@ -783,7 +826,7 @@ export function WrapSamplePage() {
                                 disabled={!rust || promote.isPending || hopBusy}
                                 onClick={() => setPromoteId(vm.id)}
                               >
-                                晋升母本
+                                {t('wrap:promoteSample')}
                               </Button>
                               <Button
                                 size='sm'
@@ -796,7 +839,7 @@ export function WrapSamplePage() {
                                 }
                                 onClick={() => openHop([vm.id], false)}
                               >
-                                替换此槽
+                                {t('wrap:replaceSlot')}
                               </Button>
                             </div>
                           </td>
@@ -809,7 +852,7 @@ export function WrapSamplePage() {
             )}
             {rustVms.length === 0 ? (
               <p className='mt-3 text-xs text-muted-foreground'>
-                没有 rust cli-hop 槽时仍会铺文件，但不会重启 kernel。
+                {t('wrap:noRustSlotHint')}
               </p>
             ) : null}
           </CardContent>
@@ -822,20 +865,32 @@ export function WrapSamplePage() {
         }}
         title={
           pendingDataplane === 'crag'
-            ? '切到 crag + cc-node？'
+            ? t('wrap:confirmCrag')
             : pendingDataplane === 'cc'
-              ? '切到 cc-node + kernel？'
-              : '切到 cli-node + kernel？'
+              ? t('wrap:confirmCc')
+              : t('wrap:confirmWrap')
         }
         desc={
           pendingDataplane === 'crag'
-            ? `${selected.length ? `所选 ${selected.length} 个 Claude 槽` : '全部 Claude 槽'}将铺 crag kernel，claude_bin 指向 /home/kincli/.kin/cc-node，并重启 rust kernel。Codex 不动。不改凭证、不删容器。`
+            ? t('wrap:switchCragDescription', {
+                scope: selected.length
+                  ? t('wrap:selectedClaudeSlots', { count: selected.length })
+                  : t('wrap:allClaudeSlots'),
+              })
             : pendingDataplane === 'cc'
-              ? `${selected.length ? `所选 ${selected.length} 个 Claude 槽` : '全部 Claude 槽'}将铺 wrap kernel 和 cc-node，并重启 rust kernel。Codex 不动。不改凭证、不删容器。`
-              : `${selected.length ? `所选 ${selected.length} 个 Claude 槽` : '全部 Claude 槽'}将铺 wrap kernel 和 cli-node，并重启 rust kernel。Codex 不动。不改凭证、不删容器。`
+              ? t('wrap:switchCcDescription', {
+                  scope: selected.length
+                    ? t('wrap:selectedClaudeSlots', { count: selected.length })
+                    : t('wrap:allClaudeSlots'),
+                })
+              : t('wrap:switchWrapDescription', {
+                  scope: selected.length
+                    ? t('wrap:selectedClaudeSlots', { count: selected.length })
+                    : t('wrap:allClaudeSlots'),
+                })
         }
-        confirmText='切换'
-        cancelBtnText='取消'
+        confirmText={t('wrap:switch')}
+        cancelBtnText={t('wrap:cancel')}
         isLoading={dataplane.isPending}
         handleConfirm={() => {
           if (pendingDataplane) dataplane.mutate(pendingDataplane)
@@ -847,10 +902,12 @@ export function WrapSamplePage() {
         onOpenChange={(open) => {
           if (!open) setPromoteId(null)
         }}
-        title='收成母本？'
-        desc={`把 ${promoteId || '此槽'} 里已跑通的 cli-node 收成以后重装用的母本。不拷凭证。kernel 仍用仓内文件。`}
-        confirmText='晋升'
-        cancelBtnText='取消'
+        title={t('wrap:confirmPromote')}
+        desc={t('wrap:promoteDescription', {
+          id: promoteId || t('wrap:thisSlot'),
+        })}
+        confirmText={t('wrap:promote')}
+        cancelBtnText={t('wrap:cancel')}
         isLoading={promote.isPending}
         handleConfirm={() => {
           if (promoteId) promote.mutate(promoteId)
@@ -859,31 +916,26 @@ export function WrapSamplePage() {
       <ConfirmDialog
         open={makeOpen}
         onOpenChange={setMakeOpen}
-        title='重整 wrap 文件？'
-        desc='用当前 share/wrap-cli 里已有的 cli-node，补 kernel wrapper / shim，并叠上仓内最新 kernel。缺 cli-node 会失败。Debian 12 可从一台 Ubuntu 槽拷 glibc 2.39 shim。'
-        confirmText='重整'
-        cancelBtnText='取消'
+        title={t('wrap:confirmRebuild')}
+        desc={t('wrap:rebuildDescription')}
+        confirmText={t('wrap:rebuild')}
+        cancelBtnText={t('wrap:cancel')}
         isLoading={make.isPending}
         handleConfirm={() => make.mutate()}
       >
         <div className='space-y-1'>
-          <p className='text-sm'>glibc shim 来源槽（可选）</p>
-          <Select
-            value={glibcVm || 'none'}
-            onValueChange={(v) => setGlibcVm(v === 'none' ? '' : v)}
-          >
-            <SelectTrigger aria-label='glibc shim 来源槽'>
-              <SelectValue placeholder='不拷 shim' />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='none'>不拷 shim</SelectItem>
-              {vms.map((vm) => (
-                <SelectItem key={vm.id} value={vm.id}>
-                  {vm.id} · {osOf(vm)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <p className='text-sm'>{t('wrap:shimSourceOptional')}</p>
+          <SearchSelect
+            label={t('wrap:shimSource')}
+            value={glibcVm}
+            options={vms.map((v) => ({
+              id: v.id,
+              name: `${v.id} · ${osOf(v)}`,
+            }))}
+            allLabel={t('wrap:noShimCopy')}
+            searchPlaceholder={t('wrap:searchSourceSlots')}
+            onChange={(id) => setGlibcVm(id || '')}
+          />
         </div>
       </ConfirmDialog>
       <ConfirmDialog
@@ -891,10 +943,13 @@ export function WrapSamplePage() {
         onOpenChange={(open) => {
           if (!open) setUploadFile(null)
         }}
-        title='上传 kernel？'
-        desc={`用 ${uploadFile?.name || '所选文件'}（${fmtBytes(uploadFile?.size || 0)}）覆盖仓内 kernel。不会自动改槽。`}
-        confirmText='上传'
-        cancelBtnText='取消'
+        title={t('wrap:confirmUpload')}
+        desc={t('wrap:uploadDescription', {
+          name: uploadFile?.name || t('wrap:selectedFile'),
+          size: fmtBytes(uploadFile?.size || 0),
+        })}
+        confirmText={t('wrap:upload')}
+        cancelBtnText={t('wrap:cancel')}
         isLoading={upload.isPending}
         handleConfirm={() => {
           if (uploadFile) upload.mutate(uploadFile)
@@ -903,10 +958,10 @@ export function WrapSamplePage() {
       <ConfirmDialog
         open={releaseOpen}
         onOpenChange={setReleaseOpen}
-        title='拉取 GitHub 内核？'
-        desc='下载最新 Release 的 linux amd64 wrap kin-kernel、cli-node、cc-node 和 crag kin-kernel 到仓内。不改槽、不重启。'
-        confirmText='下载'
-        cancelBtnText='取消'
+        title={t('wrap:confirmFetch')}
+        desc={t('wrap:fetchDescription')}
+        confirmText={t('wrap:download')}
+        cancelBtnText={t('wrap:cancel')}
         isLoading={releaseUpdate.isPending}
         handleConfirm={() => releaseUpdate.mutate()}
       />
@@ -917,26 +972,26 @@ export function WrapSamplePage() {
         }}
         title={
           hopIds.length === 1
-            ? `替换 ${hopIds[0]}？`
+            ? t('wrap:confirmReplaceSlot', { id: hopIds[0] })
             : hopIds.length === vms.length
-              ? '一键重装全部槽的最新内核？'
-              : `重装所选 ${hopIds.length} 槽？`
+              ? t('wrap:confirmReinstallAll')
+              : t('wrap:confirmReinstallSelected', { count: hopIds.length })
         }
         desc={
           hopIds.length === 1
-            ? '按该槽当前数据面铺内核并重启 rust kernel。不改凭证，不删容器。'
+            ? t('wrap:replaceDescription')
             : pullLatest
-              ? '先从 GitHub 拉 wrap kernel、cli-node、cc-node 和 crag kernel，再按各槽数据面逐槽换上。不改凭证，不删容器。'
-              : '按各槽当前数据面铺仓内内核并显示进度。不改凭证，不删容器。'
+              ? t('wrap:reinstallLatestDescription')
+              : t('wrap:reinstallSelectedDescription')
         }
         confirmText={
           hopIds.length === 1
-            ? '替换'
+            ? t('wrap:replace')
             : hopIds.length === vms.length
-              ? '全部重装'
-              : '开始重装'
+              ? t('wrap:reinstallAll')
+              : t('wrap:startReinstall')
         }
-        cancelBtnText='取消'
+        cancelBtnText={t('wrap:cancel')}
         isLoading={hopBusy}
         handleConfirm={() => {
           const ids = hopIds
@@ -951,7 +1006,7 @@ export function WrapSamplePage() {
               checked={pullLatest}
               onCheckedChange={(v) => setPullLatest(v === true)}
             />
-            先拉取 GitHub 最新 wrap/crag
+            {t('wrap:fetchLatestFirst')}
           </label>
         )}
       </ConfirmDialog>

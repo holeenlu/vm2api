@@ -651,7 +651,7 @@ export function replaceKernelBinary(projectRoot, buf, extra = {}) {
     String(metaExtra.source || 'upload')
       .trim()
       .slice(0, 32) || 'upload'
-  const releaseTag = /^v\d+\.\d+\.\d+$/.test(String(metaExtra.release_tag || '').trim())
+  const releaseTag = /^v\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?$/.test(String(metaExtra.release_tag || '').trim())
     ? String(metaExtra.release_tag).trim()
     : ''
   const destDir = wrapCliTemplateDir(projectRoot)

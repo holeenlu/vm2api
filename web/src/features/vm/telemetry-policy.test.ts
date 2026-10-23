@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   telemetryEnabled,
   telemetrySeedFlags,
   telemetryView,
 } from './telemetry-policy'
 import { telemetryStatusLabel } from './telemetry-status'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('telemetry reads one bit', () => {
   it('is on only when telemetry_disabled is false', () => {
