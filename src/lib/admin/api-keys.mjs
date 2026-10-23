@@ -1,8 +1,9 @@
+import { validateIpRules, permitsIp } from './key-ip-rules.mjs'
 /**
  * Multi API-key store (sub2api-inspired, SQLite-backed).
  *
  * Fields aligned to sub2api basics:
- *   name, status, expires_at, quota (+ used), rate windows → rpm,
+ *   name, status, expires_at, quota (+ used), spend windows,
  *   concurrency (per-key, sub2api puts this on User).
  *
  * Master env key KIN_API_KEY is separate and unlimited.
@@ -15,8 +16,8 @@
  * the panel can re-reveal a key for copying after creation.
  */
 
-import { keyScopeFromRecord, normalizeKeyScope } from './key-scope.mjs'
-import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
+import { keyScopeFromRecord, refreshAuthenticatedKey } from './key-scope.mjs'
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ApiKeysRepo } from '../db/repos/api-keys-repo.mjs'
@@ -35,13 +36,6 @@ function clampInt(n, min, max, fallback) {
 
 function nowIso() {
   return new Date().toISOString()
-}
-function storedKeyScope(scope) {
-  return {
-    group_type: scope.group_type,
-    allowed_vms: JSON.stringify(scope.allowed_vms),
-    vm_pool_id: scope.vm_pool_id || null,
-  }
 }
 
 export function generateApiKey(prefix = KEY_PREFIX) {
@@ -82,6 +76,7 @@ export function publicKeyView(rec, { reveal = false } = {}) {
     name: rec.name,
     key: reveal && plain ? plain : masked,
     revealable: !!plain,
+    secret_status: plain ? 'available' : rec.key_secret ? 'decrypt_failed' : 'hash_only',
     key_prefix: rec.key_prefix || String(plain || KEY_PREFIX).slice(0, 10),
     status: rec.status,
     user_id: rec.user_id ?? null,
@@ -107,7 +102,8 @@ export function publicKeyView(rec, { reveal = false } = {}) {
     tokens_in: rec.tokens_in || 0,
     tokens_out: rec.tokens_out || 0,
     category: rec.category === 'api' ? 'api' : 'oauth',
-    ...keyScopeFromRecord(rec),
+    ip_whitelist: JSON.parse(rec.ip_whitelist || '[]'),
+    ip_blacklist: JSON.parse(rec.ip_blacklist || '[]'),
     inflight: undefined, // filled by store.snapshot
   }
 }
@@ -125,14 +121,16 @@ export class ApiKeyStore {
     this.repo = new ApiKeysRepo(this.db)
     this.hashSecret = String(
       hashSecret ||
-        process.env.VM2API_API_KEY_HASH_SECRET ||
+        process.env.TAPMODELS_API_KEY_HASH_SECRET ||
         process.env.KIN_API_KEY_HASH_SECRET ||
-        process.env.VM2API_DB_SECRET ||
+        process.env.TAPMODELS_DB_SECRET ||
         process.env.KIN_DB_SECRET ||
-        process.env.VM2API_API_KEY ||
+        process.env.TAPMODELS_API_KEY ||
         process.env.KIN_API_KEY ||
         'kin-development-api-key-hash-secret',
     )
+    this.userInflight = new Map()
+    this.inflightOwners = new Map()
     this.inflight = new Map() // id → count
     this.rpmBuckets = new Map() // id → number[] timestamps ms
     this.users = new UsersRepo(this.db)
@@ -161,18 +159,12 @@ export class ApiKeyStore {
   }
 
   list({ reveal = false } = {}) {
-    const names = new Map()
-    try {
-      for (const pool of new VmPoolsRepo(this.db).list()) names.set(pool.id, pool.name)
-    } catch {
-      // A database opened before migration 034 still lists keys.
-    }
-    return this.repo.list().map((k) => {
-      const v = publicKeyView(k, { reveal })
-      v.inflight = this.inflight.get(k.id) || 0
-      if (v.vm_pool_id) v.vm_pool_name = names.get(v.vm_pool_id) || null
-      return v
-    })
+    const groups = new GroupsRepo(this.db)
+    return this.repo.list().map((k) => ({
+      ...publicKeyView(k, { reveal }),
+      inflight: this.inflight.get(k.id) || 0,
+      group_name: k.group_id ? groups.getById(k.group_id)?.name || null : '平台服务',
+    }))
   }
 
   getById(id) {
@@ -185,6 +177,10 @@ export class ApiKeyStore {
     const indexed = this.repo.getByHash(hash)
     if (indexed) {
       if (!this._ownerActive(indexed)) return { ok: false, reason: 'user_disabled' }
+      if (!plainApiKey(indexed)) {
+        indexed.key_secret = maybeEncrypt(token)
+        this.repo.update(indexed)
+      }
       return { ok: true, record: indexed }
     }
     // One-time migration for legacy plaintext rows.
@@ -235,7 +231,9 @@ export class ApiKeyStore {
       rate_limit_1d: Math.max(0, Number(input.rate_limit_1d) || 0),
       rate_limit_7d: Math.max(0, Number(input.rate_limit_7d) || 0),
       user_id: input.user_id ?? null,
-      group_id: input.group_id ?? 1,
+      group_id: input.group_id ?? null,
+      ip_whitelist: JSON.stringify(validateIpRules(input.ip_whitelist || [])),
+      ip_blacklist: JSON.stringify(validateIpRules(input.ip_blacklist || [])),
       rpm: clampInt(input.rpm, 0, 1e6, 0),
       expires_at: input.expires_at ? new Date(input.expires_at).toISOString() : null,
       created_at: nowIso(),
@@ -245,13 +243,6 @@ export class ApiKeyStore {
       tokens_in: 0,
       tokens_out: 0,
       category: String(input.category || 'oauth').toLowerCase() === 'api' ? 'api' : 'oauth',
-      ...storedKeyScope(
-        normalizeKeyScope({
-          group_type: input.group_type,
-          allowed_vms: input.allowed_vms,
-          ...(Object.prototype.hasOwnProperty.call(input, 'vm_pool_id') ? { vm_pool_id: input.vm_pool_id } : {}),
-        }),
-      ),
     }
     if (rec.expires_at && Number.isNaN(Date.parse(rec.expires_at))) {
       throw Object.assign(new Error('invalid expires_at'), { code: 'invalid_expires_at' })
@@ -278,8 +269,7 @@ export class ApiKeyStore {
     if (patch.rate_limit_5h != null) rec.rate_limit_5h = Math.max(0, Number(patch.rate_limit_5h) || 0)
     if (patch.rate_limit_1d != null) rec.rate_limit_1d = Math.max(0, Number(patch.rate_limit_1d) || 0)
     if (patch.rate_limit_7d != null) rec.rate_limit_7d = Math.max(0, Number(patch.rate_limit_7d) || 0)
-    if (patch.group_id != null) rec.group_id = Number(patch.group_id) || 1
-    if (patch.user_id != null) rec.user_id = patch.user_id
+    if (Object.hasOwn(patch, 'group_id')) rec.group_id = patch.group_id == null ? null : Number(patch.group_id)
     if (patch.rpm != null) rec.rpm = clampInt(patch.rpm, 0, 1e6, rec.rpm)
     if (patch.expires_at === null) rec.expires_at = null
     else if (patch.expires_at != null) {
@@ -303,8 +293,8 @@ export class ApiKeyStore {
     if (patch.category != null) {
       rec.category = String(patch.category).toLowerCase() === 'api' ? 'api' : 'oauth'
     }
-    const scope = normalizeKeyScope(patch, { partial: true, current: rec })
-    if (scope) Object.assign(rec, storedKeyScope(scope))
+    for (const field of ['ip_whitelist', 'ip_blacklist'])
+      if (patch[field] != null) rec[field] = JSON.stringify(validateIpRules(patch[field]))
     rec.updated_at = nowIso()
     return this.repo.update(rec)
   }
@@ -317,7 +307,7 @@ export class ApiKeyStore {
     const rec = this.repo.getById(id)
     if (!rec) return null
     const key = plainApiKey(rec)
-    if (!key) return { ok: false, code: 'key_not_recoverable' }
+    if (!key) return { ok: false, code: rec.key_secret ? 'key_decryption_failed' : 'key_not_recoverable' }
     return { ok: true, id: rec.id, name: rec.name, key }
   }
 
@@ -343,8 +333,8 @@ export class ApiKeyStore {
   remove(id) {
     const removed = this.repo.remove(id)
     if (!removed) return false
-    this.inflight.delete(id)
-    this.rpmBuckets.delete(id)
+    // Live reservations survive deletion until their request releases them.
+    this.rpmBuckets.delete(`key:${id}`)
     return true
   }
 
@@ -361,12 +351,47 @@ export class ApiKeyStore {
     return arr.length
   }
 
+  _rpmPolicies(rec) {
+    const groups = new GroupsRepo(this.db)
+    const override = rec.user_id && rec.group_id ? groups.override(rec.user_id, rec.group_id)?.rpm_limit : null
+    return [
+      { bucket: `key:${rec.id}`, limit: rec.rpm || 0, code: 'api_key_rate_limit' },
+      {
+        bucket: rec.user_id ? `user:${rec.user_id}` : null,
+        limit: rec.user_id ? this.users.getById(rec.user_id)?.rpm_limit || 0 : 0,
+        code: 'user_rate_limit',
+      },
+      {
+        bucket: rec.group_id ? `group:${rec.group_id}:user:${rec.user_id || 'platform'}` : null,
+        limit: override ?? (rec.group_id ? groups.getById(rec.group_id)?.rpm_limit || 0 : 0),
+        code: 'group_rate_limit',
+      },
+    ]
+  }
+
   /**
    * Pre-flight gate for a managed key. Does not acquire concurrency.
    * @returns {{ ok: true } | { ok: false, code, message, status }}
    */
-  canAccept(rec, now = Date.now()) {
+  permitsIp(rec, address) {
+    return permitsIp(rec, address)
+  }
+
+  canAccept(rec, now = Date.now(), address) {
+    const live = refreshAuthenticatedKey(rec, this.db)
+    if (live.error)
+      return {
+        ok: false,
+        code: live.error,
+        message: 'API key is no longer valid; retry with current credentials',
+        status: 403,
+      }
+    rec = live.record
+    if (address !== undefined && !this.permitsIp(rec, address))
+      return { ok: false, code: 'ip_not_allowed', message: 'Client IP is not allowed', status: 403 }
     if (!rec) return { ok: false, code: 'invalid_api_key', message: 'Invalid credentials', status: 401 }
+    const scope = keyScopeFromRecord(rec, this.db)
+    if (scope.error) return { ok: false, code: scope.error, message: '分组不可用或无权调用', status: 403 }
     if (rec.status !== 'active') {
       if (rec.status === 'quota_exhausted') {
         return { ok: false, code: 'api_key_quota_exhausted', message: 'API key quota exhausted', status: 429 }
@@ -414,15 +439,14 @@ export class ApiKeyStore {
         }
       }
     }
-    if (rec.rpm > 0) {
-      const n = this._rpmCount(rec.id, now)
-      if (n >= rec.rpm) {
+    for (const { bucket, limit, code } of this._rpmPolicies(rec)) {
+      if (bucket && limit > 0 && this._rpmCount(bucket, now) >= limit) {
         return {
           ok: false,
-          code: 'api_key_rate_limit',
-          message: `API key rate limit exceeded (${rec.rpm}/min)`,
+          code,
+          message: '每分钟请求上限已达到',
           status: 429,
-          detail: { rpm: rec.rpm, current: n },
+          detail: { limit, current: this._rpmCount(bucket, now) },
         }
       }
     }
@@ -448,10 +472,7 @@ export class ApiKeyStore {
       })()
       const cap = owner?.role === 'admin' ? 0 : Number(owner?.concurrency) || 0
       if (cap > 0) {
-        let total = 0
-        for (const k of this.repo.list()) {
-          if (k.user_id === rec.user_id) total += this.inflight.get(k.id) || 0
-        }
+        const total = this.userInflight.get(rec.user_id) || 0
         if (total >= cap) {
           return {
             ok: false,
@@ -463,29 +484,45 @@ export class ApiKeyStore {
         }
       }
     }
-    return { ok: true }
+    return { ok: true, record: rec }
   }
 
-  acquire(rec, now = Date.now()) {
-    const gate = this.canAccept(rec, now)
+  acquire(rec, now = Date.now(), address) {
+    const gate = this.canAccept(rec, now, address)
     if (!gate.ok) return gate
+    rec = gate.record
     const id = rec.id
     this.inflight.set(id, (this.inflight.get(id) || 0) + 1)
-    const arr = this.rpmBuckets.get(id) || []
-    arr.push(now)
-    this.rpmBuckets.set(id, arr)
+    if (rec.user_id) {
+      this.inflightOwners.set(id, rec.user_id)
+      this.userInflight.set(rec.user_id, (this.userInflight.get(rec.user_id) || 0) + 1)
+    }
+    for (const { bucket } of this._rpmPolicies(rec)) {
+      if (!bucket) continue
+      this._rpmCount(bucket, now)
+      const values = this.rpmBuckets.get(bucket)
+      values.push(now)
+    }
     return { ok: true }
   }
 
   release(recOrId) {
     const id = typeof recOrId === 'string' ? recOrId : recOrId?.id
-    if (!id) return
+    if (!id || !this.inflight.has(id)) return
+    const owner = this.inflightOwners.get(id)
+    if (owner) {
+      const remaining = (this.userInflight.get(owner) || 0) - 1
+      if (remaining > 0) this.userInflight.set(owner, remaining)
+      else this.userInflight.delete(owner)
+    }
     const n = (this.inflight.get(id) || 0) - 1
-    if (n <= 0) this.inflight.delete(id)
-    else this.inflight.set(id, n)
+    if (n <= 0) {
+      this.inflight.delete(id)
+      this.inflightOwners.delete(id)
+    } else this.inflight.set(id, n)
   }
 
-  recordUsage(recOrId, usage = {}, { model = null, rateMultiplier = 1, officialCost } = {}) {
+  recordUsage(recOrId, usage = {}, { model = null, rateMultiplier = 1, officialCost, actualCost } = {}) {
     const id = typeof recOrId === 'string' ? recOrId : recOrId?.id
     if (!this.repo.getById(id)) return null
     const normalized = normalizeUsage(usage)
@@ -500,7 +537,7 @@ export class ApiKeyStore {
     if (billed == null) billed = Number(usage.cost ?? usage.actual_cost) || 0
     // key quota/windows track actual (group-rated) spend, sub2api-style
     const rate = Number.isFinite(Number(rateMultiplier)) ? Number(rateMultiplier) : 1
-    const cost = billed * rate
+    const cost = actualCost == null ? billed * rate : actualCost
     const rec = this.repo.recordUsage(id, {
       tokens_in: Number(normalized.input_tokens) || Number(normalized.tokens_in) || 0,
       tokens_out: Number(normalized.output_tokens) || Number(normalized.tokens_out) || 0,

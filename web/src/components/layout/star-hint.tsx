@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { REPO_URL } from '@/config/repo'
+import { t } from '@/i18n'
 import { ArrowUpRight, Star, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { IconGithub } from '@/assets/brand-icons'
 import { Button } from '@/components/ui/button'
 
-const STORAGE_KEY = 'vm2api_star_hint_day'
+const STORAGE_KEY = 'tapmodels_star_hint_day'
 const VISIBLE_MS = 10_000
 
 function localDay(now = new Date()): string {
@@ -27,6 +29,7 @@ function claimToday(): boolean {
 }
 
 export function StarHint() {
+  useTranslation('common')
   const [open, setOpen] = useState(false)
   const [paused, setPaused] = useState(false)
   const remaining = useRef(VISIBLE_MS)
@@ -51,7 +54,7 @@ export function StarHint() {
   return (
     <aside
       role='status'
-      aria-label='GitHub Star 提示'
+      aria-label={t('common:githubHint')}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
@@ -65,9 +68,11 @@ export function StarHint() {
         </span>
         <div className='min-w-0 space-y-2.5'>
           <div className='space-y-0.5'>
-            <p className='text-sm font-semibold'>觉得 vm2api 好用？</p>
+            <p className='text-sm font-semibold'>
+              {t('common:enjoyTapmodels')}
+            </p>
             <p className='text-[13px] leading-snug text-muted-foreground'>
-              去 GitHub 点个 Star，帮更多人发现这个项目。
+              {t('common:starHelp')}
             </p>
           </div>
           <Button asChild size='sm' className='h-8 cursor-pointer gap-1.5'>
@@ -78,7 +83,7 @@ export function StarHint() {
               onClick={() => setOpen(false)}
             >
               <IconGithub aria-hidden className='size-4' />
-              Star on GitHub
+              {t('common:starGithub')}
               <ArrowUpRight aria-hidden className='size-3.5 opacity-70' />
             </a>
           </Button>
@@ -86,7 +91,7 @@ export function StarHint() {
         <Button
           variant='ghost'
           size='icon'
-          aria-label='关闭提示'
+          aria-label={t('common:dismissHint')}
           onClick={() => setOpen(false)}
           className='absolute end-2 top-2 size-7 cursor-pointer text-muted-foreground hover:text-foreground'
         >

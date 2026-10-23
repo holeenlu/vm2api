@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBlocker } from '@tanstack/react-router'
-import { VIEW_TITLES } from '@/config/nav'
+import { t } from '@/i18n'
 import type { SyncStatus } from '@/types/panel-pricing'
 import { AlertTriangle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtAgo } from '@/lib/format'
@@ -43,14 +44,16 @@ import {
 } from './policy'
 import { PricingTab } from './pricing-tab'
 
-const BETA_FILTERS: [BetaFilter, string][] = [
-  ['all', '全部'],
-  ['pass', '透传 1M'],
-  ['strip', '剥离'],
-  ['inherit', '跟随通配'],
+const BETA_FILTER_KEYS: [BetaFilter, string][] = [
+  ['all', 'models:all'],
+  ['pass', 'models:pass1m'],
+  ['strip', 'models:strip'],
+  ['inherit', 'models:inheritWildcard'],
 ]
 
 export function ModelsPage() {
+  const { t } = useTranslation('models')
+
   const qc = useQueryClient()
   const [pageTab, setPageTab] = useState<'models' | 'pricing'>('models')
   const [catalogPlatform, setCatalogPlatform] = useState<
@@ -102,9 +105,7 @@ export function ModelsPage() {
   useBlocker({
     shouldBlockFn: () => {
       if (!dirty) return false
-      return !window.confirm(
-        '有未保存更改。离开模型页会丢弃这些改动，确认离开？'
-      )
+      return !window.confirm(t('models:leaveConfirm'))
     },
     enableBeforeUnload: false,
   })
@@ -116,7 +117,7 @@ export function ModelsPage() {
         body: JSON.stringify({ policy: draft, platform: catalogPlatform }),
       }),
     onSuccess: async () => {
-      toast.success('模型策略已保存')
+      toast.success(t('models:policySaved'))
       await qc.invalidateQueries({
         queryKey: modelPolicyQueryOptions(catalogPlatform).queryKey,
       })
@@ -130,7 +131,7 @@ export function ModelsPage() {
         body: JSON.stringify({ platform: catalogPlatform }),
       }),
     onSuccess: async () => {
-      toast.success('已恢复默认')
+      toast.success(t('models:defaultsRestored'))
       await qc.invalidateQueries({
         queryKey: modelPolicyQueryOptions(catalogPlatform).queryKey,
       })
@@ -144,7 +145,7 @@ export function ModelsPage() {
         body: '{}',
       }),
     onSuccess: async (data) => {
-      toast.success(`已同步 Worker 目录 (${data.synced || 0})`)
+      toast.success(t('models:workerSynced', { count: data.synced || 0 }))
       await qc.invalidateQueries({
         queryKey: modelPolicyQueryOptions('anthropic').queryKey,
       })
@@ -158,7 +159,7 @@ export function ModelsPage() {
         body: '{}',
       }),
     onSuccess: async (data) => {
-      toast.success(`已同步 GPT 目录 (${data.synced || 0})`)
+      toast.success(t('models:gptSynced', { count: data.synced || 0 }))
       await qc.invalidateQueries({
         queryKey: modelPolicyQueryOptions('openai').queryKey,
       })
@@ -210,9 +211,7 @@ export function ModelsPage() {
 
   function requestExpand(id: string) {
     if (expanded && expanded !== id && dirty) {
-      const ok = window.confirm(
-        '有未保存更改。切换模型不会丢草稿，离开页面前请先保存。仍要切换？'
-      )
+      const ok = window.confirm(t('models:switchModelConfirm'))
       if (!ok) return
     }
     setExpanded((cur) => (cur === id ? null : id))
@@ -248,10 +247,7 @@ export function ModelsPage() {
 
   function switchPlatform(next: 'anthropic' | 'openai') {
     if (next === catalogPlatform) return
-    if (
-      dirty &&
-      !window.confirm('有未保存更改。切换号池会丢弃这些改动，确认切换？')
-    ) {
+    if (dirty && !window.confirm(t('models:switchPoolConfirm'))) {
       return
     }
     setCatalogPlatform(next)
@@ -267,13 +263,13 @@ export function ModelsPage() {
   const gptTargets = claudePool ? [] : mappingTargets(q.data?.models || [])
   const imageIds = imageTools.flatMap((m) => [m.id, ...m.snapshots])
   const poolHint = claudePool
-    ? 'Claude 号池。同一会话只占一个 VM session 窗口，不和 GPT 混调度。'
-    : 'GPT 号池。粘性独立，不占用 Claude 原生 session 槽。'
+    ? t('models:claudePoolHint')
+    : t('models:gptPoolHint')
 
   return (
     <PageHeader
-      title={VIEW_TITLES.models}
-      description='对外模型目录、模型参数、覆写别名与官方计费配置。'
+      title={t('models:title')}
+      description={t('models:description')}
       fluid
       extra={
         pageTab === 'models' ? (
@@ -283,26 +279,26 @@ export function ModelsPage() {
                 variant='outline'
                 className='cursor-pointer'
                 onClick={() => {
-                  const ask = syncConfirmText(dirty, ' Worker ')
+                  const ask = syncConfirmText(dirty, 'Worker')
                   if (ask && !window.confirm(ask)) return
                   sync.mutate()
                 }}
                 disabled={sync.isPending}
               >
-                {sync.isPending ? '同步中…' : '同步 Worker'}
+                {sync.isPending ? t('models:syncing') : t('models:syncWorker')}
               </Button>
             ) : (
               <Button
                 variant='outline'
                 className='cursor-pointer'
                 onClick={() => {
-                  const ask = syncConfirmText(dirty, ' GPT ')
+                  const ask = syncConfirmText(dirty, 'GPT')
                   if (ask && !window.confirm(ask)) return
                   syncGpt.mutate()
                 }}
                 disabled={syncGpt.isPending}
               >
-                {syncGpt.isPending ? '同步中…' : '同步 GPT'}
+                {syncGpt.isPending ? t('models:syncing') : t('models:syncGpt')}
               </Button>
             )}
             <Button
@@ -314,7 +310,7 @@ export function ModelsPage() {
               }}
               disabled={reset.isPending}
             >
-              恢复默认
+              {t('models:restoreDefaults')}
             </Button>
             <Button
               variant={dirty ? 'default' : 'outline'}
@@ -322,7 +318,7 @@ export function ModelsPage() {
               onClick={() => save.mutate()}
               disabled={save.isPending || !dirty}
             >
-              {dirty ? '保存更改' : '已保存'}
+              {dirty ? t('models:saveChanges') : t('models:saved')}
             </Button>
           </div>
         ) : undefined
@@ -335,12 +331,12 @@ export function ModelsPage() {
         }}
         className='gap-4'
       >
-        <TabsList aria-label='模型页分区'>
+        <TabsList aria-label={t('models:pageSections')}>
           <TabsTrigger value='models' className='cursor-pointer px-4'>
-            模型
+            {t('models:models')}
           </TabsTrigger>
           <TabsTrigger value='pricing' className='cursor-pointer px-4'>
-            计费
+            {t('models:pricing')}
           </TabsTrigger>
         </TabsList>
         <TabsContent value='models'>
@@ -371,7 +367,7 @@ export function ModelsPage() {
                         }
                       }}
                     >
-                      <TabsList aria-label='模型平台'>
+                      <TabsList aria-label={t('models:platform')}>
                         <TabsTrigger
                           value='anthropic'
                           className='cursor-pointer px-4'
@@ -389,8 +385,8 @@ export function ModelsPage() {
                     <div className='max-w-3xl space-y-1'>
                       <h3 className='text-xl font-semibold tracking-tight'>
                         {claudePool
-                          ? 'Claude 官方模型矩阵'
-                          : 'GPT / Codex 官方模型矩阵'}
+                          ? t('models:claudeMatrix')
+                          : t('models:gptMatrix')}
                       </h3>
                       <p className='text-sm leading-6 text-muted-foreground'>
                         {poolHint}
@@ -402,11 +398,17 @@ export function ModelsPage() {
                     </div>
                   </div>
                   <div className='grid grid-cols-2 gap-2 sm:grid-cols-4 lg:w-[28rem]'>
-                    <PoolStat label='配置' value={stats.configured} />
-                    <PoolStat label='启用' value={stats.enabled} />
-                    <PoolStat label='对外' value={stats.live} />
                     <PoolStat
-                      label={claudePool ? '1M beta' : '未对外'}
+                      label={t('models:configured')}
+                      value={stats.configured}
+                    />
+                    <PoolStat
+                      label={t('models:enabled')}
+                      value={stats.enabled}
+                    />
+                    <PoolStat label={t('models:public')} value={stats.live} />
+                    <PoolStat
+                      label={claudePool ? '1M beta' : t('models:notPublic')}
                       value={
                         claudePool
                           ? stats.pass1m
@@ -427,7 +429,7 @@ export function ModelsPage() {
                   className='flex items-center gap-2 rounded-xl border border-[color:var(--status-caution)]/40 bg-[color:var(--status-caution)]/10 px-3 py-2 text-sm text-foreground'
                 >
                   <AlertTriangle className='size-4 shrink-0 text-[color:var(--status-caution)]' />
-                  有未保存更改。离开页面或切换平台前请先保存。
+                  {t('models:unsavedWarning')}
                 </p>
               ) : null}
 
@@ -436,12 +438,10 @@ export function ModelsPage() {
                   <div className='grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center'>
                     <div className='space-y-1'>
                       <h3 className='font-semibold'>
-                        Haiku 5.5 · 100K 实用模型
+                        {t('models:haikuTitle')}
                       </h3>
                       <p className='text-sm leading-6 text-muted-foreground'>
-                        默认策略把 claude-haiku-5-5 的上下文窗口、默认
-                        max_tokens、输出上限统一收敛到 100K，避免超过官方 Haiku
-                        5.5 长上下文计费阈值。
+                        {t('models:haikuDescription')}
                       </p>
                     </div>
                     <Button
@@ -453,7 +453,7 @@ export function ModelsPage() {
                         setExpanded('claude-haiku-5-5')
                       }}
                     >
-                      打开 Haiku 5.5
+                      {t('models:openHaiku')}
                     </Button>
                   </div>
                 </section>
@@ -464,8 +464,8 @@ export function ModelsPage() {
                   <Input
                     className='w-full'
                     type='search'
-                    placeholder='搜索模型 / 别名…'
-                    aria-label='搜索模型'
+                    placeholder={t('models:searchPlaceholder')}
+                    aria-label={t('models:searchModels')}
                     value={qtext}
                     onChange={(e) => setQtext(e.target.value)}
                   />
@@ -478,11 +478,11 @@ export function ModelsPage() {
                         variant={family === f ? 'default' : 'outline'}
                         onClick={() => setFamily(f)}
                       >
-                        {f === 'all' ? '全部' : f}
+                        {f === 'all' ? t('models:all') : f}
                       </Button>
                     ))}
                     {claudePool
-                      ? BETA_FILTERS.map(([id, lab]) => (
+                      ? BETA_FILTER_KEYS.map(([id, labelKey]) => (
                           <Button
                             key={id}
                             size='sm'
@@ -490,7 +490,7 @@ export function ModelsPage() {
                             variant={beta === id ? 'secondary' : 'ghost'}
                             onClick={() => setBeta(id)}
                           >
-                            {lab}
+                            {t(labelKey)}
                           </Button>
                         ))
                       : null}
@@ -501,21 +501,21 @@ export function ModelsPage() {
                       variant='ghost'
                       onClick={() => batch('enable')}
                     >
-                      全开
+                      {t('models:enableAll')}
                     </Button>
                     <Button
                       size='sm'
                       variant='ghost'
                       onClick={() => batch('disable')}
                     >
-                      全关
+                      {t('models:disableAll')}
                     </Button>
                     <Button
                       size='sm'
                       variant='ghost'
                       onClick={() => batch('invert')}
                     >
-                      反选
+                      {t('models:invertSelection')}
                     </Button>
                   </div>
                 </div>
@@ -525,10 +525,10 @@ export function ModelsPage() {
                 <EmptyState
                   reason={
                     qtext || family !== 'all' || beta !== 'all'
-                      ? '无匹配模型。改搜索或筛选条件。'
+                      ? t('models:noMatches')
                       : claudePool
-                        ? '暂无模型配置。可先同步 Worker 目录。'
-                        : '暂无 GPT 模型。可先同步 GPT 目录。'
+                        ? t('models:emptyWorker')
+                        : t('models:emptyGpt')
                   }
                 />
               ) : (
@@ -582,6 +582,8 @@ export function ModelsPage() {
 }
 
 function PoolStat({ label, value }: { label: string; value: number }) {
+  useTranslation('models')
+
   return (
     <div className='rounded-xl border border-border/70 bg-background/60 px-3 py-2'>
       <div className='text-[11px] font-medium tracking-wide text-muted-foreground'>
@@ -599,6 +601,8 @@ function CatalogSyncBar({
   claude: SyncStatus | null
   codex: SyncStatus | null
 }) {
+  useTranslation('models')
+
   return (
     <div className='space-y-0.5 text-xs leading-5 text-muted-foreground'>
       <p>{formatCatalogSync('Claude', claude)}</p>
@@ -608,17 +612,25 @@ function CatalogSyncBar({
 }
 
 function formatCatalogSync(label: string, sync: SyncStatus | null): string {
-  if (!sync) return `${label} 尚未自动同步`
+  if (!sync) return t('models:neverAutoSynced', { label })
   const when = fmtAgo(sync.at) || sync.at
   const added = sync.added || []
-  const addedText = added.length
-    ? `新增 ${added.length}：${added.slice(0, 8).join(', ')}${
-        added.length > 8 ? '…' : ''
-      }`
-    : '无新增'
-  if (sync.status === 'ok') return `${label} ${when} · 成功 · ${addedText}`
-  if (sync.status === 'skipped') {
-    return `${label} ${when} · 跳过${sync.error ? `：${sync.error}` : ''}`
+  if (sync.status === 'ok') {
+    const additions = added.length
+      ? t('models:catalogAdded', {
+          count: added.length,
+          models: added.slice(0, 8).join(', ') + (added.length > 8 ? '…' : ''),
+        })
+      : t('models:noAdditions')
+    return t('models:catalogSyncSuccess', { label, when, additions })
   }
-  return `${label} ${when} · 失败${sync.error ? `：${sync.error}` : ''}`
+  const key =
+    sync.status === 'skipped'
+      ? sync.error
+        ? 'models:catalogSyncSkippedError'
+        : 'models:catalogSyncSkipped'
+      : sync.error
+        ? 'models:catalogSyncFailedError'
+        : 'models:catalogSyncFailed'
+  return t(key, { label, when, error: sync.error })
 }

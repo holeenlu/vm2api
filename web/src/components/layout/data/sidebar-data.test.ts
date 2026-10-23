@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { navGroupsFor } from './sidebar-data'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('sidebar permissions', () => {
   it('does not treat an explicit empty view list as unrestricted', () => {

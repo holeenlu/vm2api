@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 /**
@@ -19,6 +20,8 @@ export function SeatCells({
   color: string
   className?: string
 }) {
+  useTranslation('proxies')
+
   const fill = Math.min(used, limit)
   if (limit > 20) {
     return (
@@ -75,6 +78,8 @@ export function SeatCount({
   limit: number
   className?: string
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const over = used > limit
   const full = used >= limit
   return (
@@ -97,7 +102,9 @@ export function SeatCount({
       <span className='text-xs text-muted-foreground'>/{limit}</span>
       {full ? (
         <span className='ms-1 text-[10px] font-medium text-muted-foreground'>
-          {over ? '超出' : '满'}
+          {over
+            ? translate('proxies:overflow')
+            : translate('proxies:fullShort')}
         </span>
       ) : null}
     </span>

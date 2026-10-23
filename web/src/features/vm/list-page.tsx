@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { VIEW_TITLES } from '@/config/nav'
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import {
   ArrowDownWideNarrow,
@@ -8,6 +9,7 @@ import {
   LayoutGrid,
   List,
 } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -27,7 +29,9 @@ import { EmptyState } from '@/components/empty-state'
 import { PageHeader } from '@/components/page-header'
 import { SlotIdentity } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { meQueryOptions } from '@/features/auth/queries'
+import { groupsQueryOptions } from '@/features/groups/queries'
 import { usageQueryOptions } from '@/features/overview/queries'
 import { CreateVmDialog } from '@/features/vm/create-vm-dialog'
 import { FleetPulse } from '@/features/vm/fleet-pulse'
@@ -47,22 +51,38 @@ import {
   type VmKindFilter,
   type VmSortKey,
 } from '@/features/vm/vm-table'
+import { localizedOption } from './localized-option'
+import { VmBatchGroups } from './vm-batch-groups'
 
 const SORT_CHIPS = [
-  ['status', '状态'],
-  ['name', '名称'],
-  ['remain', '5H 剩余'],
-  ['today', '今日花费'],
-  ['cost7', '7D 费用'],
-  ['total', '总计费用'],
-  ['cache', '缓存命中'],
+  localizedOption('status', 'vm:detailAccountTab.status'),
+  localizedOption('name', 'vm:createVmForm.name'),
+  localizedOption('remain', 'vm:listPage.5HourRemaining'),
+  localizedOption('today', 'vm:listPage.todaySCost'),
+  localizedOption('cost7', 'vm:listPage.7DayCost'),
+  localizedOption('total', 'vm:listPage.totalCost'),
+  localizedOption('cache', 'vm:detailAccountTab.cacheHit'),
 ] as const
 
-const SIZES: [RackSize, string, string][] = [
-  ['s', '小', '小卡：一屏看全队'],
-  ['m', '中', '中卡：日常巡检'],
-  ['l', '大', '大卡：逐台核对'],
-]
+function cardSizes(): [RackSize, string, string][] {
+  return [
+    localizedOption(
+      's',
+      'vm:listPage.small',
+      tVm('vm:listPage.smallCardsViewTheWholeFleet')
+    ),
+    localizedOption(
+      'm',
+      'vm:listPage.medium',
+      tVm('vm:listPage.mediumCardsRoutineChecks')
+    ),
+    localizedOption(
+      'l',
+      'vm:listPage.large',
+      tVm('vm:listPage.largeCardsInspectEachSlot')
+    ),
+  ]
+}
 
 const LS_VIEW = 'vm-list-view'
 const LS_SIZE = 'vm-rack-size'
@@ -89,6 +109,8 @@ function writePref(key: string, value: string) {
 }
 
 export function VmListPage() {
+  const { t: tVm } = useTranslation('vm')
+
   const me = useQuery(meQueryOptions())
   const vmsQ = useQuery(vmsListQueryOptions(5000))
   usePoolSeatStream()
@@ -97,6 +119,8 @@ export function VmListPage() {
     enabled: me.data?.role !== 'user',
   })
   const qc = useQueryClient()
+  const [groupFilter, setGroupFilter] = useState('all')
+  const groups = useQuery(groupsQueryOptions())
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState<VmZoneFilter>('all')
   const [kind, setKind] = useState<VmKindFilter>('all')
@@ -129,7 +153,11 @@ export function VmListPage() {
         body: JSON.stringify({ mode }),
       }),
     onSuccess: async (_data, { mode }) => {
-      toast.success(mode === 'keep' ? '已保留原数据重建' : '已按新特征重建')
+      toast.success(
+        mode === 'keep'
+          ? tVm('vm:listPage.rebuiltWithExistingData')
+          : tVm('vm:listPage.rebuiltWithANewIdentity')
+      )
       setResetTarget(null)
       setResetInput('')
       await qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey })
@@ -140,7 +168,7 @@ export function VmListPage() {
     mutationFn: (id: string) =>
       api(`/api/panel/vms/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     onSuccess: async () => {
-      toast.success('已删除')
+      toast.success(tVm('vm:detailPage.deleted'))
       setDeleteTarget(null)
       setDeleteInput('')
       await qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey })
@@ -150,21 +178,47 @@ export function VmListPage() {
   const vms: Vm[] = vmsQ.data?.items || []
   const poolQueue = vmsQ.data?.pool_queue
   const accounts = usage.data?.accounts
-  const canCreate =
-    me.data?.role === 'admin' ||
-    (me.data?.role === 'user' && (me.data.vm_create_quota || 0) > 0)
+  const canCreate = me.data?.role === 'admin' || me.data?.role === 'super'
   const perms = vmPermsFor(me.data?.role)
   const scoped = filterVms(vms, '', 'all', kind)
-  const list = sortVms(filterVms(vms, q, filter, kind), sort, dir, accounts)
+  const list = sortVms(
+    filterVms(vms, q, filter, kind).filter(
+      (v) =>
+        groupFilter === 'all' ||
+        (groupFilter === 'none'
+          ? !v.groups?.length
+          : v.groups?.some((g) => String(g.id) === groupFilter))
+    ),
+    sort,
+    dir,
+    accounts
+  )
 
   return (
     <PageHeader
       title={VIEW_TITLES.vm}
-      description='槽位和账号用量。按服务器分机架、按状态分区；未探测的额度不会冒充可用。'
+      description={tVm(
+        'vm:listPage.slotAndAccountUsageGroupedByServerAndStatus'
+      )}
       fluid
       extra={
         poolQueue || canCreate ? (
-          <div className='flex items-center gap-3'>
+          <div className='flex flex-wrap items-center gap-3'>
+            <SearchSelect
+              label={tVm('vm:listPage.filterByGroup')}
+              value={groupFilter === 'all' ? undefined : groupFilter}
+              options={[
+                { id: 'none', name: tVm('vm:listPage.ungrouped') },
+                ...(groups.data?.items || []).map((g) => ({
+                  id: String(g.id),
+                  name: g.name,
+                })),
+              ]}
+              allLabel={tVm('vm:listPage.allGroups')}
+              searchPlaceholder={tVm('vm:listPage.searchGroups')}
+              onChange={(id) => setGroupFilter(id || 'all')}
+            />
+            <VmBatchGroups vms={list} />
             {poolQueue ? (
               <span
                 className={cn(
@@ -172,13 +226,24 @@ export function VmListPage() {
                   poolQueue.global_queue_depth > 0 &&
                     'text-[color:var(--status-warn)]'
                 )}
-                title='还没落到任何 VM、在等新席位的 Claude 请求数 / 允许排队数量（上限按全部排队请求计，含各 VM 上的排队，见状态列）'
+                title={tVm(
+                  'vm:listPage.claudeRequestsWaitingForANewSeatBeforeVM'
+                )}
               >
-                全局排队 {poolQueue.global_queue_depth}/{poolQueue.queue_max}
+                <Trans
+                  ns='vm'
+                  i18nKey='listPage.globalQueue'
+                  values={{
+                    global_queue_depth: poolQueue.global_queue_depth,
+                    queue_max: poolQueue.queue_max,
+                  }}
+                />
               </span>
             ) : null}
             {canCreate ? (
-              <Button onClick={() => setCreateOpen(true)}>创建</Button>
+              <Button onClick={() => setCreateOpen(true)}>
+                <Trans ns='vm' i18nKey='createVmForm.create' />
+              </Button>
             ) : null}
           </div>
         ) : undefined
@@ -207,12 +272,14 @@ export function VmListPage() {
             data-1p-ignore
             data-lpignore='true'
             data-bwignore
-            placeholder='搜索名称 / 邮箱 / 代理'
+            placeholder={tVm('vm:listPage.searchNameEmailProxy')}
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
           <div className='ms-auto flex flex-wrap items-center gap-2'>
-            <span className='text-xs text-muted-foreground'>排序</span>
+            <span className='text-xs text-muted-foreground'>
+              <Trans ns='vm' i18nKey='listPage.sort' />
+            </span>
             <Select
               value={sort}
               onValueChange={(next) => {
@@ -220,7 +287,11 @@ export function VmListPage() {
                 setDir(next === 'name' ? 'asc' : 'desc')
               }}
             >
-              <SelectTrigger size='sm' className='w-28' aria-label='排序字段'>
+              <SelectTrigger
+                size='sm'
+                className='w-28'
+                aria-label={tVm('vm:listPage.sortBy')}
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align='end'>
@@ -234,9 +305,15 @@ export function VmListPage() {
             <Button
               size='sm'
               variant='outline'
-              title={dir === 'asc' ? '升序' : '降序'}
+              title={
+                dir === 'asc'
+                  ? tVm('vm:listPage.ascending')
+                  : tVm('vm:listPage.descending')
+              }
               aria-label={
-                dir === 'asc' ? '当前升序，切到降序' : '当前降序，切到升序'
+                dir === 'asc'
+                  ? tVm('vm:listPage.ascendingSwitchToDescending')
+                  : tVm('vm:listPage.descendingSwitchToAscending')
               }
               onClick={() => setDir(dir === 'asc' ? 'desc' : 'asc')}
             >
@@ -246,10 +323,10 @@ export function VmListPage() {
             {view === 'grid' ? (
               <div
                 role='group'
-                aria-label='卡片大小'
+                aria-label={tVm('vm:listPage.cardSize')}
                 className='inline-flex gap-0.5 rounded-lg bg-muted p-0.5'
               >
-                {SIZES.map(([key, label, title]) => (
+                {cardSizes().map(([key, label, title]) => (
                   <button
                     key={key}
                     type='button'
@@ -271,8 +348,8 @@ export function VmListPage() {
               size='sm'
               variant={view === 'list' ? 'default' : 'outline'}
               aria-pressed={view === 'list'}
-              aria-label='列表视图'
-              title='列表'
+              aria-label={tVm('vm:listPage.listView')}
+              title={tVm('vm:detailPage.list')}
               onClick={() => setView('list')}
             >
               <List />
@@ -281,8 +358,8 @@ export function VmListPage() {
               size='sm'
               variant={view === 'grid' ? 'default' : 'outline'}
               aria-pressed={view === 'grid'}
-              aria-label='网格视图'
-              title='网格'
+              aria-label={tVm('vm:listPage.gridView')}
+              title={tVm('vm:listPage.grid')}
               onClick={() => setView('grid')}
             >
               <LayoutGrid />
@@ -322,8 +399,10 @@ export function VmListPage() {
             )
           ) : (
             <EmptyState
-              reason='没有符合当前筛选的槽位。'
-              actionLabel={canCreate ? '创建' : undefined}
+              reason={tVm('vm:listPage.noSlotsMatchTheCurrentFilters')}
+              actionLabel={
+                canCreate ? tVm('vm:createVmForm.create') : undefined
+              }
               onAction={canCreate ? () => setCreateOpen(true) : undefined}
             />
           )}
@@ -337,7 +416,7 @@ export function VmListPage() {
             setResetInput('')
           }
         }}
-        title='重建槽位'
+        title={tVm('vm:detailPage.rebuildSlot')}
         desc={
           resetTarget ? (
             <>
@@ -348,15 +427,22 @@ export function VmListPage() {
                 </span>
               </p>
               <p className='mt-2'>
-                本地槽和集群槽都换当前 kernel、cli-node 与 Go 遥测后的容器。
+                <Trans
+                  ns='vm'
+                  i18nKey='detailPage.localAndClusterSlotsBothReceiveAReplacementContainer'
+                />
               </p>
             </>
           ) : (
             ''
           )
         }
-        confirmText={resetMode === 'keep' ? '保留原数据重建' : '重建新特征'}
-        cancelBtnText='取消'
+        confirmText={
+          resetMode === 'keep'
+            ? tVm('vm:detailOpsTab.rebuildWithExistingData')
+            : tVm('vm:detailOpsTab.rebuildWithNewIdentity')
+        }
+        cancelBtnText={tVm('vm:authSchemeEditor.cancel')}
         destructive={resetMode === 'traits'}
         disabled={resetInput.trim() !== resetTarget?.id}
         isLoading={resetVm.isPending}
@@ -366,20 +452,23 @@ export function VmListPage() {
         }}
       >
         <ChoiceTiles
-          label='重建方式'
+          label={tVm('vm:detailPage.rebuildMethod')}
           value={resetMode}
           onChange={setResetMode}
           choices={[
             {
               value: 'keep',
-              title: '保留原数据重建',
-              detail: '留下凭证、指纹、主机名和统计，只换容器里的服务。',
+              title: tVm('vm:detailOpsTab.rebuildWithExistingData'),
+              detail: tVm(
+                'vm:detailPage.keepsCredentialsFingerprintsHostnameAndStatisticsReplacesOnlyContainer'
+              ),
             },
             {
               value: 'traits',
-              title: '重建新特征',
-              detail:
-                '清掉凭证和家目录，重新生成主机名、machine-id 和设备特征。',
+              title: tVm('vm:detailOpsTab.rebuildWithNewIdentity'),
+              detail: tVm(
+                'vm:detailPage.clearsCredentialsAndTheHomeDirectoryThenRegeneratesHostname'
+              ),
             },
           ]}
         />
@@ -388,7 +477,7 @@ export function VmListPage() {
           autoComplete='off'
           spellCheck={false}
           placeholder={resetTarget?.id}
-          aria-label='确认 ID'
+          aria-label={tVm('vm:detailPage.confirmID')}
           value={resetInput}
           onChange={(e) => setResetInput(e.target.value)}
           onKeyDown={(e) => {
@@ -411,7 +500,7 @@ export function VmListPage() {
             setDeleteInput('')
           }
         }}
-        title='删除'
+        title={tVm('vm:detailPage.deleteAlternative')}
         desc={
           deleteTarget ? (
             <>
@@ -422,15 +511,18 @@ export function VmListPage() {
                 </span>
               </p>
               <p className='mt-2 text-destructive'>
-                删除槽位不可恢复：容器、家目录、凭证与代理绑定一并清除。还有其他槽位时，活跃槽位需先切换活跃再删。
+                <Trans
+                  ns='vm'
+                  i18nKey='listPage.slotDeletionIsPermanentTheContainerHomeDirectoryCredentials'
+                />
               </p>
             </>
           ) : (
             ''
           )
         }
-        confirmText='删除'
-        cancelBtnText='取消'
+        confirmText={tVm('vm:detailPage.deleteAlternative')}
+        cancelBtnText={tVm('vm:authSchemeEditor.cancel')}
         destructive
         disabled={deleteInput.trim() !== deleteTarget?.id}
         isLoading={deleteVm.isPending}
@@ -443,7 +535,7 @@ export function VmListPage() {
           autoComplete='off'
           spellCheck={false}
           placeholder={deleteTarget?.id}
-          aria-label='确认 ID'
+          aria-label={tVm('vm:detailPage.confirmID')}
           value={deleteInput}
           onChange={(e) => setDeleteInput(e.target.value)}
           onKeyDown={(e) => {

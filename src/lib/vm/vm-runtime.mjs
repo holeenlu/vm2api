@@ -22,7 +22,7 @@ import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mj
 import { ensureSlotComputer, rememberComputer } from '../identity/slot-computer.mjs'
 import { coerceRfc4122Uuid } from '../identity/rfc4122-uuid.mjs'
 import { boundProxyUrl, ensureProxyEgress, isLocalEgressProxy, slotNetworkForVm } from './egress.mjs'
-import { socksProxyEndpoint } from './socks-address.mjs'
+import { proxyEndpointOf } from './proxy-address.mjs'
 import { assertProxyAllowed } from './proxy-policy.mjs'
 import { toHostPath } from './host-path.mjs'
 import { fileURLToPath } from 'node:url'
@@ -332,11 +332,11 @@ function workerProxyUrl(vm) {
 
 /** host:port only — never include userinfo. */
 export function proxyEndpointFromUrl(raw) {
-  return socksProxyEndpoint({ url: raw })
+  return proxyEndpointOf({ url: raw })
 }
 
 export function proxyEndpointFromVm(vm) {
-  return socksProxyEndpoint(vm?.proxy)
+  return proxyEndpointOf(vm?.proxy)
 }
 
 export function readWorkerProxyEndpoint(projectRoot, vmId) {

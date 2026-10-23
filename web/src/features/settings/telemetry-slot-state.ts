@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { Vm, VmDetailPayload } from '@/types/panel-vm'
 import { telemetryEnabled } from '@/features/vm/telemetry-policy'
 
@@ -38,29 +39,61 @@ export function slotState(
       live: 'off',
       label:
         running === true && observed?.enabled === true
-          ? '关 · 旁路仍在退出'
-          : '关',
+          ? translate('settings:telemetryState.stopping')
+          : translate('settings:telemetry.off'),
       probing: false,
     }
   }
   if (vm.status !== 'running') {
-    return { vm, on, live: 'parked', label: '槽已停', probing: false }
+    return {
+      vm,
+      on,
+      live: 'parked',
+      label: translate('settings:telemetryState.stopped'),
+      probing: false,
+    }
   }
   if (!detail || detail.isPending) {
-    return { vm, on, live: 'unknown', label: '探测中', probing: true }
+    return {
+      vm,
+      on,
+      live: 'unknown',
+      label: translate('settings:telemetryState.probing'),
+      probing: true,
+    }
   }
   if (observed?.enabled === false) {
     return {
       vm,
       on,
       live: 'blocked',
-      label: vm.node_id ? '无官方身份 · 集群槽' : '无官方身份',
+      label: vm.node_id
+        ? translate('settings:telemetryState.clusterNoIdentity')
+        : translate('settings:telemetryState.noIdentity'),
       probing: false,
     }
   }
   if (running === true && observed?.enabled === true)
-    return { vm, on, live: 'live', label: '上传中', probing: false }
+    return {
+      vm,
+      on,
+      live: 'live',
+      label: translate('settings:telemetry.uploading'),
+      probing: false,
+    }
   if (running === false)
-    return { vm, on, live: 'idle', label: '进程未运行', probing: false }
-  return { vm, on, live: 'unknown', label: '状态未知', probing: false }
+    return {
+      vm,
+      on,
+      live: 'idle',
+      label: translate('settings:telemetryState.processStopped'),
+      probing: false,
+    }
+  return {
+    vm,
+    on,
+    live: 'unknown',
+    label: translate('settings:unknownStatus'),
+    probing: false,
+  }
 }

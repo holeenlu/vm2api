@@ -6,6 +6,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
+import { RelayBilling } from '../../src/lib/admin/relay-billing.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
@@ -47,6 +52,11 @@ async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
     res.writeHead(404)
     res.end()
   })
+  const sockets = new Set()
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
   server.on('upgrade', (req, socket, head) => {
     if (!handler.handleUpgrade(req, socket, head)) socket.destroy()
   })
@@ -58,7 +68,10 @@ async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
     httpHits,
     url: `ws://127.0.0.1:${port}/v1/responses`,
     httpUrl: `http://127.0.0.1:${port}/v1/responses`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () => {
+      for (const socket of sockets) socket.destroy()
+      return new Promise((resolve) => server.close(resolve))
+    },
   }
 }
 
@@ -110,13 +123,6 @@ function nextFrame(ws, predicate = () => true, timeoutMs = 2000) {
 function allowAuth(req) {
   req.apiKeyKind = 'managed'
   req.apiKeyRecord = { id: 'key-1' }
-  req.presentedApiKey = 'sk-test'
-  return true
-}
-
-function allowManagedOpenai(req) {
-  req.apiKeyKind = 'managed'
-  req.apiKeyRecord = { id: 'key-1', group_id: 1, group_type: 'all' }
   req.presentedApiKey = 'sk-test'
   return true
 }
@@ -176,9 +182,31 @@ async function listenWithHandleProtocol(
         protocols: { 'openai.responses': { enabled: true, mode: 'native' } },
       },
     },
-    requireAuth = allowManagedOpenai,
   },
 ) {
+  const db = openDatabase({ dataDir: path.join(root, 'data') })
+  const users = new PanelUserStore({ db })
+  const user = users.create({ username: 'ws-customer', password: 'ws-test-pass' })
+  const groups = new GroupsRepo(db)
+  const group = groups.create({ name: 'WS group', platform: 'openai', rate_multiplier: 0 })
+  groups.setGrants(user.id, [group.id])
+  groups.assignResource('vm', 'vm-gpt-a', [group.id], 0)
+  const keys = new ApiKeyStore({ db })
+  const key = keys.create({ user_id: user.id, group_id: group.id })
+  new RelayBilling(db).adjust(user.id, { amount: 1, reason: 'test credit', idempotency_key: 'ws-test-credit' }, 'test')
+  const usageSpy = apiKeyStore?.recordUsage
+  const recordUsage = keys.recordUsage.bind(keys)
+  keys.recordUsage = (...args) => {
+    usageSpy?.(...args)
+    return recordUsage(...args)
+  }
+  apiKeyStore = keys
+  const requireAuth = (req) => {
+    req.apiKeyKind = 'managed'
+    req.apiKeyRecord = keys.getById(key.id)
+    req.presentedApiKey = key.key
+    return true
+  }
   const routingFile = path.join(root, 'routing.json')
   const codexRouting = {
     websocket: { enabled: true },
@@ -231,7 +259,19 @@ async function listenWithHandleProtocol(
       ...codexOps,
     },
   })
-  return listen({ routing, requireAuth, handleProtocol })
+  const live = await listen({ routing, requireAuth, handleProtocol })
+  return {
+    ...live,
+    db,
+    keyId: key.id,
+    close: async () => {
+      try {
+        await live.close()
+      } finally {
+        closeDatabase()
+      }
+    },
+  }
 }
 
 beforeEach(() => resetOpenAIAccountRuntime())
@@ -896,7 +936,9 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
     assert.equal(finishCalls[0].error_code, null)
     assert.equal(finishCalls[0].input_tokens, 12)
     assert.equal(finishCalls[0].output_tokens, 4)
-    assert.equal(usageRecords.length, 0)
+    assert.equal(usageRecords.length, 1)
+    assert.equal(live.db.prepare('SELECT requests FROM api_keys WHERE id = ?').get(live.keyId).requests, 1)
+    assert.equal(live.db.prepare('SELECT COUNT(*) AS n FROM billing_reservations').get().n, 1)
     opened.ws.close()
   } finally {
     await live.close()

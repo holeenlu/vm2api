@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import {
   Boxes,
   Cable,
@@ -22,39 +23,185 @@ import type { NavGroup, NavItem, SidebarData } from '../types'
 // 总览看集群健康，统计看趋势与排行，日志看逐条请求。账号限额在虚拟机列表的用量窗口。
 const ALL_GROUPS: NavGroup[] = [
   {
-    title: '监控',
+    get title() {
+      return t('common:monitoring')
+    },
     items: [
-      { title: '总览', url: '/overview', icon: LayoutDashboard },
-      { title: '统计', url: '/statistics', icon: ChartColumn },
-      { title: '日志', url: '/logs', icon: ScrollText },
+      {
+        get title() {
+          return t('common:overview')
+        },
+        url: '/overview',
+        icon: LayoutDashboard,
+      },
+      {
+        get title() {
+          return t('common:statistics')
+        },
+        url: '/statistics',
+        icon: ChartColumn,
+      },
+      {
+        get title() {
+          return t('common:usageHistory')
+        },
+        url: '/logs',
+        icon: ScrollText,
+      },
+      {
+        get title() {
+          return t('common:operations')
+        },
+        url: '/ops',
+        icon: LayoutDashboard,
+      },
     ],
   },
   {
-    title: '资源',
+    get title() {
+      return t('common:resources')
+    },
     items: [
-      { title: '集群', url: '/cluster', icon: Boxes },
-      { title: '虚拟机', url: '/vm', icon: Server },
-      { title: '导入', url: '/import', icon: Download },
-      { title: '规格', url: '/specs', icon: Cpu },
-      { title: '代理', url: '/proxies', icon: Cable },
+      {
+        get title() {
+          return t('common:groups')
+        },
+        url: '/groups',
+        icon: Layers,
+      },
+      {
+        get title() {
+          return t('common:upstreamAPIs')
+        },
+        url: '/api',
+        icon: Cable,
+      },
+      {
+        get title() {
+          return t('common:cluster')
+        },
+        url: '/cluster',
+        icon: Boxes,
+      },
+      {
+        get title() {
+          return t('common:virtualMachines')
+        },
+        url: '/vm',
+        icon: Server,
+      },
+      {
+        get title() {
+          return t('common:import')
+        },
+        url: '/import',
+        icon: Download,
+      },
+      {
+        get title() {
+          return t('common:specifications')
+        },
+        url: '/specs',
+        icon: Cpu,
+      },
+      {
+        get title() {
+          return t('common:proxies')
+        },
+        url: '/proxies',
+        icon: Cable,
+      },
     ],
   },
   {
-    title: '协议',
+    get title() {
+      return t('common:protocol')
+    },
     items: [
-      { title: '模型', url: '/models', icon: Sparkles },
-      { title: '风险审计', url: '/risk', icon: ShieldAlert },
-      { title: 'system提示词', url: '/system', icon: MessageSquareText },
-      { title: 'Anthropic', url: '/anthropic', icon: Send },
-      { title: '密钥', url: '/keys', icon: KeyRound },
+      {
+        get title() {
+          return t('common:models')
+        },
+        url: '/models',
+        icon: Sparkles,
+      },
+      {
+        get title() {
+          return t('common:riskAudit')
+        },
+        url: '/risk',
+        icon: ShieldAlert,
+      },
+      {
+        get title() {
+          return t('common:systemPrompts')
+        },
+        url: '/system',
+        icon: MessageSquareText,
+      },
+      {
+        get title() {
+          return t('common:anthropic')
+        },
+        url: '/anthropic',
+        icon: Send,
+      },
+      {
+        get title() {
+          return t('common:apiKeys')
+        },
+        url: '/keys',
+        icon: KeyRound,
+      },
     ],
   },
   {
-    title: '系统',
+    get title() {
+      return t('common:system')
+    },
     items: [
-      { title: '设置', url: '/settings', icon: Settings },
-      { title: '内核', url: '/wrap', icon: Layers },
-      { title: '数据库', url: '/database', icon: Database },
+      {
+        get title() {
+          return t('common:users')
+        },
+        url: '/users',
+        icon: Server,
+      },
+      {
+        get title() {
+          return t('common:billing')
+        },
+        url: '/billing',
+        icon: ChartColumn,
+      },
+      {
+        get title() {
+          return t('common:subscriptions')
+        },
+        url: '/subscriptions',
+        icon: Layers,
+      },
+      {
+        get title() {
+          return t('common:settings')
+        },
+        url: '/settings',
+        icon: Settings,
+      },
+      {
+        get title() {
+          return t('common:kernel')
+        },
+        url: '/wrap',
+        icon: Layers,
+      },
+      {
+        get title() {
+          return t('common:database')
+        },
+        url: '/database',
+        icon: Database,
+      },
     ],
   },
 ]
@@ -78,17 +225,5 @@ export function navGroupsFor(views?: string[] | null): NavGroup[] {
 }
 
 export const sidebarData: SidebarData = {
-  user: {
-    name: 'admin',
-    email: 'admin',
-    avatar: '',
-  },
-  teams: [
-    {
-      name: 'vm2api',
-      logo: LayoutDashboard,
-      plan: 'Console API',
-    },
-  ],
   navGroups: ALL_GROUPS,
 }
