@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "features": [
+    {
+      "id": "relay-operations",
+      "requirements": [
+        "docs/RELAY_OPERATIONS_REFINEMENTS.md",
+        "docs/RELAY_OPERATIONS_DELIVERY.md"
+      ],
+      "paths": [
+        "src/lib/admin/relay-*",
+        "src/lib/db/repos/groups*",
+        "src/lib/db/repos/users*",
+        "src/lib/pool/*",
+        "web/src/features/groups/*",
+        "web/src/features/billing/*",
+        "src/lib/admin/panel-users*",
+        "src/lib/admin/panel-tenant*",
+        "src/lib/admin/api-keys*",
+        "src/lib/admin/key-scope*",
+        "web/src/features/users/*"
+      ],
+      "unit_tests": [
+        "test/unit/relay-operations.test.mjs",
+        "test/unit/relay-refinements.test.mjs",
+        "test/unit/relay-rpm.test.mjs"
+      ],
+      "e2e_tests": [
+        "test/e2e/relay-operations.e2e.test.mjs",
+        "test/e2e/relay-refinements.e2e.test.mjs"
+      ]
+    },
+    {
+      "id": "key-model-contract",
+      "requirements": [
+        "docs/CODEX_KEY_CONNECTION.md"
+      ],
+      "paths": [
+        "src/lib/protocol/codex*",
+        "src/lib/protocol/codex-assets/*",
+        "src/lib/admin/panel-api-keys*",
+        "web/src/features/keys/*",
+        "src/lib/admin/key-connection*",
+        "src/lib/admin/api-keys*"
+      ],
+      "unit_tests": [
+        "test/unit/codex-models.test.mjs",
+        "test/unit/codex-model-mapping.test.mjs",
+        "web/src/features/keys/connection-config.test.ts",
+        "web/src/features/keys/codex-catalog.test.ts"
+      ],
+      "e2e_tests": [
+        "test/e2e/codex-key-catalog.e2e.test.mjs"
+      ]
+    },
+    {
+      "id": "proxy-runtime-secrets",
+      "requirements": [
+        "docs/RELAY_OPERATIONS_FEEDBACK.md",
+        "docs/RELAY_OPERATIONS_REFINEMENTS.md"
+      ],
+      "paths": [
+        "src/lib/vm/*",
+        "src/lib/core/runtime-secrets.mjs",
+        "src/lib/db/secure.mjs",
+        "web/src/features/proxies/*"
+      ],
+      "unit_tests": [
+        "test/unit/proxy-quality.test.mjs"
+      ],
+      "e2e_tests": []
+    },
+    {
+      "id": "brand-delivery",
+      "requirements": [
+        "docs/BRANDING_AND_RELEASE.md",
+        "docs/CHANGE_DELIVERY.md"
+      ],
+      "paths": [
+        ".github/*",
+        "scripts/release/*",
+        "deploy/*",
+        "docker/*",
+        "web/src/config/*",
+        "web/src/features/auth/*"
+      ],
+      "unit_tests": [
+        "test/unit/release.test.mjs",
+        "test/unit/release-kernel.test.mjs"
+      ],
+      "e2e_tests": []
+    },
+    {
+      "id": "protocol-session",
+      "requirements": [
+        "docs/API.md"
+      ],
+      "paths": [
+        "src/lib/protocol/*",
+        "src/lib/identity/*",
+        "src/lib/transport/*"
+      ],
+      "unit_tests": [
+        "test/unit/cli-hop-body.test.mjs",
+        "test/unit/pool-scheduler.test.mjs"
+      ],
+      "e2e_tests": []
+    },
+    {
+      "id": "customization-history",
+      "requirements": [
+        "docs/CHANGE_DELIVERY.md",
+        "docs/CUSTOMIZATION_RELEASE_NOTES.md"
+      ],
+      "paths": [
+        "scripts/upstream-sync/*",
+        "scripts/release/guest_publish_guard.py",
+        ".github/workflows/*",
+        "docs/CUSTOMIZATION*"
+      ],
+      "unit_tests": [
+        "test/upstream_sync/test_preview.py",
+        "test/release/test_guest_publish_guard.py"
+      ],
+      "e2e_tests": []
+    }
+  ]
+}

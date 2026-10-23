@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, type LucideIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 export type StepStatus = 'success' | 'failure' | 'warning' | 'pending'
@@ -50,6 +51,8 @@ export function StepCard({
   isLast?: boolean
   defaultExpanded?: boolean
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const [expanded, setExpanded] = useState(defaultExpanded)
   const style = STYLES[status]
   const toggle = () => details && setExpanded((open) => !open)
@@ -97,7 +100,9 @@ export function StepCard({
                 <div className='flex items-center gap-1'>
                   {offsetMs != null ? (
                     <span className='font-mono text-xs text-muted-foreground'>
-                      +{Math.round(offsetMs)}ms
+                      {translate('logs:timelineOffset', {
+                        milliseconds: Math.round(offsetMs),
+                      })}
                     </span>
                   ) : null}
                   {details ? (

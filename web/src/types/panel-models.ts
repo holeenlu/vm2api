@@ -3,5 +3,6 @@ export type ModelCatalogItem = {
 }
 
 export type ModelsPayload = {
+  data?: ModelCatalogItem[]
   items?: ModelCatalogItem[]
 }

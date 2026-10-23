@@ -1,4 +1,6 @@
+import { t } from '@/i18n'
 import type { StatusTone } from '@/types/status'
+import { ERROR_CLASS_META } from '@/lib/log-mute'
 
 export const ERROR_CLASS_TONE: Record<string, string> = {
   auth: 'caution',
@@ -23,10 +25,14 @@ export function statusTone(status: unknown): StatusTone {
   if (Number.isFinite(n) && n >= 100) return httpStatusTone(n)
   if (!raw) return { key: 'none', text: '—', cls: 'none', label: '—' }
   if (raw === 'error' || raw === 'failed' || raw === 'fail') {
-    return { key: 'bad', text: raw, cls: 'bad', label: raw }
+    const label = t(raw === 'error' ? 'lib:status.error' : 'lib:status.failed')
+    return { key: 'bad', text: label, cls: 'bad', label }
   }
   if (raw === 'ok' || raw === 'success' || raw === 'complete') {
-    return { key: 'ok', text: raw, cls: 'ok', label: raw }
+    const label = t(
+      raw === 'complete' ? 'lib:status.complete' : 'lib:status.success'
+    )
+    return { key: 'ok', text: label, cls: 'ok', label }
   }
   return { key: 'none', text: raw, cls: 'none', label: raw }
 }
@@ -44,8 +50,9 @@ export function errorClassTone(
   item: Record<string, unknown>
 ): StatusTone | null {
   const cls = item.error_class == null ? '' : String(item.error_class)
-  const label =
-    item.error_label == null || item.error_label === ''
+  const label = Object.prototype.hasOwnProperty.call(ERROR_CLASS_META, cls)
+    ? ERROR_CLASS_META[cls].label
+    : item.error_label == null || item.error_label === ''
       ? cls
       : String(item.error_label)
   if (!cls && !label) return null

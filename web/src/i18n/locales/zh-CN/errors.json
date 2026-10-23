@@ -1,0 +1,15 @@
+{
+  "back": "返回上一页",
+  "home": "返回首页",
+  "forbiddenTitle": "访问被拒绝",
+  "forbiddenDescription": "你没有查看此资源所需的权限。",
+  "generalTitle": "出错了",
+  "generalDescription": "很抱歉给你带来不便，请稍后重试。",
+  "maintenanceTitle": "网站维护中",
+  "maintenanceDescription": "网站暂时不可用，我们将尽快恢复服务。",
+  "learnMore": "了解更多",
+  "notFoundTitle": "找不到页面",
+  "notFoundDescription": "你要查找的页面不存在或已被删除。",
+  "unauthorizedTitle": "需要登录",
+  "unauthorizedDescription": "请使用具有相应权限的账号登录以访问此资源。"
+}

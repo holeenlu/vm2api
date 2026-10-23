@@ -77,6 +77,6 @@ export function tryServeWebDist(res, projectRoot, pathname) {
     'content-type': MIME[ext] || 'application/octet-stream',
     'cache-control': cacheControl(rel, ext),
   })
-  res.end(fs.readFileSync(file))
+  res.end(res.req?.method === 'HEAD' ? undefined : fs.readFileSync(file))
   return true
 }

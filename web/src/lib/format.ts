@@ -1,3 +1,6 @@
+import { i18n, t } from '@/i18n'
+import { fixedNumber, localeNumber } from '@/lib/locale-format'
+
 export function pct(value: unknown): number {
   if (value == null) return 0
   const n = Number(value)
@@ -33,17 +36,17 @@ export function usedPctOf(
 
 export function fmtNum(n: unknown): string {
   const v = Number(n) || 0
-  if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`
-  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`
-  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`
-  return String(Math.round(v))
+  if (v >= 1e9) return `${fixedNumber(v / 1e9, 1)}B`
+  if (v >= 1e6) return `${fixedNumber(v / 1e6, 1)}M`
+  if (v >= 1e3) return `${fixedNumber(v / 1e3, 1)}K`
+  return localeNumber(Math.round(v), { useGrouping: false })
 }
 
 export function fmtUsd(n: unknown, digits?: number): string {
   const v = Number(n)
   if (!Number.isFinite(v) || v === 0) return '$0'
   const d = digits ?? (Math.abs(v) >= 100 ? 2 : Math.abs(v) >= 1 ? 3 : 4)
-  return `$${v.toFixed(d)}`
+  return `$${fixedNumber(v, d)}`
 }
 
 function nestedCached(usage: Record<string, unknown>, key: string): unknown {
@@ -76,7 +79,7 @@ export function fmtExpiresAt(value: unknown): string {
   if (!value) return '—'
   const ms = typeof value === 'number' ? value : Date.parse(String(value))
   if (!Number.isFinite(ms)) return String(value)
-  return new Date(ms).toLocaleString()
+  return new Date(ms).toLocaleString(i18n.resolvedLanguage)
 }
 
 export function remainPct(used: unknown): number {
@@ -93,48 +96,60 @@ export function fmtCountdown(leftMs: number): string {
   const d = Math.floor(totalMin / 1440)
   const h = Math.floor((totalMin % 1440) / 60)
   const m = totalMin % 60
-  if (d > 0) return `${d}d${h}h${m}m`
-  if (h > 0) return `${h}h${m}m`
-  return `${m}m`
+  if (d > 0)
+    return `${fixedNumber(d, 0)}d${fixedNumber(h, 0)}h${fixedNumber(m, 0)}m`
+  if (h > 0) return `${fixedNumber(h, 0)}h${fixedNumber(m, 0)}m`
+  return `${fixedNumber(m, 0)}m`
 }
 
 /** ISO 时间 → `刚刚` / `5 分钟前` / `3 小时前` / `2 天前`；无法解析返回空串。 */
 export function fmtAgo(value: unknown, now: number = Date.now()): string {
-  const t = Date.parse(String(value ?? ''))
-  if (!Number.isFinite(t)) return ''
-  const min = Math.floor(Math.max(0, now - t) / 60000)
-  if (min < 1) return '刚刚'
-  if (min < 60) return `${min} 分钟前`
+  const timestamp = Date.parse(String(value ?? ''))
+  if (!Number.isFinite(timestamp)) return ''
+  const min = Math.floor(Math.max(0, now - timestamp) / 60000)
+  if (min < 1) return t('lib:format.justNow')
+  if (min < 60) return t('lib:format.minutesAgo', { count: min })
   const h = Math.floor(min / 60)
-  if (h < 24) return `${h} 小时前`
-  return `${Math.floor(h / 24)} 天前`
+  if (h < 24) return t('lib:format.hoursAgo', { count: h })
+  return t('lib:format.daysAgo', { count: Math.floor(h / 24) })
 }
 
 export function fmtMs(ms: unknown): string {
   if (ms == null || !Number.isFinite(Number(ms))) return '—'
   const n = Number(ms)
-  if (n >= 10000) return `${(n / 1000).toFixed(1)}s`
-  return `${Math.round(n)}ms`
+  if (n >= 10000) return `${fixedNumber(n / 1000, 1)}s`
+  return `${fixedNumber(Math.round(n), 0)}ms`
 }
 
 /** 设置项用的人读时长：`500 毫秒` / `45 秒` / `2 分钟` / `1 分 30 秒`。 */
 export function fmtDuration(ms: number): string {
   const n = Math.max(0, Math.round(Number(ms) || 0))
-  if (n < 1000) return `${n} 毫秒`
+  if (n < 1000)
+    return t('lib:format.milliseconds', {
+      value: localeNumber(n, { useGrouping: false }),
+    })
   const sec = n / 1000
-  if (sec < 60) return `${Number.isInteger(sec) ? sec : sec.toFixed(1)} 秒`
+  if (sec < 60)
+    return t('lib:format.seconds', {
+      value: fixedNumber(sec, Number.isInteger(sec) ? 0 : 1),
+    })
   const min = Math.floor(sec / 60)
   const rest = Math.round(sec - min * 60)
-  return rest ? `${min} 分 ${rest} 秒` : `${min} 分钟`
+  return rest
+    ? t('lib:format.minutesSeconds', {
+        minutes: localeNumber(min),
+        seconds: localeNumber(rest),
+      })
+    : t('lib:format.minutes', { value: localeNumber(min) })
 }
 
 export function fmtRate(n: unknown, digits?: number): string {
   if (n == null || !Number.isFinite(Number(n))) return '—'
   const v = Number(n)
-  if (v >= 100) return v.toFixed(0)
-  if (v >= 10) return v.toFixed(1)
-  if (v >= 1) return v.toFixed(2)
-  return v.toFixed(digits ?? 3)
+  if (v >= 100) return fixedNumber(v, 0)
+  if (v >= 10) return fixedNumber(v, 1)
+  if (v >= 1) return fixedNumber(v, 2)
+  return fixedNumber(v, digits ?? 3)
 }
 
 export function fmtBytes(n: unknown): string {
@@ -147,5 +162,5 @@ export function fmtBytes(n: unknown): string {
     value /= 1024
     i += 1
   }
-  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)}${units[i]}`
+  return `${fixedNumber(value, value >= 10 || i === 0 ? 0 : 1)}${units[i]}`
 }

@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { ProviderChainItem } from '@/types/panel-usage-logs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import {
   cacheCostSplit,
   cacheWriteSplit,
@@ -205,4 +206,12 @@ describe('logs search', () => {
   it('counts a time range as one active filter', () => {
     expect(activeFilterCount({ startTime: 1, endTime: 2, model: 'm' })).toBe(2)
   })
+})
+
+const initialLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(initialLanguage)
 })

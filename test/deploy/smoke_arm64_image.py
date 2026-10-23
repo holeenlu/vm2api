@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 
-root = Path('/opt/vm2api')
+root = Path('/opt/tapmodels')
 expected = json.loads(sys.argv[1])
 assert (root / 'VERSION').read_text().strip() == expected['version']
 assert subprocess.check_output(['node', '-p', 'process.arch'], text=True).strip() == 'arm64'
@@ -55,9 +55,9 @@ for name in ('cli-node', 'cc-node'):
     print(name + ': ' + version)
 
 env = {**os.environ, 'HOST': '127.0.0.1', 'PORT': '18787', 'KIN_AUTO_SYNC_WRAP': '0',
-       'VM2API_ADMIN_PASSWORD': secrets.token_hex(24), 'VM2API_API_KEY': secrets.token_hex(32),
-       'VM2API_DB_SECRET': secrets.token_hex(32)}
-server = subprocess.Popen(['/usr/local/bin/vm2api-entrypoint'], env=env,
+       'TAPMODELS_ADMIN_PASSWORD': secrets.token_hex(24), 'TAPMODELS_API_KEY': secrets.token_hex(32),
+       'TAPMODELS_DB_SECRET': secrets.token_hex(32)}
+server = subprocess.Popen(['/usr/local/bin/tapmodels-entrypoint'], env=env,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
     deadline = time.monotonic() + 45
@@ -112,7 +112,7 @@ def main():
     parser.add_argument("image")
     args = parser.parse_args()
     expected = {"version": (ROOT / "VERSION").read_text().strip()}
-    name = "vm2api-arm64-smoke-" + uuid.uuid4().hex[:12]
+    name = "tapmodels-arm64-smoke-" + uuid.uuid4().hex[:12]
     try:
         subprocess.run(["docker", "run", "--name", name, "--platform", "linux/arm64",
                         "--network", "none", "-i", "--entrypoint", "python3", args.image,

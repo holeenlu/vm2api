@@ -221,7 +221,9 @@ export class StickyRouter {
   isolateKey(raw, req = null) {
     const id = req?.apiKeyRecord?.id
     if (id == null || id === '') return String(raw)
-    return `k${id}:${raw}`
+    const owner = req?.apiKeyRecord?.user_id || 'platform'
+    const group = req?.apiKeyRecord?.group_id
+    return group ? 'u' + owner + ':k' + id + ':g' + group + ':' + raw : 'k' + id + ':' + raw
   }
 
   extractKey(req, body = {}) {
@@ -360,22 +362,22 @@ export class StickyRouter {
     return scopeStickyKey(this.isolateKey(`family:${id}`, req), platform)
   }
 
-  /** Canonical session identity — exact sticky, never scoped to an API key. */
-  canonicalSessionKey(sessionId) {
+  /** Canonical session identity — exact sticky, scoped to customer, Key and group for commercial calls. */
+  canonicalSessionKey(sessionId, req = null) {
     const id = String(sessionId || '').trim()
-    return id ? `sess:${id}` : null
+    return id ? (req?.apiKeyRecord?.group_id ? this.isolateKey('sess:' + id, req) : 'sess:' + id) : null
   }
 
-  /** Canonical device identity — VM affinity, never scoped to an API key. */
-  canonicalDeviceKey(deviceId) {
+  /** Canonical device identity — VM affinity, scoped to customer, Key and group for commercial calls. */
+  canonicalDeviceKey(deviceId, req = null) {
     const id = String(deviceId || '').trim()
-    return id ? `dev2:${id}` : null
+    return id ? (req?.apiKeyRecord?.group_id ? this.isolateKey('dev2:' + id, req) : 'dev2:' + id) : null
   }
 
-  /** Canonical family identity — parent/root session, never scoped to an API key. */
-  canonicalFamilyKey(sessionId) {
+  /** Canonical family identity — parent/root session, scoped to customer, Key and group for commercial calls. */
+  canonicalFamilyKey(sessionId, req = null) {
     const id = String(sessionId || '').trim()
-    return id ? `family2:${id}` : null
+    return id ? (req?.apiKeyRecord?.group_id ? this.isolateKey('family2:' + id, req) : 'family2:' + id) : null
   }
 
   /**
@@ -386,7 +388,8 @@ export class StickyRouter {
    */
   sessionPoolKeys(req, body = {}, { sessionId = '', deviceId = '', migrate = true } = {}) {
     if (!this.config.enabled) return { stickyKey: null, stickyKeys: [] }
-    const canonical = this.canonicalSessionKey(sessionId)
+    const canonical = this.canonicalSessionKey(sessionId, req)
+    if (canonical && req?.apiKeyRecord?.group_id) return { stickyKey: canonical, stickyKeys: [canonical] }
     if (!canonical) {
       return {
         stickyKey: this.extractPoolKey(req, body, { platform: 'anthropic' }),
@@ -412,7 +415,8 @@ export class StickyRouter {
   familyPoolKey(req, sessionId, { trusted = false } = {}) {
     const legacy = this.familyKey(req, sessionId, 'anthropic')
     if (!trusted || !legacy) return legacy
-    const canonical = this.canonicalFamilyKey(sessionId)
+    const canonical = this.canonicalFamilyKey(sessionId, req)
+    if (req?.apiKeyRecord?.group_id) return canonical
     if (!this.resolve(canonical)) {
       const prev = this.resolve(legacy)
       if (prev?.accountId && prev?.vmId) {

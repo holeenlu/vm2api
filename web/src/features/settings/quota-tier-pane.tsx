@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type { QuotaTierKey, QuotaTierPolicy } from '@/types/panel-vm'
 import {
   ChevronDown,
@@ -9,6 +10,7 @@ import {
   Info,
   ServerCog,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import {
@@ -48,11 +50,25 @@ import {
 
 type DialogKind = 'gates' | 'concurrency' | 'rpm' | 'details'
 
-const TIERS: { key: QuotaTierKey; label: string; hint: string }[] = [
-  { key: 'default', label: '默认', hint: '未知套餐或没有凭证的账号' },
-  { key: 'pro', label: 'Pro', hint: '普通 Claude 账号' },
-  { key: 'max', label: 'Max', hint: 'Fable 可用的账号' },
-]
+function getTiers(): { key: QuotaTierKey; label: string; hint: string }[] {
+  return [
+    {
+      key: 'default',
+      label: translate('settings:default'),
+      hint: translate('settings:quota.defaultTierHelp'),
+    },
+    {
+      key: 'pro',
+      label: 'Pro',
+      hint: translate('settings:quota.standardTierHelp'),
+    },
+    {
+      key: 'max',
+      label: 'Max',
+      hint: translate('settings:quota.fableTierHelp'),
+    },
+  ]
+}
 
 const TIER_DEFAULTS: Record<
   QuotaTierKey,
@@ -72,7 +88,7 @@ function cloneTiers(
   source: Record<string, QuotaTierPolicy>
 ): Record<QuotaTierKey, QuotaTierPolicy> {
   return Object.fromEntries(
-    TIERS.map(({ key }) => [key, { ...(source[key] || {}) }])
+    getTiers().map(({ key }) => [key, { ...(source[key] || {}) }])
   ) as Record<QuotaTierKey, QuotaTierPolicy>
 }
 
@@ -88,9 +104,9 @@ function tierSummary(
   tiers: Record<string, QuotaTierPolicy>,
   format: (policy: QuotaTierPolicy, key: QuotaTierKey) => string
 ) {
-  return TIERS.map(
-    ({ key, label }) => `${label} ${format(tiers[key] || {}, key)}`
-  ).join(' · ')
+  return getTiers()
+    .map(({ key, label }) => `${label} ${format(tiers[key] || {}, key)}`)
+    .join(' · ')
 }
 
 function TierTabs({
@@ -100,15 +116,17 @@ function TierTabs({
   tier: QuotaTierKey
   onTier: (next: QuotaTierKey) => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <div className='space-y-2'>
-      <div className='text-xs font-medium'>Claude 账号层级</div>
+      <div className='text-xs font-medium'>{t('quota.accountTier')}</div>
       <div
         className='flex flex-wrap gap-2'
         role='tablist'
-        aria-label='Claude 账号层级'
+        aria-label={t('quota.accountTier')}
       >
-        {TIERS.map((item) => (
+        {getTiers().map((item) => (
           <Button
             key={item.key}
             type='button'
@@ -124,7 +142,7 @@ function TierTabs({
         ))}
       </div>
       <p className='text-xs text-muted-foreground'>
-        {TIERS.find((item) => item.key === tier)?.hint}
+        {getTiers().find((item) => item.key === tier)?.hint}
       </p>
     </div>
   )
@@ -149,6 +167,8 @@ function ClaudeGates({
   onQuotaChange: (patch: Obj) => void
   onWeeklyExpanded: (next: boolean) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const policy = tiers[tier] || {}
   const fallback = TIER_DEFAULTS[tier]
   const weekly = recordOf(quota.weekly_split)
@@ -158,14 +178,14 @@ function ClaudeGates({
       <div className='grid gap-4 sm:grid-cols-2'>
         <RatioSetting
           id={`claude-${tier}-5h`}
-          label='5h 闸线'
+          label={t('quota.fiveHourThreshold')}
           value={numberOf(policy.limit_5h, fallback.limit_5h)}
           fallback={fallback.limit_5h}
           onChange={(value) => onTierChange({ limit_5h: value })}
         />
         <RatioSetting
           id={`claude-${tier}-7d`}
-          label='7d 闸线'
+          label={t('quota.sevenDayThreshold')}
           value={numberOf(policy.limit_7d, fallback.limit_7d)}
           fallback={fallback.limit_7d}
           onChange={(value) => onTierChange({ limit_7d: value })}
@@ -173,14 +193,14 @@ function ClaudeGates({
       </div>
       <div className='grid gap-3 sm:grid-cols-2'>
         <div className='flex items-center justify-between gap-4 rounded-lg border p-3'>
-          <Label>5h 闸生效</Label>
+          <Label>{t('quota.fiveHourEnabled')}</Label>
           <Switch
             checked={quota.block_on_5h !== false}
             onCheckedChange={(block_on_5h) => onQuotaChange({ block_on_5h })}
           />
         </div>
         <div className='flex items-center justify-between gap-4 rounded-lg border p-3'>
-          <Label>7d 闸生效</Label>
+          <Label>{t('quota.sevenDayEnabled')}</Label>
           <Switch
             checked={quota.block_on_7d !== false}
             onCheckedChange={(block_on_7d) => onQuotaChange({ block_on_7d })}
@@ -190,8 +210,8 @@ function ClaudeGates({
       <div className='space-y-3 rounded-lg border p-3'>
         <SliderSetting
           id='claude-gate-overshoot'
-          label='闸线超出量'
-          desc='已入座的会话可以越过闸线继续跑这么多，再让出这台 VM；从「闸线 − 临界带宽」起就不再优先给新会话开席位，且同一账号一次只跑一个请求（读数滞后于在飞请求）。0 表示到闸线即切。'
+          label={t('quota.overrun')}
+          desc={t('quota.overrunHelp')}
           value={Math.round(numberOf(quota.gate_overshoot, 0.05) * 100)}
           min={0}
           max={10}
@@ -205,10 +225,9 @@ function ClaudeGates({
       <div className='space-y-3 rounded-lg border p-3'>
         <div className='flex items-center justify-between gap-4'>
           <div>
-            <Label>临界区大额冷请求保护</Label>
+            <Label>{t('quota.coldRequestProtection')}</Label>
             <p className='text-xs text-muted-foreground'>
-              用量进入闸线下最后几个百分点时，评估本请求规模。缓存命中与最终输出无法精确预知，这是尽力保护，不保证绝对不超过闸线，也不会截短上下文或下调
-              max_tokens。
+              {t('quota.coldRequestHelp')}
             </p>
           </div>
           <Switch
@@ -220,8 +239,8 @@ function ClaudeGates({
         </div>
         <SliderSetting
           id='claude-critical-band'
-          label='临界带宽'
-          desc='闸线下这一段与超出量一起构成临近闸线区：一次只跑一个请求，并按单笔冷缓存风险判断。'
+          label={t('quota.criticalBand')}
+          desc={t('quota.criticalBandHelp')}
           value={Math.round(numberOf(quota.critical_band, 0.05) * 100)}
           min={1}
           max={15}
@@ -233,8 +252,8 @@ function ClaudeGates({
         />
         <StepperSetting
           id='claude-large-cold-tokens'
-          label='大额冷缓存阈值'
-          desc='预估未命中缓存的输入 token 达到此值视为大额。冷请求算整段 prompt，已确认热前缀只算最后一条 user，不含 max_tokens。默认 10 万：高于普通一轮，低于现场 50 万缓存写入样本。'
+          label={t('quota.coldThreshold')}
+          desc={t('quota.coldThresholdHelp')}
           value={Math.round(
             numberOf(quota.large_cold_uncached_tokens, 100000) / 1000
           )}
@@ -258,9 +277,11 @@ function ClaudeGates({
           onClick={() => onWeeklyExpanded(!weeklyExpanded)}
         >
           <span>
-            <span className='block text-sm font-medium'>实验：周仓拆分</span>
+            <span className='block text-sm font-medium'>
+              {t('quota.weeklySplit')}
+            </span>
             <span className='block text-xs text-muted-foreground'>
-              保留当前固定份额行为，仅 Claude 可用。
+              {t('quota.weeklySplitHelp')}
             </span>
           </span>
           {weeklyExpanded ? (
@@ -273,9 +294,9 @@ function ClaudeGates({
           <div className='space-y-3 border-t px-3 py-3'>
             <div className='flex items-center justify-between gap-4'>
               <div>
-                <Label>启用周仓拆分</Label>
+                <Label>{t('quota.enableWeeklySplit')}</Label>
                 <p className='text-xs text-muted-foreground'>
-                  7d 余量按固定比例留给 Max/Fable。
+                  {t('quota.weeklyShareHelp')}
                 </p>
               </div>
               <Switch
@@ -289,7 +310,7 @@ function ClaudeGates({
             </div>
             <SliderSetting
               id='claude-weekly-fable-share'
-              label='Fable 份额'
+              label={t('quota.fableShare')}
               value={numberOf(weekly.fable_share, 0.5) * 100}
               min={0}
               max={100}
@@ -321,6 +342,8 @@ function ClaudeConcurrency({
   onTier: (next: QuotaTierKey) => void
   onChange: (patch: QuotaTierPolicy) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const policy = tiers[tier] || {}
   const value = numberOf(
     policy.max_concurrency,
@@ -331,8 +354,8 @@ function ClaudeConcurrency({
       <TierTabs tier={tier} onTier={onTier} />
       <StepperSetting
         id={`claude-${tier}-concurrency`}
-        label='执行并发'
-        desc='每个账号的在飞请求数；Claude 分档至少保留 1 个。'
+        label={t('quota.concurrency')}
+        desc={t('quota.claudeConcurrencyHelp')}
         value={value}
         min={1}
         max={256}
@@ -340,7 +363,7 @@ function ClaudeConcurrency({
         onChange={(max_concurrency) => onChange({ max_concurrency })}
       />
       <ChipGroup
-        label='Claude 执行并发常用值'
+        label={t('quota.claudeConcurrencyPresets')}
         value={value}
         options={withCurrent(
           CONC_STEPS.filter(([next]) => next > 0),
@@ -363,6 +386,8 @@ function ClaudeRpm({
   onTier: (next: QuotaTierKey) => void
   onChange: (patch: QuotaTierPolicy) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const policy = tiers[tier] || {}
   const value = numberOf(policy.max_rpm, TIER_DEFAULTS[tier].max_rpm)
   return (
@@ -370,8 +395,8 @@ function ClaudeRpm({
       <TierTabs tier={tier} onTier={onTier} />
       <StepperSetting
         id={`claude-${tier}-rpm`}
-        label='请求速率'
-        desc='每个账号每分钟启动数；0 = 不限。'
+        label={t('quota.requestRate')}
+        desc={t('quota.rpmHelp')}
         value={value}
         min={0}
         max={1000000}
@@ -380,7 +405,7 @@ function ClaudeRpm({
         onChange={(max_rpm) => onChange({ max_rpm })}
       />
       <ChipGroup
-        label='Claude RPM 常用值'
+        label={t('quota.claudeRpmPresets')}
         value={value}
         options={withCurrent(RPM_STEPS, value)}
         onChange={(max_rpm) => onChange({ max_rpm })}
@@ -404,6 +429,8 @@ export function QuotaTierPane({
   saving?: boolean
   pending?: boolean
 }) {
+  const { t } = useTranslation('settings')
+
   const list = useQuery(vmsListQueryOptions(5000))
   const [dialog, setDialog] = useState<DialogKind | null>(null)
   const [tier, setTier] = useState<QuotaTierKey>('default')
@@ -442,7 +469,7 @@ export function QuotaTierPane({
       return
     }
     if (dialog === 'gates') {
-      TIERS.forEach(({ key }) => {
+      getTiers().forEach(({ key }) => {
         const policy = draftTiers[key] || {}
         onChange(key, {
           limit_5h: numberOf(policy.limit_5h, TIER_DEFAULTS[key].limit_5h),
@@ -476,7 +503,7 @@ export function QuotaTierPane({
         },
       })
     } else if (dialog === 'concurrency') {
-      TIERS.forEach(({ key }) => {
+      getTiers().forEach(({ key }) => {
         const policy = draftTiers[key] || {}
         onChange(key, {
           max_concurrency: numberOf(
@@ -486,7 +513,7 @@ export function QuotaTierPane({
         })
       })
     } else if (dialog === 'rpm') {
-      TIERS.forEach(({ key }) => {
+      getTiers().forEach(({ key }) => {
         const policy = draftTiers[key] || {}
         onChange(key, {
           max_rpm: numberOf(policy.max_rpm, TIER_DEFAULTS[key].max_rpm),
@@ -499,29 +526,29 @@ export function QuotaTierPane({
   const claudeItems = (list.data?.items || []).filter((vm) => !isCodexVm(vm))
   const title =
     dialog === 'gates'
-      ? '配额闸线'
+      ? t('quota.gates')
       : dialog === 'concurrency'
-        ? '执行并发'
+        ? t('quota.concurrency')
         : dialog === 'rpm'
-          ? '请求速率'
-          : '生效账号与本槽覆盖'
+          ? t('quota.requestRate')
+          : t('quota.accountOverrides')
 
   return (
     <div className='space-y-4'>
       <PaneSection
         icon={Gauge}
-        title='Claude 配额'
-        desc={`${claudeItems.length} 个账号。GPT 配额在 OpenAI 页。`}
+        title={t('quota.claudeTitle')}
+        desc={t('quota.accountCount', { value1: claudeItems.length })}
       >
         <div className='grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3'>
           <QuotaSummary
             icon={Clock3}
-            title='配额闸线'
+            title={t('quota.gates')}
             value={tierSummary(tiers, (policy, key) => {
               const fallback = TIER_DEFAULTS[key]
               return `${Math.round(ratioValue(policy, 'limit_5h', fallback.limit_5h))}% / ${Math.round(ratioValue(policy, 'limit_7d', fallback.limit_7d))}%`
             })}
-            desc='5h / 7d，本地软闸'
+            desc={t('quota.localSoftGate')}
             pending={pending}
             buttonRef={(node) => {
               triggerRefs.current.gates = node
@@ -531,13 +558,13 @@ export function QuotaTierPane({
           />
           <QuotaSummary
             icon={ServerCog}
-            title='执行并发'
+            title={t('quota.concurrency')}
             value={tierSummary(
               tiers,
               (policy, key) =>
                 `${numberOf(policy.max_concurrency, TIER_DEFAULTS[key].max_concurrency)}`
             )}
-            desc='每个账号的在飞请求数'
+            desc={t('quota.inflightPerAccount')}
             pending={pending}
             buttonRef={(node) => {
               triggerRefs.current.concurrency = node
@@ -547,11 +574,11 @@ export function QuotaTierPane({
           />
           <QuotaSummary
             icon={Gauge}
-            title='请求速率'
+            title={t('quota.requestRate')}
             value={tierSummary(tiers, (policy, key) =>
               formatRpm(numberOf(policy.max_rpm, TIER_DEFAULTS[key].max_rpm))
             )}
-            desc='满后排队，不切号；0 = 不限'
+            desc={t('quota.queueNotSwitch')}
             pending={pending}
             buttonRef={(node) => {
               triggerRefs.current.rpm = node
@@ -573,10 +600,10 @@ export function QuotaTierPane({
           <Info className='size-4 text-muted-foreground' aria-hidden />
           <span className='min-w-0 flex-1'>
             <span className='block text-sm font-medium'>
-              生效账号与本槽覆盖
+              {t('quota.accountOverrides')}
             </span>
             <span className='block text-xs font-normal text-muted-foreground'>
-              查看来源、运行状态，并进入单槽 VM 调度；这里不复制逐槽编辑器。
+              {t('quota.accountOverridesHelp')}
             </span>
           </span>
         </Button>
@@ -594,10 +621,7 @@ export function QuotaTierPane({
         >
           <DialogHeader>
             <DialogTitle>{title}</DialogTitle>
-            <DialogDescription>
-              应用到草稿后，全局保存才会生效；运行中的账号状态始终来自实时 VM
-              数据。
-            </DialogDescription>
+            <DialogDescription>{t('quota.draftHelp')}</DialogDescription>
           </DialogHeader>
           <fieldset
             disabled={saving}
@@ -668,7 +692,7 @@ export function QuotaTierPane({
               className='min-h-11'
               onClick={closeDialog}
             >
-              {dialog === 'details' ? '关闭' : '取消'}
+              {dialog === 'details' ? t('off') : t('cancel')}
             </Button>
             {dialog !== 'details' ? (
               <Button
@@ -677,7 +701,7 @@ export function QuotaTierPane({
                 className='min-h-11'
                 onClick={apply}
               >
-                应用到草稿
+                {t('applyDraft')}
               </Button>
             ) : null}
           </DialogFooter>

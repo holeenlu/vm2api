@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import {
   Activity,
   Boxes,
@@ -7,43 +8,83 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
+import { Trans, useTranslation } from 'react-i18next'
 import { Reveal } from './reveal'
 
 const PROTOCOLS = [
   { path: '/v1/messages', spec: 'Anthropic' },
   { path: '/v1/chat/completions', spec: 'OpenAI Chat' },
   { path: '/v1/responses', spec: 'OpenAI Responses' },
-  { path: '/v1/models', spec: '模型目录' },
-  { path: '/v1/messages/count_tokens', spec: '计 token' },
-  { path: 'SSE 流式', spec: '逐字转发' },
+  {
+    path: '/v1/models',
+    get spec() {
+      return t('welcome:modelCatalog')
+    },
+  },
+  {
+    path: '/v1/messages/count_tokens',
+    get spec() {
+      return t('welcome:countTokens')
+    },
+  },
+  {
+    get path() {
+      return t('welcome:sse')
+    },
+    get spec() {
+      return t('welcome:verbatim')
+    },
+  },
 ] as const
-
-const PIPELINE = ['入站清洗', '风险审计', '槽位调度'] as const
 
 const MORE = [
   {
     Icon: Cpu,
-    title: '容器或 KVM',
-    desc: '槽位可以是 Docker 容器，也可以是带独立硬件特征的虚拟机。',
+    get title() {
+      return t('welcome:containerKvm')
+    },
+    get desc() {
+      return t('welcome:containerHelp')
+    },
   },
   {
     Icon: Network,
-    title: '集群节点',
-    desc: 'SSH 接入更多 VPS，槽位按节点放置，就近出口。',
+    get title() {
+      return t('welcome:clusterNodes')
+    },
+    get desc() {
+      return t('welcome:clusterHelp')
+    },
   },
   {
     Icon: ScrollText,
-    title: '请求日志',
-    desc: '每次调度落在哪个槽、用了多少 token，日志里都查得到。',
+    get title() {
+      return t('welcome:requestLogs')
+    },
+    get desc() {
+      return t('welcome:logsHelp')
+    },
   },
   {
     Icon: Users,
-    title: '多用户',
-    desc: '管理员、运维、租户三种角色，租户只看到自己的槽和密钥。',
+    get title() {
+      return t('welcome:multiUser')
+    },
+    get desc() {
+      return t('welcome:multiUserHelp')
+    },
   },
 ] as const
 
 export function WelcomeCapabilities() {
+  const { t } = useTranslation('welcome')
+
+  const PIPELINE = [
+    t('welcome:sanitize'),
+    t('welcome:riskAudit'),
+    t('welcome:scheduling'),
+  ] as const
+
   return (
     <section
       id='welcome-features'
@@ -52,12 +93,14 @@ export function WelcomeCapabilities() {
       <div className='mx-auto max-w-6xl'>
         <Reveal className='mb-16 max-w-lg'>
           <p className='mb-3 text-xs font-medium tracking-widest text-muted-foreground uppercase'>
-            核心能力
+            {t('welcome:capabilities')}
           </p>
           <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-3xl'>
-            官方客户端在槽里跑，
-            <br />
-            网关只负责调度与隔离
+            <Trans
+              t={t}
+              i18nKey='welcome:capabilitiesTitle'
+              components={{ break: <br /> }}
+            />
           </h2>
         </Reveal>
         <div className='grid gap-px overflow-hidden rounded-xl border border-border bg-border md:grid-cols-3'>
@@ -65,9 +108,9 @@ export function WelcomeCapabilities() {
             animation='scale-in'
             className='group bg-background p-7 transition-colors duration-300 hover:bg-muted/20 md:col-span-2 md:p-8'
           >
-            <CellHead num='01' title='协议兼容' />
+            <CellHead num='01' title={t('welcome:protocolCompatibility')} />
             <p className='text-sm leading-relaxed text-muted-foreground'>
-              客户端照常调用标准入口，网关清洗后交给槽内官方进程。
+              {t('welcome:protocolHelp')}
             </p>
             <ul className='mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3'>
               {PROTOCOLS.map((p) => (
@@ -91,9 +134,9 @@ export function WelcomeCapabilities() {
             delay={100}
             className='group bg-background p-7 transition-colors duration-300 hover:bg-muted/20 md:p-8'
           >
-            <CellHead num='02' title='槽位隔离' />
+            <CellHead num='02' title={t('welcome:slotIsolation')} />
             <p className='text-sm leading-relaxed text-muted-foreground'>
-              每个账号一个槽，独立会话、指纹与出口，互不共用。
+              {t('welcome:isolationHelp')}
             </p>
             <div className='mt-5 flex items-center justify-center'>
               <div className='relative'>
@@ -116,9 +159,9 @@ export function WelcomeCapabilities() {
             delay={200}
             className='group bg-background p-7 transition-colors duration-300 hover:bg-muted/20 md:p-8'
           >
-            <CellHead num='03' title='进槽前把关' />
+            <CellHead num='03' title={t('welcome:preflight')} />
             <p className='text-sm leading-relaxed text-muted-foreground'>
-              每个请求先过清洗与风险审计，再决定派给哪个槽。
+              {t('welcome:preflightHelp')}
             </p>
             <ol className='mt-4 space-y-2'>
               {PIPELINE.map((step, i) => (
@@ -144,15 +187,14 @@ export function WelcomeCapabilities() {
             delay={300}
             className='group bg-background p-7 transition-colors duration-300 hover:bg-muted/20 md:col-span-2 md:p-8'
           >
-            <CellHead num='04' title='额度感知调度' />
+            <CellHead num='04' title={t('welcome:quotaScheduling')} />
             <p className='text-sm leading-relaxed text-muted-foreground'>
-              按官方 5h / 7d
-              用量窗口选槽，临近闸线自动让位，同一会话尽量留在同一个槽。
+              {t('welcome:quotaSchedulingHelp')}
             </p>
             <div className='mt-4 grid gap-2 sm:grid-cols-2'>
               {[
-                { label: '5h 窗口', pct: 42 },
-                { label: '7d 窗口', pct: 68 },
+                { label: t('welcome:fiveHourWindow'), pct: 42 },
+                { label: t('welcome:sevenDayWindow'), pct: 68 },
               ].map((w) => (
                 <div
                   key={w.label}
@@ -175,7 +217,7 @@ export function WelcomeCapabilities() {
               ))}
             </div>
             <p className='mt-2 text-[11px] text-muted-foreground/70'>
-              示意图，实际用量在控制台「虚拟机」页的用量窗口。
+              {t('welcome:quotaIllustration')}
             </p>
           </Reveal>
         </div>
@@ -203,6 +245,8 @@ export function WelcomeCapabilities() {
 }
 
 function CellHead({ num, title }: { num: string; title: string }) {
+  useTranslation('welcome')
+
   return (
     <div className='mb-3 flex items-center gap-3'>
       <span className='flex size-7 items-center justify-center rounded-md border border-border/40 bg-muted text-[10px] font-semibold text-muted-foreground tabular-nums'>

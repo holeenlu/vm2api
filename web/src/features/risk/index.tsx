@@ -2,8 +2,10 @@ import { useCallback, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { VIEW_TITLES } from '@/config/nav'
+import { t as translate, i18n } from '@/i18n'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { ArrowUpRight, RefreshCw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/page-header'
@@ -38,23 +40,53 @@ import {
 import { RefusalSettings } from './refusal-settings'
 
 const STATE_TONE = {
-  on: { key: 'on', text: '开启', cls: 'ok' },
-  off: { key: 'off', text: '关闭', cls: 'off' },
-  unset: { key: 'unset', text: '开启但未配置地址', cls: 'caution' },
-  loading: { key: 'loading', text: '读取中', cls: 'none' },
+  on: {
+    key: 'on',
+    get text() {
+      return translate('risk:enabled')
+    },
+    cls: 'ok',
+  },
+  off: {
+    key: 'off',
+    get text() {
+      return translate('risk:disabled')
+    },
+    cls: 'off',
+  },
+  unset: {
+    key: 'unset',
+    get text() {
+      return translate('risk:enabledWithoutUrl')
+    },
+    cls: 'caution',
+  },
+  loading: {
+    key: 'loading',
+    get text() {
+      return translate('risk:loading')
+    },
+    cls: 'none',
+  },
 } as const
 
 function FeedNote({ shown, more }: { shown: number; more: boolean }) {
+  const { t: translate } = useTranslation('risk')
+
   if (!shown) return null
   return (
     <p className='border-t px-4 py-2 text-xs text-muted-foreground'>
-      {more ? `只列最近 ${shown} 条。` : `今天共 ${shown} 条。`}
-      点一行打开请求详情，看正文判断是否误伤。
+      {more
+        ? translate('risk:recentEntries', { count: shown })
+        : translate('risk:todayEntries', { count: shown })}{' '}
+      {translate('risk:requestDetailHint')}
     </p>
   )
 }
 
 export function RiskAuditPage() {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const search = useSearch({ from: '/_authenticated/risk' })
   const navigate = useNavigate({ from: '/risk' })
@@ -73,8 +105,7 @@ export function RiskAuditPage() {
 
   const go = (next: ViewKey) => {
     if (next === view) return
-    if (dirty && !window.confirm('这一关有未保存的修改，离开会丢掉。继续？'))
-      return
+    if (dirty && !window.confirm(translate('risk:discardGateChanges'))) return
     setDirty(false)
     setFocusRule(null)
     void navigate({
@@ -116,7 +147,7 @@ export function RiskAuditPage() {
   return (
     <PageHeader
       title={VIEW_TITLES.risk}
-      description='入站请求在出站前依次过四道关。拦下的请求不占凭证、不出站；放行的才 hop 上游。'
+      description={translate('risk:pageDescription')}
       extra={
         <Button
           variant='outline'
@@ -138,7 +169,7 @@ export function RiskAuditPage() {
             )}
             aria-hidden='true'
           />
-          刷新
+          {translate('risk:refresh')}
         </Button>
       }
     >
@@ -149,7 +180,9 @@ export function RiskAuditPage() {
       </div>
       {stats.error ? (
         <p className='mt-2 text-sm text-destructive' role='alert'>
-          今日计数读取失败：{(stats.error as Error).message}
+          {translate('risk:todayStatsError', {
+            error: (stats.error as Error).message,
+          })}
         </p>
       ) : null}
 
@@ -174,8 +207,8 @@ export function RiskAuditPage() {
         {view === 'pass' ? (
           <div className='grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]'>
             <Panel
-              title='放行原因'
-              hint='「模型故障放行」是没被检查就出站的请求，越少越好。'
+              title={translate('risk:allowReasons')}
+              hint={translate('risk:failOpenHint')}
             >
               <PassReasons
                 rows={passes}
@@ -183,14 +216,14 @@ export function RiskAuditPage() {
               />
             </Panel>
             <Panel
-              title='上游拒答'
-              hint='过了四道关、被上游拒答的请求，是这里漏拦的。拒答缓存开着时会记成指纹，同类正文下次在第三关拦下。'
+              title={translate('risk:upstreamRefusal')}
+              hint={translate('risk:upstreamRefusalHint')}
             >
               <div className='max-h-[34rem] overflow-y-auto'>
                 <RiskFeed
                   {...feedProps}
                   rows={upstreamRows}
-                  empty='今天没有上游拒答。'
+                  empty={translate('risk:noUpstreamRefusals')}
                   showKind={false}
                 />
               </div>
@@ -200,8 +233,8 @@ export function RiskAuditPage() {
         ) : (
           <div className='grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]'>
             <Panel
-              title='今日命中'
-              hint='按触发的词和规则归并。远高于同行的那条，先怀疑误伤。'
+              title={translate('risk:todayHits')}
+              hint={translate('risk:hitsHint')}
             >
               <div className='max-h-[34rem] overflow-y-auto'>
                 <HitTable
@@ -211,10 +244,10 @@ export function RiskAuditPage() {
                   showSource={!stage}
                   empty={
                     stats.isLoading
-                      ? '读取中'
+                      ? translate('risk:loading')
                       : stage
-                        ? '这一关今天没有拦下请求。'
-                        : '今天没有拦下请求。'
+                        ? translate('risk:noGateBlocks')
+                        : translate('risk:noBlocksToday')
                   }
                   action={(row) => {
                     if (!stage) {
@@ -223,7 +256,9 @@ export function RiskAuditPage() {
                           size='sm'
                           variant='ghost'
                           className='h-7 shrink-0 cursor-pointer px-2'
-                          aria-label={`去${row.label}关`}
+                          aria-label={translate('risk:goToGate', {
+                            p0: row.label,
+                          })}
                           onClick={() => go(row.by as ViewKey)}
                         >
                           <ArrowUpRight className='size-3.5' />
@@ -243,7 +278,7 @@ export function RiskAuditPage() {
                             ?.scrollIntoView({ behavior: 'smooth' })
                         }}
                       >
-                        定位规则
+                        {translate('risk:locateRule')}
                       </Button>
                     )
                   }}
@@ -251,8 +286,12 @@ export function RiskAuditPage() {
               </div>
             </Panel>
             <Panel
-              title={stage ? '最近拦截' : '拦截流水'}
-              hint={stage ? undefined : '今天被四道关拦下的请求，按时间倒序。'}
+              title={
+                stage
+                  ? translate('risk:recentBlocks')
+                  : translate('risk:blockHistory')
+              }
+              hint={stage ? undefined : translate('risk:blockHistoryHint')}
             >
               <div className='max-h-[34rem] overflow-y-auto'>
                 <RiskFeed
@@ -263,7 +302,9 @@ export function RiskAuditPage() {
                       : blockedRows
                   }
                   empty={
-                    stage ? '这一关今天没有拦下请求。' : '今天没有拦下请求。'
+                    stage
+                      ? translate('risk:noGateBlocks')
+                      : translate('risk:noBlocksToday')
                   }
                   showKind={!stage}
                 />
@@ -284,11 +325,11 @@ export function RiskAuditPage() {
         {stage ? (
           <div id='risk-settings' className='scroll-mt-4'>
             <Panel
-              title='设置'
+              title={translate('risk:settings')}
               hint={
                 stage.id === 'refusal'
-                  ? '改动立即生效。'
-                  : '改完在底部保存条里保存。'
+                  ? translate('risk:changesImmediate')
+                  : translate('risk:saveChangesHint')
               }
             >
               {stage.id === 'distill' ? (
@@ -320,6 +361,8 @@ function PassReasons({
   rows: { by: string; count: number }[]
   total: number
 }) {
+  useTranslation('risk')
+
   const counts: Record<string, number> = {}
   for (const row of rows) counts[row.by] = (counts[row.by] || 0) + row.count
   const keys = Object.keys(PASS_REASONS).filter(
@@ -346,7 +389,7 @@ function PassReasons({
               </p>
             </div>
             <span className='text-sm font-medium tabular-nums'>
-              {count.toLocaleString()}
+              {count.toLocaleString(i18n.language)}
             </span>
             <span className='w-14 text-right text-xs text-muted-foreground tabular-nums'>
               {share(count, total)}
