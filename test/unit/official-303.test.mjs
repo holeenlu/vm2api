@@ -385,8 +385,8 @@ test('kernel.json cli_version follows the slot profile', () => {
     JSON.parse(fs.readFileSync(writeKernelConfig(root, vm, { token: 't', routing }).configPath, 'utf8'))
   try {
     assert.equal(read({ id: 'vm-01' }, { compatibility: { persona_preset: 'official_303' } }).cli_version, '2.1.303')
-    assert.equal(read({ id: 'vm-02' }, { compatibility: { persona_preset: 'official_full' } }).cli_version, '2.1.296')
-    assert.equal(read({ id: 'vm-03' }, {}).cli_version, '2.1.296')
+    assert.equal(read({ id: 'vm-02' }, { compatibility: { persona_preset: 'official_full' } }).cli_version, '2.1.303')
+    assert.equal(read({ id: 'vm-03' }, {}).cli_version, '2.1.303')
     assert.equal(
       read({ id: 'vm-04', persona_preset: 'official_303' }, { compatibility: { persona_preset: 'zero' } }).cli_version,
       '2.1.303',

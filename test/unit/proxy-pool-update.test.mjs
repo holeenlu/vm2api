@@ -18,7 +18,8 @@ function seed(pool, line = 'socks5://alice:s3cret@1.2.3.4:1080') {
 test('update: 只改 port，账密保留；raw 明文密码被清除', () => {
   const pool = makePool()
   const p = seed(pool)
-  assert.match(p.raw, /s3cret/, '前提：导入后 raw 含明文密码')
+  assert.doesNotMatch(p.raw, /s3cret/, '新导入不再把密码写进 raw')
+  p.raw = 'socks5://alice:s3cret@1.2.3.4:1080' // 已存在的旧记录仍在编辑时清理
   const r = pool.update(p.id, { port: 1081 })
   assert.equal(r.ok, true)
   assert.equal(p.port, 1081)
@@ -118,7 +119,7 @@ test('update: 只改代理名称不动连接字段，也不要求重载槽位；
   assert.equal(r.ok, true)
   assert.equal(r.connection_changed, false)
   assert.equal(r.proxy.label, '东京-2 号机')
-  assert.equal(p.raw, 'socks5://alice:s3cret@1.2.3.4:1080', '只改名称不应改写 raw')
+  assert.equal(p.raw, 'socks5://1.2.3.4:1080', '只改名称不应改写 raw')
   pool.load()
   assert.equal(pool.state.proxies[0].label, '东京-2 号机')
   assert.equal(pool.snapshot().proxies[0].label, '东京-2 号机')

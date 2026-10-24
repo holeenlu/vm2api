@@ -1,9 +1,9 @@
 # Issue 提交指南
 
-提交前按本页收集信息，再用 [Bug 报告表单](https://github.com/dofastted/vm2api/issues/new?template=bug_report.yml) 提交。信息齐全的 Issue 可以直接复现定位；缺版本、缺日志的 Issue 只能先回问。
+提交前按本页收集信息，再用 [Bug 报告表单](https://github.com/holeenlu/vm2api/issues/new?template=bug_report.yml) 提交。信息齐全的 Issue 可以直接复现定位；缺版本、缺日志的 Issue 只能先回问。
 
 <p align="center">
-  <img src="docs/images/issue-flow.svg" alt="vm2api Issue 提交路线图" width="100%" />
+  <img src="docs/images/issue-flow.svg" alt="tapmodels Issue 提交路线图" width="100%" />
 </p>
 
 > [!WARNING]
@@ -13,21 +13,21 @@
 
 ## 0. 提交前自查
 
-- [ ] 已升级到 [最新 Release](https://github.com/dofastted/vm2api/releases)，问题仍存在（升级：`curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade`）
-- [ ] 已在 [Issues](https://github.com/dofastted/vm2api/issues?q=is%3Aissue) 搜索过错误码 / 关键字，没有重复
+- [ ] 已升级到 [最新 Release](https://github.com/holeenlu/vm2api/releases)，问题仍存在（升级：`curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade`）
+- [ ] 已在 [Issues](https://github.com/holeenlu/vm2api/issues?q=is%3Aissue) 搜索过错误码 / 关键字，没有重复
 - [ ] 已对照 [CHANGELOG.md](CHANGELOG.md)，不是已知行为变更
 - [ ] 一个 Issue 只写一个问题；多个问题分开提
 
-功能建议走 [功能建议表单](https://github.com/dofastted/vm2api/issues/new?template=feature_request.yml)；使用交流走 [Telegram @VM2API](https://t.me/VM2API)。安全漏洞**不要**公开提 Issue，私信 Telegram 联系作者。
+功能建议走 [功能建议表单](https://github.com/holeenlu/vm2api/issues/new?template=feature_request.yml)；使用交流走 [Telegram @VM2API](https://t.me/VM2API)。安全漏洞**不要**公开提 Issue，私信 Telegram 联系作者。
 
 ---
 
 ## 1. 使用的版本（必填）
 
 ```bash
-cat /opt/vm2api/VERSION                                      # 控制面版本，例如 1.3.102
-docker inspect vm2api --format '{{.Config.Image}}'           # 镜像与 tag
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- status
+cat /opt/tapmodels/VERSION                                      # 控制面版本，例如 1.3.102
+docker inspect tapmodels --format '{{.Config.Image}}'           # 镜像与 tag
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- status
 ```
 
 管理台 `设置 → 关于` 也能看到当前版本。同时说明：
@@ -49,7 +49,7 @@ curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install
 
 ```bash
 curl -sS -D - http://127.0.0.1:8787/v1/messages \
-  -H "Authorization: Bearer $VM2API_API_KEY" \
+  -H "Authorization: Bearer $TAPMODELS_API_KEY" \
   -H "content-type: application/json" \
   -d '{"model":"claude-sonnet-5-5","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -73,9 +73,9 @@ curl -sS -D - http://127.0.0.1:8787/v1/messages \
 一键收集（只读，不含密钥；端口不是 8787 时自行修改）：
 
 ```bash
-cd /opt/vm2api
+cd /opt/tapmodels
 echo "== version";  cat VERSION
-echo "== image";    docker inspect vm2api --format '{{.Config.Image}}' 2>/dev/null
+echo "== image";    docker inspect tapmodels --format '{{.Config.Image}}' 2>/dev/null
 echo "== health";   curl -sS --noproxy '*' http://127.0.0.1:8787/health | head -c 3000; echo
 echo "== os";       . /etc/os-release && echo "$PRETTY_NAME"; uname -r
 echo "== virt";     systemd-detect-virt 2>/dev/null; ls -l /dev/kvm 2>/dev/null || echo "no /dev/kvm"
@@ -87,7 +87,7 @@ echo "== slots";    docker ps -a --filter name=kin- --format '{{.Names}}\t{{.Sta
 
 ### 3.2 代理 / 出口
 
-vm2api 是 **1 VM = 1 出口**，代理问题占了大量故障。请写清：
+tapmodels 是 **1 VM = 1 出口**，代理问题占了大量故障。请写清：
 
 | 项 | 示例 |
 |---|---|
@@ -120,7 +120,7 @@ VM 创建、导入、启动、重置失败时提供：
 2. 控制面日志：
 
    ```bash
-   docker logs --since 30m --timestamps vm2api 2>&1 | tail -n 300 > vm2api.log
+   docker logs --since 30m --timestamps tapmodels 2>&1 | tail -n 300 > tapmodels.log
    ```
 
 3. 槽位容器日志（`vm-01` 对应容器 `kin-01`，以此类推）：
@@ -140,11 +140,11 @@ VM 创建、导入、启动、重置失败时提供：
 
    ```bash
    curl -sS http://127.0.0.1:8787/api/panel/request-logs/<request_id>/attempts \
-     -H "Authorization: Bearer $VM2API_API_KEY"
+     -H "Authorization: Bearer $TAPMODELS_API_KEY"
    ```
 
 3. 需要请求体时，对单个复现请求加头 `X-Kin-Debug: 1`（落库为脱敏 body）。debug body 含你的提示词内容，贴出前自己检查。
-4. 同一时间段的 `vm2api.log` / `kin-NN.log`（见 4.1），时间点要与请求对得上
+4. 同一时间段的 `tapmodels.log` / `kin-NN.log`（见 4.1），时间点要与请求对得上
 
 日志太长请作为附件（`.log` / `.txt`）上传，不要只贴一行报错。
 
@@ -160,7 +160,7 @@ VM 创建、导入、启动、重置失败时提供：
 
 | 必须打码 | 出现位置 |
 |---|---|
-| `VM2API_API_KEY`、子密钥、`VM2API_DB_SECRET` | `.env`、curl 命令、请求头 |
+| `TAPMODELS_API_KEY`、子密钥、`TAPMODELS_DB_SECRET` | `.env`、curl 命令、请求头 |
 | OAuth access / refresh token、setup-token、`sk-ant-…` | 日志、`vms/*.json`、面板接口响应 |
 | sessionKey、Cookie、`kin_panel_token` | 导入记录、浏览器请求 |
 | 代理 `USER:PASS`、完整出口 IP、宿主机公网 IP / 域名 | 代理配置、日志 |
@@ -176,7 +176,7 @@ VM 创建、导入、启动、重置失败时提供：
 
 ## 7. 提交与跟进
 
-1. 打开 [New issue](https://github.com/dofastted/vm2api/issues/new/choose) → **Bug 报告**，按表单逐项填写
+1. 打开 [New issue](https://github.com/holeenlu/vm2api/issues/new/choose) → **Bug 报告**，按表单逐项填写
 2. 标题格式：`[Bug] <现象> (<版本>)`，例如 `[Bug] 创建 KVM 槽位卡在 provisioning (1.3.102)`
 3. 维护者回问时请在同一 Issue 补充，不要另开新 Issue
 4. 修复会在 [CHANGELOG.md](CHANGELOG.md) 与 Release 中注明；升级验证后请回复结果并关闭
@@ -194,6 +194,6 @@ VM 创建、导入、启动、重置失败时提供：
 实际：502 incomplete_response，x-request-id = 9f3c…
 环境：Hetzner DE 8C16G Ubuntu 24.04，KVM 母机，3 个 Docker 槽位
 代理：每 VM 独立 SOCKS5，ISP 静态，美国，不共享
-日志：附 attempts.json、vm2api.log、kin-02.log（已脱敏，时间 14:02–14:05 UTC）
+日志：附 attempts.json、tapmodels.log、kin-02.log（已脱敏，时间 14:02–14:05 UTC）
 源码：无
 ```

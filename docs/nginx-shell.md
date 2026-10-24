@@ -83,7 +83,7 @@ nginx -T 2>/dev/null | grep -n shell
 「连不上」和「页面没加载」不是同一件事。
 
 ```bash
-# 控制台入口。应有 <title>vm2api</title> 和 id="root"
+# 控制台入口。应有 <title>tapmodels</title> 和 id="root"
 curl -sk -o /dev/null -w '%{http_code}\n' https://<域名>/
 
 # 终端脚本。文件名以线上 index 的引用为准，应 200，Content-Type 含 javascript

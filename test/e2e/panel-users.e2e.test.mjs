@@ -32,11 +32,11 @@ async function panel(gw, method, path, { cookie, body } = {}) {
   return { status: res.status, json, text }
 }
 
-for (const prefix of ['VM2API', 'KIN']) {
+for (const prefix of ['TAPMODELS', 'KIN']) {
   test(`${prefix} default admin is listed and can rotate its password across restarts`, async () => {
     const env = {
-      VM2API_ADMIN_USER: '',
-      VM2API_ADMIN_PASSWORD: '',
+      TAPMODELS_ADMIN_USER: '',
+      TAPMODELS_ADMIN_PASSWORD: '',
       [`${prefix}_ADMIN_USER`]: 'admin',
       [`${prefix}_ADMIN_PASSWORD`]: '123456',
     }
@@ -148,37 +148,30 @@ test('admin can create users and change passwords', async () => {
   }
 })
 
-test('deleting a tenant reclaims its assigned VM in the runtime file and SQLite mirror', async () => {
+test('deleting a customer invalidates sessions without altering grouped supply', async () => {
   const gw = await startGateway()
   try {
     const created = await api(gw, 'POST', '/api/panel/users', {
       body: { username: 'tenant', password: 'tenant-pass', role: 'user' },
     })
-    assert.equal(created.status, 201, created.text)
-    const userId = created.json.data.item.id
+    const uid = created.json.data.item.id
     const session = await login(gw, 'tenant', 'tenant-pass')
-    assert.equal(session.status, 200)
-    const assigned = await api(gw, 'PATCH', '/api/panel/vms/vm-sim-01/owner', { body: { user_id: userId } })
-    assert.equal(assigned.status, 200, assigned.text)
-
-    const deleted = await api(gw, 'DELETE', `/api/panel/users/${userId}`)
-    assert.equal(deleted.status, 200, deleted.text)
-    const vm = JSON.parse(fs.readFileSync(path.join(gw.project, 'vms', 'vm-sim-01.json'), 'utf8'))
-    assert.equal(vm.owner_user_id, null)
-    assert.equal(vm.origin, 'platform')
-    assert.equal(vm.schedulable, true)
-    const db = new DatabaseSync(path.join(gw.project, 'data', 'kin.db'), { readOnly: true })
-    try {
-      const row = db.prepare('SELECT owner_user_id, origin FROM vms WHERE id = ?').get(vm.id)
-      assert.equal(row.owner_user_id, null)
-      assert.equal(row.origin, 'platform')
-    } finally {
-      db.close()
-    }
+    const group = (await api(gw, 'POST', '/api/panel/groups', { body: { name: 'retained', platform: 'anthropic' } }))
+      .json.data.item
+    assert.equal(
+      (
+        await api(gw, 'PUT', '/api/panel/vms/vm-sim-01/groups', {
+          body: { group_ids: [group.id], expected_version: 0 },
+        })
+      ).status,
+      200,
+    )
+    assert.equal((await api(gw, 'DELETE', '/api/panel/users/' + uid)).status, 200)
+    const listed = await api(gw, 'GET', '/api/panel/vms')
+    assert.equal(listed.json.data.items[0].groups[0].id, group.id)
     assert.equal((await panel(gw, 'GET', '/api/panel/me', { cookie: session.cookie })).status, 401)
   } finally {
     await gw.stop()
-    fs.rmSync(gw.project, { recursive: true, force: true })
   }
 })
 
@@ -253,7 +246,7 @@ test('proxy DNS URLs remain admin-only in list and config responses', async () =
       assert.equal(reader.status, 200)
       for (const route of ['/api/panel/proxies', '/api/panel/proxies/config']) {
         const response = await panel(gw, 'GET', route, { cookie: reader.cookie })
-        if (role === 'super') {
+        if (role === 'user') {
           assert.equal(response.status, 403, response.text)
           assert.equal(response.text.includes('private-doh-token'), false)
           continue
@@ -279,7 +272,7 @@ test('proxy DNS URLs remain admin-only in list and config responses', async () =
   }
 })
 
-test('super can toggle schedule but cannot import or delete VMs', async () => {
+test('super can maintain supply but cannot read credentials or system data', async () => {
   const gw = await startGateway()
   try {
     const admin = await login(gw, 'admin', 'testpass')
@@ -307,14 +300,14 @@ test('super can toggle schedule but cannot import or delete VMs', async () => {
       cookie: superu.cookie,
       body: { vm_id: 'vm-sim-01', sessionKey: 'sk-ant-sid01-' + 'e'.repeat(24) },
     })
-    assert.equal(imp.status, 403)
+    assert.equal(imp.status, 200)
     const del = await panel(gw, 'DELETE', '/api/panel/vms/vm-sim-01', { cookie: superu.cookie })
-    assert.equal(del.status, 403)
+    assert.equal(del.status, 200)
     const oauth = await panel(gw, 'POST', '/api/panel/vms/vm-sim-01/oauth/refresh', {
       cookie: superu.cookie,
       body: {},
     })
-    assert.equal(oauth.status, 403)
+    assert.equal(oauth.status, 404)
     const credGet = await panel(gw, 'GET', '/api/panel/vms/vm-sim-01/oauth/credential', {
       cookie: superu.cookie,
     })
@@ -323,7 +316,7 @@ test('super can toggle schedule but cannot import or delete VMs', async () => {
       cookie: superu.cookie,
       body: { access_token: 'sk-ant-oat01-DENIED' },
     })
-    assert.equal(credPut.status, 403)
+    assert.equal(credPut.status, 404)
   } finally {
     await gw.stop()
   }

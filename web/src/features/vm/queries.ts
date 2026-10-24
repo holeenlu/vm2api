@@ -11,7 +11,7 @@ import type {
 } from '@/types/panel-vm'
 import { api } from '@/lib/api'
 
-/** 创建表单默认规格 + 本机 KVM 能力。ACL 与 POST /vms/create 相同，租户可读。 */
+/** 创建表单默认规格 + 本机 KVM 能力，供资源管理角色使用。 */
 export function vmCreateOptionsQueryOptions() {
   return queryOptions({
     queryKey: ['panel', 'vms', 'create-options'] as const,
@@ -87,10 +87,12 @@ export function vmCredentialQueryOptions(id: string, enabled = true) {
 }
 
 export function testModelsQueryOptions(vmId: string) {
-  const q = vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ''
   return queryOptions({
     queryKey: ['panel', 'test-models', vmId || ''] as const,
-    queryFn: () => api<TestModelsPayload>(`/api/panel/test-models${q}`),
+    queryFn: () =>
+      api<TestModelsPayload>(
+        `/api/panel/test-models${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ''}`
+      ),
     enabled: !!vmId,
   })
 }

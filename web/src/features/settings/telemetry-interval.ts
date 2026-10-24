@@ -1,17 +1,21 @@
+import { t as translate } from '@/i18n'
+
 export const UPLOAD_INTERVAL_DEFAULT = 600
 export const UPLOAD_INTERVAL_MIN = 60
 export const UPLOAD_INTERVAL_MAX = 86_400
 
 export type IntervalUnit = 'min' | 'hour'
 
-export const UPLOAD_INTERVAL_PRESETS: [number, string][] = [
-  [300, '5 分钟'],
-  [600, '10 分钟'],
-  [1800, '30 分钟'],
-  [3600, '1 小时'],
-  [21_600, '6 小时'],
-  [86_400, '24 小时'],
-]
+export function getUploadIntervalPresets(): [number, string][] {
+  return [
+    [300, translate('settings:duration.fiveMinutes')],
+    [600, translate('settings:duration.tenMinutes')],
+    [1800, translate('settings:duration.thirtyMinutes')],
+    [3600, translate('settings:duration.oneHour')],
+    [21_600, translate('settings:duration.sixHours')],
+    [86_400, translate('settings:duration.day')],
+  ]
+}
 
 /** Mirrors gateway `telemetryUploadInterval`: whole minutes in 1 min–24 h, else 10 min. */
 export function uploadIntervalOf(raw: unknown): number {
@@ -44,10 +48,14 @@ export function secondsFrom(amount: number, unit: IntervalUnit): number {
 }
 
 export function intervalLabel(seconds: number): string {
-  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`
+  if (seconds % 3600 === 0)
+    return translate('settings:duration.hours', { value1: seconds / 3600 })
   if (seconds > 3600) {
     const h = Math.floor(seconds / 3600)
-    return `${h} 小时 ${(seconds % 3600) / 60} 分钟`
+    return translate('settings:duration.hoursMinutes', {
+      value1: h,
+      value2: (seconds % 3600) / 60,
+    })
   }
-  return `${seconds / 60} 分钟`
+  return translate('settings:minutes', { value1: seconds / 60 })
 }

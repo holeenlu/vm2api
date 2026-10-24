@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { i18n, t as translate } from '@/i18n'
 import type { ClusterLocalStatus } from '@/types/panel-cluster'
 import type { StatusTone } from '@/types/status'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -16,11 +18,18 @@ const TONE = {
 type Row = { label: string; value: string; tone?: StatusTone; hint?: string }
 
 function controlText(c: ClusterLocalStatus['control']): string {
-  if (c.mode === 'process') return '本机进程 · 宿主网络'
-  const net = c.network_mode || '未知网络'
+  if (c.mode === 'process') return translate('cluster:localLink.process')
+  const net = c.network_mode || translate('cluster:localLink.unknownNetwork')
   const kind =
-    net === 'host' ? 'host 网络' : net === 'bridge' ? 'bridge（NAT）' : net
-  return `容器 ${c.container || ''} · ${kind}`
+    net === 'host'
+      ? translate('cluster:localLink.hostNetwork')
+      : net === 'bridge'
+        ? 'bridge（NAT）'
+        : net
+  return translate('cluster:localLink.container', {
+    value1: c.container || '',
+    value2: kind,
+  })
 }
 
 function rows(
@@ -31,25 +40,45 @@ function rows(
   const listen = `${control.listen_host ?? '—'}:${control.listen_port ?? '—'}`
   const inbound: Row =
     nat.inbound === 'loopback'
-      ? { label: '入站', value: '仅本机监听', tone: TONE.ok }
+      ? {
+          label: translate('cluster:localLink.inbound'),
+          value: translate('cluster:localLink.loopback'),
+          tone: TONE.ok,
+        }
       : nat.inbound === 'open'
         ? {
-            label: '入站',
-            value: `公网可达 ${nat.public_ip}:${control.listen_port}`,
+            label: translate('cluster:localLink.inbound'),
+            value: translate('cluster:localLink.publicReachable', {
+              value1: nat.public_ip,
+              value2: control.listen_port,
+            }),
             tone: TONE.caution,
-            hint: '面板暴露在公网，建议只监听 127.0.0.1 并走反代或防火墙',
+            hint: translate('cluster:localLink.publicWarning'),
           }
         : nat.inbound === 'closed'
-          ? { label: '入站', value: '公网不可达', tone: TONE.ok }
-          : { label: '入站', value: '—', hint: nat.note }
+          ? {
+              label: translate('cluster:localLink.inbound'),
+              value: translate('cluster:localLink.publicUnreachable'),
+              tone: TONE.ok,
+            }
+          : {
+              label: translate('cluster:localLink.inbound'),
+              value: '—',
+              hint: nat.note,
+            }
   return [
-    { label: '控制面', value: controlText(control) },
-    { label: '监听', value: listen },
     {
-      label: '公网出口',
+      label: translate('cluster:localLink.controlPlane'),
+      value: controlText(control),
+    },
+    { label: translate('cluster:localLink.listen'), value: listen },
+    {
+      label: translate('cluster:localLink.publicEgress'),
       value: nat.public_ip || '—',
       hint: nat.observed_via
-        ? `由 ${nat.observed_via.label} 观测`
+        ? translate('cluster:localLink.observedBy', {
+            value1: nat.observed_via.label,
+          })
         : nat.note || undefined,
     },
     {
@@ -58,25 +87,33 @@ function rows(
         nat.behind_nat == null
           ? '—'
           : nat.behind_nat
-            ? '在 NAT 后（仅出站，不影响接入）'
-            : '公网地址直连',
+            ? translate('cluster:localLink.behindNat')
+            : translate('cluster:localLink.publicDirect'),
     },
     inbound,
     docker.ok
       ? {
-          label: '本机 Docker',
-          value: `${docker.version} · 运行 ${docker.running ?? '—'} / ${docker.containers ?? '—'} · 槽容器 ${docker.slots ?? '—'}`,
+          label: translate('cluster:localLink.docker'),
+          value: translate('cluster:localLink.dockerSummary', {
+            value1: docker.version,
+            value2: docker.running ?? '—',
+            value3: docker.containers ?? '—',
+            value4: docker.slots ?? '—',
+          }),
           tone: TONE.ok,
         }
       : {
-          label: '本机 Docker',
-          value: '不可用',
+          label: translate('cluster:localLink.docker'),
+          value: translate('cluster:unavailable'),
           tone: TONE.bad,
           hint: docker.error || undefined,
         },
     {
-      label: '集群出站',
-      value: `${outbound.ready} / ${outbound.total} 节点已连接`,
+      label: translate('cluster:localLink.outbound'),
+      value: translate('cluster:localLink.connectedNodes', {
+        value1: outbound.ready,
+        value2: outbound.total,
+      }),
       tone:
         outbound.total === 0
           ? undefined
@@ -96,6 +133,8 @@ export function LocalLink({
   error: Error | null
   outbound: { ready: number; total: number }
 }) {
+  const { t } = useTranslation('cluster')
+
   const qc = useQueryClient()
   const refresh = useMutation({
     mutationFn: () =>
@@ -108,10 +147,11 @@ export function LocalLink({
     <div className='border-t px-4 py-3'>
       <div className='mb-2 flex items-center justify-between'>
         <span className='text-[11.5px] text-muted-foreground'>
-          链路
-          {status
-            ? ` · ${new Date(status.checked_at).toLocaleTimeString()}`
-            : ''}
+          {t('localLink.checked', {
+            value1: status
+              ? ` · ${new Date(status.checked_at).toLocaleTimeString(i18n.language)}`
+              : '',
+          })}
         </span>
         <Button
           size='sm'
@@ -120,13 +160,15 @@ export function LocalLink({
           disabled={refresh.isPending}
           onClick={() => refresh.mutate()}
         >
-          {refresh.isPending ? '观测中…' : '重新观测'}
+          {refresh.isPending
+            ? t('localLink.observing')
+            : t('localLink.observeAgain')}
         </Button>
       </div>
       {error ? (
         <p className='text-xs text-red-3'>{error.message}</p>
       ) : !status ? (
-        <p className='text-xs text-muted-foreground'>加载中…</p>
+        <p className='text-xs text-muted-foreground'>{t('loading')}</p>
       ) : (
         <dl className='grid grid-cols-1 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2'>
           {rows(status, outbound).map((row) => (
