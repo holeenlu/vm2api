@@ -1,4 +1,5 @@
 import { Plus, Trash2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { PERSONA_TEMPLATE_VARS, type RawBlock } from '@/lib/persona-template'
 import { Button } from '@/components/ui/button'
 import {
@@ -84,6 +85,8 @@ function PersonaBlockCard({
   onChange: (block: RawBlock) => void
   onRemove: () => void
 }) {
+  const { t } = useTranslation('settings')
+
   const cache = cacheControlOf(block)
   const n = index + 1
   return (
@@ -96,7 +99,7 @@ function PersonaBlockCard({
           className='h-7 w-32 font-mono text-xs'
           value={String(block.id ?? '')}
           placeholder='id'
-          aria-label={`第 ${n} 块 id`}
+          aria-label={t('persona.blockId', { value1: n })}
           onChange={(e) => onChange({ ...block, id: e.target.value })}
         />
         <label className='flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground'>
@@ -104,7 +107,7 @@ function PersonaBlockCard({
             checked={block.hide === true}
             onCheckedChange={(on) => onChange(withFlag(block, 'hide', on))}
           />
-          遮罩
+          {t('persona.mask')}
         </label>
         <label className='flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground'>
           <Switch
@@ -113,14 +116,14 @@ function PersonaBlockCard({
               onChange(withFlag(block, 'drop_if_empty', on))
             }
           />
-          空丢
+          {t('persona.dropEmpty')}
         </label>
         <Button
           type='button'
           size='icon'
           variant='ghost'
           className='ml-auto size-7 cursor-pointer text-muted-foreground hover:text-foreground'
-          aria-label={`删除第 ${n} 块`}
+          aria-label={t('persona.deleteBlock', { value1: n })}
           onClick={onRemove}
         >
           <Trash2 />
@@ -131,7 +134,7 @@ function PersonaBlockCard({
           className='min-h-16 font-mono text-xs'
           spellCheck={false}
           value={typeof block.text === 'string' ? block.text : ''}
-          aria-label={`第 ${n} 块内容`}
+          aria-label={t('persona.blockContent', { value1: n })}
           onChange={(e) => onChange({ ...block, text: e.target.value })}
         />
         <div className='flex items-center gap-2'>
@@ -142,7 +145,7 @@ function PersonaBlockCard({
             className='h-7 w-16 font-mono text-xs'
             value={cache.ttl}
             placeholder='ttl'
-            aria-label={`第 ${n} 块 cache ttl`}
+            aria-label={t('persona.blockCacheTtl', { value1: n })}
             onChange={(e) =>
               onChange(withCacheControl(block, e.target.value, cache.scope))
             }
@@ -151,7 +154,7 @@ function PersonaBlockCard({
             className='h-7 w-20 font-mono text-xs'
             value={cache.scope}
             placeholder='scope'
-            aria-label={`第 ${n} 块 cache scope`}
+            aria-label={t('persona.blockCacheScope', { value1: n })}
             onChange={(e) =>
               onChange(withCacheControl(block, cache.ttl, e.target.value))
             }
@@ -169,6 +172,8 @@ function PersonaBlockFields({
   blocks: RawBlock[]
   onChange: (blocks: RawBlock[]) => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <div className='space-y-2'>
       {blocks.map((block, index) => (
@@ -195,7 +200,7 @@ function PersonaBlockFields({
         }
       >
         <Plus />
-        加一块
+        {t('persona.addBlock')}
       </Button>
     </div>
   )
@@ -215,11 +220,13 @@ export function PersonaTemplateEditor({
   onTextChange: (text: string) => void
   onBlocksChange: (blocks: RawBlock[]) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const jsonl = (
     <Textarea
       className='h-40 font-mono text-xs'
       spellCheck={false}
-      aria-label='system 模板 JSONL'
+      aria-label={t('persona.jsonlTemplate')}
       value={text}
       onChange={(e) => onTextChange(e.target.value)}
     />

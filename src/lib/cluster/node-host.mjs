@@ -22,13 +22,13 @@ const NODE_HOST_SCRIPT = [
 export const NODE_HOST_COMMAND = `sh -c ${shellQuote(NODE_HOST_SCRIPT)}`
 
 // macOS: same lines and units as /proc. Available = free + inactive + speculative + purgeable pages
-// (what Activity Monitor can hand out without paging); slot memory = RSS of processes under ~/.vm2api.
+// (what Activity Monitor can hand out without paging); slot memory = RSS of processes under ~/.tapmodels.
 const NODE_HOST_SCRIPT_DARWIN = [
   'echo "ncpu $(sysctl -n hw.ncpu)"',
   `echo "load $(sysctl -n vm.loadavg | tr -d '{}')"`,
   'echo "MemTotal: $(( $(sysctl -n hw.memsize) / 1024 ))"',
   `vm_stat | awk -v ps="$(sysctl -n hw.pagesize)" '/^Pages (free|inactive|speculative|purgeable):/{gsub(/\\./,"",$NF); n+=$NF} END{print "MemAvailable:", int(n*ps/1024)}'`,
-  `ps -axo rss=,command= | awk -v root="$HOME/.vm2api/" 'index($0, root) && !index($0, "awk -v root"){s+=$1} END{print "cg", s*1024, 0}'`,
+  `ps -axo rss=,command= | awk -v root="$HOME/.tapmodels/" 'index($0, root) && !index($0, "awk -v root"){s+=$1} END{print "cg", s*1024, 0}'`,
 ].join('\n')
 
 export const NODE_HOST_COMMAND_DARWIN = `sh -c ${shellQuote(NODE_HOST_SCRIPT_DARWIN)}`

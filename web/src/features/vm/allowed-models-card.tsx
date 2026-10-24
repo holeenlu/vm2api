@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { catalogForVm, isCodexVm } from '@/lib/vm-kind'
@@ -69,6 +70,8 @@ function isChecked(vm: Vm, id: string) {
 }
 
 export function AllowedModelsCard({ vm }: { vm: Vm }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const me = useQuery(meQueryOptions())
   const canEdit = me.data?.role === 'admin'
@@ -89,11 +92,18 @@ export function AllowedModelsCard({ vm }: { vm: Vm }) {
         body: JSON.stringify({ allowed_models: next }),
       }),
     onSuccess: (_r, next) => {
-      toast.success(next?.length ? '已限制模型' : '已恢复全部模型')
+      toast.success(
+        next?.length
+          ? tVm('vm:allowedModelsCard.modelRestrictionsSaved')
+          : tVm('vm:allowedModelsCard.allModelsRestored')
+      )
       qc.invalidateQueries({ queryKey: vmQueryOptions(vm.id).queryKey })
       qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
     },
-    onError: (e: Error) => toast.error(e.message || '保存模型白名单失败'),
+    onError: (e: Error) =>
+      toast.error(
+        e.message || tVm('vm:allowedModelsCard.failedToSaveModelAllowlist')
+      ),
   })
 
   const toggle = (id: string, checked: boolean) => {
@@ -124,16 +134,22 @@ export function AllowedModelsCard({ vm }: { vm: Vm }) {
   return (
     <Card>
       <CardHeader className='pb-2'>
-        <CardTitle className='text-sm'>模型白名单</CardTitle>
+        <CardTitle className='text-sm'>
+          <Trans ns='vm' i18nKey='allowedModelsCard.modelAllowlist' />
+        </CardTitle>
       </CardHeader>
       <CardContent className='space-y-3'>
         <p className='text-xs text-muted-foreground'>
           {inherit
             ? gpt
-              ? '未限制，继承 GPT 模型矩阵'
-              : '未限制，继承全局模型矩阵'
-            : '仅下列模型可打入此凭证'}
-          {pro && !gpt ? ' · Pro 账号无 Fable' : ''}
+              ? tVm('vm:allowedModelsCard.unrestrictedFollowsTheGPTModelMatrix')
+              : tVm(
+                  'vm:allowedModelsCard.unrestrictedFollowsTheGlobalModelMatrix'
+                )
+            : tVm('vm:allowedModelsCard.onlyTheseModelsCanUseThisCredential')}
+          {pro && !gpt
+            ? tVm('vm:allowedModelsCard.fableIsUnavailableForProAccounts')
+            : ''}
         </p>
         {!canEdit ? (
           inherit ? null : (
@@ -142,7 +158,9 @@ export function AllowedModelsCard({ vm }: { vm: Vm }) {
             </p>
           )
         ) : policy.isLoading ? (
-          <p className='text-xs text-muted-foreground'>矩阵加载中…</p>
+          <p className='text-xs text-muted-foreground'>
+            <Trans ns='vm' i18nKey='allowedModelsCard.loadingModelMatrix' />
+          </p>
         ) : items.length ? (
           <div className='flex flex-wrap gap-x-4 gap-y-2'>
             {items.map((m) => {
@@ -168,7 +186,10 @@ export function AllowedModelsCard({ vm }: { vm: Vm }) {
           </div>
         ) : (
           <p className='text-xs text-muted-foreground'>
-            模型矩阵未加载。先到「模型」页同步一次矩阵。
+            <Trans
+              ns='vm'
+              i18nKey='allowedModelsCard.modelMatrixNotLoadedSyncItOnTheModels'
+            />
           </p>
         )}
         {canEdit ? (
@@ -178,7 +199,9 @@ export function AllowedModelsCard({ vm }: { vm: Vm }) {
             disabled={inherit || save.isPending}
             onClick={() => save.mutate(null)}
           >
-            {save.isPending ? '保存中…' : '全选（继承）'}
+            {save.isPending
+              ? tVm('vm:allowedModelsCard.saving')
+              : tVm('vm:allowedModelsCard.selectAllInherit')}
           </Button>
         ) : null}
       </CardContent>

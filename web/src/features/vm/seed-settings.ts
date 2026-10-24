@@ -6,10 +6,17 @@ import {
   type TelemetrySeedFlags,
 } from '@/features/vm/telemetry-policy'
 import { telemetryStatusLabel } from '@/features/vm/telemetry-status'
+import { localizedOption } from './localized-option'
 
 export const REJECT_FLAGS = [
-  ['reject_client_settings', '拒客户端 settings'],
-  ['reject_client_metadata_identity', '拒客户端身份'],
+  localizedOption(
+    'reject_client_settings',
+    'vm:seedSettings.rejectClientSettings'
+  ),
+  localizedOption(
+    'reject_client_metadata_identity',
+    'vm:seedSettings.rejectClientIdentity'
+  ),
 ] as const
 
 const TOP_KEYS = ['theme', 'autoUpdates', 'grove_enabled'] as const
@@ -66,6 +73,7 @@ export type SettingRow = {
 export const SEED_LOCALE_OPTIONS = [
   ['en', 'en_US.UTF-8'],
   ['cn', 'zh_CN.UTF-8'],
+  ['tw', 'zh_TW.UTF-8'],
   ['jp', 'ja_JP.UTF-8'],
 ] as const
 

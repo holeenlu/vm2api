@@ -39,7 +39,7 @@ import { isCodexVm } from '../vm/vm-kind.mjs'
 import { detectInboundPlatform } from '../protocol/platform-detect.mjs'
 import { resolveCredentialScheduleLevel } from './credential-weight.mjs'
 import { PLATFORM_SCOPE, normalizeOwnerId, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
-import { keyAllowsVm } from '../admin/key-scope.mjs'
+import { keyAllowsVm, refreshKeyScope, keyAllowsModel } from '../admin/key-scope.mjs'
 import {
   kernelFaults,
   rustKernelBusy,
@@ -493,6 +493,12 @@ export class PoolScheduler extends EventEmitter {
         return fail('all_accounts_busy', waitCandidates, waitAvailable, waitPool)
       }
       const now = Date.now()
+      // Eligibility inspection is asynchronous: a cooldown/RPM window can
+      // expire before this wait is planned. Re-read it instead of dropping its
+      // wake time and sleeping until the full request deadline.
+      if (waitPool.some((candidate) => Number(candidate.availableAt) > 0 && Number(candidate.availableAt) <= now)) {
+        continue
+      }
       const wakeAts = waitPool.map((candidate) => Number(candidate.availableAt) || 0).filter((value) => value > now)
       const concurrencyWait = waitPool.some((candidate) => candidate.busy && stickyShouldWait(candidate.waitReason))
       const waitPlan = this.resolveWaitPlan({
@@ -575,6 +581,14 @@ export class PoolScheduler extends EventEmitter {
       }
     }
     const finish = (granted) => {
+      if (!this.candidateAuthorized(granted.candidate)) {
+        granted.reservation.release()
+        if (granted.seatOpened) {
+          const seat = this.planner.seatOf(seatKey)
+          if (seat) this.planner.free(seat)
+        }
+        return fail('key_unavailable')
+      }
       consumed = true
       return {
         ...granted.candidate,
@@ -868,6 +882,8 @@ export class PoolScheduler extends EventEmitter {
   } = {}) {
     const now = Date.now()
     this.runtimeRepo?.clearExpired?.(now)
+    keyScope = refreshKeyScope(keyScope)
+    if (!keyAllowsModel(keyScope, model)) return []
     const summaries = listVms(this.projectRoot)
     const candidates = []
     // Accounts dropped by an upstream 429 / 529 cooldown; an empty pool reports
@@ -899,6 +915,8 @@ export class PoolScheduler extends EventEmitter {
         pinned: !!pin,
         quotaRequest,
       })
+      keyScope = refreshKeyScope(keyScope)
+      if (!keyAllowsModel(keyScope, model) || !keyAllowsVm(keyScope, vm)) continue
       if (!eligibility.ok) {
         const kind = eligibility.reason
         if (kind === 'rate_limited' || kind === 'overloaded') {
@@ -929,6 +947,7 @@ export class PoolScheduler extends EventEmitter {
         state,
         model: normalizeModel(model),
         priority: priorityOf(vm, eligibility.account, now),
+        groupPriority: keyScope?.resource_priorities?.[vm.id] ?? 50,
         weight: weightOf(vm, state),
         inflight,
         maxConcurrency,
@@ -944,6 +963,8 @@ export class PoolScheduler extends EventEmitter {
         waitReason: eligibility.waitReason || null,
         cooldownReason: state?.cooldown_reason || null,
         quotaRequest,
+        keyScope,
+        requestedModel: model,
         exec: this.executionContext(vm, accountId),
       })
     }
@@ -1334,6 +1355,8 @@ export class PoolScheduler extends EventEmitter {
     }
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
+    const groupPriority = Math.min(...pool.map((c) => c.groupPriority ?? 50))
+    pool = pool.filter((c) => (c.groupPriority ?? 50) === groupPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
     pool = pool.filter((candidate) => candidate.loadRatio === minLoad)
     if (pool.length === 1) return { ...pool[0], selectionReason: reasonFor('priority-load') }
@@ -1348,6 +1371,8 @@ export class PoolScheduler extends EventEmitter {
     if (!candidates.length) return null
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
+    const groupPriority = Math.min(...pool.map((c) => c.groupPriority ?? 50))
+    pool = pool.filter((c) => (c.groupPriority ?? 50) === groupPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
     pool = pool.filter((candidate) => candidate.loadRatio === minLoad)
     pool.sort((left, right) => left.lastUsedAt - right.lastUsedAt || left.accountId.localeCompare(right.accountId))
@@ -1418,7 +1443,13 @@ export class PoolScheduler extends EventEmitter {
    * release() is idempotent and hands freed concurrency to the VM's queue.
    * Seats are layered on top by claimSeat().
    */
+  candidateAuthorized(candidate) {
+    const scope = refreshKeyScope(candidate.keyScope)
+    return keyAllowsModel(scope, candidate.requestedModel ?? candidate.model) && keyAllowsVm(scope, candidate.vm)
+  }
+
   reserve(candidate, { skipQuota = false, pinned = false } = {}) {
+    if (!this.candidateAuthorized(candidate)) return null
     const requestInflight = this.inflight.get(candidate.accountId) || 0
     if (!candidate.maxConcurrency || requestInflight >= candidate.maxConcurrency) return null
     const family = isFableModel(candidate.model) ? FABLE_FAMILY_KEY : null

@@ -2,7 +2,6 @@
  * official_303 on the real chain: Node handler → kin-kernel ELF → cli-node ELF → local upstream.
  * Needs the binaries, so it is opt-in:
  *   KIN_303_KERNEL=<kin-kernel> KIN_303_CLI=<cli-node with profile mode>
- *   KIN_303_BASE_CLI=<cli-node before this change> (296 byte regression)
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -25,7 +24,6 @@ import { startRealChain } from './helpers/real-chain.mjs'
 const root = path.resolve(import.meta.dirname, '../..')
 const kernelBin = process.env.KIN_303_KERNEL || ''
 const cliBin = process.env.KIN_303_CLI || ''
-const baseCli = process.env.KIN_303_BASE_CLI || ''
 const skip = !kernelBin || !cliBin || !fs.existsSync(kernelBin) || !fs.existsSync(cliBin)
 const SKELETON = JSON.parse(fs.readFileSync(path.join(root, 'test/fixtures/official-2.1.303-skeleton.json'), 'utf8'))
 
@@ -54,7 +52,7 @@ const ENV = [
 ].join('\n')
 const AFTER_ENV =
   "\n\n# Language\nAlways respond in Chinese.\n\n<total_tokens>15000000 tokens left</total_tokens>\n\nToday's date is 2026-10-22."
-const OFFICIAL_UA = 'claude-cli/2.1.303 (external, cli)'
+const OFFICIAL_UA = 'claude-cli/2.1.303 (external, sdk-cli)'
 
 function officialRequest(model = 'claude-opus-5-5', history = []) {
   return {
@@ -123,7 +121,7 @@ test('official_303 lean on the real chain: skeleton, rules, version, CCH', { ski
     'stream',
   ])
   assert.equal(wire.body.kin_outbound_shape, undefined)
-  assert.equal(wire.headers['user-agent'], 'claude-cli/2.1.303 (external, cli)')
+  assert.equal(wire.headers['user-agent'], 'claude-cli/2.1.303 (external, sdk-cli)')
   assert.equal(wire.headers.accept, 'application/json')
   assert.equal(wire.headers['accept-encoding'], 'gzip, deflate, br, zstd')
   assert.equal(wire.headers['x-stainless-timeout'], '600')
@@ -135,7 +133,9 @@ test('official_303 lean on the real chain: skeleton, rules, version, CCH', { ski
     if (value === '***REDACTED***') continue
     assert.equal(value, wire.headers[key], key)
   }
-  for (const key of ['accept', 'accept-encoding', 'content-length', 'user-agent', 'anthropic-beta']) {
+  // Accept-Encoding is added by the HTTP implementation after the CLI fetch snapshot.
+  // Its wire value is checked above; explicit snapshot fields must still match.
+  for (const key of ['accept', 'content-length', 'user-agent', 'anthropic-beta']) {
     assert.equal(logged.outbound_headers[key], wire.headers[key], key)
   }
   assert.match(
@@ -200,7 +200,7 @@ test('official_303 lean: non-official caller and a second turn keep the cached p
   assert.equal(strip(second.body.tools), strip(first.body.tools))
 })
 
-test('official_303 full-prompt model keeps the existing body at 2.1.303; hot switch back to 296', {
+test('official_303 full-prompt model keeps the existing body at 2.1.303; hot switch to official_full at 303', {
   skip,
   timeout: 60000,
 }, async (t) => {
@@ -213,50 +213,9 @@ test('official_303 full-prompt model keeps the existing body at 2.1.303; hot swi
   const pidBefore = JSON.parse(await h.health()).pid ?? null
   h.switchPreset('official_full')
   const back = await h.send(officialRequest(), OFFICIAL_UA)
-  assert.match(back.headers['user-agent'], /^claude-cli\/2\.1\.296 /)
-  assert.match(billingOf(back), /cc_version=2\.1\.296\./)
+  assert.match(back.headers['user-agent'], /^claude-cli\/2\.1\.303 /)
+  assert.match(billingOf(back), /cc_version=2\.1\.303\./)
   assert.equal(back.body.messages.at(-1).role, 'system')
   assert.equal(back.body.system[1].text, OFFICIAL_303_IDENTITY)
   assert.equal(JSON.parse(await h.health()).pid ?? null, pidBefore)
 })
-
-for (const caller of ['official', 'bot'])
-  test(`296 presets: profile cli-node sends the same bytes as the baseline (${caller})`, {
-    skip: skip || !baseCli || !fs.existsSync(baseCli),
-    timeout: 90000,
-  }, async (t) => {
-    const request =
-      caller === 'official'
-        ? [officialRequest(), OFFICIAL_UA]
-        : [
-            {
-              model: 'claude-opus-5-5',
-              max_tokens: 1024,
-              stream: true,
-              system: [{ type: 'text', text: 'You are a helpful bot.' }],
-              messages: [{ role: 'user', content: 'q1' }],
-            },
-            'my-bot/1.0',
-          ]
-    for (const preset of ['official', 'official_full', 'zero']) {
-      const base = await (await harness(t, { preset, cli: baseCli })).send(...request)
-      const next = await (await harness(t, { preset })).send(...request)
-      const neutral = (wire) =>
-        JSON.stringify({
-          ...wire.body,
-          metadata: null,
-          // cc_prompt_id follows each attempt's outbound session; CCH follows the body.
-          system: wire.body.system.map((block) => ({
-            ...block,
-            text: block.text
-              .replace(/cch=[0-9a-f]{5}/, 'cch=X')
-              .replace(/cc_prompt_id=[0-9a-f-]{36}/, 'cc_prompt_id=X'),
-          })),
-        })
-      assert.equal(neutral(next), neutral(base), preset)
-      assert.equal(
-        next.headers['user-agent'],
-        base.headers['user-agent'].replace('(external, sdk-cli)', '(external, cli)'),
-      )
-    }
-  })

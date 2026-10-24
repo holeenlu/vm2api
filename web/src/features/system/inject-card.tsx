@@ -1,5 +1,6 @@
 import type { PersonaPreset } from '@/types/panel-routing'
 import { EyeOff, RotateCcw, SquarePlus, type LucideIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   AGENT_STANDING_MAX,
   agentStandingText,
@@ -44,6 +45,8 @@ function FlagRow({
   on: boolean
   onChange: (on: boolean) => void
 }) {
+  const { t } = useTranslation('system')
+
   const locked = state !== 'switch'
   return (
     <label
@@ -57,9 +60,9 @@ function FlagRow({
         <span className='block text-sm font-medium'>{label}</span>
         <span className='block truncate font-mono text-[10px] text-muted-foreground'>
           {state === 'builtin'
-            ? '模板自带'
+            ? t('system:includedInTemplate')
             : state === 'absent'
-              ? lockedHint || '模板未引用 · 可恢复预设'
+              ? lockedHint || t('system:notReferenced')
               : hint}
         </span>
       </span>
@@ -84,6 +87,8 @@ function FlagGroup({
   note: string
   children: React.ReactNode
 }) {
+  useTranslation('system')
+
   return (
     <section className='p-1.5'>
       <div className='flex items-center gap-1.5 px-3 pt-1.5 pb-1'>
@@ -117,6 +122,8 @@ export function InjectCard({
   env: SlotState
   onChange: (next: Compat) => void
 }) {
+  const { t } = useTranslation('system')
+
   const custom = compat.agent_standing != null
   const raw = custom ? String(compat.agent_standing) : agentStandingText(compat)
   const over = raw.length > AGENT_STANDING_MAX
@@ -128,27 +135,31 @@ export function InjectCard({
 
   return (
     <Card className='gap-0 overflow-hidden py-0'>
-      <FlagGroup icon={SquarePlus} title='注入' note='写进出站 system'>
+      <FlagGroup
+        icon={SquarePlus}
+        title={t('system:injection')}
+        note={t('system:injectionHint')}
+      >
         <FlagRow
           id='flag-standing'
-          label='常驻约束'
-          hint='agent 第一段'
+          label={t('system:standingConstraints')}
+          hint={t('system:firstAgentBlock')}
           state={standing}
           on={presetFlagEnabled(compat, 'agent_standing_presets', preset)}
           onChange={flip('agent_standing_presets')}
         />
         <FlagRow
           id='flag-env'
-          label='Environment'
-          hint='槽位时区'
+          label={t('system:environment')}
+          hint={t('system:slotTimezone')}
           state={env}
           on={presetFlagEnabled(compat, 'persona_env_presets', preset)}
           onChange={flip('persona_env_presets')}
         />
         <FlagRow
           id='flag-model-extra'
-          label='模型附加句'
-          hint='默认关'
+          label={t('system:modelExtra')}
+          hint={t('system:offByDefault')}
           state='switch'
           on={presetFlagEnabled(compat, 'model_env_extra_presets', preset)}
           onChange={flip('model_env_extra_presets')}
@@ -158,13 +169,13 @@ export function InjectCard({
       <div className='border-t border-border/60'>
         <FlagGroup
           icon={EyeOff}
-          title='usage 遮罩'
-          note='开 = 不计入调用方 usage'
+          title={t('system:usageMask')}
+          note={t('system:usageMaskHint')}
         >
           <FlagRow
             id='flag-persona-hide'
-            label='注入块'
-            hint='身份 / agent / Environment'
+            label={t('system:injectedBlocks')}
+            hint={t('system:injectedBlocksHint')}
             state='switch'
             on={personaHideEnabled(compat, preset, blocks)}
             onChange={(on) =>
@@ -173,10 +184,10 @@ export function InjectCard({
           />
           <FlagRow
             id='flag-standing-hide'
-            label='常驻约束'
-            hint='单独计'
+            label={t('system:standingConstraints')}
+            hint={t('system:countSeparately')}
             state={standingOn ? 'switch' : 'absent'}
-            lockedHint='常驻约束未注入'
+            lockedHint={t('system:constraintsNotInjected')}
             on={presetFlagEnabled(
               compat,
               'agent_standing_hide_presets',
@@ -190,12 +201,14 @@ export function InjectCard({
       <div className='space-y-2 border-t border-border/60 px-4 py-3'>
         <div className='flex items-center gap-2'>
           <label htmlFor='agent-standing' className='text-sm font-medium'>
-            常驻约束内容
+            {t('system:constraintsContent')}
           </label>
           <Badge variant='outline' className='font-normal'>
-            {custom ? '已改' : '默认'}
+            {custom ? t('system:modified') : t('system:default')}
           </Badge>
-          <span className='text-[11px] text-muted-foreground'>四档共用</span>
+          <span className='text-[11px] text-muted-foreground'>
+            {t('system:sharedPresets')}
+          </span>
           <Button
             type='button'
             size='sm'
@@ -205,7 +218,7 @@ export function InjectCard({
             onClick={() => onChange(resetAgentStanding(compat, server))}
           >
             <RotateCcw />
-            恢复默认
+            {t('system:restoreDefaults')}
           </Button>
         </div>
         <div className='relative'>
@@ -215,7 +228,7 @@ export function InjectCard({
             spellCheck={false}
             aria-invalid={over || undefined}
             value={raw}
-            placeholder='留空则不加'
+            placeholder={t('system:emptyConstraintsPlaceholder')}
             onChange={(e) =>
               onChange({ ...compat, agent_standing: e.target.value })
             }
@@ -232,7 +245,9 @@ export function InjectCard({
       </div>
       {preset === 'official_full' ? (
         <div className='space-y-1 border-t border-border/60 px-4 py-3'>
-          <div className='text-sm font-medium'>块选择</div>
+          <div className='text-sm font-medium'>
+            {t('system:blockSelection')}
+          </div>
           {selectedPreviewBlocks(blocks, undefined, preset).map((block) => {
             const id = String(block.id ?? '')
             return (

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpCircle, Copy, ExternalLink, RefreshCw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { ApiError, api, isApiError } from '@/lib/api'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -10,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   changelogQueryOptions,
+  refreshVersionStatus,
   versionQueryOptions,
   type ChangelogEntry,
   type ReleaseStatus,
@@ -20,6 +22,8 @@ async function copyText(text: string) {
 }
 
 export function AboutPane() {
+  const { t } = useTranslation('settings')
+
   const qc = useQueryClient()
   const [upgradeTarget, setUpgradeTarget] = useState<string | null>(null)
   const version = useQuery({
@@ -30,6 +34,7 @@ export function AboutPane() {
         : false,
   })
   const changelog = useQuery(changelogQueryOptions())
+  const check = useMutation({ mutationFn: () => refreshVersionStatus(qc) })
   const [confirmOpen, setConfirmOpen] = useState(false)
   const data = version.data
   const checkFailed =
@@ -41,7 +46,7 @@ export function AboutPane() {
     if (data?.upgrade?.target !== upgradeTarget) return
     if (data.upgrade.state === 'failed') {
       setUpgradeTarget(null)
-      toast.error('升级失败，后端未完成验证，请检查更新日志')
+      toast.error(t('about.upgradeFailed'))
     } else if (
       data.upgrade.state === 'succeeded' &&
       data.current_tag === upgradeTarget
@@ -49,7 +54,7 @@ export function AboutPane() {
       setUpgradeTarget(null)
       window.location.reload()
     }
-  }, [data, upgradeTarget])
+  }, [data, upgradeTarget, t])
 
   const upgrade = useMutation({
     mutationFn: () =>
@@ -63,13 +68,17 @@ export function AboutPane() {
     onSuccess: async (payload) => {
       setConfirmOpen(false)
       if (payload?.message === 'already_latest') {
-        toast.success(`已是最新 ${payload.current_tag}`)
+        toast.success(
+          t('about.upToDateVersion', { value1: payload.current_tag })
+        )
         return
       }
       if (payload?.started) {
         setUpgradeTarget(payload.target || payload.latest_tag)
         qc.setQueryData(versionQueryOptions().queryKey, payload)
-        toast.info(`正在升级到 ${payload.target || payload.latest_tag}`)
+        toast.info(
+          t('about.upgrading', { value1: payload.target || payload.latest_tag })
+        )
       }
     },
     onError: (error: Error) => {
@@ -81,7 +90,7 @@ export function AboutPane() {
         toast.error(error.message)
         if (command) {
           copyText(command)
-            .then(() => toast.success('已复制宿主机命令'))
+            .then(() => toast.success(t('about.hostCommandCopied')))
             .catch(() => undefined)
         }
         return
@@ -90,7 +99,7 @@ export function AboutPane() {
         error instanceof TypeError ||
         /failed to fetch|network|load failed/i.test(error.message)
       ) {
-        toast.info('连接中断，正在检查后端更新状态')
+        toast.info(t('about.connectionLost'))
         void qc.invalidateQueries({ queryKey: versionQueryOptions().queryKey })
         return
       }
@@ -110,72 +119,73 @@ export function AboutPane() {
     <div className='space-y-3'>
       <Card>
         <CardHeader className='flex flex-row items-center justify-between space-y-0'>
-          <CardTitle>版本</CardTitle>
+          <CardTitle>{t('about.version')}</CardTitle>
           <Button
             size='sm'
             variant='outline'
-            onClick={() => version.refetch()}
-            loading={version.isFetching}
+            onClick={() => check.mutate()}
+            loading={version.isFetching || check.isPending}
           >
             <RefreshCw />
-            检查更新
+            {t('about.checkUpdates')}
           </Button>
         </CardHeader>
         <CardContent className='space-y-3'>
           {version.isError ? (
             <Alert variant='destructive'>
-              <AlertTitle>检查失败</AlertTitle>
+              <AlertTitle>{t('about.checkFailed')}</AlertTitle>
               <AlertDescription>
                 {version.error instanceof ApiError
                   ? version.error.message
-                  : '无法读取版本'}
+                  : t('about.versionUnavailable')}
               </AlertDescription>
             </Alert>
           ) : null}
           <dl className='grid gap-2 text-sm sm:grid-cols-2'>
             <div>
-              <dt className='text-muted-foreground'>当前</dt>
+              <dt className='text-muted-foreground'>{t('about.current')}</dt>
               <dd className='font-mono'>{data?.current_tag || '—'}</dd>
             </div>
             <div>
-              <dt className='text-muted-foreground'>GitHub 最新</dt>
+              <dt className='text-muted-foreground'>
+                {t('about.latestGitHub')}
+              </dt>
               <dd className='flex items-center gap-2 font-mono'>
                 {checkFailed ? '—' : data?.latest_tag || '—'}
                 {checkFailed ? (
-                  <Badge variant='destructive'>检查失败</Badge>
+                  <Badge variant='destructive'>{t('about.checkFailed')}</Badge>
                 ) : data?.update_available ? (
-                  <Badge>有更新</Badge>
+                  <Badge>{t('about.updateAvailable')}</Badge>
                 ) : data?.update_available === false ? (
-                  <Badge variant='secondary'>已是最新</Badge>
+                  <Badge variant='secondary'>{t('about.upToDate')}</Badge>
                 ) : null}
               </dd>
             </div>
           </dl>
           {data?.source_error ? (
             <p className='text-sm text-muted-foreground'>
-              GitHub 不可达（{data.source_error}）。仍可复制宿主机命令。
+              {t('about.githubUnavailable', { value1: data.source_error })}
             </p>
           ) : null}
           {updateRunning ? (
             <Alert>
               <AlertTitle>
-                正在更新到 {upgradeTarget || data?.upgrade?.target}
+                {t('about.updating', {
+                  value1: upgradeTarget || data?.upgrade?.target,
+                })}
               </AlertTitle>
-              <AlertDescription>等待后端重启和版本验证。</AlertDescription>
+              <AlertDescription>{t('about.verifying')}</AlertDescription>
             </Alert>
           ) : data?.upgrade?.state === 'failed' ? (
             <Alert variant='destructive'>
-              <AlertTitle>更新失败</AlertTitle>
+              <AlertTitle>{t('about.updateFailed')}</AlertTitle>
               <AlertDescription>{data.upgrade.log_command}</AlertDescription>
             </Alert>
           ) : null}
           {data?.needs_wrap_cli_sync ? (
             <Alert>
-              <AlertTitle>需要重装槽内 kernel</AlertTitle>
-              <AlertDescription>
-                此跨度 changelog 提到 wrap-cli/sync。控制面升完后到内核页重装
-                kernel，或给 install.sh 加 --sync-wrap。
-              </AlertDescription>
+              <AlertTitle>{t('about.kernelRequired')}</AlertTitle>
+              <AlertDescription>{t('about.kernelHelp')}</AlertDescription>
             </Alert>
           ) : null}
           {data?.html_url ? (
@@ -185,7 +195,7 @@ export function AboutPane() {
               rel='noreferrer'
               className='inline-flex items-center gap-1 text-sm text-primary hover:underline'
             >
-              GitHub Release
+              {t('about.githubRelease')}
               <ExternalLink className='size-3.5' />
             </a>
           ) : null}
@@ -194,17 +204,15 @@ export function AboutPane() {
 
       <Card>
         <CardHeader>
-          <CardTitle>一键更新</CardTitle>
+          <CardTitle>{t('about.oneClickUpdate')}</CardTitle>
         </CardHeader>
         <CardContent className='space-y-3'>
           <p className='text-sm text-muted-foreground'>
-            在宿主机执行。保留 .env / vms / data。本地槽同步 kernel 与
-            CLI；集群槽按同一份 kernel、cli-node 和 Go
-            遥测重建镜像并换容器，不改凭证和指纹。
+            {t('about.updateScope')}
           </p>
           <pre className='overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs'>
             {data?.upgrade_command ||
-              'curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade'}
+              'curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade'}
           </pre>
           <div className='flex flex-wrap gap-2'>
             <Button
@@ -214,12 +222,12 @@ export function AboutPane() {
                 const command = data?.upgrade_command
                 if (!command) return
                 copyText(command)
-                  .then(() => toast.success('已复制'))
-                  .catch(() => toast.error('复制失败'))
+                  .then(() => toast.success(t('copied')))
+                  .catch(() => toast.error(t('copyFailed')))
               }}
             >
               <Copy />
-              复制命令
+              {t('about.copyCommand')}
             </Button>
             <Button
               size='sm'
@@ -232,7 +240,7 @@ export function AboutPane() {
               onClick={() => setConfirmOpen(true)}
             >
               <ArrowUpCircle />
-              从面板发起
+              {t('about.startFromPanel')}
             </Button>
           </div>
         </CardContent>
@@ -240,12 +248,12 @@ export function AboutPane() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Changelog</CardTitle>
+          <CardTitle>{t('about.changelog')}</CardTitle>
         </CardHeader>
         <CardContent className='space-y-4'>
           {entries.length === 0 ? (
             <p className='text-sm text-muted-foreground'>
-              没有比当前版本更新的条目。
+              {t('about.noNewEntries')}
             </p>
           ) : (
             entries.map((entry) => (
@@ -258,10 +266,10 @@ export function AboutPane() {
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title={`升级到 ${data?.latest_tag || ''}？`}
-        desc='会更新并重启控制面，面板短暂不可用。完成后自动刷新。保留槽位、配置和数据。'
-        confirmText='开始升级'
-        cancelBtnText='取消'
+        title={t('about.confirmVersion', { value1: data?.latest_tag || '' })}
+        desc={t('about.confirmDescription')}
+        confirmText={t('about.startUpgrade')}
+        cancelBtnText={t('cancel')}
         destructive
         isLoading={upgrade.isPending}
         handleConfirm={() => upgrade.mutate()}

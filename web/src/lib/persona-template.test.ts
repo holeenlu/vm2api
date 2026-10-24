@@ -240,10 +240,16 @@ describe('agent standing + system preview', () => {
       )
     ).toEqual({ env_official: 'ENV', timezone: 'UTC' })
 
+    const fullVars = {
+      ...vars,
+      identity_cli: 'CLI',
+      reporting: 'REPORTING',
+      dynamic_boundary: '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__',
+    }
     const fullOn = previewSystemBlocks(
       DEFAULT_PERSONA_TEMPLATES.official_full,
       {
-        ...vars,
+        ...fullVars,
         env_official: 'ENV',
       }
     )
@@ -268,7 +274,7 @@ describe('agent standing + system preview', () => {
     const fullOff = previewSystemBlocks(
       DEFAULT_PERSONA_TEMPLATES.official_full,
       applyPersonaEnvVars(
-        { ...vars, env_official: 'ENV', timezone: 'Asia/Tokyo' },
+        { ...fullVars, env_official: 'ENV', timezone: 'Asia/Tokyo' },
         isolated,
         'official_full'
       )

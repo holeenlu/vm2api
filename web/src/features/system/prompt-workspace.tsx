@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { PersonaPreset } from '@/types/panel-routing'
 import { Check, ChevronDown, RotateCcw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   DEFAULT_PERSONA_TEMPLATES,
-  PERSONA_PRESET_OPTIONS,
   PERSONA_PRESETS,
   formatLineError,
   parsePersonaTemplateLines,
   personaPresetFromCompat,
-  personaPresetLabel,
   presetSeed,
   stringifyPersonaTemplate,
   templateSlotState,
@@ -36,6 +35,7 @@ import {
   Problems,
 } from '@/features/settings/persona-editors'
 import { InjectCard } from './inject-card'
+import { systemPresetLabel } from './preset-label'
 import { SystemPreview } from './system-preview'
 
 type Compat = Record<string, unknown>
@@ -58,13 +58,16 @@ function PresetBar({
   summaries: Record<PersonaPreset, string>
   onView: (preset: PersonaPreset) => void
 }) {
+  const { t } = useTranslation('system')
+
   return (
     <div
       role='tablist'
-      aria-label='system 提示词档位'
+      aria-label={t('system:presetSelector')}
       className='grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5'
     >
-      {PERSONA_PRESET_OPTIONS.map(([key, label]) => {
+      {PERSONA_PRESETS.map((key) => {
+        const label = systemPresetLabel(key)
         const selected = key === viewing
         return (
           <button
@@ -85,7 +88,7 @@ function PresetBar({
               {key === active ? (
                 <span className='ml-auto flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400'>
                   <Check className='size-3' aria-hidden />
-                  生效
+                  {t('system:active')}
                 </span>
               ) : null}
             </span>
@@ -105,6 +108,7 @@ function ModelEnvExtra({
   compat: Compat
   onChange: (next: Compat) => void
 }) {
+  const { t } = useTranslation('system')
   const stored =
     compat.model_env_extra &&
     typeof compat.model_env_extra === 'object' &&
@@ -119,10 +123,9 @@ function ModelEnvExtra({
   return (
     <Card className='gap-3 px-4 py-3'>
       <div className='space-y-1'>
-        <p className='text-sm font-medium'>按模型附加</p>
+        <p className='text-sm font-medium'>{t('system:appendByModel')}</p>
         <p className='text-xs leading-5 text-muted-foreground'>
-          模板里的 {'{{model_sentence}}'} 取当前模型这一句，追加在 Environment
-          之后。没填的模型不追加。
+          {t('system:modelExtraHelp', { variable: '{{model_sentence}}' })}
         </p>
       </div>
       {rows.map(([id, value]) => (
@@ -140,7 +143,7 @@ function ModelEnvExtra({
       <div className='flex gap-2'>
         <input
           value={model}
-          placeholder='claude-sonnet-5-5'
+          placeholder={t('system:modelIdPlaceholder')}
           className='h-8 min-w-0 flex-1 rounded-md border bg-background px-2 font-mono text-xs'
           onChange={(event) => setModel(event.target.value.trim())}
         />
@@ -156,14 +159,14 @@ function ModelEnvExtra({
             setText('')
           }}
         >
-          添加
+          {t('system:addModel')}
         </Button>
       </div>
       <textarea
         value={text}
         rows={2}
         maxLength={4000}
-        placeholder='这个模型要追加的句子'
+        placeholder={t('system:modelExtraPlaceholder')}
         className='w-full rounded-md border bg-background px-2 py-1.5 text-sm'
         onChange={(event) => setText(event.target.value)}
       />
@@ -182,6 +185,8 @@ export function SystemPromptWorkspace({
   onChange: (next: Compat) => void
   onProblemsChange: (problems: string[]) => void
 }) {
+  const { t } = useTranslation('system')
+
   const [drafts, setDrafts] = useState<PersonaDrafts | null>(null)
   const active = personaPresetFromCompat(compat)
   const [viewing, setViewing] = useState<PersonaPreset>(active)
@@ -197,22 +202,30 @@ export function SystemPromptWorkspace({
     if (!drafts) return []
     const out: string[] = []
     for (const key of PERSONA_PRESETS) {
-      const at = key === active ? '' : `「${personaPresetLabel(key)}」`
+      const messageKey =
+        key === active ? 'system:templateError' : 'system:presetTemplateError'
       const parsed = parsePersonaTemplateLines(drafts[key])
       for (const err of parsed.errors)
-        out.push(`模板${at}${formatLineError(err)}`)
+        out.push(
+          t(messageKey, {
+            preset: systemPresetLabel(key),
+            error: formatLineError(err),
+          })
+        )
       for (const msg of validatePersonaTemplate(parsed.blocks))
-        out.push(`模板${at}${msg}`)
+        out.push(t(messageKey, { preset: systemPresetLabel(key), error: msg }))
     }
     return out
-  }, [drafts, active])
+  }, [drafts, active, t])
 
   useEffect(() => {
     onProblemsChange(problems)
   }, [problems, onProblemsChange])
 
   if (!drafts) {
-    return <p className='text-sm text-muted-foreground'>读取中…</p>
+    return (
+      <p className='text-sm text-muted-foreground'>{t('system:loading')}</p>
+    )
   }
 
   const setDraft = (text: string) => {
@@ -243,8 +256,10 @@ export function SystemPromptWorkspace({
           {viewing !== active ? (
             <div className='flex items-center justify-between gap-3 rounded-xl border border-dashed px-4 py-2.5'>
               <span className='text-sm text-muted-foreground'>
-                正在查看「{personaPresetLabel(viewing)}」，当前生效「
-                {personaPresetLabel(active)}」
+                {t('system:viewingPreset', {
+                  viewing: systemPresetLabel(viewing),
+                  active: systemPresetLabel(active),
+                })}
               </span>
               <Button
                 type='button'
@@ -258,25 +273,19 @@ export function SystemPromptWorkspace({
                   })
                 }
               >
-                设为生效
+                {t('system:activate')}
               </Button>
             </div>
           ) : null}
 
           {viewing === 'official_303' ? (
             <div className='space-y-1.5 rounded-xl border bg-muted/30 px-4 py-3 text-xs leading-5'>
-              <p className='font-medium'>按模型分流，版本 2.1.303</p>
+              <p className='font-medium'>{t('system:profile303Title')}</p>
               <p className='text-muted-foreground'>
-                Opus 4.8 / 5 / 5.5、Fable、Mythos 等：下面三块 system；调用方
-                system 放进第一条 user 的 &lt;system-reminder&gt;（官方调用方的
-                system 不出站）；Environment 作为尾部
-                role=system；最后一条与上一条 user 的末尾非 thinking 块打点（共
-                3–4 个断点），TTL 取协议页的缓存 TTL。
+                {t('system:profile303Lean')}
               </p>
               <p className='text-muted-foreground'>
-                Sonnet、Haiku、Opus 4.0–4.7：沿用现有 cli-hop
-                结构，只把版本号换成 2.1.303，不使用这里的模板。实际生效值见
-                设置 → 协议 → 当前出站参照。
+                {t('system:profile303Full')}
               </p>
             </div>
           ) : null}
@@ -307,9 +316,14 @@ export function SystemPromptWorkspace({
                       )}
                       aria-hidden
                     />
-                    <span className='text-sm font-medium'>模板</span>
+                    <span className='text-sm font-medium'>
+                      {t('system:template')}
+                    </span>
                     <span className='truncate text-xs text-muted-foreground'>
-                      {summaries[viewing]} · {blocks.length} 块
+                      {t('system:schemeBlocks', {
+                        summary: summaries[viewing],
+                        count: blocks.length,
+                      })}
                     </span>
                   </button>
                 </CollapsibleTrigger>
@@ -327,13 +341,15 @@ export function SystemPromptWorkspace({
                   }
                 >
                   <RotateCcw />
-                  恢复预设
+                  {t('system:restorePreset')}
                 </Button>
               </div>
               <CollapsibleContent className='space-y-3 border-t border-border/60 px-4 py-3'>
                 {viewing === 'custom' &&
                 personaDraftStoresEmpty(text, 'custom') ? (
-                  <Notice tone='caution'>空模板会回落官方提示词。</Notice>
+                  <Notice tone='caution'>
+                    {t('system:emptyTemplateHint')}
+                  </Notice>
                 ) : null}
                 <PersonaTemplateEditor
                   key={viewing}

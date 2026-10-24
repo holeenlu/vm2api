@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { ChevronDown } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   Collapsible,
   CollapsibleContent,
@@ -31,6 +32,7 @@ type Props = {
 }
 
 export function ModelAdvanced({ pol, onCatalogMode, onDefaults }: Props) {
+  const { t } = useTranslation('models')
   const defs = pol.defaults || {}
   const mode = isCatalogMode(pol.catalog_mode)
     ? pol.catalog_mode
@@ -40,11 +42,11 @@ export function ModelAdvanced({ pol, onCatalogMode, onDefaults }: Props) {
   return (
     <Collapsible className='mt-4 rounded-lg border border-border/70 bg-card'>
       <CollapsibleTrigger className='flex w-full cursor-pointer items-center justify-between px-3 py-2.5 text-left text-sm font-medium transition-colors duration-200 hover:bg-muted/40'>
-        <span>高级：目录模式 · 默认参数</span>
+        <span>{t('models:advancedTitle')}</span>
         <ChevronDown className='size-4 text-muted-foreground' />
       </CollapsibleTrigger>
       <CollapsibleContent className='space-y-3 border-t border-border/40 px-3 py-3 text-sm'>
-        <Row label='目录模式'>
+        <Row label={t('models:catalogMode')}>
           <Select
             value={mode}
             onValueChange={(v) => {
@@ -56,32 +58,38 @@ export function ModelAdvanced({ pol, onCatalogMode, onDefaults }: Props) {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value='worker_intersect_policy'>
-                Worker ∩ 策略（推荐）
+                {t('models:workerIntersectPolicy')}
               </SelectItem>
-              <SelectItem value='worker_only'>仅 Worker 目录</SelectItem>
-              <SelectItem value='policy_only'>仅策略矩阵</SelectItem>
+              <SelectItem value='worker_only'>
+                {t('models:workerOnly')}
+              </SelectItem>
+              <SelectItem value='policy_only'>
+                {t('models:policyOnly')}
+              </SelectItem>
             </SelectContent>
           </Select>
         </Row>
-        <Row label='过滤 1M beta'>
+        <Row label={t('models:filter1mBeta')}>
           <div className='flex items-center gap-2'>
             <Switch
               checked={defs.strip_context_1m !== false}
               onCheckedChange={(on) => onDefaults({ strip_context_1m: on })}
-              aria-label='过滤 1M beta'
+              aria-label={t('models:filter1mBeta')}
             />
             <span className='text-xs text-muted-foreground'>
-              {defs.strip_context_1m !== false ? '已开启' : '已关闭'}
+              {defs.strip_context_1m !== false
+                ? t('models:on')
+                : t('models:off')}
             </span>
           </div>
         </Row>
         <div className='space-y-1'>
-          <Label>未入库通配</Label>
+          <Label>{t('models:fallbackWildcard')}</Label>
           <Textarea
             className='min-h-[72px] font-mono text-xs'
             rows={3}
             value={whitelistText}
-            placeholder='只兜底未设开关的新 id'
+            placeholder={t('models:fallbackPlaceholder')}
             onChange={(e) =>
               onDefaults({
                 context_1m_whitelist: e.target.value
@@ -92,22 +100,23 @@ export function ModelAdvanced({ pol, onCatalogMode, onDefaults }: Props) {
             }
           />
           <p className='text-xs text-muted-foreground'>
-            行内「透传 / 剥离」优先。通配只覆盖未设开关的 dated id，例如
-            claude-sonnet-5-日期。不要把 Fable / Opus 写进来。
+            {t('models:fallbackDescription')}
           </p>
         </div>
-        <Row label='规范化 thinking'>
+        <Row label={t('models:normalizeThinking')}>
           <div className='flex items-center gap-2'>
             <Switch
               checked={defs.normalize_thinking !== false}
               onCheckedChange={(on) => onDefaults({ normalize_thinking: on })}
             />
             <span className='text-xs text-muted-foreground'>
-              {defs.normalize_thinking !== false ? '已开启' : '已关闭'}
+              {defs.normalize_thinking !== false
+                ? t('models:on')
+                : t('models:off')}
             </span>
           </div>
         </Row>
-        <Row label='fallback budget'>
+        <Row label={t('models:fallbackBudget')}>
           <Input
             className='h-8 w-[140px]'
             type='number'
@@ -119,7 +128,7 @@ export function ModelAdvanced({ pol, onCatalogMode, onDefaults }: Props) {
             }
           />
         </Row>
-        <Row label='默认 max_tokens'>
+        <Row label={t('models:maxTokensDefault')}>
           <Input
             className='h-8 w-[140px]'
             type='number'
@@ -135,6 +144,8 @@ export function ModelAdvanced({ pol, onCatalogMode, onDefaults }: Props) {
 }
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
+  useTranslation('models')
+
   return (
     <div className='flex flex-wrap items-center gap-3'>
       <span className='w-32 shrink-0 text-muted-foreground'>{label}</span>

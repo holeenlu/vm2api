@@ -215,27 +215,30 @@ test('a failed lookup keeps the last known location and records the error', asyn
   assert.equal(pool.proxyTimezone(id), 'Asia/Tokyo')
 })
 
-test('binding a proxy moves the slot onto the exit node timezone', async () => {
-  const pool = makePool(async () => ({
-    ok: true,
-    geo: { ip: '203.0.113.9', country: 'Japan', timezone: 'Asia/Tokyo' },
-  }))
-  const id = pool.importLines('1.2.3.4:1080').items[0].id
-  pool.bind(id, 'vm-01')
-  const root = seedProject({
-    id: 'vm-01',
-    timezone: 'America/Los_Angeles',
-    fingerprint: { timezone: 'America/Los_Angeles' },
-    proxy: { id },
-  })
+for (const locale of ['en_US.UTF-8', 'zh_TW.UTF-8']) {
+  test(`binding a proxy moves a ${locale} slot onto the exit node timezone`, async () => {
+    const pool = makePool(async () => ({
+      ok: true,
+      geo: { ip: '203.0.113.9', country: 'Japan', timezone: 'Asia/Tokyo' },
+    }))
+    const id = pool.importLines('1.2.3.4:1080').items[0].id
+    pool.bind(id, 'vm-01')
+    const root = seedProject({
+      id: 'vm-01',
+      locale,
+      timezone: 'America/Los_Angeles',
+      fingerprint: { timezone: 'America/Los_Angeles' },
+      proxy: { id },
+    })
 
-  const synced = await syncVmTimezoneFromProxy(root, pool, 'vm-01')
-  assert.deepEqual(synced, { ok: true, applied: true, timezone: 'Asia/Tokyo', reason: null })
-  const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-01.json'), 'utf8'))
-  assert.equal(vm.timezone, 'Asia/Tokyo')
-  assert.equal(vm.timezone_source, 'proxy_geo')
-  assert.equal(vm.fingerprint.timezone, 'Asia/Tokyo')
-})
+    const synced = await syncVmTimezoneFromProxy(root, pool, 'vm-01')
+    assert.deepEqual(synced, { ok: true, applied: true, timezone: 'Asia/Tokyo', reason: null })
+    const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-01.json'), 'utf8'))
+    assert.equal(vm.timezone, 'Asia/Tokyo')
+    assert.equal(vm.timezone_source, 'proxy_geo')
+    assert.equal(vm.fingerprint.timezone, 'Asia/Tokyo')
+  })
+}
 
 test('a hand-pinned slot timezone survives a proxy bind unless forced', async () => {
   const pool = makePool(async () => ({ ok: true, geo: { timezone: 'Asia/Tokyo' } }))

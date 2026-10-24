@@ -1,3 +1,4 @@
+import { createUsageEvidence, hasCompleteUsage } from '../protocol/usage-evidence.mjs'
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -562,6 +563,7 @@ export async function callGoWorker({
       via: 'go-worker-mock',
       terminalState: mock.ok ? 'verified' : 'error',
       usage: mock.body?.usage || null,
+      usageComplete: !!mock.ok && hasCompleteUsage(mock.body?.usage),
       model: mock.body?.model || null,
       stopReason: mock.body?.stop_reason || null,
     }
@@ -604,6 +606,7 @@ export async function callGoWorker({
       body: parsed,
       headers,
       usage: parsed?.usage || null,
+      usageComplete: !!parsed?.stop_reason && hasCompleteUsage(parsed?.usage),
       model: parsed?.model || null,
       stopReason: parsed?.stop_reason || null,
       terminalState: headers['x-terminal-state'] || null,
@@ -729,6 +732,7 @@ export async function streamGoWorker({
       terminalState: payload.ok ? 'verified' : 'error',
       committed: !!payload.ok,
       usage: payload.body?.usage || null,
+      usageComplete: !!payload.ok && hasCompleteUsage(payload.body?.usage),
       model: payload.body?.model || null,
       stopReason: payload.body?.stop_reason || null,
       ttftMs: mockTtftMs,
@@ -736,6 +740,7 @@ export async function streamGoWorker({
     }
   }
   let committed = false
+  const evidence = createUsageEvidence()
   // Hop-relative TTFT. firstTokenAt is epoch ms so request logs subtract ingress t0.
   const startedAt = Date.now()
   let ttftMs = null
@@ -819,6 +824,7 @@ export async function streamGoWorker({
     }
     const observeSseEvent = (event) => {
       if (!event) return event
+      evidence.observe(event)
       if (ttftMs == null && isFirstTokenEvent(event)) ttftMs = Date.now() - startedAt
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
@@ -938,6 +944,7 @@ export async function streamGoWorker({
         // Trailer stays authoritative, but it may carry totals only (Codex/Responses hops).
         // Merge so SSE `input_tokens_details` / cache breakdown survives instead of being short-circuited.
         usage: mergeUsage(mergeUsage(assembled?.usage || null, sseUsage), meta.usage),
+        usageComplete: evidence.snapshot().usageComplete,
         model: meta.model || sseModel || assembled?.model || null,
         stopReason,
         sawMessageStop,
@@ -955,6 +962,7 @@ export async function streamGoWorker({
     if (signal?.aborted) {
       return clientCancelledResult({
         via: 'go-worker-stream',
+        ...evidence.snapshot(),
         ttftMs,
         firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
         committed,
@@ -964,6 +972,7 @@ export async function streamGoWorker({
       ok: false,
       status: 0,
       via: 'go-worker-stream',
+      ...evidence.snapshot(),
       body: {
         type: 'error',
         error: {
@@ -1257,11 +1266,4 @@ export async function callWorkerGet(exec, requestPath, { timeoutMs = 30000, sign
       transportError: true,
     }
   }
-}
-
-export async function countTokensViaWorker(exec, { body, headers = {}, timeoutMs = 45000 } = {}) {
-  if (isCrsMock()) {
-    return { ok: true, status: 200, body: { input_tokens: 8 }, headers: {}, via: 'go-worker-mock' }
-  }
-  return runSlotOauth(exec, 'count-tokens', { body, headers, timeoutMs })
 }

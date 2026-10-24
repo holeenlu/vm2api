@@ -39,6 +39,8 @@ function seed(db, rows) {
       model: 'claude-sonnet-4',
       status: 200,
       vm_id: 'vm-a',
+      actual_cost: r.total_cost ?? null,
+      user_id: r.api_key_id === 'k1' ? 'u1' : r.api_key_id === 'k2' ? 'u2' : null,
       ...r,
     }
     repo.insertSummary(rec)
@@ -111,7 +113,7 @@ test('JS-filtered paging hands back the scan cursor instead of ending early', ()
   assert.ok(seen.every((r) => r.errorClass === 'timeout'))
 })
 
-test('user owner scope keeps only own key / own user rows and ignores other tenants', () => {
+test('caller snapshot excludes unattributed rows even when their current key is owned', () => {
   const db = freshDb()
   seed(db, [
     { user_id: 'u1', api_key_id: 'k1' },
@@ -120,9 +122,9 @@ test('user owner scope keeps only own key / own user rows and ignores other tena
   ])
   const view = new UsageLogsView(db)
   const mine = view.listBatch({ owner_user_id: 'u1' }).logs
-  assert.equal(mine.length, 2)
+  assert.equal(mine.length, 1)
   assert.ok(mine.every((r) => r.keyId === 'k1'))
-  assert.equal(view.summary({ owner_user_id: 'u1' }).totalRequests, 2)
+  assert.equal(view.summary({ owner_user_id: 'u1' }).totalRequests, 1)
   const opts = view.filterOptions({ owner_user_id: 'u1' })
   assert.deepEqual(opts.users, [{ id: 'u1', name: 'alice' }])
   assert.deepEqual(opts.keys, [{ id: 'k1', name: 'alice-key', userId: 'u1' }])

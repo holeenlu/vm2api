@@ -1,4 +1,6 @@
+import { t } from '@/i18n'
 import { ArrowUpRight, Download, PlugZap, Server } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Reveal } from './reveal'
 import { docsHref } from './steps'
 
@@ -6,30 +8,50 @@ const STEPS = [
   {
     n: '1',
     Icon: Server,
-    title: '安装',
-    body: '一键脚本或 Docker Compose 拉起控制面，打开 /console 登录。',
+    get title() {
+      return t('welcome:install')
+    },
+    get body() {
+      return t('welcome:installHelp')
+    },
     href: docsHref('guide/install'),
-    label: '安装文档',
+    get label() {
+      return t('welcome:installDocs')
+    },
   },
   {
     n: '2',
     Icon: Download,
-    title: '导入',
-    body: '建槽、绑出口、写入订阅账号，等官方初装完成后打开调度。',
+    get title() {
+      return t('welcome:import')
+    },
+    get body() {
+      return t('welcome:quickImportHelp')
+    },
     href: docsHref('guide/console/import'),
-    label: '导入文档',
+    get label() {
+      return t('welcome:importDocs')
+    },
   },
   {
     n: '3',
     Icon: PlugZap,
-    title: '调用',
-    body: '签发 sk-vm- 密钥，把客户端的 base URL 指到这台网关。',
+    get title() {
+      return t('welcome:call')
+    },
+    get body() {
+      return t('welcome:callHelp')
+    },
     href: docsHref('guide/clients'),
-    label: '接入文档',
+    get label() {
+      return t('welcome:connectionDocs')
+    },
   },
 ] as const
 
 export function WelcomeQuickStart() {
+  const { t } = useTranslation('welcome')
+
   return (
     <section
       id='welcome-quick-start'
@@ -38,13 +60,13 @@ export function WelcomeQuickStart() {
       <div className='mx-auto max-w-6xl'>
         <Reveal className='mb-16 text-center md:mb-20'>
           <p className='mb-3 text-xs font-medium tracking-widest text-muted-foreground uppercase'>
-            快速开始
+            {t('welcome:quickStart')}
           </p>
           <h2 className='text-2xl font-bold tracking-tight md:text-3xl'>
-            三步用起来
+            {t('welcome:threeSteps')}
           </h2>
           <p className='mx-auto mt-3 max-w-md text-sm leading-relaxed text-muted-foreground'>
-            顺序就是生产路径：先有控制面，再有可调度的槽，最后才是客户端。
+            {t('welcome:quickStartHelp')}
           </p>
         </Reveal>
 

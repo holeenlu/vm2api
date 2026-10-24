@@ -90,11 +90,20 @@ export class ApiScheduler {
     this.endpoints = Array.isArray(endpoints) ? endpoints : []
   }
 
-  catalog() {
+  hasReadySupply(now = Date.now()) {
+    return this.endpoints.some(
+      (ep) =>
+        !ep.disabled &&
+        modelIdsForEndpoint(ep).length > 0 &&
+        (ep.api_key_entries || []).some((key) => keyReady(key, now, ep.disable_cooling)),
+    )
+  }
+
+  catalog(allowed = null) {
     const data = []
     const seen = new Set()
     for (const ep of this.endpoints) {
-      if (ep.disabled) continue
+      if (ep.disabled || (allowed && !allowed.includes(ep.id))) continue
       for (const id of modelIdsForEndpoint(ep, { forcePrefix: this.forcePrefix })) {
         const k = lower(id)
         if (seen.has(k)) continue
@@ -111,9 +120,9 @@ export class ApiScheduler {
     return { object: 'list', data, source: 'api-endpoints' }
   }
 
-  pick(requestedModel, now = Date.now()) {
+  pick(requestedModel, now = Date.now(), allowed = null) {
     const parents = this.endpoints
-      .filter((ep) => endpointMatchesModel(ep, requestedModel))
+      .filter((ep) => (!allowed || allowed.includes(ep.id)) && endpointMatchesModel(ep, requestedModel))
       .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))
     if (!parents.length) {
       return { ok: false, code: 'model_not_found', message: `no api endpoint serves ${requestedModel}` }

@@ -1,4 +1,4 @@
-import { Link } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { getDisplayNameInitials } from '@/lib/utils'
 import useDialogState from '@/hooks/use-dialog-state'
@@ -12,11 +12,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { AccountMenuItems } from '@/components/account-menu-items'
 import { SignOutDialog } from '@/components/sign-out-dialog'
 
 export function ProfileDropdown() {
   const [open, setOpen] = useDialogState()
-  const user = useAuthStore((s) => s.user) || 'admin'
+  const user = useAuthStore((s) => s.me?.display_name || s.user) || ''
+  const { t } = useTranslation('common')
   const role = useAuthStore((s) => s.me?.role) || ''
   return (
     <>
@@ -33,27 +35,19 @@ export function ProfileDropdown() {
             <div className='flex flex-col gap-1.5'>
               <p className='text-sm leading-none font-medium'>{user}</p>
               <p className='text-xs leading-none text-muted-foreground'>
-                {role || '已登录'}
+                {role === 'admin'
+                  ? t('common:administrator')
+                  : role === 'super'
+                    ? t('common:operator')
+                    : t('common:user')}
               </p>
             </div>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem asChild>
-            <Link to='/settings/$tab' params={{ tab: 'sticky' }}>
-              设置
-            </Link>
-          </DropdownMenuItem>
-          <DropdownMenuItem asChild>
-            <Link to='/settings/$tab' params={{ tab: 'about' }}>
-              关于 / 更新
-            </Link>
-          </DropdownMenuItem>
-          <DropdownMenuItem asChild>
-            <Link to='/users'>用户</Link>
-          </DropdownMenuItem>
+          <AccountMenuItems />
           <DropdownMenuSeparator />
           <DropdownMenuItem variant='destructive' onClick={() => setOpen(true)}>
-            退出
+            {t('common:signOut')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

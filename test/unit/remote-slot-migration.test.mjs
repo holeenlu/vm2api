@@ -13,7 +13,7 @@ const oldSlot = {
   Id: 'old-slot-id',
   State: { Running: true },
   Config: {
-    Image: 'vm2api/kin-slot-ubuntu:old',
+    Image: 'tapmodels/kin-slot-ubuntu:old',
     User: '1000:1000',
     Cmd: ['/opt/kin/kin-kernel', '--gateway-worker', '--config', '/run/kin/kernel.json'],
     Labels: { 'kin.vm': '1', 'kin.vm.layout': '2' },
