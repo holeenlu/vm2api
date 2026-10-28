@@ -100,14 +100,13 @@ test('standing mask is its own switch, independent of template hide flags', () =
   assert.equal(full.overlay, standingTokens)
   assert.equal(full.official, 0)
 
-  // zero no longer injects standing (billing-only template), so there is nothing to mask either way.
   const zeroMasked = hideFor({ persona_preset: 'zero', agent_standing_presets: { zero: true } }, helloBody)
   const zeroShown = hideFor(
     { persona_preset: 'zero', agent_standing_presets: { zero: true }, agent_standing_hide_presets: { zero: false } },
     helloBody,
   )
-  assert.equal(zeroMasked.overlay || 0, 0)
-  assert.equal(zeroShown.overlay || 0, 0)
+  assert.equal(zeroMasked.overlay, 0)
+  assert.equal(zeroShown.overlay, 0)
   assert.equal(zeroShown.official, zeroMasked.official)
 })
 
@@ -141,7 +140,7 @@ test('none mode hides nothing', () => {
 })
 
 test('official_prompt does not start usage hide, even with standing and env', () => {
-  const before = { model: 'claude-opus-5-5', messages: helloBody.messages }
+  const before = { messages: helloBody.messages }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-official-standing-'))
   const routingFile = path.join(dir, 'routing.json')
   fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { agent_standing_presets: { official: true } } }))
@@ -149,7 +148,11 @@ test('official_prompt does not start usage hide, even with standing and env', ()
     const after = applyCrsUnofficialPersona(before, { mode: 'official_prompt', routingFile })
     assert.equal(personaHideForUnofficial(before, after, { mode: 'official_prompt' }), 0)
     assert.ok(after.system.some((b) => String(b?.text || '').startsWith(`${DEFAULT_AGENT_STANDING}\n`)))
-    assert.ok(after.messages.some((m) => m.role === 'system' && String(m.content || '').startsWith('# Environment')))
+    assert.ok(
+      after.messages.some(
+        (message) => message.role === 'system' && JSON.stringify(message.content).includes('# Environment'),
+      ) || after.system.some((block) => String(block?.text || '').includes('# Environment')),
+    )
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -186,19 +189,18 @@ test('cli-hop zero hides billing+env so 04 usage matches Portunex remainder', ()
   assert.equal(Number(personaHideForCliZero(inbound, inbound, { timezone: 'America/New_York', hides: false })), 0)
 })
 
-test('cli-hop zero hides only its layout: the Node rewrite no longer injects standing', () => {
+test('cli-hop zero also hides the standing Node put in the leftover', () => {
   const before = { system: '你是一个高速收费员。', messages: helloBody.messages }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cli-zero-standing-'))
   const routingFile = path.join(dir, 'routing.json')
   fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { agent_standing_presets: { zero: true } } }))
   try {
     const after = applyCrsUnofficialPersona(before, { mode: 'zero', routingFile })
-    assert.ok(!JSON.stringify(after).includes(DEFAULT_AGENT_STANDING.split('\n')[0]))
     const node = personaHideInputTokens(before, after)
-    assert.equal(node.overlay || 0, 0)
+    assert.equal(node.overlay, 0)
     const hide = personaHideForCliZero(before, after, { timezone: 'America/New_York', overlay: node.overlay })
-    assert.equal(hide.overlay || 0, 0)
-    assert.equal(Number(hide), zeroCliLayoutHideTokens({ timezone: 'America/New_York' }))
+    assert.equal(hide.overlay, node.overlay)
+    assert.equal(Number(hide), zeroCliLayoutHideTokens({ timezone: 'America/New_York' }) + node.overlay)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -1,13 +1,21 @@
-import { useCallback, useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import { useMutation, useMutationState, useQuery } from '@tanstack/react-query'
 import { VIEW_TITLES } from '@/config/nav'
 import type { VmProxySnap } from '@/types/panel-vm'
+import type { ProxyQualityReport } from '@/types/proxy-quality'
 import { Plus, Settings2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { useVmIndex } from '@/hooks/use-vm-index'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog'
 import {
   Sheet,
   SheetContent,
@@ -20,6 +28,7 @@ import { PageHeader } from '@/components/page-header'
 import { SectionSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
+import { useVmIndex } from '@/features/vm/use-vm-index'
 import { ProxyBulkActions } from './proxy-bulk-actions'
 import { ProxyEditDialog } from './proxy-edit-dialog'
 import { createProxyHover } from './proxy-hover'
@@ -27,6 +36,7 @@ import { ProxyImportPanel } from './proxy-import-panel'
 import { ProxyList } from './proxy-list'
 import { ProxyManagePanel } from './proxy-manage-panel'
 import { ProxyOverview } from './proxy-overview'
+import { ProxyQualityDialog } from './proxy-quality-dialog'
 import {
   type ProxyRegionFilter,
   REGION_ANY,
@@ -39,6 +49,8 @@ import {
   bindOutcome,
   deleteConfirmText,
   disableConfirmText,
+  probeOneOutcome,
+  type ProbeOneResult,
 } from './proxy-results'
 import type { ProxyRowActions } from './proxy-row'
 import {
@@ -59,6 +71,7 @@ const PROBE_KEY = ['panel', 'proxies', 'probe'] as const
 const GEO_KEY = ['panel', 'proxies', 'geo'] as const
 const COPY_KEY = ['panel', 'proxies', 'reveal'] as const
 const TOGGLE_KEY = ['panel', 'proxies', 'toggle'] as const
+const QUALITY_KEY = ['panel', 'proxies', 'quality'] as const
 const LS_RAIL_COLLAPSED = 'kin_proxy_region_rail_collapsed'
 
 function readRailCollapsed(): boolean {
@@ -91,16 +104,17 @@ function usePendingIds(mutationKey: readonly string[]): Set<string> {
   return new Set(ids)
 }
 
-function firstOf(set: Set<string>): string {
-  for (const id of set) return id
-  return ''
-}
-
 export function ProxiesPage() {
+  const { t: translate } = useTranslation('proxies')
+
   const px = useQuery(proxiesQueryOptions())
   const me = useQuery(meQueryOptions())
-  // 租户只能增删改自己的代理；测通、测地理、启停、绑定、池设置都是管理员接口。
-  const canManage = me.data?.role === 'admin'
+  const canManage = me.data?.role === 'super_admin'
+  const canConfigurePool = me.data?.role === 'super_admin'
+  const [qualityTarget, setQualityTarget] = useState<{
+    proxy: VmProxySnap
+    report: ProxyQualityReport
+  } | null>(null)
   const { list: vms } = useVmIndex()
   const refresh = useRefreshProxies()
   const [hover] = useState(createProxyHover)
@@ -139,10 +153,8 @@ export function ProxiesPage() {
   const slotsUsed = Number(tot.slots_used ?? tot.bound ?? 0)
   const slotsCap = Number(tot.slots_cap ?? total * bindLimit)
 
-  const sorted = useMemo(
-    () => sortedProxies(list, sortKey, sortDir),
-    [list, sortKey, sortDir]
-  )
+  // Host labels can be localized (local exits), so do not cache their ordering.
+  const sorted = sortedProxies(list, sortKey, sortDir)
   const vmById = useMemo(() => new Map(vms.map((v) => [v.id, v])), [vms])
   const ownerOf = useMemo(() => {
     const out = new Map<string, VmProxySnap>()
@@ -151,22 +163,15 @@ export function ProxiesPage() {
   }, [list])
   // 输入即「挑可用节点」：有关键词时只留可绑且有空位的，空关键词仍看全集。
   // 地区之外的全部筛选；地区栏的计数也按它算，所以单独留一个谓词。
-  const matchesOthers = useCallback(
-    (p: VmProxySnap) =>
-      proxyInFilter(p, filter, bindLimit) &&
-      (!deferredQuery || proxyInFilter(p, 'open', bindLimit)) &&
-      proxyMatchesQuery(p, deferredQuery, (id) => vmById.get(id)?.name || ''),
-    [filter, bindLimit, deferredQuery, vmById]
-  )
-  const matches = useCallback(
-    (p: VmProxySnap) => proxyInRegion(p, region) && matchesOthers(p),
-    [region, matchesOthers]
-  )
-  const rows = useMemo(() => sorted.filter(matches), [sorted, matches])
-  const regions = useMemo(
-    () => regionGroups(list, bindLimit, matchesOthers),
-    [list, bindLimit, matchesOthers]
-  )
+  // Recompute locale-sensitive labels/search on render; form state is independent.
+  const matchesOthers = (p: VmProxySnap) =>
+    proxyInFilter(p, filter, bindLimit) &&
+    (!deferredQuery || proxyInFilter(p, 'open', bindLimit)) &&
+    proxyMatchesQuery(p, deferredQuery, (id) => vmById.get(id)?.name || '')
+  const matches = (p: VmProxySnap) =>
+    proxyInRegion(p, region) && matchesOthers(p)
+  const rows = sorted.filter(matches)
+  const regions = regionGroups(list, bindLimit, matchesOthers)
   const regionTotals = regions.reduce(
     (acc, g) => ({ count: acc.count + g.count, free: acc.free + g.free }),
     { count: 0, free: 0 }
@@ -182,14 +187,46 @@ export function ProxiesPage() {
   const probeOne = useMutation({
     mutationKey: PROBE_KEY,
     mutationFn: (id: string) =>
-      api(`/api/panel/proxies/${encodeURIComponent(id)}/probe`, {
-        method: 'POST',
-      }),
-    onSuccess: async () => {
-      toast.success('探测完成')
+      api<ProbeOneResult>(
+        `/api/panel/proxies/${encodeURIComponent(id)}/probe`,
+        {
+          method: 'POST',
+        }
+      ),
+    onSuccess: async (data, id) => {
+      const out = probeOneOutcome(data)
+      const name = list.find((p) => p.id === id)
+      toast[out.level](`${name ? proxyLabel(name) : id}：${out.text}`)
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
+  })
+  const qualityOne = useMutation({
+    mutationKey: QUALITY_KEY,
+    mutationFn: (id: string) =>
+      api<{ report: ProxyQualityReport }>(
+        `/api/panel/proxies/${encodeURIComponent(id)}/quality-check`,
+        { method: 'POST' }
+      ),
+    onSuccess: async ({ report }, id) => {
+      const proxy = list.find((p) => p.id === id)
+      if (proxy) setQualityTarget({ proxy, report })
+      const level =
+        report.failed_count || report.challenge_count
+          ? 'warning'
+          : report.warn_count
+            ? 'warning'
+            : 'success'
+      toast[level](
+        translate('proxies:qualityCompleted', {
+          p0: report.score,
+          p1: report.grade,
+        })
+      )
+      await refresh()
+    },
+    onError: (error: Error) =>
+      toast.error(translate('proxies:qualityFailed', { p0: error.message })),
   })
   const geoOne = useMutation({
     mutationKey: GEO_KEY,
@@ -202,7 +239,11 @@ export function ProxiesPage() {
       const where = [data.geo?.country, data.geo?.timezone]
         .filter(Boolean)
         .join(' · ')
-      toast.success(where ? `出口位置 ${where}` : '已检测')
+      toast.success(
+        where
+          ? translate('proxies:exitLocation', { p0: where })
+          : translate('proxies:checked')
+      )
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -213,7 +254,7 @@ export function ProxiesPage() {
         method: 'DELETE',
       }),
     onSuccess: async () => {
-      toast.success('已删除')
+      toast.success(translate('proxies:deleted'))
       setDelId('')
       await refresh()
     },
@@ -227,7 +268,9 @@ export function ProxiesPage() {
         { method: 'POST' }
       ),
     onSuccess: async (_data, { on }) => {
-      toast.success(on ? '已启用' : '已禁用')
+      toast.success(
+        on ? translate('proxies:enabled') : translate('proxies:disabled')
+      )
       setDisableId('')
       await refresh()
     },
@@ -248,8 +291,12 @@ export function ProxiesPage() {
       const name = vmById.get(vmId)?.name || vmId
       const out = bindOutcome(
         from && from.id !== id
-          ? `${name} 已从 ${proxyLabel(from)} 换绑到 ${to ? proxyLabel(to) : id}`
-          : `${name} 已绑定`,
+          ? translate('proxies:slotRebound', {
+              p0: name,
+              p1: proxyLabel(from),
+              p2: to ? proxyLabel(to) : id,
+            })
+          : translate('proxies:slotBound', { p0: name }),
         data?.worker
       )
       toast[out.level](out.text)
@@ -264,7 +311,7 @@ export function ProxiesPage() {
         body: JSON.stringify({ vm_id: vmId }),
       }),
     onSuccess: async () => {
-      toast.success('已解绑')
+      toast.success(translate('proxies:unbound'))
       setUnbindTarget(null)
       await refresh()
     },
@@ -286,16 +333,16 @@ export function ProxiesPage() {
     onSuccess: async (data) => {
       const uri = data.uri || ''
       if (!uri) {
-        toast.error('未取到地址')
+        toast.error(translate('proxies:addressUnavailable'))
         return
       }
       try {
         await navigator.clipboard.writeText(uri)
-        toast.success('已复制 SOCKS5 地址（含账密）')
+        toast.success(translate('proxies:addressCopied'))
       } catch {
         // 剪贴板 API 需要安全上下文（HTTPS 或 localhost），失败要说明白，
         // 而不是静默什么都没发生。这里也不把 uri 兜底渲染出来。
-        toast.error('浏览器拒绝了剪贴板写入，请检查是否在 HTTPS 下访问')
+        toast.error(translate('proxies:clipboardDenied'))
       }
     },
     onError: (error: Error) => toast.error(error.message),
@@ -305,15 +352,29 @@ export function ProxiesPage() {
   const geoing = usePendingIds(GEO_KEY)
   const copying = usePendingIds(COPY_KEY)
   const toggling = usePendingIds(TOGGLE_KEY)
+  const qualityChecking = usePendingIds(QUALITY_KEY)
 
   const actions: ProxyRowActions = {
-    onCopy: (id) => copyUri.mutate(id),
+    onCopy:
+      me.data?.role === 'super_admin' ? (id) => copyUri.mutate(id) : undefined,
     onEdit: setEditId,
+    onQuality: (id, run = true) => {
+      const proxy = list.find((p) => p.id === id)
+      if (!run) {
+        if (proxy?.quality) setQualityTarget({ proxy, report: proxy.quality })
+      } else if (!qualityChecking.has(id)) {
+        if (qualityChecking.size >= 4)
+          toast.info(translate('proxies:tooManyChecks'))
+        else qualityOne.mutate(id)
+      }
+    },
     onDelete: setDelId,
     onVmDragChange: setDragVm,
     ...(canManage
       ? {
-          onProbe: (id: string) => probeOne.mutate(id),
+          onProbe: (id: string) => {
+            if (!probing.has(id)) probeOne.mutate(id)
+          },
           onGeo: (id: string) => geoOne.mutate(id),
           onToggleEnabled: (item: VmProxySnap) => {
             if (!item.id) return
@@ -365,7 +426,7 @@ export function ProxiesPage() {
       title={VIEW_TITLES.proxies}
       extra={
         <div className='flex flex-wrap items-center gap-2'>
-          {canManage ? (
+          {canConfigurePool ? (
             <>
               <ProxyBulkActions empty={!list.length} />
               <Button
@@ -374,7 +435,7 @@ export function ProxiesPage() {
                 onClick={() => setDrawer({ open: true, kind: 'settings' })}
               >
                 <Settings2 aria-hidden='true' />
-                池设置
+                {translate('proxies:poolSettings')}
               </Button>
             </>
           ) : null}
@@ -383,7 +444,7 @@ export function ProxiesPage() {
             onClick={() => setDrawer({ open: true, kind: 'import' })}
           >
             <Plus aria-hidden='true' />
-            添加代理
+            {translate('proxies:addProxy')}
           </Button>
         </div>
       }
@@ -476,10 +537,11 @@ export function ProxiesPage() {
               hover={hover}
               dragVm={dragVm}
               pending={{
-                probe: firstOf(probing),
-                geo: firstOf(geoing),
-                copy: firstOf(copying),
-                toggle: firstOf(toggling),
+                probe: probing,
+                geo: geoing,
+                copy: copying,
+                toggle: toggling,
+                quality: qualityChecking,
                 binding: bind.isPending || unbind.isPending,
               }}
               actions={actions}
@@ -488,7 +550,7 @@ export function ProxiesPage() {
         </div>
       </QueryGate>
       <Sheet
-        open={drawer.open}
+        open={drawer.open && drawer.kind === 'settings'}
         onOpenChange={(open) => {
           if (!open) setDrawer((d) => ({ ...d, open: false }))
         }}
@@ -498,31 +560,49 @@ export function ProxiesPage() {
           className='w-[95vw] gap-0 overflow-y-auto sm:max-w-[420px]'
         >
           <SheetHeader className='border-b'>
-            <SheetTitle>
-              {drawer.kind === 'settings' ? '池设置' : '添加代理'}
-            </SheetTitle>
+            <SheetTitle>{translate('proxies:poolSettings')}</SheetTitle>
             <SheetDescription className='text-xs'>
-              {drawer.kind === 'settings'
-                ? '绑定上限、自动探测、出口 DNS 与时区跟随，对整个代理池生效。'
-                : '粘贴 SOCKS5 行批量导入，或添加走所在 VPS 出口的本地代理。'}
+              {translate('proxies:poolSettingsDescription')}
             </SheetDescription>
           </SheetHeader>
           <div className='p-4'>
-            {drawer.kind === 'settings' ? (
-              <ProxyManagePanel
-                proxies={list}
-                bindLimit={bindLimit}
-                probeMin={probeMin}
-                dnsPrimary={String(cfg.dns_primary || 'auto')}
-                dnsDisableSvcbHttps={cfg.dns_disable_svcb_https === true}
-                followProxyTimezone={cfg.follow_proxy_timezone !== false}
-              />
-            ) : (
-              <ProxyImportPanel hasLocal={list.some(proxyIsControlLocal)} />
-            )}
+            <ProxyManagePanel
+              proxies={list}
+              bindLimit={bindLimit}
+              probeMin={probeMin}
+              dnsPrimary={String(cfg.dns_primary || 'auto')}
+              dnsDisableSvcbHttps={cfg.dns_disable_svcb_https === true}
+              followProxyTimezone={cfg.follow_proxy_timezone !== false}
+            />
           </div>
         </SheetContent>
       </Sheet>
+      <Dialog
+        open={drawer.open && drawer.kind === 'import'}
+        onOpenChange={(open) =>
+          !open && setDrawer((d) => ({ ...d, open: false }))
+        }
+      >
+        <DialogContent className='max-h-[90svh] overflow-y-auto sm:max-w-2xl'>
+          <DialogHeader>
+            <DialogTitle>{translate('proxies:addProxy')}</DialogTitle>
+            <DialogDescription>
+              {translate('proxies:addProxyDescription')}
+            </DialogDescription>
+          </DialogHeader>
+          {drawer.open && drawer.kind === 'import' && (
+            <ProxyImportPanel
+              proxies={list}
+              hasLocal={list.some(proxyIsControlLocal)}
+              onClose={() => setDrawer((d) => ({ ...d, open: false }))}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+      <ProxyQualityDialog
+        target={qualityTarget}
+        onClose={() => setQualityTarget(null)}
+      />
       <ProxyEditDialog
         proxy={editing}
         onOpenChange={(open) => !open && setEditId('')}
@@ -530,12 +610,15 @@ export function ProxiesPage() {
       <ConfirmDialog
         open={!!unbindTarget}
         onOpenChange={() => setUnbindTarget(null)}
-        title='解绑代理'
-        desc={`解绑后 ${
-          vmById.get(unbindTarget?.vmId || '')?.name || unbindTarget?.vmId || ''
-        } 将无法转发，确认？`}
-        confirmText='解绑'
-        cancelBtnText='取消'
+        title={translate('proxies:unbindProxy')}
+        desc={translate('proxies:unbindConfirm', {
+          p0:
+            vmById.get(unbindTarget?.vmId || '')?.name ||
+            unbindTarget?.vmId ||
+            '',
+        })}
+        confirmText={translate('proxies:unbind')}
+        cancelBtnText={translate('proxies:cancel')}
         destructive
         isLoading={unbind.isPending}
         handleConfirm={() => {
@@ -545,10 +628,10 @@ export function ProxiesPage() {
       <ConfirmDialog
         open={!!delId}
         onOpenChange={() => setDelId('')}
-        title='删除代理'
+        title={translate('proxies:deleteProxy')}
         desc={deleteConfirmText(delBound)}
-        confirmText='删除'
-        cancelBtnText='取消'
+        confirmText={translate('proxies:delete')}
+        cancelBtnText={translate('proxies:cancel')}
         destructive
         isLoading={remove.isPending}
         handleConfirm={() => {
@@ -558,10 +641,10 @@ export function ProxiesPage() {
       <ConfirmDialog
         open={!!disableId}
         onOpenChange={() => setDisableId('')}
-        title='禁用代理'
+        title={translate('proxies:disableProxy')}
         desc={disableConfirmText(proxyBoundIds(disabling).length)}
-        confirmText='禁用'
-        cancelBtnText='取消'
+        confirmText={translate('proxies:disable')}
+        cancelBtnText={translate('proxies:cancel')}
         destructive
         isLoading={setEnabled.isPending}
         handleConfirm={() => {

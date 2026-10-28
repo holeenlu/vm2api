@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { vmSeedQueryOptions, vmSeedUploadLogQueryOptions } from './queries'
 import {
   claudeSettingKeys,
@@ -24,6 +25,10 @@ const settings = {
   theme: 'dark',
   autoUpdates: false,
 }
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('current slot settings', () => {
   it('lists the file env, marking lines also named in claude.setting', () => {
@@ -113,32 +118,40 @@ describe('seed draft', () => {
     })
   })
 
-  it('sends slot timezone follow or fixed locale without extra_env TZ/LANG', () => {
+  it.each([
+    'en_US.UTF-8',
+    'zh_CN.UTF-8',
+    'zh_TW.UTF-8',
+    'ja_JP.UTF-8',
+    'C.UTF-8',
+  ])('keeps timezone independent of %s and out of extra_env', (locale) => {
     const follow = seedDraftOf(
       { settings_json: { env: { TZ: 'UTC' } }, claude_setting: '' },
-      { timezone_source: 'auto', timezone: 'Asia/Tokyo', locale: 'ja_JP.UTF-8' }
+      { timezone_source: 'auto', timezone: 'Asia/Tokyo', locale }
     )
     expect(follow.timezoneFollow).toBe(true)
     expect(seedSaveBody(follow)).toMatchObject({
       timezone_follow_proxy: true,
-      locale: 'ja_JP.UTF-8',
+      locale,
       extra_env: { CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
     })
     expect(seedSaveBody(follow).extra_env).not.toHaveProperty('TZ')
+    expect(seedSaveBody(follow)).not.toHaveProperty('timezone')
+    expect(seedSaveBody(follow).extra_env).not.toHaveProperty('LANG')
 
     const fixed = seedDraftOf(
       { settings_json: { env: { TZ: 'UTC' } }, claude_setting: '' },
       {
         timezone_source: 'manual',
         timezone: 'Europe/Berlin',
-        locale: 'en_US.UTF-8',
+        locale,
       }
     )
     fixed.timezoneFixed = 'America/New_York'
     fixed.timezoneFollow = false
     expect(seedSaveBody(fixed)).toMatchObject({
       timezone: 'America/New_York',
-      locale: 'en_US.UTF-8',
+      locale,
     })
     expect(seedSaveBody(fixed).timezone_follow_proxy).toBeUndefined()
   })

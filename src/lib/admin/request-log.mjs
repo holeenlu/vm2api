@@ -370,8 +370,7 @@ export function resolveLogMode(envMode, req) {
 }
 
 export function newRequestId(req) {
-  const incoming = String(req?.headers?.['x-request-id'] || '').trim()
-  if (incoming && incoming.length <= 128) return incoming
+  // Server-owned identity prevents caller collisions across accounting and diagnostics.
   return crypto.randomUUID()
 }
 
@@ -592,6 +591,11 @@ export class RequestLogStore {
       image_output_tokens: imageTokenCount(extra.image_usage?.output_tokens),
       // sub2api ownership + billing columns
       user_id: extra.user_id ?? null,
+      billing_status: extra.billing_status || 'unmetered',
+      billing_group_id: extra.billing_group_id ?? extra.group_id ?? null,
+      subscription_id: extra.subscription_id || null,
+      api_key_name: extra.api_key_name || null,
+      source: extra.api_key_kind === 'master' ? 'platform' : 'protocol',
       vm_owner_user_id: this.repo.vmOwnerOf(extra.vm_id),
       group_id: extra.group_id ?? 1,
       rate_multiplier: Number.isFinite(Number(extra.rate_multiplier)) ? Number(extra.rate_multiplier) : 1,
@@ -600,14 +604,18 @@ export class RequestLogStore {
     }
     // sub2api actual_cost: official cost × group rate multiplier (0 is a valid rate)
     if (summary.total_cost != null) {
-      summary.actual_cost = extra.actual_cost ?? summary.total_cost * summary.rate_multiplier
+      summary.actual_cost = Object.hasOwn(extra, 'actual_cost')
+        ? extra.actual_cost
+        : summary.total_cost * summary.rate_multiplier
     }
     const classified = classifyRequestError(summary)
     if (classified?.error_class) summary.error_class = classified.error_class
 
     try {
       this.repo.insertSummaryIfAbsent(summary)
-    } catch {}
+    } catch (error) {
+      if (extra.strict) throw error
+    }
     if (this.jsonlMirror) this._appendJsonl(summary)
     this._mem.push(summary)
     if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)

@@ -1,6 +1,12 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
+import { beforeEach } from 'vitest'
 import { describe, expect, it } from 'vitest'
 import { vmSchedulableProps } from './schedulable-switch'
+
+beforeEach(() => {
+  void i18n.changeLanguage('zh-CN')
+})
 
 const vm = (over: Partial<Vm>): Vm => ({ id: 'vm-01', ...over })
 

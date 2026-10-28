@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { t as translate } from '@/i18n'
 import {
   ArrowRightLeft,
   Armchair,
@@ -9,6 +10,7 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { fmtDuration } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -71,28 +73,30 @@ function numOf(source: Obj, key: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback
 }
 
-const STRATEGIES: {
+function getStrategies(): {
   id: 'balanced' | 'fill'
   title: string
   desc: string
   demo: number[]
   next: number
-}[] = [
-  {
-    id: 'balanced',
-    title: '平衡',
-    desc: '新设备先去占用比例最低的 VM，负载摊平，单台额度消耗慢。',
-    demo: [2, 1, 3],
-    next: 1,
-  },
-  {
-    id: 'fill',
-    title: '填充',
-    desc: '新设备先去占用比例最高、还没满的 VM，集中用满少数几台，其它保持空闲。',
-    demo: [4, 3, 1],
-    next: 1,
-  },
-]
+}[] {
+  return [
+    {
+      id: 'balanced',
+      title: translate('settings:pool.balance'),
+      desc: translate('settings:pool.balanceHelp'),
+      demo: [2, 1, 3],
+      next: 1,
+    },
+    {
+      id: 'fill',
+      title: translate('settings:pool.fill'),
+      desc: translate('settings:pool.fillHelp'),
+      demo: [4, 3, 1],
+      next: 1,
+    },
+  ]
+}
 
 function StrategyCards({
   value,
@@ -101,13 +105,15 @@ function StrategyCards({
   value: 'balanced' | 'fill'
   onChange: (next: 'balanced' | 'fill') => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <div
       role='radiogroup'
-      aria-label='开席策略'
+      aria-label={t('pool.seatStrategy')}
       className='grid gap-3 sm:grid-cols-2'
     >
-      {STRATEGIES.map((strategy) => {
+      {getStrategies().map((strategy) => {
         const selected = strategy.id === value
         return (
           <button
@@ -150,7 +156,7 @@ function StrategyCards({
                     )}
                   >
                     VM {String.fromCharCode(65 + index)}
-                    {index === strategy.next ? ' ← 下一席' : ''}
+                    {index === strategy.next ? t('pool.nextSeat') : ''}
                   </div>
                   <SeatCells
                     used={used}
@@ -176,6 +182,8 @@ function BudgetStairs({
   reservePct: number
   cap: number
 }) {
+  const { t } = useTranslation('settings')
+
   const reachable =
     reservePct > 0 ? Math.min(cap, Math.floor(100 / reservePct)) : cap
   return (
@@ -186,7 +194,10 @@ function BudgetStairs({
           return (
             <div
               key={index}
-              title={`第 ${index + 1} 席需余量 ≥ ${need.toFixed(1)}%`}
+              title={t('pool.seatBudget', {
+                value1: index + 1,
+                value2: need.toFixed(1),
+              })}
               className={cn(
                 'flex-1 rounded-t-[2px]',
                 need > 100
@@ -201,18 +212,24 @@ function BudgetStairs({
       <p className='text-[11px] leading-4 text-muted-foreground'>
         {reservePct > 0 ? (
           <>
-            开第 1 席需 5h/7d 余量 ≥ {reservePct.toFixed(1)}%，开满 {cap} 席需 ≥{' '}
-            {(cap * reservePct).toFixed(1)}%
-            {reachable < cap ? (
-              <span className='text-[color:var(--status-bad)]'>
-                {' '}
-                · 第 {reachable + 1} 席起永远开不出
-              </span>
-            ) : null}
-            。余量未知（还没读到 /usage）时放行。
+            {
+              <>
+                {t('pool.budgetHelp', {
+                  reserve: reservePct.toFixed(1),
+                  capacity: cap,
+                  total: (cap * reservePct).toFixed(1),
+                })}
+                {reachable < cap ? (
+                  <span className='text-[color:var(--status-bad)]'>
+                    {' '}
+                    {t('pool.unreachableSeat', { seat: reachable + 1 })}
+                  </span>
+                ) : null}
+              </>
+            }
           </>
         ) : (
-          '0% = 不看余量，只要席位没满就开。'
+          t('pool.zeroBudget')
         )}
       </p>
     </div>
@@ -256,24 +273,26 @@ function QueueTimeline({
   fallback: number
   deadline: number
 }) {
+  const { t } = useTranslation('settings')
+
   const total = Math.max(sticky + fallback, deadline, 1)
   const lanes: { title: string; segments: [string, number, string][] }[] = [
     {
-      title: '回头设备（已有家 VM）',
+      title: t('pool.returningDevice'),
       segments: [
-        ['守原 VM', sticky, 'bg-primary/80 text-primary-foreground'],
+        [t('pool.stayHome'), sticky, 'bg-primary/80 text-primary-foreground'],
         [
-          '全局排队',
+          t('pool.globalQueue'),
           fallback,
           'bg-[color:var(--status-caution-solid)] text-white',
         ],
       ],
     },
     {
-      title: '新设备',
+      title: t('pool.newDevice'),
       segments: [
         [
-          '全局排队',
+          t('pool.globalQueue'),
           fallback,
           'bg-[color:var(--status-caution-solid)] text-white',
         ],
@@ -307,11 +326,12 @@ function QueueTimeline({
         </div>
       ))}
       <p className='text-[11px] leading-4 text-muted-foreground'>
-        红线 = 总重试时限 {fmtDuration(deadline)}
-        ，任何等待都不会越过它；超时返回 529 <code>
-          pool_queue_timeout
-        </code>{' '}
-        并带 retry-after。
+        <Trans
+          t={t}
+          i18nKey='pool.retryDeadlineHelp'
+          values={{ value1: fmtDuration(deadline), value2: ' ' }}
+          components={{ part1: <code /> }}
+        />
       </p>
     </div>
   )
@@ -324,6 +344,8 @@ function CircuitFlow({
   threshold: number
   openMs: number
 }) {
+  const { t } = useTranslation('settings')
+
   const step = (icon: ReactNode, title: string, sub: string) => (
     <div className='flex min-w-0 flex-1 flex-col items-center gap-1 text-center'>
       <div className='flex h-6 items-center'>{icon}</div>
@@ -350,20 +372,20 @@ function CircuitFlow({
             <span className='text-[10px]'>+{threshold - 10}</span>
           ) : null}
         </span>,
-        `连续 ${threshold} 次 5xx`,
-        '529 / 401 不计'
+        t('pool.consecutiveFailures', { value1: threshold }),
+        t('pool.excludedFailures')
       )}
       {arrow}
       {step(
         <ShieldAlert className='size-5 text-[color:var(--status-bad)]' />,
-        `熔断 ${fmtDuration(openMs)}`,
-        '这台 VM 退出可选集'
+        t('pool.circuitDuration', { value1: fmtDuration(openMs) }),
+        t('pool.circuitExclude')
       )}
       {arrow}
       {step(
         <Zap className='size-5 text-[color:var(--status-caution)]' />,
-        '放行 1 个探测',
-        '成功即恢复，失败再熔断'
+        t('pool.probeOnce'),
+        t('pool.probeRecovery')
       )}
     </div>
   )
@@ -388,6 +410,8 @@ function SummaryButton({
   buttonRef: (node: HTMLButtonElement | null) => void
   disabled: boolean
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <Button
       ref={buttonRef}
@@ -405,7 +429,7 @@ function SummaryButton({
           <span className='truncate'>{title}</span>
           {pending ? (
             <span className='shrink-0 rounded bg-[color:var(--status-caution)]/15 px-1.5 py-0.5 text-[10px] text-[color:var(--status-caution)]'>
-              待保存
+              {t('pendingSave')}
             </span>
           ) : null}
         </span>
@@ -428,6 +452,8 @@ export function PoolPane({
   saving = false,
   pending = false,
 }: PoolPaneProps) {
+  const { t } = useTranslation('settings')
+
   const strategy = pool.strategy === 'fill' ? 'fill' : 'balanced'
   const seatCap = Math.min(
     SEAT_CAP_MAX,
@@ -551,14 +577,14 @@ export function PoolPane({
   const inferenceDraft = drafts.inference
   const dialogTitle =
     open === 'strategy'
-      ? '开席策略'
+      ? t('pool.seatStrategy')
       : open === 'seats'
-        ? '席位容量'
+        ? t('pool.seatCapacity')
         : open === 'queue'
-          ? '排队等待'
+          ? t('pool.queueWait')
           : open === 'retry'
-            ? '重试与切号'
-            : '故障保护'
+            ? t('pool.retrySwitch')
+            : t('pool.failureProtection')
 
   return (
     <div className='space-y-4'>
@@ -566,9 +592,9 @@ export function PoolPane({
       <div className='grid grid-cols-1 gap-3 lg:grid-cols-3'>
         <SummaryButton
           icon={Layers}
-          title='分配策略'
-          value={strategy === 'fill' ? '填充' : '平衡'}
-          desc='Claude 新 session 开席的优先顺序'
+          title={t('pool.allocation')}
+          value={strategy === 'fill' ? t('pool.fill') : t('pool.balance')}
+          desc={t('pool.allocationHelp')}
           pending={pending}
           disabled={saving}
           buttonRef={(node) => {
@@ -578,9 +604,11 @@ export function PoolPane({
         />
         <SummaryButton
           icon={Armchair}
-          title='席位容量'
-          value={`${seatCap} 席 / VM`}
-          desc={`对话结束即释放 · 预算预留 ${reservePct}%`}
+          title={t('pool.seatCapacity')}
+          value={t('pool.seatsPerVm', { count: Number(seatCap) })}
+          desc={t('pool.capacitySummary', {
+            value2: reservePct,
+          })}
           pending={pending}
           disabled={saving}
           buttonRef={(node) => {
@@ -590,9 +618,15 @@ export function PoolPane({
         />
         <SummaryButton
           icon={Hourglass}
-          title='排队等待'
-          value={`${queueMax} 个 · ${fmtDuration(Math.max(sticky, fallbackWait))}`}
-          desc={`粘性 ${fmtDuration(sticky)} · 全局 ${fmtDuration(fallbackWait)}`}
+          title={t('pool.queueWait')}
+          value={t('pool.queueSummary', {
+            count: Number(queueMax),
+            value2: fmtDuration(Math.max(sticky, fallbackWait)),
+          })}
+          desc={t('pool.waitSummary', {
+            value1: fmtDuration(sticky),
+            value2: fmtDuration(fallbackWait),
+          })}
           pending={pending}
           disabled={saving}
           buttonRef={(node) => {
@@ -602,7 +636,7 @@ export function PoolPane({
         />
       </div>
       <div className='flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border px-3 py-2 text-xs'>
-        <span className='font-medium'>辅助设置</span>
+        <span className='font-medium'>{t('pool.additional')}</span>
         <button
           type='button'
           disabled={saving}
@@ -612,7 +646,8 @@ export function PoolPane({
           className='inline-flex min-h-11 items-center gap-1 text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50'
           onClick={() => begin('retry')}
         >
-          <ArrowRightLeft className='size-3.5' aria-hidden /> 重试与切号
+          <ArrowRightLeft className='size-3.5' aria-hidden />{' '}
+          {t('pool.retrySwitch')}
         </button>
         <button
           type='button'
@@ -623,19 +658,21 @@ export function PoolPane({
           className='inline-flex min-h-11 items-center gap-1 text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50'
           onClick={() => begin('circuit')}
         >
-          <ShieldAlert className='size-3.5' aria-hidden /> 故障保护
+          <ShieldAlert className='size-3.5' aria-hidden />{' '}
+          {t('pool.failureProtection')}
         </button>
         <a
           className='inline-flex min-h-11 items-center gap-1 text-primary hover:underline'
           href='/console/#/vm'
         >
-          <Link2 className='size-3.5' aria-hidden /> 账号优先级 · VM 调度
+          <Link2 className='size-3.5' aria-hidden /> {t('pool.vmScheduling')}
         </a>
         <a
           className='inline-flex min-h-11 items-center gap-1 text-primary hover:underline'
           href='/console/#/settings/sticky'
         >
-          <Link2 className='size-3.5' aria-hidden /> 粘性设置
+          <Link2 className='size-3.5' aria-hidden />{' '}
+          {t('pool.affinitySettings')}
         </a>
       </div>
       <Dialog
@@ -650,9 +687,7 @@ export function PoolPane({
         >
           <DialogHeader>
             <DialogTitle>{dialogTitle}</DialogTitle>
-            <DialogDescription>
-              应用到草稿后，点击页面底部保存才会写入运行配置。
-            </DialogDescription>
+            <DialogDescription>{t('pool.saveDraftHelp')}</DialogDescription>
           </DialogHeader>
           <fieldset
             disabled={saving}
@@ -669,9 +704,9 @@ export function PoolPane({
             {open === 'seats' ? (
               <>
                 <div className='space-y-2'>
-                  <Label>每台 VM 席位上限</Label>
+                  <Label>{t('pool.maxSeats')}</Label>
                   <ChipGroup
-                    label='每台 VM 席位上限'
+                    label={t('pool.maxSeats')}
                     value={Math.min(
                       SEAT_CAP_MAX,
                       Math.max(
@@ -703,7 +738,7 @@ export function PoolPane({
                 </div>
                 <SliderSetting
                   id='pool-seat-grace'
-                  label='旧席位宽限（不再释放槽位）'
+                  label={t('pool.seatGrace')}
                   value={numOf(
                     poolDraft,
                     'seat_grace_ms',
@@ -712,14 +747,16 @@ export function PoolPane({
                   min={0}
                   max={120000}
                   step={5000}
-                  format={(ms) => (ms ? fmtDuration(ms) : '不保留')}
+                  format={(ms) =>
+                    ms ? fmtDuration(ms) : t('pool.noRetention')
+                  }
                   fallback={POOL_DEFAULTS.seat_grace_ms}
                   presets={[0, 10000, 30000, 60000, 120000]}
                   onChange={(ms) => updateDraft('pool', { seat_grace_ms: ms })}
                 />
                 <SliderSetting
                   id='pool-seat-reserve'
-                  label='每席位预算预留'
+                  label={t('pool.budgetReserve')}
                   value={
                     numOf(
                       poolDraft,
@@ -761,11 +798,11 @@ export function PoolPane({
               <>
                 <SliderSetting
                   id='pool-queue-max'
-                  label='允许排队数量'
+                  label={t('pool.maxQueued')}
                   value={numOf(poolDraft, 'queue_max', POOL_DEFAULTS.queue_max)}
                   min={1}
                   max={999}
-                  format={(value) => `${value} 个`}
+                  format={(value) => t('pool.itemCount', { value1: value })}
                   fallback={POOL_DEFAULTS.queue_max}
                   presets={[10, 20, 50, 100, 200, 500]}
                   onChange={(value) =>
@@ -774,7 +811,7 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='pool-sticky-wait'
-                  label='粘性等待'
+                  label={t('pool.affinityWait')}
                   value={numOf(
                     poolDraft,
                     'sticky_wait_timeout_ms',
@@ -794,7 +831,7 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='pool-fallback-wait'
-                  label='全局等待'
+                  label={t('pool.globalWait')}
                   value={numOf(
                     poolDraft,
                     'fallback_wait_timeout_ms',
@@ -831,7 +868,7 @@ export function PoolPane({
               <>
                 <SliderSetting
                   id='failover-total-deadline'
-                  label='总重试时限'
+                  label={t('pool.totalRetryDeadline')}
                   value={numOf(
                     failoverDraft,
                     'total_retry_deadline_ms',
@@ -851,8 +888,8 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='failover-stream-idle'
-                  label='流空闲超时'
-                  desc='上游流连续无事件超过此时长即断开；大文件 Write 会被上游整段缓冲，过短会误断。未在面板设置时可用控制面环境变量 KIN_STREAM_IDLE_TIMEOUT（毫秒）。保存后各槽 kernel 会在没有请求时自动重启以应用新值。'
+                  label={t('pool.streamIdleTimeout')}
+                  desc={t('pool.streamIdleHelp')}
                   value={numOf(
                     failoverDraft,
                     'stream_idle_timeout_ms',
@@ -872,8 +909,8 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='failover-max-request'
-                  label='请求体上限'
-                  desc='入站请求超过此大小返回 413。未设置时槽内 kernel 仍是 32 MiB；保存后各槽 kernel 会在没有请求时自动重启以应用新值。网关不会放行超过 KIN_MAX_BODY 的请求。'
+                  label={t('pool.bodyLimit')}
+                  desc={t('pool.bodyLimitHelp')}
                   value={numOf(
                     failoverDraft,
                     'max_request_mib',
@@ -892,13 +929,10 @@ export function PoolPane({
                 <div className='flex items-center justify-between gap-4 rounded-md border px-3 py-2.5'>
                   <div>
                     <Label htmlFor='failover-eager-tool-streaming'>
-                      工具参数流式下发
+                      {t('pool.toolStreaming')}
                     </Label>
                     <p className='text-xs leading-5 text-muted-foreground'>
-                      默认开启。给所有自定义工具加 eager_input_streaming（官方
-                      Claude Code
-                      直连官方地址并开启细粒度工具流式时的形态），大文件 Write
-                      内容边生成边下发，避免经中转时长静默触发空闲超时。显式关闭后恢复整段缓冲；客户端自带的布尔值优先。
+                      {t('pool.toolStreamingHelp')}
                     </p>
                   </div>
                   <Switch
@@ -911,7 +945,7 @@ export function PoolPane({
                 </div>
                 <SliderSetting
                   id='failover-oauth-cooldown'
-                  label='OAuth 401 冷却'
+                  label={t('pool.oauthCooldown')}
                   value={numOf(
                     failoverDraft,
                     'oauth_401_cooldown_ms',
@@ -931,7 +965,7 @@ export function PoolPane({
                 />
                 <StepperSetting
                   id='failover-same-retries'
-                  label='同 VM 重试'
+                  label={t('pool.sameVmRetries')}
                   value={numOf(
                     failoverDraft,
                     'max_same_account_retries',
@@ -939,7 +973,7 @@ export function PoolPane({
                   )}
                   min={0}
                   max={5}
-                  unit='次'
+                  unit={t('times')}
                   fallback={FAILOVER_DEFAULTS.max_same_account_retries}
                   onChange={(value) =>
                     updateDraft('failover', {
@@ -949,7 +983,7 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='failover-same-delay'
-                  label='同 VM 重试间隔'
+                  label={t('pool.sameVmInterval')}
                   value={numOf(
                     failoverDraft,
                     'same_account_retry_delay_ms',
@@ -958,7 +992,7 @@ export function PoolPane({
                   min={0}
                   max={5000}
                   step={100}
-                  format={(ms) => (ms ? fmtDuration(ms) : '立即')}
+                  format={(ms) => (ms ? fmtDuration(ms) : t('immediately'))}
                   fallback={FAILOVER_DEFAULTS.same_account_retry_delay_ms}
                   presets={[0, 250, 500, 1000, 2000]}
                   onChange={(value) =>
@@ -969,7 +1003,7 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='failover-same-hop'
-                  label='同 VM 单次重试最长占用'
+                  label={t('pool.sameVmOccupancy')}
                   value={numOf(
                     failoverDraft,
                     'same_account_retry_max_hop_ms',
@@ -978,7 +1012,7 @@ export function PoolPane({
                   min={0}
                   max={30000}
                   step={500}
-                  format={(ms) => (ms ? fmtDuration(ms) : '不限')}
+                  format={(ms) => (ms ? fmtDuration(ms) : t('unlimited'))}
                   fallback={FAILOVER_DEFAULTS.same_account_retry_max_hop_ms}
                   presets={[0, 5000, 10000, 20000, 30000]}
                   onChange={(value) =>
@@ -989,7 +1023,7 @@ export function PoolPane({
                 />
                 <StepperSetting
                   id='failover-switches'
-                  label='切号上限'
+                  label={t('pool.switchLimit')}
                   value={numOf(
                     failoverDraft,
                     'max_account_switches',
@@ -997,7 +1031,7 @@ export function PoolPane({
                   )}
                   min={0}
                   max={50}
-                  unit='次'
+                  unit={t('times')}
                   fallback={FAILOVER_DEFAULTS.max_account_switches}
                   onChange={(value) =>
                     updateDraft('failover', {
@@ -1007,7 +1041,7 @@ export function PoolPane({
                 />
                 <StepperSetting
                   id='failover-total'
-                  label='总尝试'
+                  label={t('pool.totalAttempts')}
                   value={numOf(
                     failoverDraft,
                     'max_total_attempts',
@@ -1015,7 +1049,7 @@ export function PoolPane({
                   )}
                   min={1}
                   max={50}
-                  unit='次'
+                  unit={t('times')}
                   fallback={FAILOVER_DEFAULTS.max_total_attempts}
                   onChange={(value) =>
                     updateDraft('failover', {
@@ -1024,7 +1058,7 @@ export function PoolPane({
                   }
                 />
                 <ChipGroup
-                  label='流式交付'
+                  label={t('pool.streamDelivery')}
                   value={
                     failoverDraft.delivery_mode === 'verified'
                       ? 'verified'
@@ -1032,8 +1066,8 @@ export function PoolPane({
                   }
                   options={
                     [
-                      ['realtime', 'realtime · 实时'],
-                      ['verified', 'verified · 校验后'],
+                      ['realtime', t('pool.realtime')],
+                      ['verified', t('pool.verified')],
                     ] as ['realtime' | 'verified', string][]
                   }
                   onChange={(value) =>
@@ -1043,10 +1077,10 @@ export function PoolPane({
                 <div className='flex items-center justify-between gap-4 rounded-md border px-3 py-2.5'>
                   <div>
                     <Label htmlFor='failover-signature-repair'>
-                      启用签名修复
+                      {t('pool.signatureRepair')}
                     </Label>
                     <p className='text-xs leading-5 text-muted-foreground'>
-                      仅对可修复的签名错误执行一次修复跳转。
+                      {t('pool.signatureRepairHelp')}
                     </p>
                   </div>
                   <Switch
@@ -1063,7 +1097,7 @@ export function PoolPane({
               <>
                 <StepperSetting
                   id='pool-circuit-threshold'
-                  label='熔断失败次数'
+                  label={t('pool.circuitThreshold')}
                   value={numOf(
                     poolDraft,
                     'circuit_failure_threshold',
@@ -1071,7 +1105,7 @@ export function PoolPane({
                   )}
                   min={1}
                   max={20}
-                  unit='次'
+                  unit={t('times')}
                   fallback={POOL_DEFAULTS.circuit_failure_threshold}
                   onChange={(value) =>
                     updateDraft('pool', {
@@ -1081,7 +1115,7 @@ export function PoolPane({
                 />
                 <SliderSetting
                   id='pool-circuit-open'
-                  label='熔断打开时长'
+                  label={t('pool.circuitOpenDuration')}
                   value={numOf(
                     poolDraft,
                     'circuit_open_ms',
@@ -1120,7 +1154,7 @@ export function PoolPane({
               className='min-h-11'
               onClick={close}
             >
-              取消
+              {t('cancel')}
             </Button>
             <Button
               type='button'
@@ -1128,7 +1162,7 @@ export function PoolPane({
               className='min-h-11'
               onClick={apply}
             >
-              应用到草稿
+              {t('applyDraft')}
             </Button>
           </DialogFooter>
         </DialogContent>

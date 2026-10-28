@@ -127,6 +127,11 @@ const SUMMARY_COLUMNS = [
   'intercept',
   'jev_state',
   'vm_owner_user_id',
+  'billing_status',
+  'billing_group_id',
+  'subscription_id',
+  'api_key_name',
+  'source',
   'image_model',
   'image_usage',
   'image_input_tokens',
@@ -136,6 +141,8 @@ const SUMMARY_COLUMNS = [
 
 function toRow(rec) {
   return SUMMARY_COLUMNS.map((c) => {
+    if (c === 'billing_status') return rec[c] || 'unmetered'
+    if (c === 'source') return rec[c] || 'protocol'
     if (c === 'created_at') return rec.created_at ?? rec.ts ?? null
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
@@ -956,7 +963,7 @@ export class UsageLogsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost,
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost,
              COALESCE(SUM(duration_ms), 0) AS duration_ms_sum,
              SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) AS duration_n
       FROM usage_logs ${cond}
@@ -982,7 +989,7 @@ export class UsageLogsRepo {
       SELECT ${expr} AS name,
              COUNT(*) AS requests,
              COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0) AS tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost
       FROM usage_logs ${cond}
       GROUP BY name ORDER BY requests DESC, total_cost DESC LIMIT ${limit}
     `)

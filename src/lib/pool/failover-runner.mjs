@@ -1,3 +1,4 @@
+import { refreshKeyScope, keyAllowsModel, keyAllowsVm } from '../admin/key-scope.mjs'
 import {
   classifyUpstreamResult,
   isFableModel,
@@ -893,6 +894,21 @@ export class FailoverRunner {
               replaceSession: !!attemptStickyBound?.vmId && attemptStickyBound.vmId !== selected.vmId,
             },
           )
+        }
+        const liveScope = refreshKeyScope(keyScope)
+        if (!keyAllowsModel(liveScope, model) || !keyAllowsVm(liveScope, selected.vm || { id: selected.vmId })) {
+          this.attemptsRepo?.complete?.(requestId, attemptNo, {
+            action: 'stop',
+            errorScope: 'request',
+            terminalState: 'rejected',
+          })
+          return {
+            ok: false,
+            status: 403,
+            attempt_count: budget.hops,
+            terminalState: 'rejected',
+            body: { error: { type: 'permission_error', code: 'group_unavailable', message: '当前授权已失效' } },
+          }
         }
         result = await callAttempt({
           candidate: selected,

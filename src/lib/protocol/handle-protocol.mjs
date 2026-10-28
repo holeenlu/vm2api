@@ -1,3 +1,8 @@
+import { allowsStandaloneSearch } from '../admin/key-scope.mjs'
+import { codexBodyToAnthropicMessage } from './codex-convert.mjs'
+import { withTransaction } from '../db/database.mjs'
+import { calculateCost } from '../admin/pricing.mjs'
+import { RelayBilling } from '../admin/relay-billing.mjs'
 /**
  * /v1 protocol handler. URLs, auth, and response envelopes stay with the
  * server wiring; this factory owns convert → pool → Go/Rust hop → client.
@@ -61,7 +66,7 @@ import { agentSummarySession } from './agent-summary.mjs'
 import { summarizeBody, redactHeaders, presentedApiKeyForLog } from '../admin/request-log.mjs'
 import { reasoningEffortOf, sessionIdForLog } from './log-fields.mjs'
 import { ownerScopeFromRequest } from '../admin/resource-owner.mjs'
-import { keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { keyScopeFromRequest, groupScopeDenial, keyAllowsModel } from '../admin/key-scope.mjs'
 import {
   resolveInferenceEngine,
   resolveOfficialCcInference,
@@ -146,7 +151,6 @@ import {
   cacheBreakpointsFromRoutingFile,
   pinConversationCacheTtl,
   resolveCacheTtl,
-  fillMissingCacheTtl,
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
 import { confirmCachePrefix, describeCacheContinuity, formatCacheBreak, prepareCachePrefix } from './cache-prefix.mjs'
@@ -165,7 +169,6 @@ import { getVm } from '../vm/vm-registry.mjs'
 import { credentialModeFromOauth, isApiKeyMode } from '../oauth/credential-mode.mjs'
 import {
   prepareAnthropicRequest,
-  enforceCacheLimit,
   rewriteToolNames,
   restoreToolNames,
   restoreToolNamesInSSELine,
@@ -206,68 +209,106 @@ export function createHandleProtocol(deps) {
     return disjointOpenaiUsage(next)
   }
 
-  function attachPricing(logBag, { managedKey = null, rateMultiplier = 1, bill = false } = {}) {
+  function attachPricing(logBag) {
     const model = logBag.upstream_model || logBag.model
     const priced = costColumnsFromUsage(logBag.usage || {}, model)
     Object.assign(logBag, priced)
-    if (!bill || !managedKey) return
-    try {
-      apiKeyStore.recordUsage(managedKey, logBag.usage || {}, {
-        model,
-        rateMultiplier,
-        officialCost: priced.total_cost,
-      })
-    } catch {}
   }
 
-  function keyGateErrorBody(gate) {
-    return makeError({
-      type: gate.status === 429 ? ErrorType.RATE_LIMIT : ErrorType.PERMISSION,
-      code: gate.code,
-      message: gate.message,
-      status: gate.status,
-      details: gate.detail || undefined,
-    }).body
-  }
-
-  // Codex handlers write usage onto logBag themselves. The key is charged the
-  // official cost usage_logs prices for the same row (image generation
-  // included) times the group rate; logBag is left as is so the row is too.
-  function billCodexKey(managedKey, logBag) {
-    if (logBag.final_state !== 'verified') return
-    const model = logBag.upstream_model || logBag.model
-    const image = logBag.image_usage
-      ? { usage: logBag.image_usage, model: logBag.image_model || null, only: logBag.protocol === 'openai.images' }
-      : null
-    try {
-      const priced = costColumnsFromUsage(logBag.usage || {}, model, image)
-      apiKeyStore.recordUsage(managedKey, logBag.usage || {}, {
-        model,
-        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey.group_id ?? 1),
-        officialCost: priced.total_cost,
-      })
-    } catch {}
-  }
-
-  /** Codex handlers take the same managed-key acquire / release / spend as the Claude paths. */
-  async function runWithCodexKey(req, res, logBag, run) {
-    const managedKey = req.apiKeyRecord || null
-    if (!managedKey) return run()
-    const gate = apiKeyStore.acquire(managedKey)
-    if (!gate.ok) {
-      stats.errors++
-      logBag.error_code = gate.code
-      logBag.error_message = gate.message
-      return json(res, gate.status, keyGateErrorBody(gate))
+  function finalizeCommercial(req) {
+    const bag = req.relayLog
+    if (!bag || !apiKeyStore?.db || !req.apiKeyRecord) return
+    const billing = new RelayBilling(apiKeyStore.db)
+    if (bag.image_usage || bag.protocol === 'openai.images') {
+      bag.usage = {
+        ...bag.usage,
+        image_generation: {
+          usage: bag.image_usage || null,
+          model: bag.image_model || null,
+          only: bag.protocol === 'openai.images',
+        },
+      }
     }
-    try {
-      return await run()
-    } finally {
+    const usage = bag.usage
+    const actual = bag.usage_complete === true
+    if (req.relayTicket) {
+      if (actual) {
+        const item = billing.settle(
+          req.relayTicket.request_id,
+          usage,
+          bag.upstream_model || bag.model,
+          null,
+          (rate, actualCost) => {
+            apiKeyStore.recordUsage(req.apiKeyRecord, usage, {
+              model: bag.upstream_model || bag.model,
+              rateMultiplier: rate,
+              actualCost,
+              officialCost: calculateCost(usage, bag.upstream_model || bag.model, {
+                resolvedPrice: JSON.parse(req.relayTicket.quote_json || 'null'),
+              }).total_cost,
+            })
+          },
+        )
+        Object.assign(
+          bag,
+          costColumnsFromUsage(usage, bag.upstream_model || bag.model, null, {
+            resolvedPrice: JSON.parse(req.relayTicket.quote_json || 'null'),
+          }),
+        )
+        bag.billing_status = item.status
+        bag.actual_cost = item.actual_micros == null ? null : item.actual_micros / 1e6
+        bag.billing_group_id = item.group_id
+        bag.subscription_id = item.subscription_id
+        bag.rate_multiplier = item.rate_multiplier
+      } else {
+        billing.finish(req.relayTicket.request_id, {
+          dispatched: !!(bag.vm_id || bag.account_id || bag.attempt_count > 0),
+        })
+        const item = apiKeyStore.db
+          .prepare('SELECT status FROM billing_reservations WHERE request_id=?')
+          .get(req.relayTicket.request_id)
+        bag.billing_status = item?.status || 'unmetered'
+        bag.actual_cost = null
+      }
+    } else if (actual && !req.relayKeyMetered) {
+      apiKeyStore.recordUsage(req.apiKeyRecord, usage, {
+        model: bag.upstream_model || bag.model,
+        rateMultiplier: keyScopeFromRequest(req).rate_multiplier ?? 1,
+        officialCost: calculateCost(usage, bag.upstream_model || bag.model).total_cost,
+      })
+      req.relayKeyMetered = true
+      bag.billing_status = 'unmetered'
+    }
+    bag.api_key_name = req.apiKeyRecord.name
+  }
+
+  function installCommercialLog(req, res, logCtx, logBag) {
+    req.relayLog = logBag
+    req.commitRelayLog = () => {
+      if (req.relayLogCommitted) return
+      withTransaction(apiKeyStore.db, () => {
+        finalizeCommercial(req)
+        const groupId = req.apiKeyRecord?.group_id ?? 1
+        requestLog.finish(req.relayTicket && logCtx.mode === 'off' ? { ...logCtx, mode: 'normal' } : logCtx, {
+          status: res.statusCode || 0,
+          api_key_kind: req.apiKeyKind || null,
+          api_key_id: req.apiKeyRecord?.id || null,
+          user_id: req.apiKeyRecord?.user_id ?? null,
+          group_id: groupId,
+          rate_multiplier: deps.groupsRepo.rateMultiplier(groupId),
+          ...logBag,
+          strict: !!req.relayTicket,
+        })
+      })
+      req.relayLogCommitted = true
+    }
+    res.on('finish', () => {
       try {
-        apiKeyStore.release(managedKey)
-      } catch {}
-      billCodexKey(managedKey, logBag)
-    }
+        req.commitRelayLog()
+      } catch (error) {
+        console.error('[billing] recoverable transaction failure', logCtx.request_id, error.message)
+      }
+    })
   }
 
   function finishClientCancel(res, result, logBag) {
@@ -386,7 +427,6 @@ export function createHandleProtocol(deps) {
     logBag.error_code = decision.error?.body?.error?.code || null
     logBag.error_message = decision.errorMessage || decision.error?.body?.error?.message || null
     logBag.intercept = decision.intercept || null
-    logBag.jev_state = decision.jevState || null
     json(res, decision.error.status, decision.error.body)
     return true
   }
@@ -529,7 +569,7 @@ export function createHandleProtocol(deps) {
     return acceptAssistantHop(workerResult)
   }
 
-  async function handleProtocol(req, res, protocol, pathName) {
+  async function executeProtocol(req, res, protocol, pathName) {
     const logCtx = requestLog.start(req, { protocol, pathName })
     res._kinRequestId = logCtx.request_id
     // Registers its own 'finish' listener first so status/headers are final when finish() runs.
@@ -567,20 +607,7 @@ export function createHandleProtocol(deps) {
       reasoning_effort: null,
       outbound_session_id: null,
     }
-    res.on('finish', () => {
-      try {
-        const groupId = req.apiKeyRecord?.group_id ?? 1
-        requestLog.finish(logCtx, {
-          status: res.statusCode || 0,
-          api_key_kind: req.apiKeyKind || null,
-          api_key_id: req.apiKeyRecord?.id || null,
-          user_id: req.apiKeyRecord?.user_id ?? null,
-          group_id: groupId,
-          rate_multiplier: deps.groupsRepo.rateMultiplier(groupId),
-          ...logBag,
-        })
-      } catch {}
-    })
+    installCommercialLog(req, res, logCtx, logBag)
     if (!requireAuth(req, res)) {
       logBag.error_code = req.authError?.code || ErrorCode.INVALID_API_KEY
       logBag.error_message = req.authError?.message || 'Invalid credentials'
@@ -606,6 +633,14 @@ export function createHandleProtocol(deps) {
           status: 400,
         }).body,
       )
+    }
+    if (req.apiKeyRecord) {
+      const gate = apiKeyStore.canAccept(req.apiKeyRecord, Date.now(), req.socket?.remoteAddress)
+      if (!gate.ok) {
+        logBag.error_code = gate.code
+        return json(res, gate.status, { error: { code: gate.code, message: gate.message } })
+      }
+      req.apiKeyRecord = gate.record
     }
     logBag.inbound_body = inbound
     logBag.inbound_summary = summarizeBody(inbound)
@@ -744,16 +779,40 @@ export function createHandleProtocol(deps) {
       return json(res, errorResult.status, errorResult.body)
     }
     const keyScope = keyScopeFromRequest(req)
-    const poolDenial = vmPoolDenial(keyScope)
+    const imageTools = Array.isArray(ctx.body?.tools)
+      ? ctx.body.tools.filter((tool) => tool?.type === 'image_generation')
+      : []
+    if (
+      !keyAllowsModel(keyScope, inbound?.model) ||
+      imageTools.some((tool) => !keyAllowsModel(keyScope, tool.model || 'gpt-image-2.5-flare'))
+    ) {
+      logBag.error_code = 'model_forbidden'
+      return json(res, 403, { error: { code: 'model_forbidden', message: '分组不支持该模型' } })
+    }
+    try {
+      if (req.apiKeyRecord?.user_id)
+        req.relayTicket = new RelayBilling(apiKeyStore.db).reserve(
+          req.apiKeyRecord,
+          logCtx.request_id,
+          ctx.body.model,
+          ctx.body,
+          { protocol },
+        )
+    } catch (error) {
+      logBag.error_code = error.code
+      return json(res, error.status || 403, { error: { code: error.code, message: error.message } })
+    }
+
+    const poolDenial = groupScopeDenial(keyScope)
     if (poolDenial) {
       stats.errors++
       const errorResult = makeError({
         type: ErrorType.PERMISSION,
-        code: ErrorCode.VM_POOL_UNAVAILABLE,
+        code: ErrorCode.GROUP_UNAVAILABLE,
         message: poolDenial.message,
         status: 403,
       })
-      logBag.error_code = ErrorCode.VM_POOL_UNAVAILABLE
+      logBag.error_code = ErrorCode.GROUP_UNAVAILABLE
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, 403, errorResult.body)
     }
@@ -797,10 +856,14 @@ export function createHandleProtocol(deps) {
     if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res })) {
       return
     }
-    if (platform.platform === 'openai') {
+    if (platform.platform === 'openai' && inferenceBackend !== 'api') {
+      if (req.apiKeyRecord) {
+        const gate = apiKeyStore.acquire(req.apiKeyRecord, Date.now(), req.socket?.remoteAddress)
+        if (!gate.ok) return json(res, gate.status, { error: { code: gate.code, message: gate.message } })
+        req.relayCodexAcquired = true
+      }
       const routing = getRouting() || {}
       const codexSticky = {
-        cfg,
         requestStartedAt: logCtx.t0,
         stickyRouter,
         sessions: accountQuota?.sessions || null,
@@ -822,38 +885,7 @@ export function createHandleProtocol(deps) {
         })
       if (protocol === 'anthropic.messages') {
         const codex = normalizeCodexRouting(routing.codex)
-        return runWithCodexKey(req, res, logBag, () =>
-          handleCodexProtocol({
-            req,
-            res,
-            protocol,
-            ctx,
-            inbound,
-            logBag,
-            stats,
-            json,
-            writeSSEHeaders,
-            routing: {
-              ...routing,
-              codex: {
-                ...codex,
-                protocols: {
-                  ...codex.protocols,
-                  'anthropic.messages': { mode: 'convert', enabled: true },
-                },
-                convert: { ...codex.convert, anthropic_to_codex: true },
-              },
-            },
-            projectRoot: cfg.paths.project,
-            captureOutbound: logCtx.capture_outbound === true,
-            accountGate,
-            ops: deps.codexOps || {},
-            ...codexSticky,
-          }),
-        )
-      }
-      return runWithCodexKey(req, res, logBag, () =>
-        handleCodexProtocol({
+        return handleCodexProtocol({
           req,
           res,
           protocol,
@@ -863,16 +895,43 @@ export function createHandleProtocol(deps) {
           stats,
           json,
           writeSSEHeaders,
-          routing,
+          routing: {
+            ...routing,
+            codex: {
+              ...codex,
+              protocols: {
+                ...codex.protocols,
+                'anthropic.messages': { mode: 'convert', enabled: true },
+              },
+              convert: { ...codex.convert, anthropic_to_codex: true },
+            },
+          },
           projectRoot: cfg.paths.project,
           captureOutbound: logCtx.capture_outbound === true,
           accountGate,
           ops: deps.codexOps || {},
           ...codexSticky,
-        }),
-      )
+        })
+      }
+      return handleCodexProtocol({
+        req,
+        res,
+        protocol,
+        ctx,
+        inbound,
+        logBag,
+        stats,
+        json,
+        writeSSEHeaders,
+        routing,
+        projectRoot: cfg.paths.project,
+        captureOutbound: logCtx.capture_outbound === true,
+        accountGate,
+        ops: deps.codexOps || {},
+        ...codexSticky,
+      })
     }
-    if (protocol === 'openai.responses') {
+    if (protocol === 'openai.responses' && inferenceBackend !== 'api') {
       stats.errors++
       logBag.error_code = 'protocol_not_allowed'
       return json(
@@ -959,7 +1018,9 @@ export function createHandleProtocol(deps) {
     const clientDiscriminator = sessionContextDiscriminator({
       clientIp: clientIp(req),
       userAgent: req.headers['user-agent'] || '',
-      apiKeyId: req.apiKeyRecord?.id ?? '',
+      apiKeyId: req.apiKeyRecord
+        ? [req.apiKeyRecord.user_id, req.apiKeyRecord.id, req.apiKeyRecord.group_id].join(':')
+        : '',
     })
     const sessionMode = outboundSessionMode(getRouting())
     const sessionContext = {
@@ -993,12 +1054,14 @@ export function createHandleProtocol(deps) {
     // One-shot test calls (sub2api account test, new-api channel test) keep their
     // sticky identity but never hold a session seat the main conversation needs.
     const seatless = isProbe || isShortProbeRequest(inbound)
-    // Seat = this client session. Same device, other session = other slot.
-    const seatKey = seatless
+    // Seats follow client sessions; commercial keys retain their authorization boundary.
+    const unscopedSeatKey = seatless
       ? null
       : summarySession
         ? `seat:sess:${summarySession}`
         : resolveSeatIdentity({ inbound, body: ctx.body, headers: req.headers, clientIp: clientIp(req) }).key
+    const seatKey =
+      unscopedSeatKey && req.apiKeyRecord?.group_id ? stickyRouter.isolateKey(unscopedSeatKey, req) : unscopedSeatKey
     // Summary forks retain parent affinity, but must not migrate/bind its
     // aliases or join its serialization queue while the parent is streaming.
     const sessionKeys = summarySession
@@ -1015,7 +1078,7 @@ export function createHandleProtocol(deps) {
           }
     const stickyKey = sessionKeys.stickyKey || null
     const stickyKeys = sessionKeys.stickyKeys || []
-    const deviceKey = stickyDeviceId ? stickyRouter?.canonicalDeviceKey?.(stickyDeviceId) || null : null
+    const deviceKey = stickyDeviceId ? stickyRouter?.canonicalDeviceKey?.(stickyDeviceId, req) || null : null
     const parentSession = explicitParentSessionId(inbound, req.headers)
     const familySession = parentSession || callerSession
     const familyTrusted =
@@ -1116,12 +1179,12 @@ export function createHandleProtocol(deps) {
     }
     if (inferenceBackend === 'api') {
       // API 直连走平台端点，不经过槽位；门禁与 api-kernel hop 同位，勿提前于 credential/intercept 链
-      if (ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
+      if (!keyScope.group_id && ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
         stats.errors++
         const errorResult = makeError({
           type: ErrorType.PERMISSION,
           code: ErrorCode.API_BACKEND_FORBIDDEN,
-          message: '租户密钥只能调用自己名下的槽位',
+          message: '此密钥无权调用平台 API 资源',
           status: 403,
         })
         logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
@@ -1130,10 +1193,20 @@ export function createHandleProtocol(deps) {
       }
       const managedKey = req.apiKeyRecord || null
       if (managedKey) {
-        const gate = apiKeyStore.acquire(managedKey)
+        const gate = apiKeyStore.acquire(managedKey, Date.now(), req.socket?.remoteAddress)
         if (!gate.ok) {
           stats.errors++
-          return json(res, gate.status, keyGateErrorBody(gate))
+          return json(
+            res,
+            gate.status,
+            makeError({
+              type: gate.status === 429 ? ErrorType.RATE_LIMIT : ErrorType.PERMISSION,
+              code: gate.code,
+              message: gate.message,
+              status: gate.status,
+              details: gate.detail || undefined,
+            }).body,
+          )
         }
       }
       const clientAbort = bindClientAbort(req, res)
@@ -1192,22 +1265,15 @@ export function createHandleProtocol(deps) {
       logBag.account_id = result?.accountId || null
       logBag.final_account_id = result?.accountId || null
       logBag.upstream_status = result?.status ?? null
+      logBag.usage_complete = result?.usageComplete === true
       logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, { cacheTtl })
       logBag.upstream_model = result?.model || null
-      // TTFT is generated content; the upstream window also includes hidden reasoning.
+      // API transport still stamps the first data: line; subtract t0 for queue wait only.
       logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
         ? Math.max(0, result.firstTokenAt - logCtx.t0)
         : (result?.ttftMs ?? null)
-      logBag.first_byte_ms = Number.isFinite(result?.firstByteAt)
-        ? Math.max(0, result.firstByteAt - logCtx.t0)
-        : (result?.firstByteMs ?? null)
-      logBag.generation_ms = result?.generationMs ?? null
       logBag.final_state = result?.terminalState || null
-      attachPricing(logBag, {
-        managedKey,
-        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
-        bill: !!(result?.ok && managedKey),
-      })
+      attachPricing(logBag)
       if (clientStream) {
         if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
         if (!res.headersSent) {
@@ -1226,7 +1292,10 @@ export function createHandleProtocol(deps) {
         return sendMapped(res, mapped)
       }
       let output
-      const clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
+      if (protocol === 'openai.responses' && result.body?.object === 'response') return json(res, 200, result.body)
+      const canonicalResult =
+        result.body?.object === 'response' ? codexBodyToAnthropicMessage(result.body, inbound.model) : result.body
+      const clientBody = hidePersonaUsageOnMessage(canonicalResult, personaHideTokens)
       if (protocol === 'anthropic.messages') output = clientBody
       else if (protocol === 'openai.chat') output = fromClaudeToOpenAIChat(clientBody, inbound.model)
       else if (protocol === 'openai.completions') output = fromClaudeToOpenAICompletions(clientBody, inbound.model)
@@ -1244,10 +1313,20 @@ export function createHandleProtocol(deps) {
     const streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(getRouting(), cfg)
     const managedKey = req.apiKeyRecord || null
     if (managedKey) {
-      const gate = apiKeyStore.acquire(managedKey)
+      const gate = apiKeyStore.acquire(managedKey, Date.now(), req.socket?.remoteAddress)
       if (!gate.ok) {
         stats.errors++
-        return json(res, gate.status, keyGateErrorBody(gate))
+        return json(
+          res,
+          gate.status,
+          makeError({
+            type: gate.status === 429 ? ErrorType.RATE_LIMIT : ErrorType.PERMISSION,
+            code: gate.code,
+            message: gate.message,
+            status: gate.status,
+            details: gate.detail || undefined,
+          }).body,
+        )
       }
     }
 
@@ -1386,7 +1465,7 @@ export function createHandleProtocol(deps) {
             }
           }
           try {
-            touchTelemetrySession(cfg.paths.project, selected.vmId, selected.exec?.vm, body?.model)
+            touchTelemetrySession(cfg.paths.project, selected.vmId, selected.exec?.vm)
           } catch {}
           const identity = loadVmIdentity(selected.exec)
           const attemptStartedAt = extra.attemptStartedAt ?? Date.now()
@@ -1563,7 +1642,9 @@ export function createHandleProtocol(deps) {
             clientDiscriminator,
             firstUserText,
             firstUserIdentity,
-            apiKeyId: req.apiKeyRecord?.id ?? '',
+            apiKeyId: req.apiKeyRecord
+              ? [req.apiKeyRecord.user_id, req.apiKeyRecord.id, req.apiKeyRecord.group_id].join(':')
+              : '',
             stream: upstreamStream,
             cacheControlLimit: Number(getRouting()?.compatibility?.cache_control_limit) || 4,
             toolNameRewrite: openaiCompat ? false : getRouting()?.compatibility?.tool_name_rewrite !== false,
@@ -1730,6 +1811,7 @@ export function createHandleProtocol(deps) {
     logBag.attempt_count = result?.attemptCount ?? 0
     logBag.final_state = result?.finalState || result?.terminalState || null
     logBag.upstream_status = result?.status ?? null
+    logBag.usage_complete = result?.usageComplete === true
     logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, {
       cacheTtl,
       requestedSpeed: wantsFastMode(ctx.body) ? 'fast' : null,
@@ -1739,10 +1821,6 @@ export function createHandleProtocol(deps) {
     logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
       ? Math.max(0, result.firstTokenAt - logCtx.t0)
       : (result?.ttftMs ?? null)
-    logBag.first_byte_ms = Number.isFinite(result?.firstByteAt)
-      ? Math.max(0, result.firstByteAt - logCtx.t0)
-      : (result?.firstByteMs ?? null)
-    logBag.generation_ms = result?.generationMs ?? null
     logBag.stop_reason = result?.body?.stop_reason || result?.stopReason || null
     logBag.via = result?.via || 'go-worker-pool'
     if (result?.finalState === 'content_filter' || logBag.stop_reason === 'refusal') {
@@ -1782,11 +1860,7 @@ export function createHandleProtocol(deps) {
           if (vm) pool.syncQuotaSchedule(vm)
         }
       } catch {}
-      attachPricing(logBag, {
-        managedKey,
-        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
-        bill: !!managedKey,
-      })
+      attachPricing(logBag)
     }
 
     if (clientStream) {
@@ -1893,6 +1967,10 @@ export function createHandleProtocol(deps) {
       logBag.api_key_presented = presentedApiKeyForLog(req.presentedApiKey)
       return
     }
+    if (!allowsStandaloneSearch(req.apiKeyRecord))
+      return json(res, 403, {
+        error: { code: 'commercial_search_unpriced', message: '独立搜索尚无可核验计量，商业 Key 请使用模型内搜索' },
+      })
     let body
     try {
       body = await readBody(req, inboundBodyLimit(getRouting(), cfg.limits.max_body_bytes))
@@ -1914,20 +1992,31 @@ export function createHandleProtocol(deps) {
     }
     logBag.model = typeof body?.model === 'string' ? body.model : null
     logBag.inbound_summary = summarizeBody(body)
-    return runWithCodexKey(req, res, logBag, () =>
-      handleCodexSearch({
-        req,
-        res,
-        body,
-        logBag,
-        stats,
-        json,
-        routing: getRouting() || {},
-        projectRoot: cfg.paths.project,
-        stickyRouter,
-        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-      }),
-    )
+    return handleCodexSearch({
+      req,
+      res,
+      body,
+      logBag,
+      stats,
+      json,
+      routing: getRouting() || {},
+      projectRoot: cfg.paths.project,
+      stickyRouter,
+      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+    })
+  }
+
+  async function handleProtocol(req, res, protocol, pathName) {
+    try {
+      return await executeProtocol(req, res, protocol, pathName)
+    } finally {
+      if (req.relayCodexAcquired) apiKeyStore.release(req.apiKeyRecord)
+      try {
+        if (res.writableFinished || res.destroyed) req.commitRelayLog?.()
+      } catch (error) {
+        console.error('[billing] recoverable settlement failure', error.message)
+      }
+    }
   }
 
   /** Field names and image count only: Images bodies carry base64 uploads. */
@@ -1942,7 +2031,7 @@ export function createHandleProtocol(deps) {
   }
 
   /** POST /v1/images/{generations,edits}: same logging and auth as search; edits also take multipart. */
-  async function handleImages(req, res, pathName, kind) {
+  async function executeImages(req, res, pathName, kind) {
     const protocol = 'openai.images'
     const logCtx = requestLog.start(req, { protocol, pathName })
     res._kinRequestId = logCtx.request_id
@@ -1962,20 +2051,8 @@ export function createHandleProtocol(deps) {
       attempt_count: null,
       final_state: null,
     }
-    res.on('finish', () => {
-      try {
-        const groupId = req.apiKeyRecord?.group_id ?? 1
-        requestLog.finish(logCtx, {
-          status: res.statusCode || 0,
-          api_key_kind: req.apiKeyKind || null,
-          api_key_id: req.apiKeyRecord?.id || null,
-          user_id: req.apiKeyRecord?.user_id ?? null,
-          group_id: groupId,
-          rate_multiplier: deps.groupsRepo.rateMultiplier(groupId),
-          ...logBag,
-        })
-      } catch {}
-    })
+    installCommercialLog(req, res, logCtx, logBag)
+
     if (!requireAuth(req, res)) {
       logBag.error_code = req.authError?.code || ErrorCode.INVALID_API_KEY
       logBag.error_message = req.authError?.message || 'Invalid credentials'
@@ -2026,21 +2103,61 @@ export function createHandleProtocol(deps) {
     }
     logBag.model = typeof body?.model === 'string' ? body.model : null
     logBag.inbound_summary = summarizeImagesBody(body)
-    return runWithCodexKey(req, res, logBag, () =>
-      handleCodexImages({
-        req,
-        res,
-        kind,
-        body,
-        logBag,
-        stats,
-        json,
-        routing: getRouting() || {},
-        projectRoot: cfg.paths.project,
-        stickyRouter,
-        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-      }),
-    )
+    const scope = keyScopeFromRequest(req)
+    const model = body?.model || 'gpt-image-2.5-flare'
+    const denial = groupScopeDenial(scope)
+    if (denial || !keyAllowsModel(scope, model) || !['all', 'openai'].includes(scope.group_type)) {
+      logBag.error_code = denial ? 'group_unavailable' : 'model_forbidden'
+      return json(res, 403, { error: { code: logBag.error_code, message: denial?.message || '分组不支持该模型' } })
+    }
+    if (resolveInferenceBackend(req) === 'api') {
+      logBag.error_code = 'images_backend_unsupported'
+      return json(res, 400, { error: { code: logBag.error_code, message: 'Images requires a VM group' } })
+    }
+    logBag.model = model
+    try {
+      if (req.apiKeyRecord?.user_id)
+        req.relayTicket = new RelayBilling(apiKeyStore.db).reserve(req.apiKeyRecord, logCtx.request_id, model, body, {
+          protocol: 'openai.images',
+        })
+    } catch (error) {
+      logBag.error_code = error.code
+      return json(res, error.status || 403, { error: { code: error.code, message: error.message } })
+    }
+    if (req.apiKeyRecord) {
+      const gate = apiKeyStore.acquire(req.apiKeyRecord, Date.now(), req.socket?.remoteAddress)
+      if (!gate.ok) {
+        logBag.error_code = gate.code
+        return json(res, gate.status, { error: { code: gate.code, message: gate.message } })
+      }
+      req.relayCodexAcquired = true
+    }
+    return handleCodexImages({
+      req,
+      res,
+      kind,
+      body,
+      logBag,
+      stats,
+      json,
+      routing: getRouting() || {},
+      projectRoot: cfg.paths.project,
+      stickyRouter,
+      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+    })
+  }
+
+  async function handleImages(req, res, pathName, kind) {
+    try {
+      return await executeImages(req, res, pathName, kind)
+    } finally {
+      if (req.relayCodexAcquired) apiKeyStore.release(req.apiKeyRecord)
+      try {
+        if (res.writableFinished || res.destroyed) req.commitRelayLog?.()
+      } catch (error) {
+        console.error('[billing] recoverable settlement failure', error.message)
+      }
+    }
   }
 
   return {

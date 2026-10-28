@@ -13,6 +13,7 @@ import type {
 } from '@/types/panel-cluster'
 import type { RuntimeType } from '@/types/panel-vm'
 import { RefreshCw } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { importErrorMessage } from '@/lib/import-errors'
 import { Button } from '@/components/ui/button'
@@ -73,7 +74,7 @@ export function usePlacement(
   runtimeType: RuntimeType = 'docker'
 ): Placement {
   const me = useQuery(meQueryOptions())
-  const isAdmin = me.data?.role === 'admin'
+  const isAdmin = me.data?.role === 'super_admin'
   const nodes = useQuery({
     ...clusterNodesQueryOptions(),
     enabled: isAdmin,
@@ -96,6 +97,8 @@ export function usePlacement(
 }
 
 export function PreflightCheckList({ checks }: { checks: PreflightCheck[] }) {
+  useTranslation('vm')
+
   if (!checks.length) return null
   return (
     <ul className='space-y-0.5 text-xs'>
@@ -122,6 +125,8 @@ export function PreflightCheckList({ checks }: { checks: PreflightCheck[] }) {
 }
 
 function NodeOption({ node }: { node: ClusterApiNode }) {
+  useTranslation('vm')
+
   const state = LINK_STATE_TEXT[node.link.state]
   return (
     <span className='flex min-w-0 items-center gap-1.5'>
@@ -146,20 +151,26 @@ export function PlacementField({
   kernel: string
   runtimeType?: RuntimeType
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const { visible, nodes, nodeId, setNodeId, preflight } = placement
   if (!visible) return null
   return (
     <div className='space-y-1'>
-      <Label>目标节点</Label>
+      <Label>
+        <Trans ns='vm' i18nKey='createExitField.targetNode' />
+      </Label>
       <Select
         value={nodeId || LOCAL}
         onValueChange={(v) => setNodeId(v === LOCAL ? '' : v)}
       >
-        <SelectTrigger aria-label='目标节点'>
+        <SelectTrigger aria-label={tVm('vm:createExitField.targetNode')}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={LOCAL}>本机</SelectItem>
+          <SelectItem value={LOCAL}>
+            <Trans ns='vm' i18nKey='createExitField.localMachine' />
+          </SelectItem>
           {nodes.map((n) => (
             <SelectItem key={n.id} value={n.id}>
               <NodeOption node={n} />
@@ -172,14 +183,14 @@ export function PlacementField({
           <div className='flex items-center justify-between gap-2'>
             <span className='text-xs text-muted-foreground'>
               {preflight.isFetching
-                ? '预检中…'
+                ? tVm('vm:placementField.runningPreflight')
                 : preflight.data
                   ? preflight.data.ok
-                    ? '预检通过'
-                    : '预检未通过'
+                    ? tVm('vm:placementField.preflightPassed')
+                    : tVm('vm:placementField.preflightDidNotPass')
                   : preflight.error
-                    ? '预检请求失败'
-                    : '等待预检'}
+                    ? tVm('vm:placementField.preflightRequestFailed')
+                    : tVm('vm:placementField.awaitingPreflight')}
             </span>
             <Button
               size='sm'
@@ -188,8 +199,13 @@ export function PlacementField({
               disabled={preflight.isFetching}
               onClick={() => void preflight.refetch()}
             >
-              <RefreshCw className='size-3' aria-hidden='true' />
-              重新检查
+              <Trans
+                ns='vm'
+                i18nKey='placementField.checkAgain'
+                components={{
+                  part0: <RefreshCw className='size-3' aria-hidden='true' />,
+                }}
+              />
             </Button>
           </div>
           {preflight.error && !preflight.isFetching ? (
@@ -231,6 +247,8 @@ function SlotImagePrep({
   initialJob: SlotImageJob | null
   onReady: () => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const jobOptions = slotImageJobQueryOptions(nodeId, kernel, true)
   const jobQ = useQuery(jobOptions)
@@ -254,12 +272,12 @@ function SlotImagePrep({
     if (seen.current !== 'running') return
     seen.current = st
     if (st === 'done') {
-      toast.success('镜像已就绪，重新预检')
+      toast.success(tVm('vm:placementField.imageReadyRunningPreflightAgain'))
       onReady()
     } else if (st === 'failed') {
-      toast.error('镜像构建失败，见日志')
+      toast.error(tVm('vm:placementField.imageBuildFailedSeeLogs'))
     }
-  }, [job?.status, onReady])
+  }, [job?.status, onReady, tVm])
 
   const logRef = useRef<HTMLPreElement>(null)
   const tail = logTail(job?.log)
@@ -273,10 +291,10 @@ function SlotImagePrep({
       <div className='flex flex-wrap items-center gap-2'>
         <span className='min-w-0 flex-1 text-xs text-muted-foreground'>
           {running
-            ? '镜像构建中，每 3s 刷新…'
+            ? tVm('vm:placementField.buildingImageRefreshesEvery3s')
             : job?.status === 'failed'
-              ? '镜像构建失败'
-              : '节点上缺少槽位镜像'}
+              ? tVm('vm:placementField.imageBuildFailed')
+              : tVm('vm:placementField.slotImageMissingOnNode')}
           {imageRef ? (
             <span className='ms-1 font-mono break-all'>{imageRef}</span>
           ) : null}
@@ -289,15 +307,18 @@ function SlotImagePrep({
           onClick={() => start.mutate()}
         >
           {running
-            ? '准备中…'
+            ? tVm('vm:placementField.preparing')
             : job?.status === 'failed'
-              ? '重新准备'
-              : '准备镜像'}
+              ? tVm('vm:placementField.prepareAgain')
+              : tVm('vm:placementField.prepareImage')}
         </Button>
       </div>
       {running || job?.status === 'failed' ? (
         <p className='text-[11px] text-muted-foreground'>
-          上传二进制并在节点上 docker build，通常需要几分钟。
+          <Trans
+            ns='vm'
+            i18nKey='placementField.uploadsBinariesAndRunsDockerBuildOnTheNode'
+          />
         </p>
       ) : null}
       {tail ? (

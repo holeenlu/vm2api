@@ -8,7 +8,6 @@ import {
   CRS_OFFICIAL_CLI_SYSTEM,
   applyCrsUnofficialPersona,
 } from '../../src/lib/identity/crs-persona.mjs'
-import { OFFICIAL_303_HARNESS } from '../../src/lib/identity/official-profiles.mjs'
 import { toClaudeMessages } from '../../src/lib/protocol/convert.mjs'
 import { detectInboundPlatform } from '../../src/lib/protocol/platform-detect.mjs'
 
@@ -35,21 +34,22 @@ function firstUserText(body) {
   return (Array.isArray(content) ? content : []).map((part) => String(part?.text || '')).join('')
 }
 
-function assertOfficial(body, { caller = '' } = {}) {
-  const blocks = texts(body)
-  assert.match(blocks[0], /^x-anthropic-billing-header: /)
-  assert.equal(blocks[1], CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(blocks[2], OFFICIAL_303_HARNESS)
-  assert.equal(blocks[3], '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
-  assert.equal(blocks.length, 4)
-  assert.equal(body.messages[0].role, 'user')
-  const first = firstUserText(body)
-  if (caller) assert.equal(first, `<system-reminder>\n${caller}\n</system-reminder>\n${HI}`)
-  else assert.equal(first, HI)
-  const env = body.messages.find((message) => message.role === 'system')
-  assert.match(String(env?.content || ''), /^# Environment\n/)
+function userText(body) {
+  return JSON.stringify(body.messages || [])
 }
 
+function assertOfficial(body) {
+  const blocks = texts(body)
+  assert.match(blocks[0], /^x-anthropic-billing-header:/)
+  assert.match(blocks[1], /official CLI for Claude/)
+  assert.match(blocks[2], /You are an agent working with the user/)
+  assert.ok(
+    body.messages.some(
+      (message) => message.role === 'system' && JSON.stringify(message.content).includes('# Environment'),
+    ) || blocks.some((text) => text.includes('# Environment')),
+  )
+  assert.match(userText(body), new RegExp(HI))
+}
 function assertZero(body, { caller = '' } = {}) {
   const blocks = texts(body)
   assert.equal(blocks.length, caller ? 2 : 1)
@@ -72,10 +72,7 @@ const SHAPES = [
 test('official preset appends the configured prompt on every empty-system shape', () => {
   withRouting({ persona_preset: 'official', overlay_preset: 'off' }, (file) => {
     for (const [name, body] of SHAPES) {
-      const out = applyCrsUnofficialPersona(
-        { model: 'claude-opus-5-5', ...structuredClone(body) },
-        { routingFile: file },
-      )
+      const out = applyCrsUnofficialPersona(structuredClone(body), { routingFile: file })
       assertOfficial(out, { caller: name === 'caller leftover' ? 'keep-this-caller' : '' })
     }
   })

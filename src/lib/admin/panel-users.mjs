@@ -1,3 +1,4 @@
+import { integer } from './relay-common.mjs'
 /**
  * Panel operator accounts: scrypt passwords + admin/super/user roles.
  *
@@ -6,12 +7,11 @@
  */
 
 import crypto from 'node:crypto'
-import { resolveStoreDb } from '../db/database.mjs'
+import { resolveStoreDb, withTransaction } from '../db/database.mjs'
 import { UsersRepo } from '../db/repos/users-repo.mjs'
-import { clampVmCreateQuota } from './resource-owner.mjs'
-import { reclaimAssignedVms } from '../vm/vm-registry.mjs'
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
 
-export const PANEL_ROLES = ['admin', 'super', 'user']
+export const PANEL_ROLES = ['super_admin', 'admin', 'user']
 
 const SCRYPT_N = 16384
 const SCRYPT_R = 8
@@ -32,7 +32,8 @@ export function normalizeRole(role) {
     .trim()
     .toLowerCase()
   if (r === 'viewer' || r === 'readonly' || r === '普通') return 'user'
-  if (r === '管理员') return 'admin'
+  if (r === '管理员' || r === '管理') return 'admin'
+  if (r === '超管理' || r === '超管') return 'super_admin'
   return r
 }
 
@@ -96,7 +97,7 @@ function assertPassword(password) {
 function assertRole(role) {
   const r = normalizeRole(role)
   if (!isPanelRole(r)) {
-    const err = new Error('角色必须是 admin / super / user')
+    const err = new Error('角色必须是 super_admin / admin / user')
     err.code = 'invalid_role'
     throw err
   }
@@ -110,7 +111,10 @@ export function publicUserView(rec) {
     username: rec.username,
     role: rec.role,
     enabled: rec.enabled !== false,
-    vm_create_quota: clampVmCreateQuota(rec.vm_create_quota, 0),
+    balance: rec.balance ?? 0,
+    concurrency: rec.concurrency ?? 5,
+    rpm_limit: rec.rpm_limit ?? 0,
+    restrict_public_groups: rec.restrict_public_groups !== false,
     created_at: rec.created_at,
     updated_at: rec.updated_at,
     last_login_at: rec.last_login_at || null,
@@ -130,7 +134,8 @@ export class PanelUserStore {
   }
 
   list() {
-    return this.repo.list().map(publicUserView)
+    const groups = new GroupsRepo(this.db)
+    return this.repo.list().map((u) => ({ ...publicUserView(u), groups: groups.grants(u.id) }))
   }
 
   getById(id) {
@@ -142,7 +147,7 @@ export class PanelUserStore {
   }
 
   countEnabledAdmins() {
-    return this.repo.countEnabledRole('admin')
+    return this.repo.countEnabledRole('super_admin')
   }
 
   bootstrapFromEnv({ username, password } = {}) {
@@ -156,9 +161,8 @@ export class PanelUserStore {
         id: crypto.randomUUID(),
         username: assertUsername(name),
         password_hash: hashPassword(password),
-        role: 'admin',
+        role: 'super_admin',
         enabled: true,
-        vm_create_quota: 0,
         created_at: nowIso(),
         updated_at: nowIso(),
         last_login_at: null,
@@ -175,7 +179,17 @@ export class PanelUserStore {
     return publicUserView(next)
   }
 
-  create({ username, password, role = 'user', enabled = true, vm_create_quota = 0 } = {}) {
+  create({
+    username,
+    password,
+    role = 'user',
+    enabled = true,
+    concurrency = 5,
+    rpm_limit = 0,
+    restrict_public_groups = true,
+    groups,
+    actor = 'system',
+  } = {}) {
     const name = assertUsername(username)
     if (this.repo.getByUsername(name)) {
       const err = new Error('用户名已存在')
@@ -188,12 +202,18 @@ export class PanelUserStore {
       password_hash: hashPassword(assertPassword(password)),
       role: assertRole(role),
       enabled: enabled !== false,
-      vm_create_quota: clampVmCreateQuota(vm_create_quota, 0),
+      concurrency: integer(concurrency, 0, 1000, 'concurrency'),
+      rpm_limit: integer(rpm_limit, 0, 1000000, 'rpm_limit'),
+      restrict_public_groups,
       created_at: nowIso(),
       updated_at: nowIso(),
       last_login_at: null,
     }
-    return this.repo.insert(rec)
+    return withTransaction(this.db, () => {
+      const created = this.repo.insert(rec)
+      if (groups !== undefined) new GroupsRepo(this.db).setGrants(rec.id, groups, actor)
+      return created
+    })
   }
 
   update(id, patch = {}, { actorId = null } = {}) {
@@ -203,7 +223,7 @@ export class PanelUserStore {
 
     if (patch.role != null) {
       const role = assertRole(patch.role)
-      if (rec.role === 'admin' && role !== 'admin' && this.countEnabledAdmins() <= 1) {
+      if (rec.role === 'super_admin' && role !== 'super_admin' && this.countEnabledAdmins() <= 1) {
         const err = new Error('不能取消最后一个管理员')
         err.code = 'last_admin'
         throw err
@@ -213,7 +233,7 @@ export class PanelUserStore {
 
     if (patch.enabled != null) {
       const enabled = !!patch.enabled
-      if (rec.role === 'admin' && rec.enabled && !enabled && this.countEnabledAdmins() <= 1) {
+      if (rec.role === 'super_admin' && rec.enabled && !enabled && this.countEnabledAdmins() <= 1) {
         const err = new Error('不能停用最后一个管理员')
         err.code = 'last_admin'
         throw err
@@ -230,12 +250,16 @@ export class PanelUserStore {
       next.password_hash = hashPassword(assertPassword(patch.password))
     }
 
-    if (patch.vm_create_quota != null) {
-      next.vm_create_quota = clampVmCreateQuota(patch.vm_create_quota, rec.vm_create_quota || 0)
-    }
+    if (patch.concurrency != null) next.concurrency = integer(patch.concurrency, 0, 1000, 'concurrency')
+    if (patch.rpm_limit != null) next.rpm_limit = integer(patch.rpm_limit, 0, 1000000, 'rpm_limit')
+    if (patch.restrict_public_groups != null) next.restrict_public_groups = patch.restrict_public_groups === true
 
     next.updated_at = nowIso()
-    return this.repo.update(next)
+    return withTransaction(this.db, () => {
+      const updated = this.repo.update(next)
+      if (Object.hasOwn(patch, 'groups')) new GroupsRepo(this.db).setGrants(id, patch.groups, actorId || 'system')
+      return updated
+    })
   }
 
   remove(id, { actorId = null } = {}) {
@@ -246,13 +270,12 @@ export class PanelUserStore {
       err.code = 'self_delete'
       throw err
     }
-    if (rec.role === 'admin' && rec.enabled && this.countEnabledAdmins() <= 1) {
+    if (rec.role === 'super_admin' && rec.enabled && this.countEnabledAdmins() <= 1) {
       const err = new Error('不能删除最后一个管理员')
       err.code = 'last_admin'
       throw err
     }
     // Validate deletion first; a failed slot write must leave the user available for retry.
-    if (this.projectRoot) reclaimAssignedVms(this.projectRoot, new Set([rec.id]))
     return this.repo.remove(id)
   }
 }
