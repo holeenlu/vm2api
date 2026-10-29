@@ -1,3 +1,5 @@
+import { t as tr } from '@/i18n'
+import { t as tVm } from '@/i18n'
 import type { Dashboard } from '@/types/panel-overview'
 import type {
   Vm,
@@ -7,6 +9,7 @@ import type {
   VmProxySnap,
 } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
+import { useTranslation, Trans } from 'react-i18next'
 import {
   fableCap,
   fableCardInfo,
@@ -53,7 +56,6 @@ import { proxyHealthOf } from '@/features/vm/proxy-health'
 import { RuntimeChip } from '@/features/vm/runtime-chip'
 import { VmMemoryBlock } from '@/features/vm/vm-memory-block'
 import { VmSchedulingBlock } from '@/features/vm/vm-scheduling'
-import { telemetryEnabled } from './telemetry-policy'
 import { telemetryStatusLabel } from './telemetry-status'
 
 type Props = {
@@ -79,16 +81,18 @@ function PrevWindowMeter({ w }: { w: VmClosedWindow | null | undefined }) {
   if (!w) {
     return (
       <div className='flex items-baseline justify-between gap-2'>
-        <span className='text-xs text-muted-foreground'>上个 5H 已用</span>
+        <span className='text-xs text-muted-foreground'>
+          {tr('vm:sync14008Previous5hUsed')}
+        </span>
         <span className='text-[11px] text-muted-foreground'>
-          暂无记录 · 窗口翻转后开始记录
+          {tr('vm:sync14008NoPreviousWindow')}
         </span>
       </div>
     )
   }
   return (
     <Meter
-      label='上个 5H 已用'
+      label={tr('vm:sync14008Previous5hUsed')}
       value={w.used_ratio * 100}
       hint={closedWindowHint(w)}
     />
@@ -121,7 +125,7 @@ function slotVerdict(
     return {
       tone: {
         key: 'none',
-        text: '无凭证',
+        text: tVm('vm:detailStatusBoard.noCredentials'),
         cls: 'none',
         label: acc.text,
       },
@@ -133,7 +137,7 @@ function slotVerdict(
     return {
       tone: {
         key: 'bad',
-        text: '不可服务',
+        text: tVm('vm:detailStatusBoard.unavailableForRequests'),
         cls: 'bad',
         label: why,
       },
@@ -144,7 +148,7 @@ function slotVerdict(
     return {
       tone: {
         key: 'off',
-        text: '未调度',
+        text: tVm('vm:detailStatusBoard.notScheduled'),
         cls: 'off',
         label: acc.text,
       },
@@ -153,14 +157,16 @@ function slotVerdict(
   }
   if (acc.cls === 'warn' || acc.cls === 'caution') notes.push(acc.text)
   if (hop && kernelProcessUp(hop) && !kernelHopReady(hop)) {
-    notes.push('CLI 未就绪')
+    notes.push(tVm('vm:detailStatusBoard.cLINotReady'))
   }
   return {
     tone: {
       key: 'ok',
-      text: accountUsable(vm) ? '可服务' : acc.text,
+      text: accountUsable(vm)
+        ? tVm('vm:detailStatusBoard.readyForRequests')
+        : acc.text,
       cls: acc.cls === 'ok' ? 'ok' : acc.cls,
-      label: notes.join(' · ') || '凭证有效',
+      label: notes.join(' · ') || tVm('vm:detailStatusBoard.validCredentials'),
     },
     notes,
   }
@@ -176,8 +182,9 @@ function topologyLabel(
   topology: VmKernelSnapshot['process_topology'] | undefined
 ) {
   if (topology?.rust_pid1) return 'kernel PID1'
-  if (topology?.go_worker_pid1) return '旧拓扑'
-  return '未知'
+  if (topology?.go_worker_pid1)
+    return tVm('vm:detailStatusBoard.legacyTopology')
+  return tVm('vm:detailAccountTab.unknown')
 }
 
 function money(value: unknown): number {
@@ -186,6 +193,8 @@ function money(value: unknown): number {
 }
 
 export function VmStatusBoard(props: Props) {
+  const { t: tVm } = useTranslation('vm')
+
   const {
     vm,
     kernel,
@@ -225,7 +234,6 @@ export function VmStatusBoard(props: Props) {
       : live5
   const spend7 = formatWindowSpend(cost7, vm.estimate_7d)
   const spendFable = formatWindowSpend(fableCost, vm.estimate_fable)
-  const telemetry = kernel?.telemetry
   const topology = kernel?.process_topology
   const rust = wrapHealthLabel(kernel?.rust_health)
 
@@ -235,11 +243,15 @@ export function VmStatusBoard(props: Props) {
         <div className='min-w-0 p-4 xl:pr-5'>
           <div className='flex items-start justify-between gap-3'>
             <div className='min-w-0'>
-              <h2 className='text-lg leading-none font-semibold'>现状</h2>
+              <h2 className='text-lg leading-none font-semibold'>
+                <Trans ns='vm' i18nKey='detailStatusBoard.currentState' />
+              </h2>
               <p className='mt-1.5 text-xs text-muted-foreground'>
                 {verdict.notes.length
                   ? verdict.notes.join(' · ')
-                  : '这槽现在可以接推理'}
+                  : tVm(
+                      'vm:detailStatusBoard.thisSlotCanCurrentlyAcceptInferenceRequests'
+                    )}
               </p>
             </div>
             <StatusMark tone={verdict.tone} variant='pill' />
@@ -252,14 +264,16 @@ export function VmStatusBoard(props: Props) {
             <StatusMark
               tone={{
                 key: vmRunning(vm) ? 'ok' : 'off',
-                text: vmRunning(vm) ? '运行' : '停止',
+                text: vmRunning(vm)
+                  ? tVm('vm:detailPage.running')
+                  : tVm('vm:detailPage.stop'),
                 cls: vmRunning(vm) ? 'ok' : 'off',
               }}
               variant='pill'
             />
           </div>
           <div className='mt-4 divide-y'>
-            <Field label='邮箱' compact>
+            <Field label={tVm('vm:detailStatusBoard.email')} compact>
               <SlotIdentity
                 vm={vm}
                 email={
@@ -269,12 +283,12 @@ export function VmStatusBoard(props: Props) {
               />
             </Field>
             {isCodexVm(vm) ? (
-              <Field label='平台' compact>
+              <Field label={tVm('vm:createVmForm.platform')} compact>
                 OpenAI / Codex
               </Field>
             ) : (
               <>
-                <Field label='镜像' compact>
+                <Field label={tVm('vm:detailStatusBoard.image')} compact>
                   <div className='space-y-1'>
                     <div className='flex flex-wrap items-center gap-1.5'>
                       <span>{String(vm.kernel || '—')}</span>
@@ -283,24 +297,24 @@ export function VmStatusBoard(props: Props) {
                     <KernelFeatTags kernel={vm.kernel} />
                   </div>
                 </Field>
-                <Field label='Worker' compact>
+                <Field label={tVm('vm:labels.worker')} compact>
                   {workerLabel(
                     (vm.runtime as Record<string, unknown> | undefined)?.worker
                   )}
                 </Field>
               </>
             )}
-            <Field label='调度状态' compact>
+            <Field label={tVm('vm:detailStatusBoard.schedulingStatus')} compact>
               {scheduleStateLabel(vm)}
             </Field>
-            <Field label='限制至' compact>
+            <Field label={tVm('vm:detailStatusBoard.restrictedUntil')} compact>
               {restrictionUntilOf(vm) ? (
                 <ResetAt value={restrictionUntilOf(vm)} now={now} />
               ) : (
                 '—'
               )}
             </Field>
-            <Field label='冷却' compact>
+            <Field label={tVm('vm:detailStatusBoard.cooldown')} compact>
               {restrictionCopy(vm)}
             </Field>
             <CircuitField vm={vm} now={now} />
@@ -308,7 +322,9 @@ export function VmStatusBoard(props: Props) {
         </div>
 
         <div className='min-w-0 border-t p-4 xl:border-t-0 xl:border-l xl:px-5'>
-          <h3 className='text-sm font-medium'>额度</h3>
+          <h3 className='text-sm font-medium'>
+            <Trans ns='vm' i18nKey='detailStatusBoard.quota' />
+          </h3>
           <div className='mt-3 grid gap-3'>
             {isCodexVm(vm) ? (
               <>
@@ -325,7 +341,7 @@ export function VmStatusBoard(props: Props) {
             ) : (
               <>
                 <Meter
-                  label='本窗口 5H 已用'
+                  label={tVm('vm:detailStatusBoard.5HourUsage')}
                   value={u5}
                   gate={
                     vm.quota_policy ? vm.quota_policy.limit_5h * 100 : undefined
@@ -340,7 +356,7 @@ export function VmStatusBoard(props: Props) {
                 />
                 <PrevWindowMeter w={billing?.prev_window_5h} />
                 <Meter
-                  label='7 天已用'
+                  label={tVm('vm:detailStatusBoard.7DayUsage')}
                   value={u7}
                   gate={
                     vm.quota_policy ? vm.quota_policy.limit_7d * 100 : undefined
@@ -355,7 +371,7 @@ export function VmStatusBoard(props: Props) {
                 />
                 {fable.usedPct != null ? (
                   <Meter
-                    label='Fable 已用'
+                    label={tVm('vm:detailStatusBoard.fableUsage')}
                     value={fable.usedPct}
                     hint={[
                       ...fable.bits,
@@ -374,14 +390,18 @@ export function VmStatusBoard(props: Props) {
                 {split ? (
                   <div className='grid grid-cols-2 gap-3'>
                     <Meter
-                      label='普通半仓'
+                      label={tVm('vm:detailStatusBoard.regularPartition')}
                       value={Math.min(100, split.regularFill)}
-                      hint={`周限 ${(split.regularUsed * 100).toFixed(1)}%`}
+                      hint={tVm('vm:detailStatusBoard.weeklyLimit', {
+                        value1: (split.regularUsed * 100).toFixed(1),
+                      })}
                     />
                     <Meter
-                      label='Fable 半仓'
+                      label={tVm('vm:detailStatusBoard.fablePartition')}
                       value={Math.min(100, split.fableFill)}
-                      hint={`周限 ${(split.fableUsed * 100).toFixed(1)}%`}
+                      hint={tVm('vm:detailStatusBoard.weeklyLimit', {
+                        value1: (split.fableUsed * 100).toFixed(1),
+                      })}
                     />
                   </div>
                 ) : null}
@@ -392,10 +412,14 @@ export function VmStatusBoard(props: Props) {
         </div>
 
         <div className='min-w-0 border-t p-4 xl:border-t-0 xl:border-l xl:pl-5'>
-          <h3 className='text-sm font-medium'>运行</h3>
+          <h3 className='text-sm font-medium'>
+            <Trans ns='vm' i18nKey='detailPage.running' />
+          </h3>
           <div className='mt-3 grid grid-cols-2 gap-3'>
             <div>
-              <div className='text-xs text-muted-foreground'>今日</div>
+              <div className='text-xs text-muted-foreground'>
+                <Trans ns='vm' i18nKey='detailAccountTab.today' />
+              </div>
               <div className='mt-0.5 text-lg font-semibold tabular-nums'>
                 {fmtUsd(
                   Number(acc.today_cost ?? vm.today_cost ?? cost.today),
@@ -403,21 +427,24 @@ export function VmStatusBoard(props: Props) {
                 )}
               </div>
               <div className='text-[11px] text-muted-foreground'>
-                {fmtNum(today.requests)} req
+                {fmtNum(today.requests)}{' '}
+                <Trans ns='vm' i18nKey='units.requestsShort' />
               </div>
             </div>
             <div>
-              <div className='text-xs text-muted-foreground'>5h 窗口</div>
+              <div className='text-xs text-muted-foreground'>
+                <Trans ns='vm' i18nKey='detailStatusBoard.5HourWindow' />
+              </div>
               <div className='mt-0.5 text-lg font-semibold tabular-nums'>
                 {fmtUsd(cost.w, 2)}
               </div>
               <div className='text-[11px] text-muted-foreground'>
-                {fmtNum(cost.tok)} tok
+                {fmtNum(cost.tok)} <Trans ns='vm' i18nKey='units.tokensShort' />
               </div>
             </div>
           </div>
           <div className='mt-3 divide-y'>
-            <Field label='代理' compact>
+            <Field label={tVm('vm:detailPage.proxy')} compact>
               <span className='font-mono text-xs'>
                 {proxyNamedLabel(proxy)}
               </span>
@@ -428,10 +455,10 @@ export function VmStatusBoard(props: Props) {
             </div>
             {isCodexVm(vm) ? null : (
               <>
-                <Field label='5h 重置' compact>
+                <Field label={tVm('vm:detailStatusBoard.5HourReset')} compact>
                   <ResetAt value={reset5} now={now} />
                 </Field>
-                <Field label='7d 重置' compact>
+                <Field label={tVm('vm:detailStatusBoard.7DayReset')} compact>
                   <ResetAt value={reset7} now={now} />
                 </Field>
               </>
@@ -443,18 +470,17 @@ export function VmStatusBoard(props: Props) {
                 <Field label='cli-hop' compact>
                   {rust}
                 </Field>
-                <Field label='内核' compact>
+                <Field label={tVm('vm:detailStatusBoard.kernel')} compact>
                   {isCodexVm(vm) ? '—' : dataplaneLabel(vm.resolved_dataplane)}
                 </Field>
-                <Field label='拓扑' compact>
+                <Field label={tVm('vm:detailStatusBoard.topology')} compact>
                   {topologyLabel(topology)}
-                  {topology?.go_telemetry ? ' · Go telemetry' : ''}
+                  {topology?.go_telemetry
+                    ? ' · ' + tVm('common:goTelemetry')
+                    : ''}
                 </Field>
-                <Field label='遥测' compact>
-                  {telemetryStatusLabel(
-                    telemetry,
-                    telemetryEnabled(vm.seed_policy)
-                  )}
+                <Field label={tVm('vm:detailStatusBoard.telemetry')} compact>
+                  {telemetryStatusLabel(kernel?.telemetry)}
                 </Field>
               </>
             )}

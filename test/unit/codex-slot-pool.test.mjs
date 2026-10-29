@@ -5,6 +5,7 @@ import {
   orderCodexSessionSlots,
   isCodexSlotParked,
   isCodexFailoverError,
+  isCodexOverloadError,
   evaluateCodexQuotaSchedule,
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { SessionLimitRegistry } from '../../src/lib/pool/session-limit.mjs'
@@ -92,6 +93,21 @@ test('capped 5h window parks the slot', () => {
     ),
     true,
   )
+})
+
+test('OpenAI server overload errors fail over before reaching the client', () => {
+  for (const result of [
+    { ok: false, status: 503, body: { error: { type: 'server_error', code: 'server_is_overloaded' } } },
+    {
+      ok: false,
+      status: 502,
+      body: { error: { message: 'Our servers are currently overloaded. Please try again later.' } },
+    },
+  ]) {
+    assert.equal(isCodexOverloadError(result), true)
+    assert.equal(isCodexFailoverError(result), true)
+  }
+  assert.equal(isCodexOverloadError({ ok: false, status: 503, body: { error: { code: 'server_error' } } }), false)
 })
 
 test('429 and usage_limit_reached fail over; committed hops do not', () => {

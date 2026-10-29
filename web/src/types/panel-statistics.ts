@@ -2,7 +2,7 @@
  * 统计页（`/statistics`）的前后端契约。
  *
  * 形状对齐 claude-code-hub 的 `UserStatisticsData` / `ChartDataItem` 与排行榜，
- * 数据由 vm2api 的 `usage_logs` 聚合（`src/lib/db/repos/statistics-repo.mjs`，
+ * 数据由 tapmodels 的 `usage_logs` 聚合（`src/lib/db/repos/statistics-repo.mjs`，
  * 路由 `/api/panel/statistics*`）。所有接口带 `tz`（IANA，浏览器时区），
  * 分桶与「今天 / 本月」边界按该时区计算。
  */
@@ -27,7 +27,8 @@ export type StatsSeries = {
 }
 
 /** 聚合维度。user 角色只允许 `key` / `model`（后端对其它值回 400）。 */
-export type StatsDimension = 'user' | 'key' | 'model' | 'vm'
+export type StatsDimension =
+  'user' | 'key' | 'model' | 'vm' | 'group' | 'endpoint'
 
 /** 指标页签。三个指标一次性下发，切页签不重新请求。 */
 export type StatsMetric = 'cost' | 'requests' | 'tokens'
@@ -71,7 +72,8 @@ export type StatisticsData = {
 }
 
 /** 排行榜范围。user 角色只允许 `key` / `model`。 */
-export type LeaderboardScope = 'user' | 'key' | 'model' | 'vm'
+export type LeaderboardScope =
+  'user' | 'key' | 'model' | 'vm' | 'group' | 'endpoint'
 
 export type LeaderboardEntry = {
   id: string

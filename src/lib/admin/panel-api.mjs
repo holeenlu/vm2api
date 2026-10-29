@@ -39,7 +39,7 @@ import { filterVmsForPanel } from './resource-owner.mjs'
 import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../pool/weekly-split.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { pickScheduleFields } from '../pool/schedule-state.mjs'
-import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
+import { proxyFamily, normalizeProxyHost } from '../vm/proxy-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
@@ -105,7 +105,7 @@ export function ok(data, meta) {
 }
 
 /** Start/create `allocated_proxy` must never carry SOCKS credentials. */
-export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'admin', nodes = [] } = {}) {
+export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'super_admin', nodes = [] } = {}) {
   if (!bound) return null
   const raw = bound.id && proxyPool?.state?.proxies?.find((p) => p.id === bound.id)
   let view =
@@ -647,7 +647,7 @@ export async function buildDashboard({
       liveById,
       projectRoot: cfg.paths.project,
       clusterNodes,
-      role: 'admin',
+      role: 'super_admin',
     }),
   )
   const snap = accountQuota.snapshot()
@@ -685,7 +685,7 @@ export async function buildDashboard({
   return ok({
     health: {
       status: 'ok',
-      service: 'vm2api',
+      service: 'tapmodels',
       rewrite: cfg.rewrite?.enabled ? 'on' : 'off',
       base_url: cfg.base_url,
     },
@@ -757,7 +757,7 @@ export async function buildVmList({
   poolScheduler = null,
   proxyPool = null,
   ownerUserId = null,
-  role = 'admin',
+  role = 'super_admin',
   requestLog = null,
   clusterNodes = [],
 } = {}) {
@@ -820,7 +820,7 @@ export async function buildVmDetail({
   kernelHealth = null,
   slotProcessStatus = readSlotProcessStatus,
   clusterNodes = [],
-  role = 'admin',
+  role = 'super_admin',
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -857,7 +857,7 @@ export async function buildVmDetail({
   })()
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
   const gpt = isCodexVm(vm)
-  applyCostFields(summary, cost, { coveredSince: billing?.log_coverage_start })
+  applyCostFields(summary, cost)
   const detail = buildAccountBilling(cost, billing, {
     vmId: summary.id,
     accountId: acc?.account_id || summary.account_uuid,
@@ -1026,10 +1026,11 @@ function claudeResetFail(result) {
   )
 }
 
-export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
+export async function buildClaudeResetQuery({ cfg, id, accountQuota, transport, now } = {}) {
   const result = await queryClaudeResetCredits({
     projectRoot: cfg.paths.project,
     vmId: id,
+    accountQuota,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
   })
@@ -1041,10 +1042,11 @@ export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
   })
 }
 
-export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, transport, now } = {}) {
+export async function buildClaudeResetRedeem({ cfg, id, accountQuota, idempotencyKey, transport, now } = {}) {
   const result = await redeemClaudeResetCredit({
     projectRoot: cfg.paths.project,
     vmId: id,
+    accountQuota,
     idempotencyKey,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
@@ -1097,6 +1099,7 @@ export async function buildProbeOne({
   usageCache = null,
   hop = true,
   fableProbe = probeFableEntitlement,
+  probeEntitlement = true,
   routingConfig = {},
 } = {}) {
   const vm = getVm(cfg.paths.project, id)
@@ -1176,11 +1179,13 @@ export async function buildProbeOne({
   const acc = accountQuota.repo.get(accountId)
   const q = quotaFromAccount(acc)
   const storedTier = vm.claude?.account_tier || acc?.unified?.account_tier || q.account_tier || null
-  const includeFable = shouldProbeFable({
-    fable: q.fable || acc?.unified?.fable || {},
-    quota: { ...acc?.unified, ...q },
-    storedTier,
-  })
+  const includeFable =
+    probeEntitlement &&
+    shouldProbeFable({
+      fable: q.fable || acc?.unified?.fable || {},
+      quota: { ...acc?.unified, ...q },
+      storedTier,
+    })
   const cache = usageCache || getUsageCache()
   if (force) cache.clear(accountId)
   const skipHop = !shouldHopOfficialUsage(acc?.unified, { hop, force })
@@ -1206,7 +1211,12 @@ export async function buildProbeOne({
     } catch {}
   }
   if (!skipHop) accountQuota.ingestOAuthUsage(accountId, result)
-  if (isSetupTokenMode(credentialModeOfVm(vm)) && (force || includeFable) && !result.usage_scope_missing) {
+  if (
+    probeEntitlement &&
+    isSetupTokenMode(credentialModeOfVm(vm)) &&
+    (force || includeFable) &&
+    !result.usage_scope_missing
+  ) {
     try {
       await applyFableProbeResult(accountQuota, accountId, await fableProbe({ exec, timeoutMs: 20000 }))
     } catch {}
@@ -1408,12 +1418,7 @@ export function buildUsage({ accountQuota, cfg, requestLog = null }) {
         cache_read_tokens: cost?.today_cache_read_tokens || cost?.today?.cache_read_tokens || 0,
         cache_creation_tokens: cost?.today_cache_creation_tokens || cost?.today?.cache_creation_tokens || 0,
       }).cache_hit_rate,
-      ...windowEstimates(
-        codexVm ? { ...quota, ...(codexVm.codex_usage?.quota || {}) } : quota,
-        cost,
-        billing?.log_coverage_start,
-        !!codexVm,
-      ),
+      ...windowEstimates(codexVm ? { ...quota, ...(codexVm.codex_usage?.quota || {}) } : quota, cost, !!codexVm),
       near_limit:
         accountQuota?.nearLimit?.(a) ??
         isNearLimit(
@@ -1591,8 +1596,13 @@ export function quotaFromAccount(acc, quotaConfig) {
   const extra = u.extra_usage || null
   const o5 = u.official?.['5h'] || u['5h'] || {}
   const o7 = u.official?.['7d'] || u['7d'] || {}
-  const o5Limited = isOfficialWindowLimited(o5)
-  const o7Limited = isOfficialWindowLimited(o7)
+  const newerHeader = (key, official) => {
+    const headerAt = Date.parse(u.headers?.[key]?.sampled_at || '')
+    const officialAt = Date.parse(official.sampled_at || '')
+    return Number.isFinite(headerAt) && Number.isFinite(officialAt) && headerAt > officialAt
+  }
+  const o5Limited = isOfficialWindowLimited(o5) && !newerHeader('5h', o5)
+  const o7Limited = isOfficialWindowLimited(o7) && !newerHeader('7d', o7)
   const effectiveU5 = o5Limited
     ? 1.0
     : listed.utilization_5h != null
@@ -1619,6 +1629,7 @@ export function quotaFromAccount(acc, quotaConfig) {
     reset_7d: listed.reset_7d || o7.reset || null,
     reset_7d_sonnet: sonnet.reset || null,
     reset_7d_oi: oi.reset || listed.reset_7d_oi || null,
+    cleared_windows: u.cleared_windows || null,
     status_5h: effectiveStatus5,
     status_7d: effectiveStatus7,
     status_7d_sonnet: sonnet.status || null,
@@ -1735,7 +1746,7 @@ function canImportCredential(v, hit) {
   return !!(base.url || (base.host && base.port) || v.proxy_id)
 }
 
-function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
+function mergeVmProxy(v, poolSnap, { role = 'super_admin', nodes = [] } = {}) {
   const hit = poolProxyForVm(v, poolSnap)
   const base = v.proxy || {}
   const configured = proxyConfigured(v, hit)
@@ -1744,7 +1755,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   }
   const proxy = {
     id: hit?.id || base.id || v.proxy_id || null,
-    host: normalizeSocksHost(hit?.host || base.host) || hit?.host || base.host || null,
+    host: normalizeProxyHost(hit?.host || base.host) || hit?.host || base.host || null,
     port: hit?.port ?? base.port ?? null,
     label: hit?.label || null,
     scheme: hit?.scheme || base.scheme || (isLocalEgressId(hit?.id) || isLocalEgressId(base.id) ? 'local' : 'socks5'),
@@ -1752,7 +1763,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
     status: hit?.status ?? null,
     enabled: hit?.enabled ?? null,
     blocked_reason: hit ? hit.blocked_reason || null : proxyBlockedReason(base),
-    address_family: hit?.address_family || socksProxyFamily(base) || null,
+    address_family: hit?.address_family || proxyFamily(base) || null,
     latency_ms: hit?.latency_ms ?? null,
     last_error: hit?.last_error || null,
     last_probe_at: hit?.last_probe_at || null,
@@ -1813,7 +1824,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const u5 = mergedQuota.utilization_5h
   const u7 = mergedQuota.utilization_7d
   const merged = mergeVmProxy(v, extras.poolSnap || null, {
-    role: extras.role || 'admin',
+    role: extras.role || 'super_admin',
     nodes: extras.clusterNodes || [],
   })
   const expiresAt = normalizePanelExpiresAt(v.expires_at, workerCred?.expires_at)
@@ -1946,6 +1957,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     sessions: isCodex ? { active: codexSessions?.active, max: codexSessions?.max } : null,
   })
   return {
+    groups: v.groups || [],
+    groups_version: v.groups_version || 0,
     id: v.id,
     name: v.name,
     status: v.status,
@@ -1964,7 +1977,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     node_id: v.node_id || null,
     owner_user_id: v.owner_user_id || null,
     origin: v.origin || null,
-    ...(canRevealClusterNodes(extras.role || 'admin') && v.node_id
+    ...(canRevealClusterNodes(extras.role || 'super_admin') && v.node_id
       ? { node_name: nodeNameOf(extras.clusterNodes, v.node_id) }
       : {}),
     timezone: v.timezone || null,
@@ -2387,6 +2400,7 @@ function billingWindowOf(accountId, vmId, vm, q) {
     reset_5h: (codex ? codexQuota.reset_5h : q.reset_5h) || vm.reset_5h || null,
     reset_7d: (codex ? codexQuota.reset_7d : q.reset_7d) || vm.reset_7d || null,
     reset_7d_oi: codex ? null : q.reset_7d_oi || vm.reset_7d_oi || null,
+    cleared_windows: (codex ? codexQuota.cleared_windows : q.cleared_windows) || null,
   }
 }
 
@@ -2399,7 +2413,7 @@ function stampVmBilling(vms, billing) {
   if (!billing) return null
   const index = indexBillingAccounts(billing)
   for (const vm of vms || []) {
-    applyCostFields(vm, lookupBilling(index, vm), { coveredSince: billing.log_coverage_start })
+    applyCostFields(vm, lookupBilling(index, vm))
   }
   return billing
 }
@@ -2434,7 +2448,7 @@ function tokenTotal(row) {
   )
 }
 
-function applyCostFields(target, cost, { coveredSince = null } = {}) {
+function applyCostFields(target, cost) {
   if (!target) return
   const today = cost?.today && typeof cost.today === 'object' ? cost.today : null
   const todayInput = Number(cost?.today_input_tokens ?? (today?.input_tokens || 0))
@@ -2462,11 +2476,11 @@ function applyCostFields(target, cost, { coveredSince = null } = {}) {
   target.window_7d_success = cost?.window_7d_success || 0
   target.window_7d_errors = cost?.window_7d_errors || 0
   target.window_7d_tokens = cost?.window_7d_tokens || 0
-  Object.assign(target, windowEstimates(target, cost, coveredSince, isCodexVm(target)))
+  Object.assign(target, windowEstimates(target, cost, isCodexVm(target)))
 }
 
 /** Window capacity from official spend ÷ used% on the same aligned window. */
-function windowEstimates(quota, cost, coveredSince, codex) {
+function windowEstimates(quota, cost, codex) {
   const fable = cost?.window_fable || null
   const hasFableWindow = !codex && (quota?.utilization_7d_oi != null || !!quota?.reset_7d_oi)
   return {
@@ -2476,8 +2490,6 @@ function windowEstimates(quota, cost, coveredSince, codex) {
       tokens: cost?.window_5h_tokens,
       usedRatio: usedRatioOf(quota?.utilization_5h),
       reset: quota?.reset_5h,
-      windowStart: cost?.window_5h_start,
-      coveredSince,
       unpricedRequests: cost?.window_5h_unpriced,
     }),
     estimate_7d: estimateWindow({
@@ -2485,8 +2497,6 @@ function windowEstimates(quota, cost, coveredSince, codex) {
       tokens: cost?.window_7d_tokens,
       usedRatio: usedRatioOf(quota?.utilization_7d),
       reset: quota?.reset_7d,
-      windowStart: cost?.window_7d_start,
-      coveredSince,
       unpricedRequests: cost?.window_7d_unpriced,
     }),
     estimate_fable: hasFableWindow
@@ -2495,8 +2505,6 @@ function windowEstimates(quota, cost, coveredSince, codex) {
           tokens: fable?.tokens,
           usedRatio: usedRatioOf(quota?.utilization_7d_oi),
           reset: quota?.reset_7d_oi,
-          windowStart: fable?.start,
-          coveredSince,
           unpricedRequests: fable?.unpriced,
         })
       : null,

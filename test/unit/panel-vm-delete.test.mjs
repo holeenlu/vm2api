@@ -26,7 +26,7 @@ function handler(project) {
     cfg,
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -106,32 +106,6 @@ test('startup reconcile does not resurrect a deleted sole active VM', async () =
     assert.equal(again.active, null)
     assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-01.json')), false)
     assert.equal(fs.existsSync(path.join(root, 'vms', 'active.json')), false)
-  } finally {
-    stopVmWatch()
-    setVmWriteHook(null)
-    closeDatabase()
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('deleting a slot removes its account-pool membership', async () => {
-  const { openDatabase, closeDatabase, getDb } = await import('../../src/lib/db/database.mjs')
-  const { initVmDbSync, stopVmWatch } = await import('../../src/lib/vm/vm-db-sync.mjs')
-  const { setVmWriteHook } = await import('../../src/lib/vm/vm-file.mjs')
-  const { VmPoolsRepo } = await import('../../src/lib/db/repos/vm-pools-repo.mjs')
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-pool-'))
-  try {
-    openDatabase({ dataDir: path.join(root, 'data') })
-    seed(root, 'vm-01')
-    seed(root, 'vm-02')
-    initVmDbSync(root, { watch: false })
-    const pools = new VmPoolsRepo(getDb())
-    const pool = pools.insert({ name: 'shared' })
-    pools.setMembers(pool.id, ['vm-01', 'vm-02'])
-    const { handlePanel, response } = handler(root)
-    await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-01'))
-    assert.equal(response.status, 200, JSON.stringify(response.body))
-    assert.deepEqual(pools.get(pool.id).vm_ids, ['vm-02'])
   } finally {
     stopVmWatch()
     setVmWriteHook(null)

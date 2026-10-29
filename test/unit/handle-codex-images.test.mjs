@@ -1,3 +1,5 @@
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -6,7 +8,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { handleCodexImages } from '../../src/lib/protocol/handle-codex.mjs'
 import { CODEX_IMAGE_EDITS_URL, CODEX_IMAGE_GENERATIONS_URL } from '../../src/lib/protocol/codex-models.mjs'
-import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { openDatabase, closeDatabase, getDb } from '../../src/lib/db/database.mjs'
 import { loadGptModelPolicy, saveGptModelPolicy } from '../../src/lib/protocol/gpt-model-policy.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
@@ -46,7 +48,7 @@ async function images({ kind = 'generations', body, headers = {}, ops = {}, stic
   const logBag = {}
   const stats = { errors: 0, requests: 0, by_route: {} }
   await handleCodexImages({
-    req: { headers: { 'user-agent': 'codex_exec/0.163.0', ...headers } },
+    req: { apiKeyKind: 'master', headers: { 'user-agent': 'codex_exec/0.163.0', ...headers } },
     res,
     kind,
     body: body ?? { model: 'gpt-image-2.5-flare', prompt: 'a cat', size: '1024x1024' },
@@ -236,7 +238,7 @@ test('a non-JSON upstream answer is a 502, and upstream errors pass through', as
 
 function protocolHarness(rows, { apiKeyStore = null } = {}) {
   return createHandleProtocol({
-    apiKeyStore,
+    apiKeyStore: apiKeyStore || new ApiKeyStore({ db: getDb() }),
     cfg: { limits: { max_body_bytes: 1 << 20 }, rewrite: { enabled: false }, paths: { project: root } },
     json(res, status, body) {
       res.statusCode = status
@@ -244,7 +246,7 @@ function protocolHarness(rows, { apiKeyStore = null } = {}) {
     },
     readBody,
     requireAuth: (req) => {
-      req.apiKeyKind = 'managed'
+      req.apiKeyKind = req.apiKeyRecord ? 'managed' : 'master'
       return true
     },
     requestLog: { start: () => ({ request_id: 'req-img' }), finish: (_ctx, row) => rows.push(row) },
@@ -302,30 +304,34 @@ test('the images route rejects a broken multipart edit as a 400', async () => {
   assert.equal(rows[0].error_code, 'invalid_image_edit')
 })
 
-test('the images route picks slots by the key owner role, like search', async () => {
-  writeGptVm('vm-platform')
-  writeGptVm('vm-tenant')
-  const file = path.join(root, 'vms', 'vm-tenant.json')
-  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), owner_user_id: 'u1' }))
-  const roles = { a1: 'admin', u1: 'user' }
-  const apiKeyStore = {
-    users: { getById: (id) => ({ id, role: roles[id] }) },
-    acquire: () => ({ ok: true }),
-    release() {},
-  }
-  const run = async (userId) => {
-    const rows = []
-    const { handleImages } = protocolHarness(rows, { apiKeyStore })
-    const req = Readable.from([Buffer.from('{"model":"gpt-image-2.5-flare","prompt":"x"}')])
+test('the images route selects only authorized group slots and rejects revoked keys', async () => {
+  writeGptVm('vm-authorized')
+  writeGptVm('vm-outside')
+  const db = getDb(),
+    groups = new GroupsRepo(db),
+    keys = new ApiKeyStore({ db })
+  const group = groups.create({ name: 'images', platform: 'openai', models: ['gpt-image-2.5-flare'] })
+  groups.assignResource('vm', 'vm-authorized', [group.id], 0)
+  const record = keys.create({ group_id: group.id })
+  const run = async (model = 'gpt-image-2.5-flare') => {
+    const rows = [],
+      { handleImages } = protocolHarness(rows, { apiKeyStore: keys })
+    const req = Readable.from([Buffer.from(JSON.stringify({ model, prompt: 'x' }))])
     req.headers = { 'content-type': 'application/json' }
-    req.apiKeyRecord = { id: `key-${userId}`, user_id: userId }
+    req.apiKeyRecord = record
     const res = fakeRes()
     await handleImages(req, res, '/v1/images/generations', 'generations')
     res.finish()
-    return rows[0]
+    return { res, row: rows[0] }
   }
-  assert.equal((await run('a1')).vm_id, 'vm-platform')
-  assert.equal((await run('u1')).vm_id, 'vm-tenant')
+  const first = await run()
+  assert.equal(first.row.vm_id, 'vm-authorized')
+  assert.equal(first.res.body.error.code, 'proxy_required')
+  assert.equal((await run('gpt-image-2.5-sunburst')).res.statusCode, 403)
+  db.prepare("UPDATE api_keys SET status='disabled' WHERE id=?").run(record.id)
+  const denied = await run()
+  assert.equal(denied.res.statusCode, 403)
+  assert.equal(denied.row.vm_id, null)
 })
 
 test('the images route reads JSON generations', async () => {

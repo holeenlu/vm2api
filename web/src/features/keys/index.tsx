@@ -1,453 +1,670 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { VIEW_TITLES } from '@/config/nav'
+import { i18n } from '@/i18n'
 import type { ApiKeyItem } from '@/types/panel-keys'
+import { Copy } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { copyText } from '@/lib/clipboard'
-import { fmtNum } from '@/lib/format'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Progress } from '@/components/ui/progress'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { EmptyState } from '@/components/empty-state'
+import { FormField as Label } from '@/components/form-field'
 import { PageHeader } from '@/components/page-header'
-import { TableSkeleton } from '@/components/page-skeletons'
-import { QueryGate } from '@/components/query-gate'
-import { StatusMark } from '@/components/status-mark'
+import { SearchSelect } from '@/components/search-select'
 import { meQueryOptions } from '@/features/auth/queries'
-import { apiKeysQueryOptions } from '@/features/keys/queries'
-import { vmsListQueryOptions } from '@/features/vm/queries'
-import {
-  keyExpiryText,
-  keyIsDead,
-  keyQuotaLabel,
-  keyQuotaPct,
-  keyStatusTone,
-  maskApiKeyItem,
-  plaintextFromPayload,
-} from './key-format'
-import { KeyLimitsDialog } from './key-limits-dialog'
-import { keyLimitsPayload, type KeyLimitsDraft } from './key-payload'
-import { KeyRevealDialog, type RevealedKey } from './key-reveal-dialog'
+import { groupsQueryOptions } from '@/features/groups/queries'
+import { usersQueryOptions } from '@/features/users/queries'
+import { keyStatusTone, keyQuotaLabel } from './key-format'
+import { KeyRevealDialog } from './key-reveal-dialog'
 import { KeyStatsDialog } from './key-stats-dialog'
-import { VmPoolsCard, vmPoolsQueryOptions } from './vm-pools-card'
+import { apiKeysQueryOptions } from './queries'
+import { UseKeyDialog } from './use-key-dialog'
 
+const EMPTY = {
+  user_id: '',
+  name: '',
+  group_id: '',
+  max_concurrency: 0,
+  quota_usd: 0,
+  quota_requests: 0,
+  rpm: 0,
+  rate_limit_5h: 0,
+  rate_limit_1d: 0,
+  rate_limit_7d: 0,
+  expires_at: '',
+  ip_whitelist: '',
+  ip_blacklist: '',
+  custom_key: '',
+}
 export function KeysPage() {
-  const qc = useQueryClient()
-  const q = useQuery(apiKeysQueryOptions())
+  const { t } = useTranslation('keys')
+
+  const keyScope =
+    new URLSearchParams(window.location.hash.split('?')[1] || '').get(
+      'scope'
+    ) === 'mine'
+      ? 'mine'
+      : 'all'
+  const q = useQuery(apiKeysQueryOptions(keyScope))
+  const groups = useQuery(groupsQueryOptions())
   const me = useQuery(meQueryOptions())
-  const isAdmin = me.data?.role === 'admin'
-  const pools = useQuery({ ...vmPoolsQueryOptions(), enabled: isAdmin })
-  const vms = useQuery(vmsListQueryOptions())
-  const vmItems = vms.data?.items || []
-  const [createOpen, setCreateOpen] = useState(false)
-  const [editId, setEditId] = useState('')
-  const [statsId, setStatsId] = useState('')
-  const [rotateId, setRotateId] = useState('')
-  const [revealed, setRevealed] = useState<RevealedKey | null>(null)
-  const [delId, setDelId] = useState('')
-  const keys = q.data?.keys || []
-  const editing = keys.find((k) => k.id === editId) || null
-  const rotating = keys.find((k) => k.id === rotateId) || null
-  const refresh = () =>
-    qc.invalidateQueries({ queryKey: apiKeysQueryOptions().queryKey })
-
-  const create = useMutation({
-    mutationFn: (draft: KeyLimitsDraft) => {
-      const body = keyLimitsPayload(draft, 'create', { isAdmin })
-      return api<unknown>('/api/panel/api-keys', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      })
-    },
-    onSuccess: async (data) => {
-      const key = plaintextFromPayload(data)
-      setCreateOpen(false)
-      if (key) {
-        setRevealed({ title: '已生成', name: draftName(data), key })
-      } else {
-        toast.success('已创建')
-      }
-      await refresh()
-    },
-    onError: (error: Error) => toast.error(error.message),
+  const canSelectOwner = me.data?.role === 'super_admin'
+  const qc = useQueryClient()
+  const users = useQuery({
+    ...usersQueryOptions(),
+    enabled: me.data?.role === 'super_admin' || me.data?.role === 'admin',
   })
-
-  const edit = useMutation({
-    mutationFn: ({ id, draft }: { id: string; draft: KeyLimitsDraft }) =>
-      api(`/api/panel/api-keys/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify(keyLimitsPayload(draft, 'edit', { isAdmin })),
-      }),
-    onSuccess: async () => {
-      toast.success('并发已更新')
-      setEditId('')
-      await refresh()
-    },
-    onError: (error: Error) => toast.error(error.message),
+  const [userFilter, setUserFilter] = useState(
+    () =>
+      new URLSearchParams(window.location.hash.split('?')[1] || '').get(
+        'userId'
+      ) || ''
+  )
+  const [groupFilter, setGroupFilter] = useState(''),
+    [search, setSearch] = useState('')
+  const visible = (q.data?.keys || []).filter(
+    (k) =>
+      (!userFilter || k.user_id === userFilter) &&
+      (!groupFilter || String(k.group_id) === groupFilter) &&
+      (k.name || '').toLowerCase().includes(search.toLowerCase())
+  )
+  const [edit, setEdit] = useState<ApiKeyItem | null | undefined>()
+  const [form, setForm] = useState(EMPTY)
+  const nameInput = useRef<HTMLInputElement>(null)
+  const ownerGroups = useQuery({
+    queryKey: ['panel', 'groups', 'available_to', form.user_id],
+    queryFn: () =>
+      api<{ items: { id: number; name: string; rate_multiplier: number }[] }>(
+        `/api/panel/groups?available_to=${encodeURIComponent(form.user_id)}`
+      ),
+    enabled: edit !== undefined && canSelectOwner && !!form.user_id,
   })
-
-  const toggle = useMutation({
-    mutationFn: ({ id, enable }: { id: string; enable: boolean }) =>
-      api(`/api/panel/api-keys/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status: enable ? 'active' : 'disabled' }),
-      }),
-    onSuccess: async (_data, vars) => {
-      toast.success(vars.enable ? '已启用' : '已停用')
-      await refresh()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  const resetQuota = useMutation({
-    mutationFn: (id: string) =>
-      api(`/api/panel/api-keys/${encodeURIComponent(id)}/reset-quota`, {
-        method: 'POST',
-      }),
-    onSuccess: async () => {
-      toast.success('额度已清零')
-      await refresh()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  const reveal = useMutation({
-    mutationFn: (id: string) =>
-      api<unknown>(`/api/panel/api-keys/${encodeURIComponent(id)}/reveal`, {
-        method: 'POST',
-      }),
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  const rotate = useMutation({
-    mutationFn: (id: string) =>
-      api<unknown>(`/api/panel/api-keys/${encodeURIComponent(id)}/rotate`, {
-        method: 'POST',
-      }),
-    onSuccess: async (data) => {
-      const key = plaintextFromPayload(data)
-      setRotateId('')
-      if (key) setRevealed({ title: '已换新', name: draftName(data), key })
-      else toast.success('已换新')
-      await refresh()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  const remove = useMutation({
-    mutationFn: (id: string) =>
-      api(`/api/panel/api-keys/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: async () => {
-      toast.success('已删除')
-      setDelId('')
-      await refresh()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  async function viewPlain(k: ApiKeyItem) {
+  const availableGroupsQuery =
+    canSelectOwner && form.user_id ? ownerGroups : groups
+  const groupsLoading =
+    availableGroupsQuery.isPending || availableGroupsQuery.isFetching
+  const groupsError = availableGroupsQuery.error
+  const availableGroups =
+    groupsLoading || groupsError ? [] : availableGroupsQuery.data?.items || []
+  const canSelectPlatform =
+    canSelectOwner &&
+    (!form.user_id ||
+      users.data?.items?.find((u) => u.id === form.user_id)?.role ===
+        'super_admin')
+  const groupsUnavailable =
+    !(canSelectPlatform && form.group_id === '__platform__') &&
+    (groupsLoading || !!groupsError)
+  const [reveal, setReveal] = useState<{
+    titleKey: 'keys:copyKey' | 'keys:title'
+    name: string
+    key: string
+  } | null>(null)
+  const [useKey, setUseKey] = useState<{
+    id: string
+    name: string
+    key: string
+  } | null>(null)
+  const [secretBusy, setSecretBusy] = useState('')
+  async function readSecret(item: ApiKeyItem, action: 'copy' | 'use') {
+    setSecretBusy(item.id)
     try {
-      const data = await reveal.mutateAsync(k.id)
-      const key = plaintextFromPayload(data)
-      if (!key) {
-        toast.error('无法还原明文 · 请换新')
-        return
-      }
-      setRevealed({ title: '查看密钥', name: k.name, id: k.id, key })
-    } catch {
-      /* onError 已 toast */
+      const data = await api<{ key: string }>(
+        `/api/panel/api-keys/${item.id}/reveal`,
+        { method: 'POST' }
+      )
+      if (action === 'use')
+        setUseKey({ id: item.id, name: item.name || '', key: data.key })
+      else if (await copyText(data.key)) toast.success(t('keys:keyCopied'))
+      else
+        setReveal({
+          titleKey: 'keys:copyKey',
+          name: item.name || '',
+          key: data.key,
+        })
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSecretBusy('')
     }
   }
-
-  async function copyPlain(k: ApiKeyItem) {
-    try {
-      const data = await reveal.mutateAsync(k.id)
-      const key = plaintextFromPayload(data)
-      if (!key) {
-        toast.error('无法还原明文 · 请换新')
-        return
-      }
-      if (await copyText(key)) {
-        toast.success('已复制明文密钥，请妥善保存')
-        return
-      }
-      // The browser refused (plain HTTP without execCommand, or the click's
-      // activation expired while revealing): hand the key over in the dialog,
-      // whose own button is a fresh gesture.
-      setRevealed({ title: '复制密钥', name: k.name, id: k.id, key })
-      toast.warning('浏览器拦截了自动复制，请在弹层中点「复制」或手动选中')
-    } catch {
-      /* onError 已 toast */
-    }
+  const [stats, setStats] = useState<ApiKeyItem | null>(null)
+  const mutation = useMutation({
+    mutationFn: ({
+      path,
+      method,
+      body,
+    }: {
+      path: string
+      method: string
+      body?: unknown
+    }) =>
+      api<{ item?: ApiKeyItem; key?: string }>(path, {
+        method,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    onSuccess: async (data) => {
+      setEdit(undefined)
+      const key = data.item?.key || data.key
+      if (key && !key.includes('…'))
+        setReveal({ titleKey: 'keys:title', name: data.item?.name || '', key })
+      await qc.invalidateQueries({ queryKey: ['panel', 'api-keys'] })
+      toast.success(t('keys:success'))
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  function open(k: ApiKeyItem | null) {
+    void qc.invalidateQueries({ queryKey: ['panel', 'groups'] })
+    setEdit(k)
+    setForm({
+      ...EMPTY,
+      ...k,
+      name: k?.name || '',
+      user_id: canSelectOwner ? k?.user_id || userFilter || '' : '',
+      group_id: k ? (k.group_id ? String(k.group_id) : '__platform__') : '',
+      max_concurrency: k?.max_concurrency || 0,
+      quota_usd: k?.quota_usd || 0,
+      quota_requests: k?.quota_requests || 0,
+      rpm: k?.rpm || 0,
+      rate_limit_5h: k?.rate_limit_5h || 0,
+      rate_limit_1d: k?.rate_limit_1d || 0,
+      rate_limit_7d: k?.rate_limit_7d || 0,
+      expires_at: k?.expires_at?.slice(0, 16) || '',
+      ip_whitelist: (k?.ip_whitelist || []).join(','),
+      ip_blacklist: (k?.ip_blacklist || []).join(','),
+    })
   }
-
+  const [action, setAction] = useState<{
+    key: ApiKeyItem
+    kind: 'rotate' | 'delete' | 'reset'
+  } | null>(null)
+  const numeric = {
+    max_concurrency: t('keys:concurrencyLimit'),
+    quota_usd: t('keys:amountLimit'),
+    quota_requests: t('keys:requestLimit'),
+    rpm: t('keys:rpmLimit'),
+    rate_limit_5h: t('keys:fiveHourLimit'),
+    rate_limit_1d: t('keys:dailyLimit'),
+    rate_limit_7d: t('keys:weeklyLimit'),
+  } as const
   return (
     <PageHeader
-      title={VIEW_TITLES.keys}
-      description='发给客户端的 sk-vm- 密钥。请求走这张密钥，不要把主控密钥写进环境变量。'
-      extra={<Button onClick={() => setCreateOpen(true)}>生成</Button>}
+      title={t('keys:title')}
+      description={t('keys:description')}
+      extra={<Button onClick={() => open(null)}>{t('keys:create')}</Button>}
     >
-      {isAdmin ? <VmPoolsCard vms={vmItems} /> : null}
-      <QueryGate
-        loading={q.isLoading}
-        error={q.error}
-        skeleton={<TableSkeleton rows={8} columns={8} />}
-      >
-        {keys.length === 0 ? (
-          <EmptyState
-            reason='尚无密钥。协议密钥只能调 /v1。'
-            actionLabel='生成'
-            onAction={() => setCreateOpen(true)}
+      {q.error ? (
+        <p role='alert' className='text-destructive'>
+          {q.error.message}
+        </p>
+      ) : null}
+      <div className='mb-4 flex flex-wrap gap-2'>
+        <Input
+          className='max-w-xs'
+          placeholder={t('keys:search')}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        {me.data?.role === 'super_admin' || me.data?.role === 'admin' ? (
+          <SearchSelect
+            className='min-w-52'
+            label={t('keys:filterUser')}
+            value={userFilter}
+            options={(users.data?.items || []).map((u) => ({
+              id: u.id,
+              name: u.username,
+            }))}
+            searchPlaceholder={t('keys:searchUser')}
+            allLabel={t('keys:allUsers')}
+            onChange={(value) => {
+              setUserFilter(value || '')
+            }}
           />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>名称</TableHead>
-                <TableHead>Key</TableHead>
-                <TableHead>分类</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>额度</TableHead>
-                <TableHead>限制</TableHead>
-                <TableHead>过期</TableHead>
-                <TableHead className='text-right'></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {keys.map((k) => (
-                <KeyRow
-                  key={k.id}
-                  item={k}
-                  busy={
-                    toggle.isPending ||
-                    resetQuota.isPending ||
-                    reveal.isPending ||
-                    rotate.isPending
+        ) : null}
+        <SearchSelect
+          className='min-w-52'
+          label={t('keys:filterGroup')}
+          value={groupFilter}
+          options={(groups.data?.items || []).map((g) => ({
+            id: String(g.id),
+            name: g.name,
+          }))}
+          searchPlaceholder={t('keys:searchGroup')}
+          allLabel={t('keys:allGroups')}
+          onChange={(value) => {
+            setGroupFilter(value || '')
+          }}
+        />
+      </div>
+      <div className='overflow-auto rounded border'>
+        <table className='w-full text-sm'>
+          <thead>
+            <tr className='border-b bg-muted/40'>
+              {[
+                t('keys:name'),
+                t('keys:key'),
+                t('keys:group'),
+                t('keys:status'),
+                t('keys:usageLimits'),
+                t('keys:actions'),
+              ].map((v) => (
+                <th key={v} className='p-3 text-left'>
+                  {v}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((k) => (
+              <tr key={k.id} className='border-b'>
+                <td className='p-3'>
+                  {k.name}
+                  {me.data?.role === 'super_admin' ||
+                  me.data?.role === 'admin' ? (
+                    <p className='text-xs text-muted-foreground'>
+                      {users.data?.items?.find((u) => u.id === k.user_id)
+                        ?.username || t('keys:platformService')}
+                    </p>
+                  ) : null}
+                </td>
+                <td className='p-3'>
+                  <div className='flex items-center gap-1'>
+                    <code className='text-xs'>{k.key}</code>
+                    <Button
+                      aria-label={t('keys:copyNamedKey', {
+                        name: k.name || t('keys:key'),
+                      })}
+                      size='icon'
+                      variant='ghost'
+                      disabled={secretBusy === k.id}
+                      onClick={() => void readSecret(k, 'copy')}
+                    >
+                      <Copy className='size-4' />
+                    </Button>
+                  </div>
+                  {k.secret_status === 'decrypt_failed' && (
+                    <p className='text-xs text-destructive'>
+                      {t('keys:recoverDecryption')}
+                    </p>
+                  )}
+                  {k.secret_status === 'hash_only' && (
+                    <p className='text-xs text-muted-foreground'>
+                      {t('keys:legacyHashedKey')}
+                    </p>
+                  )}
+                </td>
+                <td className='p-3'>
+                  {k.group_name ||
+                    groups.data?.items.find((g) => g.id === k.group_id)?.name ||
+                    t('keys:platformService')}
+                </td>
+                <td className='p-3'>
+                  {keyStatusTone(k).text}
+                  <p className='text-xs text-muted-foreground'>
+                    {k.expires_at
+                      ? new Date(k.expires_at).toLocaleDateString(i18n.language)
+                      : t('keys:noExpiry')}
+                  </p>
+                </td>
+                <td className='p-3'>{keyQuotaLabel(k)}</td>
+                <td className='space-x-2 p-3'>
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    disabled={secretBusy === k.id}
+                    onClick={() => void readSecret(k, 'use')}
+                  >
+                    {t('keys:use')}
+                  </Button>
+                  <Button size='sm' variant='outline' onClick={() => open(k)}>
+                    {t('keys:edit')}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={() => setStats(k)}
+                  >
+                    {t('keys:usage')}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    disabled={mutation.isPending}
+                    onClick={() =>
+                      mutation.mutate({
+                        path: '/api/panel/api-keys/' + k.id + '/reveal',
+                        method: 'POST',
+                      })
+                    }
+                  >
+                    {t('keys:view')}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    disabled={mutation.isPending}
+                    onClick={() =>
+                      mutation.mutate({
+                        path: '/api/panel/api-keys/' + k.id,
+                        method: 'PATCH',
+                        body: {
+                          status: k.status === 'active' ? 'disabled' : 'active',
+                        },
+                      })
+                    }
+                  >
+                    {k.status === 'active'
+                      ? t('keys:disabled')
+                      : t('keys:enabled')}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    onClick={() => setAction({ key: k, kind: 'rotate' })}
+                  >
+                    {t('keys:rotate')}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    onClick={() => setAction({ key: k, kind: 'reset' })}
+                  >
+                    {t('keys:resetLimits')}
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    onClick={() => setAction({ key: k, kind: 'delete' })}
+                  >
+                    {t('keys:revoke')}
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Dialog
+        open={edit !== undefined}
+        onOpenChange={(v) => !v && setEdit(undefined)}
+      >
+        <DialogContent
+          className='max-h-[90svh] overflow-y-auto sm:max-w-2xl'
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            nameInput.current?.focus()
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {edit ? t('keys:editKey') : t('keys:create')}
+            </DialogTitle>
+          </DialogHeader>
+          <form
+            className='space-y-5'
+            autoComplete='off'
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (groupsUnavailable) return
+              mutation.mutate({
+                path: '/api/panel/api-keys' + (edit ? '/' + edit.id : ''),
+                method: edit ? 'PATCH' : 'POST',
+                body: {
+                  ...form,
+                  user_id: canSelectOwner ? form.user_id : undefined,
+                  group_id:
+                    form.group_id === '__platform__'
+                      ? null
+                      : Number(form.group_id),
+                  expires_at: form.expires_at
+                    ? new Date(form.expires_at + 'Z').toISOString()
+                    : null,
+                  ip_whitelist: form.ip_whitelist
+                    .split(',')
+                    .map((v) => v.trim())
+                    .filter(Boolean),
+                  ip_blacklist: form.ip_blacklist
+                    .split(',')
+                    .map((v) => v.trim())
+                    .filter(Boolean),
+                },
+              })
+            }}
+          >
+            {canSelectOwner && !edit ? (
+              <Label>
+                {t('keys:owner')}
+                <SearchSelect
+                  label={t('keys:owner')}
+                  value={form.user_id}
+                  options={(users.data?.items || []).map((u) => ({
+                    id: u.id,
+                    name: u.username,
+                  }))}
+                  allLabel={t('keys:currentAdmin')}
+                  searchPlaceholder={t('keys:searchOwner')}
+                  onChange={(id) =>
+                    setForm({ ...form, user_id: id || '', group_id: '' })
                   }
-                  onView={() => void viewPlain(k)}
-                  onCopy={() => void copyPlain(k)}
-                  onRotate={() => setRotateId(k.id)}
-                  onEdit={() => setEditId(k.id)}
-                  onStats={() => setStatsId(k.id)}
-                  onToggle={() =>
-                    toggle.mutate({
-                      id: k.id,
-                      enable: k.status === 'disabled',
+                />
+              </Label>
+            ) : null}
+            <Label>
+              {t('keys:name')}
+              <Input
+                ref={nameInput}
+                required
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+            </Label>
+            <Label>
+              {t('keys:serviceGroup')}
+              <SearchSelect
+                label={t('keys:serviceGroup')}
+                value={form.group_id}
+                loading={groupsLoading}
+                options={[
+                  ...(canSelectPlatform
+                    ? [
+                        {
+                          id: '__platform__',
+                          name: t('keys:adminKey'),
+                        },
+                      ]
+                    : []),
+                  ...availableGroups.map((g) => ({
+                    id: String(g.id),
+                    name: `${g.name} · ${g.rate_multiplier ?? '—'}×`,
+                  })),
+                ]}
+                searchPlaceholder={t('keys:searchServiceGroup')}
+                onChange={(id) => setForm({ ...form, group_id: id || '' })}
+              />
+            </Label>
+            {groupsError && (
+              <p role='alert' className='text-sm text-destructive'>
+                {groupsError.message}
+              </p>
+            )}
+            {form.group_id === '__platform__' && (
+              <p className='rounded-lg border bg-muted/40 p-3 text-sm leading-6 text-muted-foreground'>
+                {t('keys:adminKeyHelp')}
+              </p>
+            )}
+            {!edit && (
+              <Label>
+                {t('keys:customKey')}
+                <Input
+                  type='text'
+                  name='api_key_custom_value'
+                  autoComplete='off'
+                  autoCorrect='off'
+                  autoCapitalize='none'
+                  spellCheck={false}
+                  data-1p-ignore
+                  data-lpignore='true'
+                  placeholder={t('keys:customKeyPlaceholder')}
+                  value={form.custom_key}
+                  onChange={(e) =>
+                    setForm({ ...form, custom_key: e.target.value })
+                  }
+                />
+              </Label>
+            )}
+            <h3 className='border-t pt-4 text-sm font-semibold'>
+              {t('keys:limits')}
+            </h3>
+            <div className='grid gap-4 sm:grid-cols-2'>
+              {Object.entries(numeric).map(([field, label]) => (
+                <Label key={field}>
+                  {label}
+                  <Input
+                    type='number'
+                    min='0'
+                    step={
+                      field === 'max_concurrency' ||
+                      field === 'rpm' ||
+                      field === 'quota_requests'
+                        ? '1'
+                        : '0.000001'
+                    }
+                    value={form[field as keyof typeof numeric]}
+                    onChange={(e) =>
+                      setForm({ ...form, [field]: Number(e.target.value) })
+                    }
+                  />
+                </Label>
+              ))}
+            </div>
+            <p className='text-xs text-muted-foreground'>
+              {t('keys:limitsHelp')}
+            </p>
+            <h3 className='border-t pt-4 text-sm font-semibold'>
+              {t('keys:accessLimits')}
+            </h3>
+            <div className='flex flex-wrap gap-2'>
+              {[7, 30, 90, 180].map((days) => (
+                <Button
+                  key={days}
+                  type='button'
+                  size='sm'
+                  variant='outline'
+                  onClick={() =>
+                    setForm({
+                      ...form,
+                      expires_at: new Date(Date.now() + days * 86400000)
+                        .toISOString()
+                        .slice(0, 16),
                     })
                   }
-                  onReset={() => resetQuota.mutate(k.id)}
-                  onDelete={() => setDelId(k.id)}
-                />
+                >
+                  {t('keys:expiryDays', { count: days })}
+                </Button>
               ))}
-            </TableBody>
-          </Table>
-        )}
-      </QueryGate>
-      <KeyLimitsDialog
-        mode='create'
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        pending={create.isPending}
-        vms={vmItems}
-        pools={isAdmin ? pools.data?.pools || [] : undefined}
-        onSubmit={(draft) => create.mutate(draft)}
-      />
-      <KeyLimitsDialog
-        mode='edit'
-        open={!!editId}
-        onOpenChange={(open) => {
-          if (!open) setEditId('')
+              <Button
+                type='button'
+                size='sm'
+                variant='ghost'
+                onClick={() => setForm({ ...form, expires_at: '' })}
+              >
+                {t('keys:noExpiry')}
+              </Button>
+            </div>
+            <Label>
+              {t('keys:expiryUtc')}
+              <Input
+                type='datetime-local'
+                value={form.expires_at}
+                onChange={(e) =>
+                  setForm({ ...form, expires_at: e.target.value })
+                }
+              />
+            </Label>
+            <Label>
+              {t('keys:ipAllowlist')}
+              <Input
+                value={form.ip_whitelist}
+                onChange={(e) =>
+                  setForm({ ...form, ip_whitelist: e.target.value })
+                }
+              />
+            </Label>
+            <Label>
+              {t('keys:ipBlocklist')}
+              <Input
+                value={form.ip_blacklist}
+                onChange={(e) =>
+                  setForm({ ...form, ip_blacklist: e.target.value })
+                }
+              />
+            </Label>
+            <DialogFooter>
+              <Button
+                type='button'
+                variant='outline'
+                onClick={() => setEdit(undefined)}
+              >
+                {t('keys:cancel')}
+              </Button>
+              <Button
+                disabled={
+                  mutation.isPending || groupsUnavailable || !form.group_id
+                }
+              >
+                {t('keys:save')}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDialog
+        open={!!action}
+        onOpenChange={(v) => !v && setAction(null)}
+        title={
+          action?.kind === 'rotate'
+            ? t('keys:rotateKey')
+            : action?.kind === 'delete'
+              ? t('keys:revokeKey')
+              : t('keys:resetKeyLimits')
+        }
+        desc={
+          action?.kind === 'reset' ? t('keys:resetHelp') : t('keys:revokeHelp')
+        }
+        confirmText={t('keys:confirm')}
+        handleConfirm={() => {
+          if (!action) return
+          mutation.mutate({
+            path:
+              '/api/panel/api-keys/' +
+              action.key.id +
+              (action.kind === 'rotate'
+                ? '/rotate'
+                : action.kind === 'reset'
+                  ? '/reset-quota'
+                  : ''),
+            method: action.kind === 'delete' ? 'DELETE' : 'POST',
+          })
+          setAction(null)
         }}
-        initial={editing}
-        vms={vmItems}
-        pools={isAdmin ? pools.data?.pools || [] : undefined}
-        pending={edit.isPending}
-        onSubmit={(draft) => {
-          if (!editId) return
-          edit.mutate({ id: editId, draft })
-        }}
       />
-      <KeyRevealDialog value={revealed} onClose={() => setRevealed(null)} />
+      {useKey && (
+        <UseKeyDialog value={useKey} onClose={() => setUseKey(null)} />
+      )}
+      <KeyRevealDialog value={reveal} onClose={() => setReveal(null)} />
       <KeyStatsDialog
-        item={keys.find((k) => k.id === statsId) || null}
-        vms={vmItems}
-        onOpenChange={(open) => {
-          if (!open) setStatsId('')
-        }}
-      />
-      <ConfirmDialog
-        open={!!rotateId}
-        onOpenChange={() => setRotateId('')}
-        title='换新密钥'
-        desc={`${rotating?.name || rotateId} · 这条密钥建库时只留了哈希，明文取不回来。换新会立刻让旧值失效（客户端会收到 401），名称 / 分类 / 并发 / 额度 / 统计都保留。`}
-        confirmText='换新'
-        cancelBtnText='取消'
-        isLoading={rotate.isPending}
-        handleConfirm={() => {
-          if (rotateId) rotate.mutate(rotateId)
-        }}
-      />
-      <ConfirmDialog
-        open={!!delId}
-        onOpenChange={() => setDelId('')}
-        title='删除密钥'
-        desc='删除后立即失效，客户端再用该 key 将收到 401。'
-        confirmText='删除'
-        cancelBtnText='取消'
-        destructive
-        isLoading={remove.isPending}
-        handleConfirm={() => {
-          if (delId) remove.mutate(delId)
-        }}
+        vms={[]}
+        item={stats}
+        onOpenChange={(v) => !v && setStats(null)}
       />
     </PageHeader>
   )
-}
-
-function draftName(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  const rec = payload as Record<string, unknown>
-  if (typeof rec.name === 'string') return rec.name
-  const item = rec.item
-  if (item && typeof item === 'object') {
-    const name = (item as Record<string, unknown>).name
-    if (typeof name === 'string') return name
-  }
-  return undefined
-}
-
-function KeyRow({
-  item,
-  busy,
-  onView,
-  onCopy,
-  onRotate,
-  onEdit,
-  onStats,
-  onToggle,
-  onReset,
-  onDelete,
-}: {
-  item: ApiKeyItem
-  busy: boolean
-  onView: () => void
-  onCopy: () => void
-  onRotate: () => void
-  onEdit: () => void
-  onStats: () => void
-  onToggle: () => void
-  onReset: () => void
-  onDelete: () => void
-}) {
-  const active = item.status !== 'disabled'
-  const expiry = keyExpiryText(item)
-  const pct = keyQuotaPct(item)
-  const conc = Number(item.max_concurrency || 0)
-  const rpm = Number(item.rpm || 0)
-  return (
-    <TableRow className={cn(keyIsDead(item) && 'bg-destructive/10')}>
-      <TableCell>
-        <div className='font-medium'>{item.name || 'default'}</div>
-        <div className='text-xs text-muted-foreground'>
-          {scopeText(item)}
-          {' · '}
-          {fmtNum(item.requests || 0)} 请求
-          {item.inflight ? ` · ${item.inflight} 进行中` : ''}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className='flex flex-wrap items-center gap-1'>
-          <code className='font-mono text-xs'>{maskApiKeyItem(item)}</code>
-          {item.revealable ? (
-            <>
-              <Button
-                size='sm'
-                variant='ghost'
-                disabled={busy}
-                onClick={onView}
-              >
-                查看
-              </Button>
-              <Button
-                size='sm'
-                variant='ghost'
-                disabled={busy}
-                onClick={onCopy}
-              >
-                复制
-              </Button>
-            </>
-          ) : (
-            <Button
-              size='sm'
-              variant='ghost'
-              disabled={busy}
-              onClick={onRotate}
-            >
-              换新
-            </Button>
-          )}
-        </div>
-      </TableCell>
-      <TableCell>{item.category === 'api' ? 'API' : 'OAuth'}</TableCell>
-      <TableCell>
-        <StatusMark tone={keyStatusTone(item)} />
-      </TableCell>
-      <TableCell className='min-w-[120px]'>
-        <div className='text-xs'>{keyQuotaLabel(item)}</div>
-        {pct != null ? <Progress value={pct} className='mt-1 h-1.5' /> : null}
-      </TableCell>
-      <TableCell className='text-xs'>
-        {conc ? `${conc} 并发` : '并发不限'} · {rpm ? `RPM ${rpm}` : 'RPM 不限'}
-      </TableCell>
-      <TableCell
-        className={cn('text-xs', expiry.expired && 'text-destructive')}
-      >
-        {expiry.text}
-      </TableCell>
-      <TableCell className='space-x-1 text-right'>
-        <Button size='sm' variant='ghost' disabled={busy} onClick={onStats}>
-          统计
-        </Button>
-        <Button size='sm' variant='ghost' disabled={busy} onClick={onEdit}>
-          编辑
-        </Button>
-        <Button size='sm' variant='ghost' disabled={busy} onClick={onToggle}>
-          {active ? '停用' : '启用'}
-        </Button>
-        <Button size='sm' variant='ghost' disabled={busy} onClick={onReset}>
-          清零
-        </Button>
-        <Button
-          size='sm'
-          variant='destructive'
-          disabled={busy}
-          onClick={onDelete}
-        >
-          删除
-        </Button>
-      </TableCell>
-    </TableRow>
-  )
-}
-
-function scopeText(item: ApiKeyItem): string {
-  if (item.vm_pool_id) return `账号池 · ${item.vm_pool_name || item.vm_pool_id}`
-  if (item.group_type === 'anthropic')
-    return `Anthropic · ${item.allowed_vms?.length || 0} 台`
-  if (item.group_type === 'openai')
-    return `OpenAI · ${item.allowed_vms?.length || 0} 台`
-  return '全局'
 }

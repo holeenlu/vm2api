@@ -104,7 +104,7 @@ test('fleet refresh runs through the server after node links come up', async () 
         ]),
     },
     async (base, requests) => {
-      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, TAPMODELS_API_KEY: 'test-key' })
       assert.equal(result.code, 0, result.stderr)
       assert.deepEqual(
         requests.map((request) => [request.method, request.url]),
@@ -150,7 +150,7 @@ test('fleet refresh goes on past an offline node and fails on its slot', async (
     async (base, requests) => {
       const result = await runFleet({
         KIN_AUTO_SYNC_BASE: base,
-        VM2API_API_KEY: 'test-key',
+        TAPMODELS_API_KEY: 'test-key',
         KIN_FLEET_LINK_WAIT_MS: '50',
       })
       assert.equal(result.code, 1)
@@ -179,7 +179,7 @@ test('fleet refresh with only local slots skips the node link wait', async () =>
       '/api/panel/vms/fleet-update': () => telemetry([{ id: 'local-a', ok: true }]),
     },
     async (base, requests) => {
-      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, TAPMODELS_API_KEY: 'test-key' })
       assert.equal(result.code, 0, result.stderr)
       assert.ok(!requests.some((request) => request.url === '/api/panel/cluster/nodes'))
     },

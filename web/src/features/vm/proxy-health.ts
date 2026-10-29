@@ -1,3 +1,4 @@
+import { t as tVm } from '@/i18n'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
 
@@ -17,11 +18,17 @@ export function proxyHealthOf(vm: Vm, proxy: VmProxySnap): ProxyHealth {
       score: 0,
       tone: {
         key: 'bad',
-        text: '缺 SOCKS5',
+        text: tVm('vm:detailProxyTab.sOCKS5Missing'),
         cls: 'bad',
-        label: '有凭证但未绑代理 · fail closed',
+        label: tVm(
+          'vm:proxyHealth.credentialsPresentButNoProxyBoundFailClosed'
+        ),
       },
-      reasons: ['有凭证但未绑代理，出站会直接拒绝'],
+      reasons: [
+        tVm(
+          'vm:proxyHealth.credentialsPresentButNoProxyBoundOutboundRequestsWill'
+        ),
+      ],
     }
   }
   if (!proxy.host && !vm.proxy_id) {
@@ -29,11 +36,11 @@ export function proxyHealthOf(vm: Vm, proxy: VmProxySnap): ProxyHealth {
       score: 0,
       tone: {
         key: 'none',
-        text: '未绑定',
+        text: tVm('vm:proxyHealth.notBound'),
         cls: 'none',
-        label: '还没有 SOCKS5',
+        label: tVm('vm:proxyHealth.noSOCKS5Yet'),
       },
-      reasons: ['池里分配一条，或从空闲列表绑定'],
+      reasons: [tVm('vm:proxyHealth.assignFromThePoolOrBindAnAvailableProxy')],
     }
   }
 
@@ -50,11 +57,15 @@ export function proxyOwnHealthOf(proxy: VmProxySnap): ProxyHealth {
       score: 0,
       tone: {
         key: 'off',
-        text: 'IPv6 已关闭',
+        text: tVm('vm:detailProxyTab.iPv6Disabled'),
         cls: 'off',
-        label: '设置 → SOCKS5 开启 IPv6 代理出口后才能使用',
+        label: tVm(
+          'vm:proxyHealth.enableIPv6ProxyEgressInSettingsSOCKS5BeforeUsing'
+        ),
       },
-      reasons: ['IPv6 代理出口已关闭，保留绑定和探测历史，不计作代理故障'],
+      reasons: [
+        tVm('vm:proxyHealth.iPv6ProxyEgressIsDisabledBindingAndProbeHistory'),
+      ],
     }
   }
   const status = String(proxy.status || '').toLowerCase()
@@ -63,11 +74,14 @@ export function proxyOwnHealthOf(proxy: VmProxySnap): ProxyHealth {
       score: 0,
       tone: {
         key: 'bad',
-        text: '失效',
+        text: tVm('vm:proxyHealth.invalid'),
         cls: 'bad',
-        label: proxy.last_error || '最近探测失败',
+        label: proxy.last_error || tVm('vm:proxyHealth.latestProbeFailed'),
       },
-      reasons: [proxy.last_error || '状态为失效，需要换绑或重探'],
+      reasons: [
+        proxy.last_error ||
+          tVm('vm:proxyHealth.proxyIsInvalidRebindOrProbeAgain'),
+      ],
     }
   }
 
@@ -78,15 +92,17 @@ export function proxyOwnHealthOf(proxy: VmProxySnap): ProxyHealth {
 
   if (fails >= 3) {
     score -= 45
-    reasons.push(`连续失败 ${fails}`)
+    reasons.push(
+      tVm('vm:proxyHealth.consecutiveFailures', { fails: fails, count: fails })
+    )
   } else if (fails > 0) {
     score -= 18
-    reasons.push(`失败 ${fails} 次`)
+    reasons.push(tVm('vm:proxyHealth.failures', { fails: fails, count: fails }))
   }
 
   if (lat == null) {
     score -= 12
-    reasons.push('尚未探测延迟')
+    reasons.push(tVm('vm:proxyHealth.latencyNotProbedYet'))
   } else if (lat >= 1000) {
     score -= 40
     reasons.push(`${lat}ms`)
@@ -105,12 +121,12 @@ export function proxyOwnHealthOf(proxy: VmProxySnap): ProxyHealth {
     score >= 80 ? 'ok' : score >= 55 ? 'caution' : score >= 30 ? 'warn' : 'bad'
   const text =
     cls === 'ok'
-      ? '健康'
+      ? tVm('vm:detailProxyTab.health')
       : cls === 'caution'
-        ? '偏慢'
+        ? tVm('vm:proxyHealth.slow')
         : cls === 'warn'
-          ? '不稳'
-          : '异常'
+          ? tVm('vm:proxyHealth.unstable')
+          : tVm('vm:proxyHealth.abnormal')
   return {
     score,
     tone: {

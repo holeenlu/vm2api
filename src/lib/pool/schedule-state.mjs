@@ -37,6 +37,12 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
 export const HOLD_MAINTENANCE = 'maintenance'
 export const HOLD_PROXY = 'proxy_cooldown'
 const HOLD_REASONS = Object.freeze({
+  vendor_disabled: '供应商已停用',
+  vendor_paused: '供应商资源已暂停',
+  vendor_archived: '供应商资源已归档',
+  vendor_scope_revoked: '供应范围已撤销',
+  vendor_proxy_disabled: '供应商代理不可用',
+  vendor_policy_unavailable: '供应商状态不可读取',
   [HOLD_MAINTENANCE]: '维护中',
   [HOLD_PROXY]: '代理异常',
 })
@@ -154,10 +160,17 @@ export function deriveScheduleFields(vm, { preserveStatus = true } = {}) {
   const off = vm.schedule_off === true
   const bad = vm.unschedulable?.reason || null
   const hold = vm.schedule_hold?.reason || null
-  const schedulable = !off && !bad && !hold
+  const vendorDisabled = vm.vendor_disabled === true || vm.vendor_resource_paused === true
+  const schedulable = !vendorDisabled && !off && !bad && !hold
   vm.schedulable = schedulable
   vm.schedule_manual = off
-  vm.schedule_disabled_reason = off ? vm.schedule_off_reason || 'disabled' : bad || hold || null
+  vm.schedule_disabled_reason = vendorDisabled
+    ? vm.vendor_resource_paused
+      ? 'vendor_paused'
+      : 'vendor_disabled'
+    : off
+      ? vm.schedule_off_reason || 'disabled'
+      : bad || hold || null
   const status = String(vm.status || '').toLowerCase()
   if (schedulable && status === 'paused') vm.status = 'running'
   if (!preserveStatus && !schedulable && status === 'running') vm.status = 'paused'
@@ -354,6 +367,7 @@ export function resolveSlotState({
     restriction_scope: scope,
     restriction_soft: soft,
   })
+  if (vm.vendor_disabled === true) return restricted('vendor_disabled', null)
   if (vm.schedule_hold?.reason) return restricted(vm.schedule_hold.reason, null)
   const until = Number(restrictionUntil) || Number(availability?.until) || 0
   const live = until > now
