@@ -1,3 +1,4 @@
+import { t as tVm } from '@/i18n'
 import type { NodePreflight, PreflightCheck } from '@/types/panel-cluster'
 import type { VmRoutingConfig } from '@/types/panel-routing'
 import type { KvmProbe, RuntimeType, Vm } from '@/types/panel-vm'
@@ -36,8 +37,12 @@ export const VM_CPU_MODELS = [
 export type VmCpuModel = (typeof VM_CPU_MODELS)[number]
 
 export const VM_CPU_MODEL_LABELS: Record<VmCpuModel, string> = {
-  host: 'host（宿主）',
-  qemu64: 'qemu64（通用）',
+  get host() {
+    return tVm('vm:machineSpec.hostHostCPU')
+  },
+  get qemu64() {
+    return tVm('vm:machineSpec.qemu64Generic')
+  },
   'Skylake-Client-v4': 'Skylake-Client-v4',
   'Cascadelake-Server-v5': 'Cascadelake-Server-v5',
   'EPYC-v4': 'EPYC-v4',
@@ -55,7 +60,9 @@ export const VM_VCPU_OPTIONS = Array.from(
 
 export const MAC_OUI_RE = /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){2}$/
 
-export const TCG_WARNING = '当前为 TCG 软件模拟，速度很慢，仅供测试。'
+export function tcgWarning() {
+  return tVm('vm:machineSpec.tCGSoftwareEmulationIsActiveItIsVerySlow')
+}
 
 export const VM_CONFIG_DEFAULTS: VmRoutingConfig = {
   default_runtime: 'docker',
@@ -159,31 +166,43 @@ export function vmConfigFieldErrors(raw: unknown): VmConfigFieldErrors {
   const src = asRecord(raw) || {}
   const errors: VmConfigFieldErrors = {}
   if (src.default_runtime != null && !isRuntimeType(src.default_runtime)) {
-    errors.default_runtime = '默认形态须为容器或虚拟机'
+    errors.default_runtime = tVm(
+      'vm:machineSpec.defaultRuntimeMustBeContainerOrVirtualMachine'
+    )
   }
   if (src.memory != null && !isMemoryOption(src.memory)) {
-    errors.memory = `内存须为 ${VM_MEMORY_OPTIONS.join(' / ')}`
+    errors.memory = tVm('vm:machineSpec.memoryMustBeOneOf', {
+      value1: VM_MEMORY_OPTIONS.join(' / '),
+    })
   }
   if (src.vcpus != null) {
     const n = typeof src.vcpus === 'number' ? src.vcpus : Number(src.vcpus)
     if (!Number.isInteger(n) || n < VM_VCPU_MIN || n > VM_VCPU_MAX) {
-      errors.vcpus = `vCPU须为 ${VM_VCPU_MIN}–${VM_VCPU_MAX} 的整数`
+      errors.vcpus = tVm('vm:machineSpec.vCPUMustBeAnIntegerFromTo', {
+        VM_VCPU_MIN: VM_VCPU_MIN,
+        VM_VCPU_MAX: VM_VCPU_MAX,
+      })
     }
   }
   if (src.disk_gb != null) {
     const n =
       typeof src.disk_gb === 'number' ? src.disk_gb : Number(src.disk_gb)
     if (!Number.isInteger(n) || n < VM_DISK_GB_MIN || n > VM_DISK_GB_MAX) {
-      errors.disk_gb = `磁盘须为 ${VM_DISK_GB_MIN}–${VM_DISK_GB_MAX} 的整数`
+      errors.disk_gb = tVm('vm:machineSpec.diskMustBeAnIntegerFromTo', {
+        VM_DISK_GB_MIN: VM_DISK_GB_MIN,
+        VM_DISK_GB_MAX: VM_DISK_GB_MAX,
+      })
     }
   }
   if (src.cpu_model != null && !isCpuModel(src.cpu_model)) {
-    errors.cpu_model = 'CPU 型号不在允许列表'
+    errors.cpu_model = tVm('vm:machineSpec.cPUModelIsNotInTheAllowlist')
   }
   if (src.mac_oui != null) {
     const oui = String(src.mac_oui).trim()
     if (!MAC_OUI_RE.test(oui)) {
-      errors.mac_oui = 'MAC 前缀须为 xx:xx:xx（三位十六进制）'
+      errors.mac_oui = tVm(
+        'vm:machineSpec.mACPrefixMustBeXxXxXxThreeHexadecimal'
+      )
     }
   }
   return errors
@@ -195,7 +214,11 @@ export function validateVmConfigPatch(
   const errors = vmConfigFieldErrors(patch)
   const field = (Object.keys(errors) as VmConfigField[])[0]
   if (!field) return { ok: true }
-  return { ok: false, error: errors[field] || '配置不合法', field }
+  return {
+    ok: false,
+    error: errors[field] || tVm('vm:machineSpec.invalidConfiguration'),
+    field,
+  }
 }
 
 export type CreateMachinePayload = {
@@ -237,8 +260,8 @@ export function runtimeTypeOf(
   return vm?.runtime_type === 'kvm' ? 'kvm' : 'docker'
 }
 
-export function runtimeTypeLabel(type: RuntimeType): '容器' | 'KVM' {
-  return type === 'kvm' ? 'KVM' : '容器'
+export function runtimeTypeLabel(type: RuntimeType): string {
+  return type === 'kvm' ? 'KVM' : tVm('vm:detailOpsTab.container')
 }
 
 export type KvmAvailability =
@@ -254,17 +277,25 @@ export function kvmAvailabilityFromLocal(input: {
 }): KvmAvailability {
   if (input.error) {
     const msg =
-      input.error instanceof Error ? input.error.message : '无法探测宿主 KVM'
-    return { status: 'unknown', reason: msg || '无法探测宿主 KVM' }
+      input.error instanceof Error
+        ? input.error.message
+        : tVm('vm:machineSpec.unableToProbeHostKVM')
+    return {
+      status: 'unknown',
+      reason: msg || tVm('vm:machineSpec.unableToProbeHostKVM'),
+    }
   }
   if (input.fetching && input.kvm == null) return { status: 'loading' }
   if (!input.kvm) {
-    return { status: 'unknown', reason: '宿主未返回 KVM 探测结果' }
+    return {
+      status: 'unknown',
+      reason: tVm('vm:machineSpec.hostDidNotReturnKVMProbeResults'),
+    }
   }
   if (input.kvm.ok) return { status: 'ok', accel: input.kvm.accel }
   return {
     status: 'disabled',
-    reason: input.kvm.error || '宿主无 /dev/kvm',
+    reason: input.kvm.error || tVm('vm:machineSpec.hostHasNoDevKvm'),
   }
 }
 
@@ -276,8 +307,13 @@ export function kvmAvailabilityFromPreflight(input: {
   if (input.fetching && !input.data) return { status: 'loading' }
   if (input.error) {
     const msg =
-      input.error instanceof Error ? input.error.message : '节点预检失败'
-    return { status: 'unknown', reason: msg || '节点预检失败' }
+      input.error instanceof Error
+        ? input.error.message
+        : tVm('vm:machineSpec.nodePreflightFailed')
+    return {
+      status: 'unknown',
+      reason: msg || tVm('vm:machineSpec.nodePreflightFailed'),
+    }
   }
   const check = input.data?.checks.find((c) => c.id === 'kvm')
   return kvmAvailabilityFromCheck(check)
@@ -290,7 +326,10 @@ export function kvmAvailabilityFromCheck(
   if (!check) return { status: 'ok', accel: null }
   if (check.ok) return { status: 'ok', accel: 'kvm' }
   if (check.level === 'warn') return { status: 'ok', accel: 'tcg' }
-  return { status: 'disabled', reason: check.message || '宿主无 /dev/kvm' }
+  return {
+    status: 'disabled',
+    reason: check.message || tVm('vm:machineSpec.hostHasNoDevKvm'),
+  }
 }
 
 /** 可在线提升到的内存档（只升不降）；当前值不在档位里按 512m 算。 */

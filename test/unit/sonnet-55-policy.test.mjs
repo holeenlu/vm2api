@@ -38,32 +38,24 @@ const requests = [
 ]
 
 for (const [protocol, request] of requests) {
-  test(`${protocol} Sonnet 5.5 adapts named tools on the API path without changing Sonnet 5`, () => {
-    const input = { ...structuredClone(request), model, output_config: { effort: 'low' } }
-    const before = structuredClone(input)
-    const { claude } = toClaudeMessages(protocol, input)
-    const out = prepareAnthropicRequest(claude)
-    assert.deepEqual(out.tool_choice, { type: 'auto' })
-    assert.equal(out.tools[0].name, '_todo')
-    assert.equal(out.tools[0].strict, true)
-    assert.deepEqual(out.tools[0].input_schema, schema)
-    assert.equal(out.tools[1].strict, undefined)
-    assert.equal(out.output_config.effort, 'low')
-    assert.deepEqual(input, before)
-    assert.deepEqual(prepareAnthropicRequest(out), out)
-    const sonnet5 = prepareAnthropicRequest(toClaudeMessages(protocol, { ...input, model: 'claude-sonnet-5' }).claude)
-    assert.deepEqual(sonnet5.tool_choice, { type: 'tool', name: '_todo' })
-    assert.equal(sonnet5.tools[0].strict, undefined)
-  })
-
-  // 5a4f2f1d: native cli-node owns tool_choice/thinking policy, so the hop forwards the caller's choice.
-  test(`${protocol} Sonnet 5.5 cli-hop forwards the named tool choice to cli-node`, () => {
-    const input = { ...structuredClone(request), model, output_config: { effort: 'low' } }
-    const out = prepareCliHopBody(toClaudeMessages(protocol, input).claude)
-    assert.deepEqual(out.tool_choice, { type: 'tool', name: '_todo' })
-    assert.equal(out.tools[0].strict, undefined)
-    assert.deepEqual(out.tools[0].input_schema, schema)
-    assert.equal(out.output_config.effort, 'low')
+  test(`${protocol} Sonnet 5.5 adapts named tools on the HTTP outbound path without changing Sonnet 5`, () => {
+    for (const prepare of [prepareAnthropicRequest]) {
+      const input = { ...structuredClone(request), model, output_config: { effort: 'low' } }
+      const before = structuredClone(input)
+      const { claude } = toClaudeMessages(protocol, input)
+      const out = prepare(claude)
+      assert.deepEqual(out.tool_choice, { type: 'auto' })
+      assert.equal(out.tools[0].name, '_todo')
+      assert.equal(out.tools[0].strict, true)
+      assert.deepEqual(out.tools[0].input_schema, schema)
+      assert.equal(out.tools[1].strict, undefined)
+      assert.equal(out.output_config.effort, 'low')
+      assert.deepEqual(input, before)
+      assert.deepEqual(prepare(out), out)
+      const sonnet5 = prepare(toClaudeMessages(protocol, { ...input, model: 'claude-sonnet-5' }).claude)
+      assert.deepEqual(sonnet5.tool_choice, { type: 'tool', name: '_todo' })
+      assert.equal(sonnet5.tools[0].strict, undefined)
+    }
   })
 }
 
@@ -91,22 +83,21 @@ test('Sonnet 5.5 does not add strict to server tools or migrate Opus computer to
   assert.equal(out.tools[1].type, 'computer_20251124')
 })
 
-test('Sonnet 5.5 API path normalizes rejected legacy thinking; repaired cli-hop leaves it to cli-node', () => {
+test('Sonnet 5.5 repaired hops still normalize rejected legacy thinking and forced tools', () => {
   for (const type of ['disabled', 'enabled', 'adaptive']) {
-    const body = {
-      model,
-      messages,
-      tools,
-      thinking: { type, budget_tokens: 2048, display: 'summarized' },
-      tool_choice: { type: 'tool', name: '_todo' },
-    }
-    const api = prepareAnthropicRequest(structuredClone(body))
-    assert.deepEqual(api.thinking, { type: 'adaptive', display: 'summarized' })
-    assert.deepEqual(api.tool_choice, { type: 'auto' })
-    assert.equal(api.tools[0].strict, true)
-    const hop = prepareCliHopBody(structuredClone(body), { repaired: true })
-    assert.equal(hop.thinking.type, type)
-    assert.deepEqual(hop.tool_choice, { type: 'tool', name: '_todo' })
+    const out = prepareAnthropicRequest(
+      {
+        model,
+        messages,
+        tools,
+        thinking: { type, budget_tokens: 2048, display: 'summarized' },
+        tool_choice: { type: 'tool', name: '_todo' },
+      },
+      { repaired: true },
+    )
+    assert.deepEqual(out.thinking, { type: 'adaptive', display: 'summarized' })
+    assert.deepEqual(out.tool_choice, { type: 'auto' })
+    assert.equal(out.tools[0].strict, true)
   }
 })
 
@@ -138,4 +129,20 @@ test('an explicit Anthropic output format wins over compatibility response_forma
     response_format: { type: 'json_object' },
   })
   assert.deepEqual(prepareCliHopBody(claude).output_config, { effort: 'low', format })
+})
+
+test('native cli-hop leaves explicit effort, thinking and forced tools to cli-node', () => {
+  const input = {
+    model,
+    messages,
+    tools,
+    thinking: { type: 'enabled', budget_tokens: 2048 },
+    output_config: { effort: 'low' },
+    tool_choice: { type: 'tool', name: '_todo' },
+  }
+  const out = prepareCliHopBody(structuredClone(input))
+  assert.deepEqual(out.thinking, { ...input.thinking, display: 'summarized' })
+  assert.deepEqual(out.output_config, input.output_config)
+  assert.deepEqual(out.tool_choice, input.tool_choice)
+  assert.equal(out.tools[0].strict, undefined)
 })

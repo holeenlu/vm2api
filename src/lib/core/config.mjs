@@ -201,10 +201,10 @@ function snapshotVm(vm, project) {
 export function loadConfig() {
   const keyFile = path.join(ROOT, 'config', 'test.key')
   const apiKey =
-    process.env.VM2API_API_KEY ||
+    process.env.TAPMODELS_API_KEY ||
     process.env.KIN_API_KEY ||
     (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : null)
-  if (!apiKey) throw new Error('VM2API_API_KEY not set')
+  if (!apiKey) throw new Error('TAPMODELS_API_KEY not set')
 
   const vm = readActiveVmRecord(PROJECT)
 

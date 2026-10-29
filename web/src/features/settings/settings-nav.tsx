@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   SETTINGS_NAV_GROUPS,
@@ -16,6 +17,8 @@ import {
  * transform 过渡到位（motion-safe 下 200ms ease-out-expo）。
  */
 export function SettingsNav({ active }: { active: SettingsTabId }) {
+  const { t, i18n } = useTranslation('settings')
+  const locale = i18n.language
   const listRef = useRef<HTMLDivElement>(null)
   const activeDesktopRef = useRef<HTMLAnchorElement>(null)
   const activeMobileRef = useRef<HTMLAnchorElement>(null)
@@ -31,7 +34,7 @@ export function SettingsNav({ active }: { active: SettingsTabId }) {
     const listBox = list.getBoundingClientRect()
     const itemBox = item.getBoundingClientRect()
     setIndicator({ y: itemBox.top - listBox.top, h: itemBox.height })
-  }, [active])
+  }, [active, locale])
 
   useEffect(() => {
     activeMobileRef.current?.scrollIntoView({
@@ -45,7 +48,7 @@ export function SettingsNav({ active }: { active: SettingsTabId }) {
     <>
       {/* 桌面：分组竖排 */}
       <nav
-        aria-label='设置分区'
+        aria-label={t('nav.sections')}
         className='hidden @2xl/content:sticky @2xl/content:top-20 @2xl/content:block @2xl/content:self-start'
       >
         <div ref={listRef} className='relative space-y-4'>
@@ -62,7 +65,7 @@ export function SettingsNav({ active }: { active: SettingsTabId }) {
           {SETTINGS_NAV_GROUPS.map((group) => (
             <div key={group.label}>
               <div className='px-3 pb-1 text-xs font-medium text-(--text-tertiary)'>
-                {group.label}
+                {t(group.label)}
               </div>
               <div className='space-y-0.5'>
                 {group.items.map(({ id, icon: Icon }) => {
@@ -82,7 +85,7 @@ export function SettingsNav({ active }: { active: SettingsTabId }) {
                       )}
                     >
                       <Icon className='size-4 shrink-0' aria-hidden />
-                      {SETTINGS_TAB_LABELS[id]}
+                      {t(SETTINGS_TAB_LABELS[id])}
                     </Link>
                   )
                 })}
@@ -94,7 +97,7 @@ export function SettingsNav({ active }: { active: SettingsTabId }) {
 
       {/* 窄屏：横向滚动 pill 列 */}
       <nav
-        aria-label='设置分区'
+        aria-label={t('nav.sections')}
         className='-mx-4 no-scrollbar flex gap-1 overflow-x-auto px-4 @2xl/content:hidden'
       >
         {SETTINGS_NAV_ITEMS.map(({ id, icon: Icon }) => {
@@ -114,7 +117,7 @@ export function SettingsNav({ active }: { active: SettingsTabId }) {
               )}
             >
               <Icon className='size-4' aria-hidden />
-              {SETTINGS_TAB_LABELS[id]}
+              {t(SETTINGS_TAB_LABELS[id])}
             </Link>
           )
         })}

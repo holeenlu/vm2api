@@ -154,25 +154,25 @@ test('dialGate reports refusals through ready and silence as unreachable', async
 })
 
 test('gate container: root keeps only DAC_OVERRIDE, only tls/ is writable, spec follows the config', () => {
-  const root = { uid: 0, gid: 0, root: '/root/.vm2api' }
+  const root = { uid: 0, gid: 0, root: '/root/.tapmodels' }
   const body = gateConfigBody({ host: root, link: { port: 7790, token: 't' } })
   assert.deepEqual(JSON.parse(body), {
     listen: '0.0.0.0:7790',
-    root: '/root/.vm2api',
+    root: '/root/.tapmodels',
     token: 't',
     tls_dir: '/etc/kin-slot-gate/tls',
   })
-  const a = gateContainer({ host: root, imageRef: 'vm2api/kin-slot-x:1', body, binaryDigest: 'd' })
+  const a = gateContainer({ host: root, imageRef: 'tapmodels/kin-slot-x:1', body, binaryDigest: 'd' })
   assert.deepEqual(a.spec.HostConfig.CapDrop, ['ALL'])
   assert.deepEqual(a.spec.HostConfig.CapAdd, ['DAC_OVERRIDE'])
   assert.equal(a.spec.HostConfig.ReadonlyRootfs, true)
   assert.deepEqual(a.spec.HostConfig.Binds, [
-    '/root/.vm2api/gate:/etc/kin-slot-gate:ro',
-    '/root/.vm2api/gate/tls:/etc/kin-slot-gate/tls',
-    '/root/.vm2api/vms:/root/.vm2api/vms:ro',
+    '/root/.tapmodels/gate:/etc/kin-slot-gate:ro',
+    '/root/.tapmodels/gate/tls:/etc/kin-slot-gate/tls',
+    '/root/.tapmodels/vms:/root/.tapmodels/vms:ro',
   ])
   const user = gateContainer({
-    host: { uid: 1000, gid: 1000, root: '/home/u/.vm2api' },
+    host: { uid: 1000, gid: 1000, root: '/home/u/.tapmodels' },
     imageRef: 'i',
     body,
     binaryDigest: 'd',
@@ -219,7 +219,7 @@ test('SocketRelay: direct dial, SSH fallback on null, local drop when the slot s
 
 function managerWithRepo(t) {
   const db = new DatabaseSync(':memory:')
-  for (const name of ['026_cluster_nodes.sql', '039_cluster_node_direct_links.sql']) {
+  for (const name of ['026_cluster_nodes.sql', '045_cluster_node_direct_links.sql']) {
     db.exec(fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   }
   db.exec('PRAGMA foreign_keys = ON')

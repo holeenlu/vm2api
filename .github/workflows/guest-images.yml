@@ -1,25 +1,28 @@
-# Guest OS layers change independently of application releases.
+# Guest and KVM images are part of every upstream system release.
 name: guest-images
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docker/kin-os/**'
-      - 'docker/kin-kvm/**'
-      - '.github/workflows/guest-images.yml'
+  workflow_call:
+    inputs:
+      source_commit:
+        description: 'Frozen source selected by the system release workflow'
+        required: true
+        type: string
   workflow_dispatch:
 
 concurrency:
   group: guest-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   guest:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -36,6 +39,8 @@ jobs:
             image: fedora:41
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -60,6 +65,10 @@ jobs:
 
   # URLs must match src/lib/vm/os-catalog.mjs kvm.cloud_image.
   kvm:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -80,6 +89,8 @@ jobs:
             cloud_image: https://download.fedoraproject.org/pub/archive/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:

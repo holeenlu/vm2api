@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { ClusterApiNode } from '@/types/panel-cluster'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -60,6 +61,8 @@ function PanelBody({
   nodes: ClusterApiNode[]
   vmCount: number | null
 }) {
+  const { t } = useTranslation('cluster')
+
   const ready = node.link.state === 'ready'
   return (
     <>
@@ -80,10 +83,10 @@ function PanelBody({
       >
         <TabsList>
           <TabsTrigger value='terminal' disabled={!ready}>
-            终端
+            {t('terminal')}
           </TabsTrigger>
           <TabsTrigger value='docker'>Docker</TabsTrigger>
-          <TabsTrigger value='link'>连接</TabsTrigger>
+          <TabsTrigger value='link'>{t('connection')}</TabsTrigger>
         </TabsList>
         <TabsContent value='terminal' className='min-h-0 flex-1'>
           {ready ? (
@@ -113,6 +116,8 @@ function LinkTab({
   nodes: ClusterApiNode[]
   vmCount: number | null
 }) {
+  const { t } = useTranslation('cluster')
+
   const qc = useQueryClient()
   const reconnect = useMutation({
     mutationFn: () =>
@@ -125,26 +130,29 @@ function LinkTab({
     : null
   const bridge = node.bridge
   const rows: [string, string][] = [
-    ['状态', LINK_STATE_TEXT[node.link.state] || node.link.state],
+    [t('status'), LINK_STATE_TEXT[node.link.state] || node.link.state],
     [
-      '延迟',
+      t('latency'),
       node.link.state === 'ready' && node.health?.latency_ms != null
-        ? `${node.health.latency_ms} ms（SSH 通道往返）`
+        ? t('ssh.latency', { value1: node.health.latency_ms })
         : '—',
     ],
-    ['连接于', node.link.connected_at || '—'],
-    ['下次重试', node.link.next_retry_at || '—'],
-    ['经由', jump ? `${jump.label} · ${jump.host}` : '直连'],
-    ['认证', node.auth_type === 'key' ? '私钥' : '密码'],
-    ['固定指纹', `${node.host_key_alg} ${node.host_key_sha256}`],
+    [t('ssh.connectedAt'), node.link.connected_at || '—'],
+    [t('ssh.retryAt'), node.link.next_retry_at || '—'],
+    [t('ssh.via'), jump ? `${jump.label} · ${jump.host}` : t('direct')],
+    [t('ssh.auth'), node.auth_type === 'key' ? t('privateKey') : t('password')],
+    [
+      t('ssh.pinnedFingerprint'),
+      `${node.host_key_alg} ${node.host_key_sha256}`,
+    ],
     node.platform === 'darwin'
-      ? ['运行方式', 'macOS 原生（槽位是 launchd 服务，不用 Docker）']
+      ? [t('ssh.runtime'), t('ssh.macRuntime')]
       : [
           'Docker',
           node.health
             ? node.health.docker.ok
-              ? '可用'
-              : node.health.docker.error || '不可用'
+              ? t('available')
+              : node.health.docker.error || t('unavailable')
             : '—',
         ],
   ]
@@ -170,7 +178,7 @@ function LinkTab({
         disabled={reconnect.isPending}
         onClick={() => reconnect.mutate()}
       >
-        立即重连
+        {t('ssh.reconnect')}
       </Button>
 
       <NodeConfig
@@ -182,11 +190,11 @@ function LinkTab({
       <DirectLinkConfig key={node.id} node={node} />
 
       <div className='space-y-1.5'>
-        <div className='text-xs font-medium'>本机 Docker 桥</div>
+        <div className='text-xs font-medium'>{t('ssh.dockerBridge')}</div>
         {bridge?.listening ? (
           <>
             <p className='text-xs text-muted-foreground'>
-              本机 docker CLI 经这条 SSH 连接直接操作远端 daemon：
+              {t('ssh.dockerBridgeHelp')}
             </p>
             <pre className='rounded-md border bg-muted/30 p-2 font-mono text-[11px] break-all whitespace-pre-wrap'>
               {`docker -H unix://${bridge.socket_path} ps`}
@@ -194,7 +202,9 @@ function LinkTab({
           </>
         ) : (
           <p className='text-xs text-muted-foreground'>
-            未监听{bridge?.error ? `：${bridge.error}` : ''}
+            {t('ssh.notListening', {
+              value1: bridge?.error ? `：${bridge.error}` : '',
+            })}
           </p>
         )}
       </div>

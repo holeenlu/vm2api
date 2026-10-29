@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildUsage, buildVmList, indexBillingAccounts, lookupBilling } from '../../src/lib/admin/panel-api.mjs'
+import {
+  buildUsage,
+  buildVmList,
+  indexBillingAccounts,
+  lookupBilling,
+  quotaFromAccount,
+} from '../../src/lib/admin/panel-api.mjs'
 
 test('billing index keeps UUID row when leftover vm-id account is empty', () => {
   const leftover = {
@@ -153,4 +159,27 @@ test('GPT usage row without pool email takes slot email', (t) => {
   const row = usage.data.accounts.find((a) => a.vm_id === 'vm-codex-01')
   assert.equal(row?.email, 'lemeryvorhees@gmail.com')
   assert.equal(row?.total_cost, 139.87)
+})
+
+test('fresh live headers supersede an older official rejected display per window', () => {
+  const official = {
+    utilization: 1,
+    status: 'rejected',
+    reset: '2099-01-02T00:00:00Z',
+    sampled_at: '2030-01-01T00:00:00Z',
+  }
+  const live = {
+    utilization: 0.25,
+    status: 'allowed',
+    reset: '2099-01-02T00:00:00Z',
+    sampled_at: '2030-01-01T00:00:01Z',
+  }
+  const q = quotaFromAccount({ unified: { official: { '5h': official, '7d': official }, headers: { '5h': live } } })
+  assert.equal(q.utilization_5h, 0.25)
+  assert.equal(q.status_5h, 'allowed')
+  assert.equal(q.utilization_7d, 1)
+  const historical = quotaFromAccount({
+    unified: { official: { '5h': { ...official, sampled_at: undefined } }, headers: { '5h': live } },
+  })
+  assert.equal(historical.utilization_5h, 1)
 })

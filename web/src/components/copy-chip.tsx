@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { t } from '@/i18n'
 import { Check, Copy } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
@@ -13,11 +15,12 @@ export function CopyChip({
   mono?: boolean
   className?: string
 }) {
+  useTranslation('common')
   const [done, setDone] = useState(false)
   return (
     <button
       type='button'
-      title={`复制 ${text}`}
+      title={t('common:copyValue', { value: text })}
       className={cn(
         'group inline-flex max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs transition-colors duration-200 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
         mono && 'font-mono',
@@ -25,7 +28,7 @@ export function CopyChip({
       )}
       onClick={() => {
         void navigator.clipboard.writeText(text)
-        toast.success('已复制')
+        toast.success(t('common:copied'))
         setDone(true)
         window.setTimeout(() => setDone(false), 1200)
       }}
@@ -53,6 +56,7 @@ export function CopyButton({
   label: string
   className?: string
 }) {
+  useTranslation('common')
   const [done, setDone] = useState(false)
   return (
     <button
@@ -65,7 +69,7 @@ export function CopyButton({
       )}
       onClick={() => {
         void navigator.clipboard.writeText(text)
-        toast.success('已复制')
+        toast.success(t('common:copied'))
         setDone(true)
         window.setTimeout(() => setDone(false), 1200)
       }}

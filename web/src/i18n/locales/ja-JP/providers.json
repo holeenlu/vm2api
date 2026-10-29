@@ -1,0 +1,36 @@
+{
+  "title": "サービスプロバイダー",
+  "description": "サプライヤーが追加したアカウント、サプライヤーのログイン名、クォータ、使用量、スケジュールを確認します。",
+  "activeTotal": "アクティブ / 合計",
+  "nearLimit": "7D上限に近い",
+  "totalCost": "累計消費",
+  "searchPlaceholder": "アカウント、サプライヤー、サービス種別を検索",
+  "unboundVm": "VM未接続",
+  "recoveringSoon": "まもなく回復",
+  "daysHoursLater": "{{days}}日{{hours}}時間後",
+  "concurrency": "同時実行数 {{value}}",
+  "rpm": "RPM {{value}}",
+  "viewVm": "VMを表示",
+  "empty": "サービスプロバイダーのデータはありません。",
+  "columns": {
+    "vendor": "サプライヤー",
+    "status": "状態 / スケジュール",
+    "fiveHour": "5H",
+    "sevenDay": "7D",
+    "totalCost": "累計消費",
+    "tokens": "Token",
+    "actions": "操作",
+    "account": "アカウント",
+    "schedule": "スケジュール設定"
+  },
+  "status": {
+    "provisioning": "準備中",
+    "paused": "一時停止",
+    "schedulePaused": "スケジュール停止",
+    "waitingAuth": "認証待ち",
+    "enabled": "有効"
+  },
+  "hoursMinutesLater": "{{hours}}時間{{minutes}}分後",
+  "requests": "リクエスト数 {{value}}",
+  "unlimited": "無制限"
+}

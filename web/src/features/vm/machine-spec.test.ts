@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createMachinePayload,
   kvmAvailabilityFromCheck,
@@ -13,6 +14,10 @@ import {
   VM_CONFIG_DEFAULTS,
   vmConfigFieldErrors,
 } from './machine-spec'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('normalizeVmConfig', () => {
   it('fills defaults for empty input', () => {

@@ -1,0 +1,36 @@
+{
+  "title": "服务提供商",
+  "description": "仅查看供应商添加的账号、所属供应商登录名、额度、用量与调度配置。",
+  "activeTotal": "活跃 / 总数",
+  "nearLimit": "接近 7D 限额",
+  "totalCost": "累计消耗",
+  "searchPlaceholder": "搜索账号、供应商或服务类型",
+  "unboundVm": "未绑定 VM",
+  "recoveringSoon": "即将恢复",
+  "daysHoursLater": "{{days}}天{{hours}}小时后",
+  "concurrency": "并发 {{value}}",
+  "rpm": "RPM {{value}}",
+  "viewVm": "查看 VM",
+  "empty": "暂无服务提供商数据。",
+  "columns": {
+    "vendor": "供应商",
+    "status": "状态 / 调度",
+    "fiveHour": "5H",
+    "sevenDay": "7D",
+    "totalCost": "累计消耗",
+    "tokens": "Token",
+    "actions": "操作",
+    "account": "账号",
+    "schedule": "调度配置"
+  },
+  "status": {
+    "provisioning": "预配中",
+    "paused": "已暂停",
+    "schedulePaused": "已暂停调度",
+    "waitingAuth": "等待授权",
+    "enabled": "已启用"
+  },
+  "hoursMinutesLater": "{{hours}}小时{{minutes}}分钟后",
+  "requests": "总请求 {{value}}",
+  "unlimited": "不限"
+}
