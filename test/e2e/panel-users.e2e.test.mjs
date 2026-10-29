@@ -32,11 +32,11 @@ async function panel(gw, method, path, { cookie, body } = {}) {
   return { status: res.status, json, text }
 }
 
-for (const prefix of ['VM2API', 'KIN']) {
+for (const prefix of ['TAPMODELS', 'KIN']) {
   test(`${prefix} default admin is listed and can rotate its password across restarts`, async () => {
     const env = {
-      VM2API_ADMIN_USER: '',
-      VM2API_ADMIN_PASSWORD: '',
+      TAPMODELS_ADMIN_USER: '',
+      TAPMODELS_ADMIN_PASSWORD: '',
       [`${prefix}_ADMIN_USER`]: 'admin',
       [`${prefix}_ADMIN_PASSWORD`]: '123456',
     }
@@ -46,7 +46,7 @@ for (const prefix of ['VM2API', 'KIN']) {
       assert.equal(list.status, 200, list.text)
       const self = list.json.data.items.find((user) => user.username === 'admin')
       assert.ok(self, JSON.stringify(list.json))
-      assert.equal(self.role, 'admin')
+      assert.equal(self.role, 'super_admin')
       assert.equal(self.password_hash, undefined)
       assert.doesNotMatch(gw.stderr(), /bootstrap failed/)
 
@@ -108,7 +108,7 @@ test('admin can create users and change passwords', async () => {
   try {
     const admin = await login(gw, 'admin', 'testpass')
     assert.equal(admin.status, 200, JSON.stringify(admin.json))
-    assert.equal(admin.json.role, 'admin')
+    assert.equal(admin.json.role, 'super_admin')
 
     const created = await panel(gw, 'POST', '/api/panel/users', {
       cookie: admin.cookie,
@@ -148,37 +148,30 @@ test('admin can create users and change passwords', async () => {
   }
 })
 
-test('deleting a tenant reclaims its assigned VM in the runtime file and SQLite mirror', async () => {
+test('deleting a customer invalidates sessions without altering grouped supply', async () => {
   const gw = await startGateway()
   try {
     const created = await api(gw, 'POST', '/api/panel/users', {
       body: { username: 'tenant', password: 'tenant-pass', role: 'user' },
     })
-    assert.equal(created.status, 201, created.text)
-    const userId = created.json.data.item.id
+    const uid = created.json.data.item.id
     const session = await login(gw, 'tenant', 'tenant-pass')
-    assert.equal(session.status, 200)
-    const assigned = await api(gw, 'PATCH', '/api/panel/vms/vm-sim-01/owner', { body: { user_id: userId } })
-    assert.equal(assigned.status, 200, assigned.text)
-
-    const deleted = await api(gw, 'DELETE', `/api/panel/users/${userId}`)
-    assert.equal(deleted.status, 200, deleted.text)
-    const vm = JSON.parse(fs.readFileSync(path.join(gw.project, 'vms', 'vm-sim-01.json'), 'utf8'))
-    assert.equal(vm.owner_user_id, null)
-    assert.equal(vm.origin, 'platform')
-    assert.equal(vm.schedulable, true)
-    const db = new DatabaseSync(path.join(gw.project, 'data', 'kin.db'), { readOnly: true })
-    try {
-      const row = db.prepare('SELECT owner_user_id, origin FROM vms WHERE id = ?').get(vm.id)
-      assert.equal(row.owner_user_id, null)
-      assert.equal(row.origin, 'platform')
-    } finally {
-      db.close()
-    }
+    const group = (await api(gw, 'POST', '/api/panel/groups', { body: { name: 'retained', platform: 'anthropic' } }))
+      .json.data.item
+    assert.equal(
+      (
+        await api(gw, 'PUT', '/api/panel/vms/vm-sim-01/groups', {
+          body: { group_ids: [group.id], expected_version: 0 },
+        })
+      ).status,
+      200,
+    )
+    assert.equal((await api(gw, 'DELETE', '/api/panel/users/' + uid)).status, 200)
+    const listed = await api(gw, 'GET', '/api/panel/vms')
+    assert.equal(listed.json.data.items[0].groups[0].id, group.id)
     assert.equal((await panel(gw, 'GET', '/api/panel/me', { cookie: session.cookie })).status, 401)
   } finally {
     await gw.stop()
-    fs.rmSync(gw.project, { recursive: true, force: true })
   }
 })
 
@@ -220,7 +213,7 @@ test('tenant user cannot list or modify panel users', async () => {
     assert.equal(users.status, 403)
     const selfPatch = await panel(gw, 'PATCH', `/api/panel/users/${readerId}`, {
       cookie: user.cookie,
-      body: { role: 'admin', password: 'escalate-pass' },
+      body: { role: 'super_admin', password: 'escalate-pass' },
     })
     assert.equal(selfPatch.status, 403)
     const database = await panel(gw, 'GET', '/api/panel/database/metrics', { cookie: user.cookie })
@@ -243,7 +236,7 @@ test('proxy DNS URLs remain admin-only in list and config responses', async () =
       body: { dns_primary: primary, disconnect_on_error: true },
     })
     assert.equal(updated.status, 200, updated.text)
-    for (const role of ['user', 'super']) {
+    for (const role of ['user', 'admin']) {
       const created = await panel(gw, 'POST', '/api/panel/users', {
         cookie: admin.cookie,
         body: { username: `dns-${role}`, password: 'reader-pass', role },
@@ -253,16 +246,7 @@ test('proxy DNS URLs remain admin-only in list and config responses', async () =
       assert.equal(reader.status, 200)
       for (const route of ['/api/panel/proxies', '/api/panel/proxies/config']) {
         const response = await panel(gw, 'GET', route, { cookie: reader.cookie })
-        if (role === 'super') {
-          assert.equal(response.status, 403, response.text)
-          assert.equal(response.text.includes('private-doh-token'), false)
-          continue
-        }
-        assert.equal(response.status, 200, response.text)
-        const data = response.json.data || response.json
-        const config = route.endsWith('/config') ? data : data.config
-        assert.equal(Object.hasOwn(config, 'dns_primary'), false)
-        assert.equal(config.disconnect_on_error, true)
+        assert.equal(response.status, 403, response.text)
         assert.equal(response.text.includes('private-doh-token'), false)
       }
     }
@@ -279,51 +263,199 @@ test('proxy DNS URLs remain admin-only in list and config responses', async () =
   }
 })
 
-test('super can toggle schedule but cannot import or delete VMs', async () => {
+test('AD manages its domain and funds its own users without infrastructure access', async () => {
   const gw = await startGateway()
   try {
-    const admin = await login(gw, 'admin', 'testpass')
-    await panel(gw, 'POST', '/api/panel/users', {
-      cookie: admin.cookie,
-      body: { username: 'ops', password: 'super-pass', role: 'super' },
+    const sa = await login(gw, 'admin', 'testpass')
+    const added = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: sa.cookie,
+      body: { username: 'manager', password: 'manager-pass', role: 'admin' },
     })
-    const superu = await login(gw, 'ops', 'super-pass')
-    assert.equal(superu.status, 200)
-    assert.equal(superu.json.role, 'super')
+    assert.equal(added.status, 201, added.text)
+    const ad = await login(gw, 'manager', 'manager-pass')
+    assert.equal(ad.json.role, 'admin')
+    const user = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: ad.cookie,
+      body: { username: 'customer', password: 'customer-pass', role: 'user' },
+    })
+    assert.equal(user.status, 201, user.text)
+    const uid = user.json.data.item.id
+    const listed = await panel(gw, 'GET', '/api/panel/users', { cookie: ad.cookie })
+    assert.ok(listed.json.data.items.every((u) => u.role === 'user'))
+    for (const [method, path, body] of [
+      ['POST', '/api/panel/vms/create', {}],
+      ['POST', '/api/panel/vms/import', {}],
+      ['POST', '/api/panel/vms/vm-sim-01/schedulable', { schedulable: false }],
+      ['GET', '/api/panel/vms/vm-sim-01'],
+      ['GET', '/api/panel/database/metrics'],
+      ['POST', '/api/panel/users', { username: 'escalated', password: 'testing-pass', role: 'super_admin' }],
+      ['PATCH', '/api/panel/users/' + uid, { role: 'super_admin' }],
+      ['PATCH', '/api/panel/users/' + uid, { groups: [1] }],
+      ['PATCH', '/api/panel/users/' + added.json.data.item.id, { enabled: false }],
+    ])
+      assert.equal((await panel(gw, method, path, { cookie: ad.cookie, body })).status, 403, path)
+    const insufficient = await panel(gw, 'POST', '/api/panel/users/' + uid + '/balance', {
+      cookie: ad.cookie,
+      body: { amount: 1, reason: 'managed user transfer', idempotency_key: 'scope-empty-wallet' },
+    })
+    assert.equal(insufficient.status, 409, insufficient.text)
+    assert.equal(insufficient.json.error.code, 'insufficient_balance')
+    const db = new DatabaseSync(path.join(gw.project, 'data', 'kin.db'))
+    const saId = db.prepare("SELECT id FROM users WHERE role='super_admin'").get().id
+    const now = new Date().toISOString()
+    for (const [id, owner, cost] of [
+      ['consumer-log', uid, 2],
+      ['sa-log', saId, 9],
+      ['ad-log', added.json.data.item.id, 7],
+    ]) {
+      db.prepare(
+        'INSERT INTO usage_logs(id,request_id,user_id,created_at,status,actual_cost) VALUES(?,?,?,?,200,?)',
+      ).run(id, id, owner, now, cost)
+    }
+    db.close()
+    const visible = await panel(gw, 'GET', '/api/panel/usage-logs', { cookie: ad.cookie })
+    assert.deepEqual(visible.json.data.logs.map((r) => r.id).sort(), ['ad-log', 'consumer-log'])
+    const forged = await panel(gw, 'GET', '/api/panel/usage-logs?user_id=' + saId, { cookie: ad.cookie })
+    assert.deepEqual(forged.json.data.logs, [])
+    assert.equal((await panel(gw, 'GET', '/api/panel/request-logs/sa-log', { cookie: ad.cookie })).status, 404)
+    const summary = await panel(gw, 'GET', '/api/panel/usage-logs/summary', { cookie: ad.cookie })
+    assert.equal(summary.status, 200, summary.text)
+    const options = await panel(gw, 'GET', '/api/panel/usage-logs/filter-options', { cookie: ad.cookie })
+    assert.deepEqual(options.json.data.users.map((u) => u.id).sort(), [uid, added.json.data.item.id].sort())
+    const funding = await panel(gw, 'POST', `/api/panel/users/${added.json.data.item.id}/balance`, {
+      cookie: sa.cookie,
+      body: { amount: 10, reason: 'fund domain', idempotency_key: 'role-scope-fund-domain' },
+    })
+    assert.equal(funding.status, 200, funding.text)
+    const transfer = await panel(gw, 'POST', `/api/panel/users/${uid}/balance`, {
+      cookie: ad.cookie,
+      body: { amount: 4, reason: 'fund own user', idempotency_key: 'role-scope-fund-user' },
+    })
+    assert.equal(transfer.status, 200, transfer.text)
+    assert.equal(
+      (
+        await panel(gw, 'POST', `/api/panel/users/${uid}/balance`, {
+          cookie: sa.cookie,
+          body: { amount: 4, reason: 'not direct creator', idempotency_key: 'deny-super-granduser' },
+        })
+      ).status,
+      403,
+    )
+    const bill = await panel(gw, 'GET', '/api/panel/billing', { cookie: ad.cookie })
+    assert.equal(bill.json.data.balance, 6, bill.text)
+    assert.ok(bill.json.data.items.every((r) => [uid, added.json.data.item.id].includes(r.user_id)))
+    assert.equal((await panel(gw, 'GET', '/api/panel/billing?user_id=' + saId, { cookie: ad.cookie })).status, 403)
+    assert.equal(
+      (await panel(gw, 'PATCH', '/api/panel/users/' + uid, { cookie: ad.cookie, body: { enabled: false } })).status,
+      200,
+    )
+    assert.equal((await panel(gw, 'GET', '/api/panel/billing', { cookie: ad.cookie })).status, 200)
+    assert.equal((await panel(gw, 'DELETE', '/api/panel/users/' + uid, { cookie: ad.cookie })).status, 200)
+  } finally {
+    await gw.stop()
+  }
+})
 
-    const detail = await panel(gw, 'GET', '/api/panel/vms/vm-sim-01', { cookie: superu.cookie })
-    assert.equal(detail.status, 200, JSON.stringify(detail.json))
-    const database = await panel(gw, 'GET', '/api/panel/database/metrics', { cookie: superu.cookie })
-    assert.equal(database.status, 403)
-
-    const sched = await panel(gw, 'POST', '/api/panel/vms/vm-sim-01/schedulable', {
-      cookie: superu.cookie,
-      body: { schedulable: false },
+test('admins can create child admins while each branch remains isolated', async () => {
+  const gw = await startGateway()
+  try {
+    const root = await login(gw, 'admin', 'testpass')
+    const first = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: root.cookie,
+      body: { username: 'branch-a', password: 'branch-a-pass', role: 'admin' },
     })
-    assert.equal(sched.status, 200, JSON.stringify(sched.json))
-    assert.equal((sched.json.data || sched.json).schedulable, false)
-
-    const imp = await panel(gw, 'POST', '/api/panel/vms/import', {
-      cookie: superu.cookie,
-      body: { vm_id: 'vm-sim-01', sessionKey: 'sk-ant-sid01-' + 'e'.repeat(24) },
+    const second = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: root.cookie,
+      body: { username: 'branch-b', password: 'branch-b-pass', role: 'admin' },
     })
-    assert.equal(imp.status, 403)
-    const del = await panel(gw, 'DELETE', '/api/panel/vms/vm-sim-01', { cookie: superu.cookie })
-    assert.equal(del.status, 403)
-    const oauth = await panel(gw, 'POST', '/api/panel/vms/vm-sim-01/oauth/refresh', {
-      cookie: superu.cookie,
-      body: {},
+    assert.equal(first.status, 201, first.text)
+    assert.equal(second.status, 201, second.text)
+    const a = await login(gw, 'branch-a', 'branch-a-pass')
+    const b = await login(gw, 'branch-b', 'branch-b-pass')
+    const child = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: a.cookie,
+      body: { username: 'branch-a-child', password: 'branch-a-child-pass', role: 'admin' },
     })
-    assert.equal(oauth.status, 403)
-    const credGet = await panel(gw, 'GET', '/api/panel/vms/vm-sim-01/oauth/credential', {
-      cookie: superu.cookie,
+    const own = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: a.cookie,
+      body: { username: 'branch-a-user', password: 'branch-a-user-pass', role: 'user' },
     })
-    assert.equal(credGet.status, 403)
-    const credPut = await panel(gw, 'PUT', '/api/panel/vms/vm-sim-01/oauth/credential', {
-      cookie: superu.cookie,
-      body: { access_token: 'sk-ant-oat01-DENIED' },
+    const foreign = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: b.cookie,
+      body: { username: 'branch-b-user', password: 'branch-b-user-pass', role: 'user' },
     })
-    assert.equal(credPut.status, 403)
+    assert.equal(child.status, 201, child.text)
+    assert.equal(own.status, 201, own.text)
+    assert.equal(foreign.status, 201, foreign.text)
+    const creditPeer = await panel(gw, 'POST', `/api/panel/users/${child.json.data.item.id}/balance`, {
+      cookie: root.cookie,
+      body: { amount: 5000, reason: 'shared domain', idempotency_key: 'fund-peer-domain' },
+    })
+    assert.equal(creditPeer.status, 200, creditPeer.text)
+    const peerLogin = await login(gw, 'branch-a-child', 'branch-a-child-pass')
+    assert.equal((await panel(gw, 'GET', '/api/panel/billing', { cookie: a.cookie })).json.data.balance, 5000)
+    assert.equal((await panel(gw, 'GET', '/api/panel/billing', { cookie: peerLogin.cookie })).json.data.balance, 5000)
+    const transfer = await panel(gw, 'POST', `/api/panel/users/${own.json.data.item.id}/balance`, {
+      cookie: a.cookie,
+      body: { amount: 500, reason: 'own customer', idempotency_key: 'fund-own-customer' },
+    })
+    assert.equal(transfer.status, 200, transfer.text)
+    assert.equal((await panel(gw, 'GET', '/api/panel/billing', { cookie: peerLogin.cookie })).json.data.balance, 4500)
+    assert.equal(
+      (
+        await panel(gw, 'POST', `/api/panel/users/${own.json.data.item.id}/balance`, {
+          cookie: peerLogin.cookie,
+          body: { amount: 1, reason: 'peer customer', idempotency_key: 'deny-peer-customer' },
+        })
+      ).status,
+      403,
+    )
+    const ownerView = await panel(gw, 'GET', '/api/panel/users', { cookie: a.cookie })
+    const peerView = await panel(gw, 'GET', '/api/panel/users', { cookie: peerLogin.cookie })
+    assert.equal(ownerView.json.data.items.find((u) => u.id === own.json.data.item.id).can_credit, true)
+    assert.equal(peerView.json.data.items.find((u) => u.id === own.json.data.item.id).can_credit, false)
+    assert.equal(
+      (
+        await panel(gw, 'PUT', `/api/panel/users/${own.json.data.item.id}/groups`, {
+          cookie: a.cookie,
+          body: { groups: [1] },
+        })
+      ).status,
+      200,
+    )
+    assert.equal(
+      (
+        await panel(gw, 'PUT', `/api/panel/users/${foreign.json.data.item.id}/groups`, {
+          cookie: b.cookie,
+          body: { groups: [1] },
+        })
+      ).status,
+      200,
+    )
+    const keyA = await panel(gw, 'POST', '/api/panel/api-keys', {
+      cookie: a.cookie,
+      body: { user_id: JSON.parse(JSON.stringify(own.json.data.item)).id, name: 'branch-a-key', group_id: 1 },
+    })
+    assert.equal(keyA.status, 201, keyA.text)
+    const keyB = await panel(gw, 'POST', '/api/panel/api-keys', {
+      cookie: b.cookie,
+      body: { user_id: JSON.parse(JSON.stringify(foreign.json.data.item)).id, name: 'branch-b-key', group_id: 1 },
+    })
+    assert.equal(keyB.status, 201, keyB.text)
+    const keysA = await panel(gw, 'GET', '/api/panel/api-keys', { cookie: a.cookie })
+    assert.deepEqual(
+      keysA.json.keys.map((item) => item.name),
+      ['branch-a-key'],
+    )
+    const crossKey = await panel(gw, 'GET', `/api/panel/api-keys/${keyB.json.item.id}`, { cookie: a.cookie })
+    assert.equal(crossKey.status, 404)
+    const listedA = await panel(gw, 'GET', '/api/panel/users', { cookie: a.cookie })
+    assert.deepEqual(listedA.json.data.items.map((item) => item.username).sort(), ['branch-a-child', 'branch-a-user'])
+    const listedB = await panel(gw, 'GET', '/api/panel/users', { cookie: b.cookie })
+    assert.deepEqual(
+      listedB.json.data.items.map((item) => item.username),
+      ['branch-b-user'],
+    )
   } finally {
     await gw.stop()
   }
@@ -336,7 +468,31 @@ test('master API key still administers panel users', async () => {
     assert.equal(list.status, 200, list.text)
     const items = list.json.data?.items || list.json.items
     assert.ok(Array.isArray(items))
-    assert.ok(items.some((u) => u.username === 'admin' && u.role === 'admin'))
+    assert.ok(items.some((u) => u.username === 'admin' && u.role === 'super_admin'))
+  } finally {
+    await gw.stop()
+  }
+})
+
+test('disabled environment administrator cannot fall back to its configured password', async () => {
+  const gw = await startGateway()
+  try {
+    const sa = await login(gw, 'admin', 'testpass')
+    const list = await panel(gw, 'GET', '/api/panel/users', { cookie: sa.cookie })
+    const original = list.json.data.items.find((u) => u.username === 'admin')
+    const second = await panel(gw, 'POST', '/api/panel/users', {
+      cookie: sa.cookie,
+      body: { username: 'second-sa', password: 'second-sa-pass', role: 'super_admin' },
+    })
+    assert.equal(second.status, 201, second.text)
+    const other = await login(gw, 'second-sa', 'second-sa-pass')
+    assert.equal(
+      (await panel(gw, 'PATCH', '/api/panel/users/' + original.id, { cookie: other.cookie, body: { enabled: false } }))
+        .status,
+      200,
+    )
+    assert.equal((await login(gw, 'admin', 'testpass')).status, 401)
+    assert.equal((await panel(gw, 'GET', '/api/panel/me', { cookie: sa.cookie })).status, 401)
   } finally {
     await gw.stop()
   }

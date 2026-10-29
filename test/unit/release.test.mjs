@@ -59,7 +59,7 @@ function dockerFixture(root, { job = null, runError = null, containerized = true
       Hostname: 'control-host',
       Labels: {
         'com.docker.compose.project': 'custom-stack',
-        'com.docker.compose.service': 'vm2api',
+        'com.docker.compose.service': 'tapmodels',
         'com.docker.compose.project.working_dir': root,
         'com.docker.compose.project.config_files': `${root}/docker-compose.yml,${root}/docker-compose.override.yml`,
       },
@@ -73,11 +73,11 @@ function dockerFixture(root, { job = null, runError = null, containerized = true
       sock: path.join(root, 'VERSION'),
       containerized,
       hostname: 'control-host',
-      env: { VM2API_CONTAINER_NAME: 'custom-control' },
+      env: { TAPMODELS_CONTAINER_NAME: 'custom-control' },
       async execFileImpl(cmd, args, opts) {
         calls.push({ cmd, args, opts })
         if (args[0] === 'inspect') {
-          if (args.at(-1) === 'vm2api-upgrade-custom-stack') {
+          if (args.at(-1) === 'tapmodels-upgrade-custom-stack') {
             if (!job) throw new Error('No such container')
             return { stdout: JSON.stringify(job) }
           }
@@ -120,7 +120,7 @@ test('compareSemver orders dotted triples', () => {
 })
 
 test('readLocalVersion prefers VERSION file over package.json', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({ version: '0.0.1' }))
@@ -155,7 +155,7 @@ test('loadChangelog reads the warehouse CHANGELOG.md', () => {
 
 test('buildUpdateStatus reports an available GitHub release and the one-click command', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(path.join(tmp, 'CHANGELOG.md'), FIXTURE)
@@ -166,8 +166,8 @@ test('buildUpdateStatus reports an available GitHub release and the one-click co
         ok: true,
         json: async () => ({
           tag_name: 'v1.2.7',
-          name: 'vm2api v1.2.7',
-          html_url: 'https://github.com/dofastted/vm2api/releases/tag/v1.2.7',
+          name: 'tapmodels v1.2.7',
+          html_url: 'https://github.com/holeenlu/vm2api/releases/tag/v1.2.7',
           published_at: '2026-09-21T00:00:00Z',
           body: '一键更新',
         }),
@@ -187,7 +187,7 @@ test('buildUpdateStatus reports an available GitHub release and the one-click co
 
 test('buildUpdateStatus reports unknown latest when GitHub is unreachable', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(path.join(tmp, 'CHANGELOG.md'), FIXTURE)
@@ -213,7 +213,7 @@ test('buildUpdateStatus reports unknown latest when GitHub is unreachable', asyn
 
 test('startHostUpgrade without confirm only returns the command', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(path.join(tmp, 'CHANGELOG.md'), FIXTURE)
@@ -240,7 +240,7 @@ test('startHostUpgrade without confirm only returns the command', async () => {
 
 test('startHostUpgrade launches a Docker-managed helper for the actual Compose deployment', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(path.join(tmp, 'CHANGELOG.md'), FIXTURE)
@@ -255,7 +255,7 @@ test('startHostUpgrade launches a Docker-managed helper for the actual Compose d
     assert.equal(result.data.started, true)
     const run = docker.calls.find((call) => call.args[0] === 'run')
     assert.ok(run.args.includes('--detach'))
-    assert.ok(run.args.includes('vm2api-upgrade-custom-stack'))
+    assert.ok(run.args.includes('tapmodels-upgrade-custom-stack'))
     assert.ok(run.args.includes('docker:27-cli'))
     assert.ok(!run.args.includes('--rm'), 'keep failure status and logs after exit')
     assert.deepEqual(run.args.slice(run.args.indexOf('panel-upgrade') + 1), [
@@ -290,11 +290,11 @@ test('VERSION is the only application release version source', () => {
   const compose = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8')
   const vite = fs.readFileSync(path.join(root, 'web', 'vite.config.ts'), 'utf8')
 
-  assert.match(version, /^\d+\.\d+\.\d+$/)
+  assert.match(version, /^\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?$/)
   assert.equal(Object.hasOwn(pkg, 'version'), false)
   assert.equal(Object.hasOwn(lock, 'version'), false)
   assert.equal(Object.hasOwn(lock.packages[''], 'version'), false)
-  assert.doesNotMatch(compose, /image:\s*vm2api:[^\s]+/)
+  assert.doesNotMatch(compose, /image:\s*tapmodels:[^\s]+/)
   assert.doesNotMatch(vite, /__APP_VERSION__|readFileSync/)
 })
 
@@ -338,7 +338,7 @@ test('startHostUpgrade rejects a suffix for another architecture before spawning
 
 test('ARM64 host upgrade passes its architecture and the running override to the helper', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     fs.writeFileSync(path.join(tmp, 'CHANGELOG.md'), FIXTURE)
@@ -365,7 +365,7 @@ test('ARM64 host upgrade passes its architecture and the running override to the
 
 test('native Node cannot claim to upgrade itself by launching an unrelated Compose stack', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     const docker = dockerFixture(tmp, { containerized: false })
@@ -396,7 +396,7 @@ test('self discovery rejects another container and config files outside the moun
 
 test('helper startup failures are returned instead of upgrade_started', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
     const docker = dockerFixture(tmp, { runError: 'registry unavailable' })
@@ -417,10 +417,10 @@ test('helper startup failures are returned instead of upgrade_started', async ()
 
 test('running helper blocks a duplicate update and exited helpers expose their actual outcome', async () => {
   clearReleaseCache()
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-'))
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-release-'))
   try {
     fs.writeFileSync(path.join(tmp, 'VERSION'), '1.2.6\n')
-    const job = { Config: { Labels: { 'vm2api.upgrade.target': 'v1.2.7' } }, State: { Status: 'running' } }
+    const job = { Config: { Labels: { 'tapmodels.upgrade.target': 'v1.2.7' } }, State: { Status: 'running' } }
     const docker = dockerFixture(tmp, { job })
     const result = await startHostUpgrade({
       ...docker.options,
@@ -435,11 +435,80 @@ test('running helper blocks a duplicate update and exited helpers expose their a
     const failed = await readHostUpgradeStatus(docker.options)
     assert.equal(failed.state, 'failed')
     assert.equal(failed.exit_code, 1)
-    assert.equal(failed.log_command, 'docker logs vm2api-upgrade-custom-stack')
+    assert.equal(failed.log_command, 'docker logs tapmodels-upgrade-custom-stack')
     job.State.ExitCode = 0
     assert.equal((await readHostUpgradeStatus(docker.options)).state, 'succeeded')
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
     clearReleaseCache()
   }
+})
+
+test('fork revisions retain all four components and compare numerically', () => {
+  assert.equal(normalizeTag('1.3.208.0'), 'v1.3.208.0')
+  assert.equal(compareSemver('1.3.208.1', '1.3.208.0'), 1)
+  assert.deepEqual(parseReleaseTag('v1.3.204.1'), { version: '1.3.204.1', tag: 'v1.3.204.1', arch: '' })
+  assert.equal(normalizeTag('1.3.204.2-amd64'), 'v1.3.204.2')
+  assert.equal(imageTagFor('v1.3.204.1', 'amd64'), 'v1.3.204.1')
+  assert.equal(compareSemver('1.3.204.1', '1.3.204'), 1)
+  assert.equal(compareSemver('1.3.204.10', '1.3.204.9'), 1)
+  assert.equal(compareSemver('1.3.205.1', '1.3.204.99'), 1)
+  for (const value of ['v1.3.204.-1', 'v1.3.204.1.1', 'v1.3.204.1;cmd', 'v1.3.204.1-beta']) {
+    assert.equal(parseReleaseTag(value), null)
+  }
+})
+
+test('update status and upgrade command preserve the fork revision', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-fork-version-'))
+  try {
+    fs.writeFileSync(path.join(tmp, 'VERSION'), '1.3.204.1\n')
+    assert.equal(readLocalVersion(tmp), '1.3.204.1')
+    for (const [current, latest, available] of [
+      ['1.3.208.0', '1.3.208.1', true],
+      ['1.3.208.9', '1.3.209.0', true],
+      ['1.3.204.1', '1.3.204.2', true],
+      ['1.3.204.10', '1.3.204.9', false],
+      ['1.3.204', '1.3.204.1', true],
+      ['1.3.204.20', '1.3.205.1', true],
+    ]) {
+      clearReleaseCache()
+      const status = await buildUpdateStatus({
+        projectRoot: tmp,
+        currentVersion: current,
+        cacheMs: 0,
+        fetchImpl: async () => ({ ok: true, json: async () => ({ tag_name: 'v' + latest, body: '' }) }),
+      })
+      assert.equal(status.latest, latest)
+      assert.equal(status.latest_tag, 'v' + latest)
+      assert.equal(status.update_available, available)
+      if (available) assert.ok(status.upgrade_command.endsWith('--version v' + latest))
+    }
+  } finally {
+    clearReleaseCache()
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('changelog entries retain fork revisions instead of truncating to the upstream version', () => {
+  const entries = parseChangelog(
+    [
+      '# Changelog',
+      '',
+      '## 1.3.204.10 — 2026-10-21',
+      '',
+      '- tenth',
+      '',
+      '## 1.3.204.2 — 2026-10-21',
+      '',
+      '- second',
+      '',
+      '## 1.3.204 — 2026-10-21',
+      '',
+      '- upstream',
+    ].join('\n'),
+  )
+  assert.deepEqual(
+    changelogSince(entries, '1.3.204.2').map((entry) => entry.version),
+    ['1.3.204.10'],
+  )
 })

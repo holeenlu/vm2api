@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import net from 'node:net'
 import { ProxyPool, MAX_VMS_PER_PROXY, clampBindLimit } from '../../src/lib/vm/proxy-pool.mjs'
+import { VendorPlatform } from '../../src/lib/vendor/vendor-platform.mjs'
 
 function tmpDir(prefix = 'kin-px-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -15,6 +16,40 @@ function makePool() {
   pool.stopScheduler()
   return pool
 }
+
+test('supplier proxies cannot be manually bound or auto-allocated to another supplier or platform VM', () => {
+  const pool = makePool()
+  const vendors = new VendorPlatform(pool.db)
+  const one = vendors.createRoot({
+    actorUserId: 'sa',
+    body: { name: 'one', email: 'one@test.local', external_code: 'one', groups: [], platforms: ['anthropic'] },
+  })
+  const two = vendors.createRoot({
+    actorUserId: 'sa',
+    body: { name: 'two', email: 'two@test.local', external_code: 'two', groups: [], platforms: ['anthropic'] },
+  })
+  for (const [vm, vendor] of [
+    ['vm-one', one],
+    ['vm-two', two],
+  ]) {
+    pool.db
+      .prepare(
+        "INSERT INTO vendor_resources (id,vendor_id,resource_type,name,status,config_json,created_by,created_at,updated_at) VALUES (?,?,'vm',?,'active',?,'sa',?,?)",
+      )
+      .run(vm, vendor.id, vm, JSON.stringify({ runtime_vm_id: vm }), new Date().toISOString(), new Date().toISOString())
+  }
+  const proxy = pool.ensureProxy(
+    { host: '127.0.0.1', port: 1080 },
+    { vendorId: one.id, vendorResourceId: 'proxy-one' },
+  ).proxy
+  assert.ok(proxy)
+  assert.equal(pool.bind(proxy.id, 'vm-two', { force: true }).error, 'proxy_vendor_scope_forbidden')
+  assert.equal(pool.bind(proxy.id, 'vm-platform').error, 'proxy_vendor_scope_forbidden')
+  assert.equal(pool.allocateForVm('vm-platform'), null)
+  assert.equal(pool.allocateForVm('vm-two'), null)
+  assert.equal(pool.bind(proxy.id, 'vm-one').ok, true)
+  assert.equal(pool.getProxyForVm('vm-one').id, proxy.id)
+})
 
 test('proxy pool persists custom dns_primary and rejects invalid URLs without changing it', (t) => {
   const dir = tmpDir()

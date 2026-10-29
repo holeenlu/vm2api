@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
+import { useQuery } from '@tanstack/react-query'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { FileCode2, FileText, Gauge, GitBranch, XIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   Dialog,
   DialogDescription,
@@ -11,6 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { meQueryOptions } from '@/features/auth/queries'
 import { StatusBadge } from '../log-cells'
 import type { DetailTab } from '../virtualized-logs-table'
 import { LogicTraceTab } from './logic-trace-tab'
@@ -37,6 +40,11 @@ export function LogDetailDialog({
   state: DetailState | null
   onClose: () => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
+  const me = useQuery(meQueryOptions())
+  const isStaff = me.data?.role === 'super_admin'
+  const isAdmin = me.data?.role === 'super_admin'
   const [tab, setTab] = useState<DetailTab>('summary')
   useEffect(() => {
     if (!state) return
@@ -52,11 +60,11 @@ export function LogDetailDialog({
         <DialogPrimitive.Content className='fixed top-1/2 left-1/2 z-[90] flex max-h-[90vh] w-[min(96vw,1100px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border bg-background shadow-lg duration-200 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95'>
           <DialogPrimitive.Close className='absolute top-4 right-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:outline-hidden'>
             <XIcon className='size-4' />
-            <span className='sr-only'>关闭</span>
+            <span className='sr-only'>{translate('logs:close')}</span>
           </DialogPrimitive.Close>
           <DialogHeader className='border-b px-6 pt-5 pb-3'>
             <DialogTitle className='flex items-center gap-2'>
-              请求详情
+              {translate('logs:requestDetails')}
               {row ? (
                 <StatusBadge
                   statusCode={row.statusCode}
@@ -72,7 +80,12 @@ export function LogDetailDialog({
           {row ? (
             <Tabs
               key={row.id}
-              value={tab}
+              value={
+                (tab === 'raw' && !isAdmin) ||
+                (tab === 'logic-trace' && !isStaff)
+                  ? 'summary'
+                  : tab
+              }
               onValueChange={(value) => setTab(value as DetailTab)}
               className='flex min-h-0 flex-1 flex-col'
             >
@@ -80,20 +93,24 @@ export function LogDetailDialog({
                 <TabsList className='grid h-auto w-full grid-cols-4 p-1'>
                   <TabsTrigger value='summary' className={TAB_TRIGGER}>
                     <FileText className={TAB_ICON} />
-                    <span>概览</span>
+                    <span>{translate('logs:overview')}</span>
                   </TabsTrigger>
-                  <TabsTrigger value='logic-trace' className={TAB_TRIGGER}>
-                    <GitBranch className={TAB_ICON} />
-                    <span>决策链</span>
-                  </TabsTrigger>
+                  {isStaff && (
+                    <TabsTrigger value='logic-trace' className={TAB_TRIGGER}>
+                      <GitBranch className={TAB_ICON} />
+                      <span>{translate('logs:decisionChain')}</span>
+                    </TabsTrigger>
+                  )}
                   <TabsTrigger value='performance' className={TAB_TRIGGER}>
                     <Gauge className={TAB_ICON} />
-                    <span>性能</span>
+                    <span>{translate('logs:performance')}</span>
                   </TabsTrigger>
-                  <TabsTrigger value='raw' className={TAB_TRIGGER}>
-                    <FileCode2 className={TAB_ICON} />
-                    <span>原始数据</span>
-                  </TabsTrigger>
+                  {isAdmin && (
+                    <TabsTrigger value='raw' className={TAB_TRIGGER}>
+                      <FileCode2 className={TAB_ICON} />
+                      <span>{translate('logs:rawData')}</span>
+                    </TabsTrigger>
+                  )}
                 </TabsList>
               </div>
               <div className='min-h-0 flex-1 overflow-y-auto px-6 pt-4 pb-6'>
@@ -103,18 +120,25 @@ export function LogDetailDialog({
                     scrollToRedirect={!!state?.scrollToRedirect}
                   />
                 </TabsContent>
-                <TabsContent value='logic-trace' className='mt-0'>
-                  <LogicTraceTab
-                    row={row}
-                    initialExpandedIndex={state?.chainIndex}
-                  />
-                </TabsContent>
+                {isStaff && (
+                  <TabsContent value='logic-trace' className='mt-0'>
+                    <LogicTraceTab
+                      row={row}
+                      initialExpandedIndex={state?.chainIndex}
+                    />
+                  </TabsContent>
+                )}
                 <TabsContent value='performance' className='mt-0'>
                   <PerformanceTab row={row} />
                 </TabsContent>
-                <TabsContent value='raw' className='mt-0'>
-                  <RawDataTab requestId={row.requestId} logMode={row.logMode} />
-                </TabsContent>
+                {isAdmin && (
+                  <TabsContent value='raw' className='mt-0'>
+                    <RawDataTab
+                      requestId={row.requestId}
+                      logMode={row.logMode}
+                    />
+                  </TabsContent>
+                )}
               </div>
             </Tabs>
           ) : null}

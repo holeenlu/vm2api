@@ -4,6 +4,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   type ProxyRegionFilter,
@@ -41,12 +42,16 @@ export function ProxyRegionRail({
   collapsed: boolean
   onCollapsedChange: (next: boolean) => void
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const active = groups.find((g) => g.country === value.country)
-  const toggleLabel = collapsed ? '展开地区栏' : '收起地区栏'
+  const toggleLabel = collapsed
+    ? translate('proxies:expandRegions')
+    : translate('proxies:collapseRegions')
   const toggle = () => onCollapsedChange(!collapsed)
   return (
     <nav
-      aria-label='按地区筛选'
+      aria-label={translate('proxies:filterRegion')}
       className='min-w-0 2xl:sticky 2xl:top-20 2xl:max-h-[calc(100svh-6rem)] 2xl:overflow-y-auto 2xl:overscroll-contain'
     >
       <div
@@ -56,7 +61,9 @@ export function ProxyRegionRail({
         )}
       >
         {collapsed ? null : (
-          <h3 className='text-xs font-medium text-muted-foreground'>地区</h3>
+          <h3 className='text-xs font-medium text-muted-foreground'>
+            {translate('proxies:region')}
+          </h3>
         )}
         <button
           type='button'
@@ -83,7 +90,7 @@ export function ProxyRegionRail({
             title={toggleLabel}
             className='flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground'
           >
-            地区
+            {translate('proxies:region')}
             {collapsed ? (
               <ChevronRight className='size-3.5' aria-hidden='true' />
             ) : (
@@ -98,8 +105,8 @@ export function ProxyRegionRail({
           )}
         >
           <RegionButton
-            label='全部地区'
-            short='全部'
+            label={translate('proxies:allRegions')}
+            short={translate('proxies:all')}
             collapsed={collapsed}
             tally={{ count: totalCount, free: totalFree }}
             on={!value.country}
@@ -130,7 +137,9 @@ export function ProxyRegionRail({
               />
               {on && g.cities.length && !collapsed ? (
                 <ul
-                  aria-label={`${g.label}的城市`}
+                  aria-label={translate('proxies:regionCities', {
+                    p0: g.label,
+                  })}
                   className='hidden 2xl:mt-px 2xl:flex 2xl:flex-col 2xl:gap-px'
                 >
                   {g.cities.map((c) => (
@@ -201,6 +210,8 @@ function RegionButton({
   collapsed?: boolean
   onClick: () => void
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const empty = tally.count === 0
   return (
     <button
@@ -208,11 +219,19 @@ function RegionButton({
       aria-pressed={on}
       aria-label={
         collapsed
-          ? `${label}：${tally.count} 条，空位 ${tally.free}`
+          ? translate('proxies:regionSeatSummary', {
+              p0: label,
+              p1: tally.count,
+              p2: tally.free,
+            })
           : undefined
       }
       onClick={onClick}
-      title={`${label}：${tally.count} 条，空位 ${tally.free}`}
+      title={translate('proxies:regionSeatSummary', {
+        p0: label,
+        p1: tally.count,
+        p2: tally.free,
+      })}
       className={cn(
         'group flex h-8 w-full items-center gap-2 rounded-md px-2 text-start text-[13px] whitespace-nowrap transition-colors',
         'border border-transparent bg-muted/50 2xl:bg-transparent',
@@ -256,7 +275,9 @@ function RegionButton({
             : 'text-muted-foreground/70'
         )}
       >
-        <span className={cn(collapsed && '2xl:hidden')}>空 </span>
+        <span className={cn(collapsed && '2xl:hidden')}>
+          {translate('proxies:freeShort')}
+        </span>
         {tally.free}
       </span>
     </button>

@@ -873,6 +873,35 @@ export class AccountQuota {
     if (source === 'official' || progressed || reset) this.staleSettled.set(accountId, 0)
   }
 
+  /** Only a confirmed upstream reset may clear these windows and start a new billing interval. */
+  clearUsageWindows(accountId, windows, at = new Date().toISOString()) {
+    const keys = { five_hour: '5h', seven_day: '7d', seven_day_overage_included: '7d_oi' }
+    const selected = (windows || []).map((wire) => keys[wire]).filter(Boolean)
+    if (!selected.length) return null
+    const acc = this.ensure({ account_id: accountId })
+    const u = acc.unified
+    u.cleared_windows = u.cleared_windows || {}
+    u.official = u.official || {}
+    u.headers = u.headers || {}
+    for (const key of selected) {
+      const window = { utilization: 0, reset: null, status: 'allowed' }
+      u[key] = { ...window }
+      u.official[key] = { ...window }
+      u.headers[key] = { ...window }
+      u.cleared_windows[key] = at
+      if (key === '7d_oi' && u.fable) {
+        u.fable = { ...u.fable, utilization: 0, reset: null, limited: false }
+      }
+    }
+    u.official.updated_at = at
+    u.headers.updated_at = at
+    clearHeaderExhaustIfOfficialOpen(acc)
+    const saved = this.repo.save(acc)
+    this._writeSessionWindow(saved)
+    if (this.headerUnderSafety(saved)) this.clearQuotaExhaustedCooldown(accountId)
+    return saved
+  }
+
   /**
    * Write effective 5h/7d windows back to SQLite when a reset has elapsed
    * or last_used proves a probe-source 100% is leftover from the previous window.

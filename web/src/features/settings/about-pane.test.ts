@@ -1,13 +1,18 @@
 import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { AboutPane } from './about-pane'
 import {
   changelogQueryOptions,
   versionQueryOptions,
   type ReleaseStatus,
 } from './queries'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 function renderStatus(overrides: Partial<ReleaseStatus>) {
   const client = new QueryClient({
@@ -27,7 +32,7 @@ function renderStatus(overrides: Partial<ReleaseStatus>) {
     needs_wrap_cli_sync: false,
     upgrade_command: '',
     check_command: '',
-    repo: 'dofastted/vm2api',
+    repo: 'holeenlu/vm2api',
     source_error: null,
     changelog: [],
     ...overrides,

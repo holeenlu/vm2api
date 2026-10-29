@@ -26,7 +26,7 @@ function handler(project, { readBody = async () => ({}), proxyPool = {} } = {}) 
     cfg: { paths: { project }, vm: { id: null } },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -121,6 +121,50 @@ test('PUT seed-settings can follow proxy timezone and locale before writing file
     assert.equal(response.body.data.settings_json.env.TZ, 'Asia/Shanghai')
     assert.equal(response.body.data.settings_json.env.LANG, 'zh_CN.UTF-8')
     assert.equal(response.body.data.settings_json.env.CUSTOM, 'yes')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Taiwan locale uses the same independent timezone controls as other languages', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-seed-taiwan-'))
+  try {
+    seed(root, 'vm-01')
+    const vmPath = path.join(root, 'vms', 'vm-01.json')
+    const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+    Object.assign(vm, { locale: 'en_US.UTF-8', timezone: 'UTC', timezone_source: 'manual', proxy: { id: 'px-1' } })
+    fs.writeFileSync(vmPath, JSON.stringify(vm))
+    for (const [body, timezone, source] of [
+      [{ locale: 'zh_TW.UTF-8' }, 'UTC', 'manual'],
+      [{ locale: 'zh_TW.UTF-8', timezone_follow_proxy: true }, 'Asia/Shanghai', 'proxy_geo'],
+      [{ locale: 'zh_TW.UTF-8', timezone: 'Asia/Tokyo' }, 'Asia/Tokyo', 'manual'],
+      [{ locale: 'ja_JP.UTF-8' }, 'Asia/Tokyo', 'manual'],
+      [{ locale: 'zh_TW.UTF-8', timezone: 'Asia/Taipei' }, 'Asia/Taipei', 'manual'],
+      [{ locale: 'en_US.UTF-8', timezone: 'America/New_York' }, 'America/New_York', 'manual'],
+      [{ locale: 'zh_TW.UTF-8', timezone_follow_proxy: true }, 'Asia/Shanghai', 'proxy_geo'],
+      [{ locale: 'C.UTF-8', timezone_follow_proxy: true }, 'Asia/Shanghai', 'proxy_geo'],
+    ]) {
+      const { handlePanel, response } = handler(root, {
+        readBody: async () => body,
+      })
+      await handlePanel({ method: 'PUT' }, {}, new URL('http://localhost/api/panel/vms/vm-01/seed-settings'))
+      assert.equal(response.status, 200, JSON.stringify(response.body))
+      assert.equal(response.body.data.settings_json.env.LANG, body.locale)
+      assert.equal(response.body.data.settings_json.env.LC_ALL, body.locale)
+      assert.equal(response.body.data.settings_json.env.TZ, timezone)
+      const saved = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+      assert.equal(saved.locale, body.locale)
+      assert.equal(saved.timezone, timezone)
+      assert.equal(saved.timezone_source, source)
+    }
+    const before = fs.readFileSync(vmPath, 'utf8')
+    const { handlePanel, response } = handler(root, {
+      readBody: async () => ({ locale: 'zh_TW.UTF-8', timezone: 'Bad/Zone' }),
+    })
+    await handlePanel({ method: 'PUT' }, {}, new URL('http://localhost/api/panel/vms/vm-01/seed-settings'))
+    assert.equal(response.status, 400)
+    assert.equal(response.body.error.code, 'invalid_timezone')
+    assert.equal(fs.readFileSync(vmPath, 'utf8'), before)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

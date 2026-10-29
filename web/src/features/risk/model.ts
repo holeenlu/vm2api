@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { JevScopeAccount } from '@/types/panel-routing'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 
@@ -8,23 +9,39 @@ export type ViewKey = 'all' | StageId | 'pass'
 export const STAGES: { id: StageId; name: string; does: string }[] = [
   {
     id: 'distill',
-    name: '蒸馏',
-    does: '收割模板、结构特征、题目指纹。命中即 403，并封 device。',
+    get name() {
+      return translate('risk:distillation')
+    },
+    get does() {
+      return translate('risk:distillStageDescription')
+    },
   },
   {
     id: 'hard-regex',
-    name: '硬正则',
-    does: '按类别正则扫用户正文。命中即 403，不 hop。',
+    get name() {
+      return translate('risk:hardRegex')
+    },
+    get does() {
+      return translate('risk:regexStageDescription')
+    },
   },
   {
     id: 'refusal',
-    name: '拒答缓存',
-    does: '上游拒过的正文、近似正文和被封的 device，直接 503。',
+    get name() {
+      return translate('risk:refusalCache')
+    },
+    get does() {
+      return translate('risk:refusalStageDescription')
+    },
   },
   {
     id: 'jev',
-    name: '决策模型',
-    does: '把正文交给安全模型逐题打分，低于阈值就拦。',
+    get name() {
+      return translate('risk:decisionModel')
+    },
+    get does() {
+      return translate('risk:modelStageDescription')
+    },
   },
 ]
 
@@ -35,25 +52,69 @@ export function isViewKey(value: unknown): value is ViewKey {
 }
 
 export const PASS_REASONS: Record<string, { label: string; hint: string }> = {
-  jev: { label: '模型判安全', hint: '决策模型打过分' },
-  regex: { label: '正则未命中', hint: '决策模型关闭或跳过' },
-  'fail-open': { label: '模型故障放行', hint: '打分失败，按失败放行出站' },
-  unchecked: { label: '未检查', hint: '没有任何规则在跑' },
+  jev: {
+    get label() {
+      return translate('risk:modelSafe')
+    },
+    get hint() {
+      return translate('risk:modelScored')
+    },
+  },
+  regex: {
+    get label() {
+      return translate('risk:regexNoMatch')
+    },
+    get hint() {
+      return translate('risk:modelDisabledOrSkipped')
+    },
+  },
+  'fail-open': {
+    get label() {
+      return translate('risk:modelFailOpen')
+    },
+    get hint() {
+      return translate('risk:scoringFailedAllowed')
+    },
+  },
+  unchecked: {
+    get label() {
+      return translate('risk:unchecked')
+    },
+    get hint() {
+      return translate('risk:noRulesRunning')
+    },
+  },
   platform: {
-    label: 'OpenAI 平台未接入',
-    hint: 'GPT / Codex 请求，「OpenAI 平台」开关关闭',
+    get label() {
+      return translate('risk:openaiNotEnabled')
+    },
+    get hint() {
+      return translate('risk:openaiNotEnabledHint')
+    },
   },
   scope: {
-    label: '账号不在范围',
-    hint: '请求落到的槽位不在选中的平台和套餐里',
+    get label() {
+      return translate('risk:accountOutOfScope')
+    },
+    get hint() {
+      return translate('risk:accountOutOfScopeHint')
+    },
   },
   'scope-wait': {
-    label: '等待账号判定',
-    hint: '范围含这个平台或指定了账号，等到槽位确定后再判',
+    get label() {
+      return translate('risk:awaitingAccount')
+    },
+    get hint() {
+      return translate('risk:awaitingAccountHint')
+    },
   },
   unknown: {
-    label: '未经关卡',
-    hint: '鉴权、请求体等错误在关卡前结束，或升级前的旧日志',
+    get label() {
+      return translate('risk:bypassedGates')
+    },
+    get hint() {
+      return translate('risk:bypassedGatesHint')
+    },
   },
 }
 
@@ -103,15 +164,22 @@ export function feedKindOf(row: UsageLogRow): FeedKind {
 }
 
 const REFUSAL_MATCH: Record<string, string> = {
-  refusal_guard: '精确指纹',
-  refusal_similar: '近似正文',
-  refusal_device: '封禁 device',
+  get refusal_guard() {
+    return translate('risk:exactFingerprint')
+  },
+  get refusal_similar() {
+    return translate('risk:similarBody')
+  },
+  get refusal_device() {
+    return translate('risk:blockedDevice')
+  },
 }
 
 /** The part of the stored block message that says why: `nsfw: 关键词`. */
 export function evidenceOf(row: UsageLogRow): string {
   const kind = feedKindOf(row)
-  if (kind === 'refusal') return REFUSAL_MATCH[row.finalState || ''] || '拒答'
+  if (kind === 'refusal')
+    return REFUSAL_MATCH[row.finalState || ''] || translate('risk:refusal')
   const text = String(row.errorMessage || row.blockedReason || '').trim()
   if (kind === 'upstream') return text
   const at = text.search(/[:：]/)

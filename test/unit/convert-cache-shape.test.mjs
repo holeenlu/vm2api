@@ -152,11 +152,9 @@ test('unofficial cli-hop converts openai.chat and messages to the same marked sh
   ]
   const fromChat = prepareCliHopBody(
     toClaudeMessages('openai.chat', { model: MODEL, max_tokens: 256, messages: turns }).claude,
-    { unofficial: true, cacheTtl: '1h' },
   )
   const fromMessages = prepareCliHopBody(
     toClaudeMessages('anthropic.messages', { model: MODEL, max_tokens: 256, messages: turns }).claude,
-    { unofficial: true, cacheTtl: '1h' },
   )
   assert.deepEqual(stampMap(fromChat), ['system[0]', 'messages[2].content[0]', 'messages[4].content[0]'])
   assert.deepEqual(stampMap(fromMessages), stampMap(fromChat))
@@ -166,7 +164,7 @@ test('unofficial cli-hop converts openai.chat and messages to the same marked sh
   )
 })
 
-test('openai.chat multi-turn cli-hop marks last and penultimate user', () => {
+test('openai.chat multi-turn cli-hop marks only the latest user', () => {
   const chat = toClaudeMessages('openai.chat', {
     model: MODEL,
     max_tokens: 256,
@@ -178,7 +176,7 @@ test('openai.chat multi-turn cli-hop marks last and penultimate user', () => {
       { role: 'user', content: 'u3' },
     ],
   }).claude
-  const body = prepareCliHopBody(chat, { unofficial: true, cacheTtl: '1h' })
+  const body = prepareCliHopBody(chat)
   assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.deepEqual(body.messages[4].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.equal(body.messages[0].content[0].cache_control, undefined)

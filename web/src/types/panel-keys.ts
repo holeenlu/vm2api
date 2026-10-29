@@ -21,24 +21,21 @@ export type ApiKeyItem = {
   quota_usd?: number
   quota_usd_used?: number
   rpm?: number
+  secret_status?: 'available' | 'hash_only' | 'decrypt_failed'
   expires_at?: string | null
   created_at?: string
   updated_at?: string
   last_used_at?: string
   requests?: number
   inflight?: number
-  /** all = 全局可调度。anthropic / openai 必须带 allowed_vms。 */
-  group_type?: 'all' | 'anthropic' | 'openai'
-  allowed_vms?: string[]
-  vm_pool_id?: string | null
-  vm_pool_name?: string | null
-}
-
-export type VmPool = {
-  id: string
-  name: string
-  enabled: boolean
-  vm_ids: string[]
+  user_id?: string | null
+  group_id?: number | null
+  group_name?: string | null
+  rate_limit_5h?: number
+  rate_limit_1d?: number
+  rate_limit_7d?: number
+  ip_whitelist?: string[]
+  ip_blacklist?: string[]
 }
 
 export type ApiKeysPayload = {
