@@ -10,7 +10,7 @@ export function canRevealClusterNodes(role) {
   const r = String(role || '')
     .trim()
     .toLowerCase()
-  return r === 'admin' || r === 'super'
+  return r === 'super_admin'
 }
 
 export function clusterNodeDisplayName(node) {

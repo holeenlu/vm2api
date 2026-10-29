@@ -38,7 +38,7 @@ async function search(root, { body, headers = {}, ops = {} } = {}) {
   await handleCodexSearch({
     req: { headers: { 'user-agent': 'codex_exec/0.160.1 (Windows 10.0.26100; x86_64)', ...headers } },
     res,
-    body: body ?? { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'vm2api' }] } },
+    body: body ?? { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'tapmodels' }] } },
     logBag,
     stats,
     json: (_res, status, payload) => {
@@ -70,7 +70,7 @@ test('search posts to the Codex backend as the slot and returns the backend JSON
     body: {
       id: 'sess-1',
       model: 'gpt-6.1-sol',
-      commands: { search_query: [{ q: 'vm2api' }] },
+      commands: { search_query: [{ q: 'tapmodels' }] },
       prompt_cache_key: 'pck',
       prompt_cache_retention: '24h',
       store: false,
@@ -89,7 +89,7 @@ test('search posts to the Codex backend as the slot and returns the backend JSON
   assert.equal(sent.version, CODEX_APP_VERSION)
   assert.equal(sent['x-codex-turn-metadata'], '{"turn_id":"t-1"}')
   const payload = JSON.parse(calls[0].init.body)
-  assert.deepEqual(payload, { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'vm2api' }] } })
+  assert.deepEqual(payload, { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'tapmodels' }] } })
   assert.equal(res.statusCode, 200)
   assert.equal(res.body.output, 'found it')
   assert.equal(logBag.via, 'codex-search')

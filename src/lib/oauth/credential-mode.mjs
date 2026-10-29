@@ -50,10 +50,6 @@ export function canOfficialUsage(raw) {
   return mode === CREDENTIAL_OAUTH || mode === CREDENTIAL_SETUP_TOKEN
 }
 
-export function canCountTokens(raw) {
-  return isAnySetupTokenMode(raw) || isApiKeyMode(raw)
-}
-
 export function canRefreshCredential(raw) {
   return !isApiKeyMode(raw) && !isOfficialSetupTokenMode(raw)
 }

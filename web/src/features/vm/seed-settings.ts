@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { VmKernelSnapshot, VmSeedSettings } from '@/types/panel-vm'
 import {
   telemetryEnabled,
@@ -10,8 +11,8 @@ import {
 } from '@/features/vm/telemetry-status'
 
 export const REJECT_FLAGS = [
-  ['reject_client_settings', '拒客户端 settings'],
-  ['reject_client_metadata_identity', '拒客户端身份'],
+  ['reject_client_settings', t('vm:seedSettings.rejectClientSettings')],
+  ['reject_client_metadata_identity', t('vm:seedSettings.rejectClientIdentity')],
 ] as const
 
 const TOP_KEYS = ['theme', 'autoUpdates', 'grove_enabled'] as const
@@ -217,8 +218,22 @@ export function sameDraft(a: SeedDraft, b: SeedDraft): boolean {
 /** Only explicit edits are sent; a stale draft must not reopen telemetry. */
 export function seedSaveBody(
   draft: SeedDraft,
-  baseline: SeedDraft
+  baseline?: SeedDraft
 ): Record<string, unknown> {
+  if (!baseline) {
+    const body: Record<string, unknown> = {
+      ...telemetrySeedFlags(telemetryEnabled(draft)),
+      claude_setting: draft.claude_setting.replace(/\n+$/g, ''),
+      reject_client_settings: draft.reject_client_settings,
+      reject_client_metadata_identity: draft.reject_client_metadata_identity,
+      extra_env: editableSeedEnv(draft.env),
+      theme: draft.theme,
+      locale: draft.locale,
+    }
+    if (draft.timezoneFollow) body.timezone_follow_proxy = true
+    else if (draft.timezoneFixed) body.timezone = draft.timezoneFixed
+    return body
+  }
   const body: Record<string, unknown> = {}
   if (telemetryEnabled(draft) !== telemetryEnabled(baseline)) {
     Object.assign(body, telemetrySeedFlags(telemetryEnabled(draft)))
@@ -266,6 +281,7 @@ export type TelemetryLive = {
   desired: boolean | null
   on: boolean | null
   confirmed: boolean
+  running: boolean | null
   label: string
   tone: 'on' | 'off' | 'unknown'
 }
@@ -283,6 +299,7 @@ export function telemetryLive(
     desired,
     on: observed?.enabled ?? null,
     confirmed,
+    running: observed?.running ?? null,
     label: telemetryStatusLabel(observed, desired),
     tone: confirmed ? (desired ? 'on' : 'off') : 'unknown',
   }

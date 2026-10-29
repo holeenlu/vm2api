@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { AuthScheme, OauthFlavor, Vm } from '@/types/panel-vm'
 import { isCodexVm } from '@/lib/vm-kind'
 
@@ -7,9 +8,13 @@ export type CredType =
 const CRED_TYPE_LABEL: Record<CredType, string> = {
   oauth: 'OAuth',
   'setup-token': 'Setup Token',
-  'official-setup-token': '官方 Setup Token',
+  get 'official-setup-token'() {
+    return t('lib:credential.officialSetupToken')
+  },
   apikey: 'Console',
-  none: '无凭证',
+  get none() {
+    return t('lib:status.noCredentials')
+  },
 }
 
 /**
@@ -48,7 +53,7 @@ export function credTypeOf(vm: Vm | undefined): CredType {
 }
 
 export function credTypeLabel(type: CredType): string {
-  return CRED_TYPE_LABEL[type] || '无凭证'
+  return CRED_TYPE_LABEL[type] || t('lib:status.noCredentials')
 }
 
 /** 「类型」列的三类，按**实际调用上游的形式**归类，而不是按凭证怎么获得。 */
@@ -58,7 +63,9 @@ const CRED_ENDPOINT_LABEL: Record<CredEndpoint, string> = {
   console: 'Console',
   oauth: 'OAuth',
   api: 'API',
-  none: '无凭证',
+  get none() {
+    return t('lib:status.noCredentials')
+  },
 }
 
 export function credEndpointLabel(endpoint: CredEndpoint): string {
@@ -122,7 +129,7 @@ export function importMethodsFor(
   if (kind === 'apikey') return []
   const methods: { id: ImportMethod; label: string }[] = [
     { id: 'cc', label: 'Claude Code' },
-    { id: 'link', label: '授权链接' },
+    { id: 'link', label: t('lib:credential.authLink') },
     { id: 'session', label: 'Cookie' },
   ]
   if (kind === 'setup-token') return methods.filter((item) => item.id !== 'cc')

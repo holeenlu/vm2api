@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
+import { t as translate } from '@/i18n'
 import { Download } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { ERROR_CLASS_IDS, ERROR_CLASS_META } from '@/lib/log-mute'
 import { Button } from '@/components/ui/button'
 import {
@@ -35,11 +37,36 @@ export type ExportOptions = {
 }
 
 const WINDOWS: { value: ExportWindow; label: string }[] = [
-  { value: '', label: '全部时间' },
-  { value: '1h', label: '近 1 小时' },
-  { value: '6h', label: '近 6 小时' },
-  { value: '24h', label: '近 24 小时' },
-  { value: '7d', label: '近 7 天' },
+  {
+    value: '',
+    get label() {
+      return translate('logs:allTime')
+    },
+  },
+  {
+    value: '1h',
+    get label() {
+      return translate('logs:lastHour')
+    },
+  },
+  {
+    value: '6h',
+    get label() {
+      return translate('logs:lastSixHours')
+    },
+  },
+  {
+    value: '24h',
+    get label() {
+      return translate('logs:lastDay')
+    },
+  },
+  {
+    value: '7d',
+    get label() {
+      return translate('logs:lastWeek')
+    },
+  },
 ]
 
 const LIMITS = [500, 2000, 5000]
@@ -55,6 +82,8 @@ function ScopeOption({
   desc?: string
   children?: React.ReactNode
 }) {
+  useTranslation('logs')
+
   return (
     <Label className='flex cursor-pointer items-start gap-2.5 rounded-lg border border-border/60 p-3 font-normal transition-colors hover:border-border has-data-[state=checked]:border-primary/50 has-data-[state=checked]:bg-primary/5'>
       <RadioGroupItem value={value} className='mt-0.5' />
@@ -85,8 +114,12 @@ export function ExportDialog({
   onOpenChange: (open: boolean) => void
   /** 「跟随当前筛选」的说明文案，由页面根据当前筛选态拼出。 */
   currentSummary: string
-  onExport: (opts: ExportOptions) => Promise<void>
+  onExport: (opts: ExportOptions, signal?: AbortSignal) => Promise<void>
 }) {
+  const { t: translate } = useTranslation('logs')
+
+  const controller = useRef<AbortController | null>(null)
+  useEffect(() => () => controller.current?.abort(), [])
   const [format, setFormat] = useState<'jsonl' | 'csv'>('jsonl')
   const [scope, setScope] = useState<ExportScope>('current')
   const [errorClass, setErrorClass] = useState('')
@@ -96,28 +129,42 @@ export function ExportDialog({
   const [exporting, setExporting] = useState(false)
 
   async function handleConfirm() {
+    controller.current = new AbortController()
     setExporting(true)
     try {
-      await onExport({ format, scope, errorClass, window, includeMuted, limit })
+      await onExport(
+        { format, scope, errorClass, window, includeMuted, limit },
+        controller.current.signal
+      )
       onOpenChange(false)
+    } catch {
+      /* The caller reports export errors. */
     } finally {
       setExporting(false)
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !exporting && onOpenChange(o)}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) controller.current?.abort()
+        onOpenChange(o)
+      }}
+    >
       <DialogContent className='sm:max-w-md'>
         <DialogHeader>
-          <DialogTitle>导出日志</DialogTitle>
+          <DialogTitle>{translate('logs:exportLogs')}</DialogTitle>
           <DialogDescription>
-            上限 {LIMITS[LIMITS.length - 1]} 条，超出按最新截断。
+            {translate('logs:exportLimitHint', {
+              count: LIMITS[LIMITS.length - 1],
+            })}
           </DialogDescription>
         </DialogHeader>
         <div className='space-y-4'>
           <div className='space-y-2'>
             <div className='text-xs font-medium text-muted-foreground'>
-              范围
+              {translate('logs:scope')}
             </div>
             <RadioGroup
               value={scope}
@@ -126,15 +173,15 @@ export function ExportDialog({
             >
               <ScopeOption
                 value='current'
-                title='跟随当前筛选'
+                title={translate('logs:currentFilters')}
                 desc={currentSummary}
               />
               <ScopeOption
                 value='all'
-                title='全部日志'
-                desc='忽略页面筛选与屏蔽，导出全量'
+                title={translate('logs:allLogs')}
+                desc={translate('logs:exportAllHint')}
               />
-              <ScopeOption value='errors' title='仅错误'>
+              <ScopeOption value='errors' title={translate('logs:errorsOnly')}>
                 {scope === 'errors' ? (
                   <Select
                     value={errorClass || 'none'}
@@ -145,10 +192,12 @@ export function ExportDialog({
                       className='mt-1.5 w-44'
                       onClick={(e) => e.preventDefault()}
                     >
-                      <SelectValue placeholder='错误类' />
+                      <SelectValue placeholder={translate('logs:errorClass')} />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value='none'>全部错误类</SelectItem>
+                      <SelectItem value='none'>
+                        {translate('logs:allErrorClasses')}
+                      </SelectItem>
                       {ERROR_CLASS_IDS.map((c) => (
                         <SelectItem key={c} value={c}>
                           {ERROR_CLASS_META[c].label}（{c}）
@@ -163,7 +212,7 @@ export function ExportDialog({
           <div className='grid grid-cols-2 gap-3'>
             <div className='space-y-2'>
               <div className='text-xs font-medium text-muted-foreground'>
-                时间窗
+                {translate('logs:timeWindow')}
               </div>
               <Select
                 value={window || 'all'}
@@ -185,7 +234,7 @@ export function ExportDialog({
             </div>
             <div className='space-y-2'>
               <div className='text-xs font-medium text-muted-foreground'>
-                条数上限
+                {translate('logs:recordLimit')}
               </div>
               <Select
                 value={String(limit)}
@@ -206,7 +255,7 @@ export function ExportDialog({
           </div>
           {scope !== 'all' ? (
             <Label className='flex cursor-pointer items-center justify-between gap-3 font-normal'>
-              <span className='text-sm'>包含已屏蔽的错误类</span>
+              <span className='text-sm'>{translate('logs:includeMuted')}</span>
               <Switch
                 checked={includeMuted}
                 onCheckedChange={setIncludeMuted}
@@ -215,7 +264,7 @@ export function ExportDialog({
           ) : null}
           <div className='space-y-2'>
             <div className='text-xs font-medium text-muted-foreground'>
-              格式
+              {translate('logs:format')}
             </div>
             <RadioGroup
               value={format}
@@ -224,11 +273,11 @@ export function ExportDialog({
             >
               <Label className='flex cursor-pointer items-center gap-2 font-normal'>
                 <RadioGroupItem value='jsonl' />
-                <span className='text-sm'>JSONL</span>
+                <span className='text-sm'>{translate('logs:jsonl')}</span>
               </Label>
               <Label className='flex cursor-pointer items-center gap-2 font-normal'>
                 <RadioGroupItem value='csv' />
-                <span className='text-sm'>CSV</span>
+                <span className='text-sm'>{translate('logs:csv')}</span>
               </Label>
             </RadioGroup>
           </div>
@@ -236,14 +285,16 @@ export function ExportDialog({
         <DialogFooter>
           <Button
             variant='outline'
-            onClick={() => onOpenChange(false)}
-            disabled={exporting}
+            onClick={() => {
+              controller.current?.abort()
+              onOpenChange(false)
+            }}
           >
-            取消
+            {translate('logs:cancel')}
           </Button>
           <Button onClick={() => void handleConfirm()} loading={exporting}>
             <Download className='size-4' />
-            导出
+            {translate('logs:export')}
           </Button>
         </DialogFooter>
       </DialogContent>

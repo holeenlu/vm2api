@@ -223,6 +223,9 @@ export function codexAccountCandidate(vm, now = Date.now(), signals = null, poli
  * (quota, credential, operator, model); `resting` when it is outside its
  * working window (back tomorrow, but not for this request); a busy home is
  * still `live`.
+ *
+ * `resourcePriorities` is the key group's `vm id → priority` map; lower runs
+ * first inside the same weight band. Absent for keys without a group.
  */
 export function orderCodexSessionSlots(
   vms,
@@ -239,6 +242,7 @@ export function orderCodexSessionSlots(
     roundRobinCursor = null,
     model = null,
     excluded = null,
+    resourcePriorities = null,
   } = {},
 ) {
   const list = Array.isArray(vms) ? vms : []
@@ -286,7 +290,10 @@ export function orderCodexSessionSlots(
     return { error: 'session_window_full', ids: [], ready: [], parked: [], sticky: false, boundState, candidates: [] }
   }
   const cursor = roundRobinCursor == null ? readOpenAICursor() : roundRobinCursor
-  const candidates = ids.map((id) => codexAccountCandidate(byId.get(id), now, null, policy))
+  const candidates = ids.map((id) => ({
+    ...codexAccountCandidate(byId.get(id), now, null, policy),
+    groupPriority: resourcePriorities?.[id] ?? null,
+  }))
   const ordered = orderOpenAIAccounts(candidates, {
     strategy,
     now,
@@ -362,6 +369,16 @@ function withModelAllowed(picked, byId, model) {
   }
 }
 
+export function isCodexOverloadError(result = {}) {
+  if (!result || result.ok === true || result.committed === true) return false
+  const status = Number(result.status) || 0
+  const code = String(result.body?.error?.code || result.error_code || '')
+  const type = String(result.body?.error?.type || result.body?.type || '')
+  const message = String(result.body?.error?.message || result.body?.message || result.error || '')
+  if (![502, 503, 529].includes(status)) return false
+  return /overload|server_is_overloaded|servers are currently overloaded/i.test(`${code} ${type} ${message}`)
+}
+
 export function isCodexFailoverError(result) {
   if (!result || result.ok === true || result.committed === true) return false
   const status = Number(result.status) || 0
@@ -382,6 +399,7 @@ export function isCodexFailoverError(result) {
   // refused committed hops and anything that has written to the client.
   if (status === 408) return true
   // The kernel may be busy/cooling down even while the gateway has a seat.
+  if (isCodexOverloadError(result)) return true
   if (status === 503 && (code === 'no_capacity' || code === 'overloaded' || /server_error|provider_error/i.test(code)))
     return true
   if (status === 502 && /upstream_transport|worker_transport|transport/i.test(code)) return true

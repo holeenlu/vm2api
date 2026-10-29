@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { isCodexVm } from '@/lib/vm-kind'
 import { claudeTier } from '@/lib/vm-status'
@@ -27,7 +28,12 @@ const NEUTRAL: TierVisual = {
   badge: 'bg-muted text-muted-foreground',
 }
 
-const UNCONFIRMED: TierVisual = { ...NEUTRAL, label: '待探测' }
+const UNCONFIRMED: TierVisual = {
+  ...NEUTRAL,
+  get label() {
+    return t('lib:tier.pendingProbe')
+  },
+}
 
 const SKIN: Record<'pro' | 'max' | 'codex', TierVisual> = {
   pro: {

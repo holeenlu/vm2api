@@ -38,6 +38,8 @@ function seed(db, rows) {
       path: '/v1/messages',
       status: 200,
       model: 'claude-sonnet-4',
+      actual_cost: r.total_cost ?? null,
+      user_id: r.api_key_id === 'k1' ? 'u1' : r.api_key_id === 'k2' ? 'u2' : null,
       ...r,
     })
   }
@@ -131,7 +133,7 @@ test('deltas compare with the previous equal-length window', () => {
   assert.equal(empty.deltas.requests, null)
 })
 
-test('leaderboard sorts by official cost, names entities, and caps the limit', () => {
+test('leaderboard sorts by customer spend, names entities, and caps the limit', () => {
   const db = freshDb()
   const now = Date.parse('2026-05-01T12:00:00Z')
   const at = '2026-05-01T09:00:00.000Z'
@@ -164,7 +166,7 @@ test('leaderboard sorts by official cost, names entities, and caps the limit', (
   assert.equal(alice.successRequests, 1)
   assert.equal(alice.errorRequests, 1)
   assert.equal(alice.successRate, 0.5)
-  assert.equal(alice.totalActualCost, 2)
+  assert.equal(alice.totalActualCost, 3)
   assert.equal(alice.cacheHitRate, 0.2)
   assert.equal(repo.leaderboard({ range: 'today', scope: 'key', limit: 1, tz: 'UTC', now }).entries[0].name, 'bob-key')
   assert.equal(repo.leaderboard({ range: 'today', scope: 'key', limit: 500, tz: 'UTC', now }).entries.length, 3)
@@ -285,7 +287,7 @@ test('API OpenAI replies converted to non-streaming Anthropic retain disjoint hi
       const totals = repo.statistics(options).totals
       assert.equal(totals.cacheHitRate, 0.8)
       assert.equal(totals.inputTokens, 20 - cacheWrite)
-      assert.equal(totals.cost, 0.25)
+      assert.equal(totals.cost, 0.2)
       for (const scope of ['user', 'key', 'model', 'vm']) {
         const entry = repo.leaderboard({ ...options, scope }).entries[0]
         assert.equal(entry.cacheHitRate, 0.8, scope)
