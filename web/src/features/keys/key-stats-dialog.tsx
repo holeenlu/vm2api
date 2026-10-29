@@ -12,6 +12,7 @@ import {
   TrendingUp,
   Zap,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { fmtMs, fmtNum, fmtUsd } from '@/lib/format'
 import { cacheHitPct } from '@/lib/vm-usage'
 import {
@@ -44,18 +45,20 @@ export function KeyStatsDialog({
   vms: Vm[]
   onOpenChange: (open: boolean) => void
 }) {
+  const { t } = useTranslation('keys')
+
   return (
     <Dialog open={item != null} onOpenChange={onOpenChange}>
       <DialogContent className='flex max-h-[92vh] flex-col gap-3 sm:max-w-4xl'>
         <DialogHeader>
           <DialogTitle className='text-base'>
-            查看统计
+            {t('keys:viewStats')}
             {item ? (
               <span className='ms-2 font-normal'>{item.name || item.id}</span>
             ) : null}
           </DialogTitle>
           <DialogDescription className='sr-only'>
-            近 30 天该密钥的用量、费用与分布
+            {t('keys:statsDescription')}
           </DialogDescription>
         </DialogHeader>
         <div className='-me-3 min-h-0 flex-1 overflow-y-auto pe-3'>
@@ -67,6 +70,8 @@ export function KeyStatsDialog({
 }
 
 function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
+  const { t } = useTranslation('keys')
+
   const q = useQuery(keyStatsQueryOptions(item.id))
   const usage = q.data?.usage_stats ?? null
   const view = summarizeUsageStats(usage)
@@ -80,12 +85,10 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
   return (
     <div className='space-y-3 pb-1'>
       <div className='text-xs text-muted-foreground'>
-        {item.group_type === 'anthropic'
-          ? 'Anthropic'
-          : item.group_type === 'openai'
-            ? 'OpenAI'
-            : '全局'}
-        {' · '}近 {usage?.days ?? 30} 天 · 官方价
+        {t('keys:statsSubtitle', {
+          group: item.group_name || t('keys:platformService'),
+          count: usage?.days ?? 30,
+        })}
       </div>
       {q.isLoading ? (
         <div className='space-y-3'>
@@ -98,7 +101,7 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
         </div>
       ) : !view ? (
         <div className='grid h-40 place-items-center rounded-xl border text-sm text-muted-foreground'>
-          暂无统计数据
+          {t('keys:noStats')}
         </div>
       ) : (
         <>
@@ -106,52 +109,60 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             <MetricCard
               accent='emerald'
               icon={<Coins />}
-              label={`${view.summary.days} 天费用`}
+              label={t('keys:periodCost', { count: view.summary.days })}
               value={fmtUsd(view.summary.cost, 2)}
-              hint='该密钥'
+              hint={t('keys:thisKey')}
             />
             <MetricCard
               accent='blue'
               icon={<Zap />}
-              label={`${view.summary.days} 天请求`}
+              label={t('keys:periodRequests', { count: view.summary.days })}
               value={fmtNum(view.summary.requests)}
               hint={
                 view.summary.errors > 0
-                  ? `含 ${fmtNum(view.summary.errors)} 次失败`
-                  : '全部成功'
+                  ? t('keys:failedRequests', { count: view.summary.errors })
+                  : t('keys:allSuccessful')
               }
             />
             <MetricCard
               accent='amber'
               icon={<Calculator />}
-              label='日均费用'
+              label={t('keys:averageDailyCost')}
               value={fmtUsd(view.summary.avgDailyCost, 2)}
-              hint={`按 ${view.summary.activeDays} 个活跃天`}
+              hint={t('keys:activeDayCount', {
+                count: view.summary.activeDays,
+              })}
             />
             <MetricCard
               accent='purple'
               icon={<TrendingUp />}
-              label='日均请求'
+              label={t('keys:averageDailyRequests')}
               value={fmtNum(Math.round(view.summary.avgDailyRequests))}
-              hint='活跃天平均'
+              hint={t('keys:activeDayAverage')}
             />
           </div>
           <div className='grid gap-3 lg:grid-cols-3'>
             <InfoCard
               tone='bg-cyan-500/15 text-cyan-600 dark:text-cyan-400'
               icon={<Clock />}
-              title='今日概览'
+              title={t('keys:todayOverview')}
               rows={[
-                { label: '费用', value: fmtUsd(today?.total_cost ?? 0, 2) },
-                { label: '请求', value: fmtNum(today?.requests ?? 0) },
                 {
-                  label: 'Tokens',
+                  label: t('keys:cost'),
+                  value: fmtUsd(today?.total_cost ?? 0, 2),
+                },
+                {
+                  label: t('keys:requests'),
+                  value: fmtNum(today?.requests ?? 0),
+                },
+                {
+                  label: t('keys:tokens'),
                   value: fmtTokens(
                     (today?.input_tokens ?? 0) + (today?.output_tokens ?? 0)
                   ),
                 },
                 {
-                  label: '缓存命中',
+                  label: t('keys:cacheHits'),
                   value: fmtCache(today),
                 },
               ]}
@@ -159,16 +170,19 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             <InfoCard
               tone='bg-orange-500/15 text-orange-600 dark:text-orange-400'
               icon={<Flame />}
-              title='花费最高的一天'
+              title={t('keys:highestCostDay')}
               rows={[
-                { label: '日期', value: view.summary.highestCost?.day ?? '-' },
                 {
-                  label: '费用',
+                  label: t('keys:date'),
+                  value: view.summary.highestCost?.day ?? '-',
+                },
+                {
+                  label: t('keys:cost'),
                   value: fmtUsd(view.summary.highestCost?.total_cost ?? 0, 2),
                   strong: 'text-orange-600 dark:text-orange-400',
                 },
                 {
-                  label: '请求',
+                  label: t('keys:requests'),
                   value: fmtNum(view.summary.highestCost?.requests ?? 0),
                 },
               ]}
@@ -176,19 +190,19 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             <InfoCard
               tone='bg-indigo-500/15 text-indigo-600 dark:text-indigo-400'
               icon={<TrendingUp />}
-              title='请求最多的一天'
+              title={t('keys:mostRequestsDay')}
               rows={[
                 {
-                  label: '日期',
+                  label: t('keys:date'),
                   value: view.summary.highestRequests?.day ?? '-',
                 },
                 {
-                  label: '请求',
+                  label: t('keys:requests'),
                   value: fmtNum(view.summary.highestRequests?.requests ?? 0),
                   strong: 'text-indigo-600 dark:text-indigo-400',
                 },
                 {
-                  label: '费用',
+                  label: t('keys:cost'),
                   value: fmtUsd(
                     view.summary.highestRequests?.total_cost ?? 0,
                     2
@@ -201,11 +215,14 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             <InfoCard
               tone='bg-teal-500/15 text-teal-600 dark:text-teal-400'
               icon={<Boxes />}
-              title='累计 Tokens'
+              title={t('keys:totalTokens')}
               rows={[
-                { label: '总量', value: fmtTokens(view.summary.tokens) },
                 {
-                  label: '日均',
+                  label: t('keys:total'),
+                  value: fmtTokens(view.summary.tokens),
+                },
+                {
+                  label: t('keys:dailyAverage'),
                   value: fmtTokens(Math.round(view.summary.avgDailyTokens)),
                 },
               ]}
@@ -213,17 +230,17 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             <InfoCard
               tone='bg-rose-500/15 text-rose-600 dark:text-rose-400'
               icon={<Gauge />}
-              title='性能'
+              title={t('keys:performance')}
               rows={[
                 {
-                  label: '平均响应',
+                  label: t('keys:averageResponse'),
                   value:
                     view.summary.avgMs == null
                       ? '—'
                       : fmtMs(view.summary.avgMs),
                 },
                 {
-                  label: '活跃天数',
+                  label: t('keys:activeDays'),
                   value: `${view.summary.activeDays} / ${view.summary.days}`,
                 },
               ]}
@@ -231,10 +248,10 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             <InfoCard
               tone='bg-lime-500/15 text-lime-600 dark:text-lime-400'
               icon={<ClipboardList />}
-              title='7 天结果'
+              title={t('keys:weeklyResults')}
               rows={[
                 {
-                  label: '成功',
+                  label: t('keys:successful'),
                   value: fmtNum(
                     view.points
                       .slice(-7)
@@ -243,7 +260,7 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
                   strong: 'text-[color:var(--status-ok)]',
                 },
                 {
-                  label: '失败',
+                  label: t('keys:failed'),
                   value: fmtNum(
                     view.points.slice(-7).reduce((n, p) => n + p.errors, 0)
                   ),
@@ -253,18 +270,24 @@ function StatsBody({ item, vms }: { item: ApiKeyItem; vms: Vm[] }) {
             />
           </div>
           <ChartCard
-            title='用量趋势'
-            meta={`近 ${view.summary.days} 天 · 按上海自然日`}
+            title={t('keys:usageTrend')}
+            meta={t('keys:trendPeriod', { count: view.summary.days })}
           >
             <TrendChart points={view.points} />
           </ChartCard>
-          <ChartCard title='模型分布' meta='按请求数 · 上游模型'>
+          <ChartCard
+            title={t('keys:modelDistribution')}
+            meta={t('keys:upstreamRequests')}
+          >
             <DistributionChart
               rows={usage?.models ?? []}
-              empty='近期没有请求'
+              empty={t('keys:noRecentRequests')}
             />
           </ChartCard>
-          <ChartCard title='VM 分布' meta='按请求数'>
+          <ChartCard
+            title={t('keys:vmDistribution')}
+            meta={t('keys:byRequests')}
+          >
             <EndpointBars rows={vmRows} />
           </ChartCard>
         </>

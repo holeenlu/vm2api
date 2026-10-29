@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { PolicyQuestion } from '@/types/panel-routing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -36,6 +37,8 @@ export function QuestionBank({
   rows: PolicyQuestion[]
   onChange: (rows: PolicyQuestion[]) => void
 }) {
+  const { t: translate } = useTranslation('risk')
+
   const [editing, setEditing] = useState<string | null>(null)
   const [label, setLabel] = useState('')
   const [summary, setSummary] = useState('')
@@ -48,11 +51,11 @@ export function QuestionBank({
     const name = label.trim()
     const text = instructions.trim()
     if (!name || !text) {
-      toast.error('先写名称和问句')
+      toast.error(translate('risk:questionNameRequired'))
       return
     }
     if (rows.length >= MAX_QUESTIONS) {
-      toast.error(`最多 ${MAX_QUESTIONS} 题`)
+      toast.error(translate('risk:maxQuestions', { count: MAX_QUESTIONS }))
       return
     }
     onChange([
@@ -82,7 +85,7 @@ export function QuestionBank({
                   <p className='text-sm font-medium'>{row.label}</p>
                   {row.builtin ? (
                     <Badge variant='outline' className='font-normal'>
-                      内置
+                      {translate('risk:builtIn')}
                     </Badge>
                   ) : null}
                   <span className='font-mono text-xs text-muted-foreground'>
@@ -96,7 +99,9 @@ export function QuestionBank({
               <div className='flex shrink-0 items-center gap-1'>
                 <Switch
                   checked={row.enabled}
-                  aria-label={`启用 ${row.label}`}
+                  aria-label={translate('risk:enableQuestion', {
+                    p0: row.label,
+                  })}
                   onCheckedChange={(on) => patch(row.id, { enabled: on })}
                 />
                 <Button
@@ -105,7 +110,9 @@ export function QuestionBank({
                   className='cursor-pointer'
                   onClick={() => setEditing(editing === row.id ? null : row.id)}
                 >
-                  {editing === row.id ? '收起' : '编辑'}
+                  {editing === row.id
+                    ? translate('risk:collapse')
+                    : translate('risk:edit')}
                 </Button>
                 <Button
                   size='sm'
@@ -116,7 +123,7 @@ export function QuestionBank({
                     if (editing === row.id) setEditing(null)
                   }}
                 >
-                  删除
+                  {translate('risk:delete')}
                 </Button>
               </div>
             </div>
@@ -124,7 +131,9 @@ export function QuestionBank({
               <div className='grid gap-3'>
                 <div className='grid gap-3 sm:grid-cols-2'>
                   <div className='space-y-1.5'>
-                    <Label htmlFor={`q-label-${row.id}`}>名称</Label>
+                    <Label htmlFor={`q-label-${row.id}`}>
+                      {translate('risk:name')}
+                    </Label>
                     <Input
                       id={`q-label-${row.id}`}
                       value={row.label}
@@ -132,7 +141,9 @@ export function QuestionBank({
                     />
                   </div>
                   <div className='space-y-1.5'>
-                    <Label htmlFor={`q-summary-${row.id}`}>说明</Label>
+                    <Label htmlFor={`q-summary-${row.id}`}>
+                      {translate('risk:description')}
+                    </Label>
                     <Input
                       id={`q-summary-${row.id}`}
                       value={row.summary}
@@ -143,7 +154,9 @@ export function QuestionBank({
                   </div>
                 </div>
                 <div className='space-y-1.5'>
-                  <Label htmlFor={`q-text-${row.id}`}>问句</Label>
+                  <Label htmlFor={`q-text-${row.id}`}>
+                    {translate('risk:question')}
+                  </Label>
                   <Textarea
                     id={`q-text-${row.id}`}
                     rows={3}
@@ -163,7 +176,7 @@ export function QuestionBank({
         ))}
         {rows.length ? null : (
           <li className='px-4 py-6 text-sm text-muted-foreground'>
-            还没有题目。可以在下面新增，或恢复内置题目。
+            {translate('risk:noQuestions')}
           </li>
         )}
       </ul>
@@ -171,31 +184,37 @@ export function QuestionBank({
       <div className='space-y-3 rounded-xl border border-dashed p-4'>
         <div className='grid gap-3 sm:grid-cols-2'>
           <div className='space-y-1.5'>
-            <Label htmlFor='new-question-label'>新题名称</Label>
+            <Label htmlFor='new-question-label'>
+              {translate('risk:newQuestionName')}
+            </Label>
             <Input
               id='new-question-label'
               value={label}
-              placeholder='例如 诈骗'
+              placeholder={translate('risk:questionNameExample')}
               onChange={(e) => setLabel(e.target.value)}
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='new-question-summary'>说明</Label>
+            <Label htmlFor='new-question-summary'>
+              {translate('risk:description')}
+            </Label>
             <Input
               id='new-question-summary'
               value={summary}
-              placeholder='一句话，列表里显示'
+              placeholder={translate('risk:questionDescriptionPlaceholder')}
               onChange={(e) => setSummary(e.target.value)}
             />
           </div>
         </div>
         <div className='space-y-1.5'>
-          <Label htmlFor='new-question-text'>问句</Label>
+          <Label htmlFor='new-question-text'>
+            {translate('risk:question')}
+          </Label>
           <Textarea
             id='new-question-text'
             rows={3}
             value={instructions}
-            placeholder='这段话是否可以提交给模型，并且不涉及……？高分表示安全。'
+            placeholder={translate('risk:questionPlaceholder')}
             onChange={(e) => setInstructions(e.target.value)}
           />
         </div>
@@ -205,7 +224,7 @@ export function QuestionBank({
           className='cursor-pointer'
           onClick={add}
         >
-          加入题库
+          {translate('risk:addQuestion')}
         </Button>
       </div>
     </div>

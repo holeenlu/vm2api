@@ -1,0 +1,36 @@
+{
+  "title": "服務提供商",
+  "description": "僅查看供應商新增的帳號、所屬供應商登入名稱、額度、用量與排程配置。",
+  "activeTotal": "活躍 / 總數",
+  "nearLimit": "接近 7D 額度",
+  "totalCost": "累計消耗",
+  "searchPlaceholder": "搜尋帳號、供應商或服務類型",
+  "unboundVm": "未綁定 VM",
+  "recoveringSoon": "即將恢復",
+  "daysHoursLater": "{{days}}天{{hours}}小時後",
+  "concurrency": "並發 {{value}}",
+  "rpm": "RPM {{value}}",
+  "viewVm": "查看 VM",
+  "empty": "暫無服務提供商資料。",
+  "columns": {
+    "vendor": "供應商",
+    "status": "狀態 / 調度",
+    "fiveHour": "5H",
+    "sevenDay": "7D",
+    "totalCost": "累計消耗",
+    "tokens": "Token",
+    "actions": "操作",
+    "account": "帳號",
+    "schedule": "排程配置"
+  },
+  "status": {
+    "provisioning": "預配中",
+    "paused": "已暫停",
+    "schedulePaused": "已暫停調度",
+    "waitingAuth": "等待授權",
+    "enabled": "已啟用"
+  },
+  "hoursMinutesLater": "{{hours}}小時{{minutes}}分鐘後",
+  "requests": "總請求 {{value}}",
+  "unlimited": "不限"
+}

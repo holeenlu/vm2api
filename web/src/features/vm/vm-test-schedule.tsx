@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t as tVm, i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { Clock3, Save, Trash2 } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { validTimezone } from '@/lib/timezone'
@@ -78,13 +80,48 @@ type TestParams = {
 }
 
 const WEEKDAY_OPTIONS = [
-  { value: 1, label: '周一' },
-  { value: 2, label: '周二' },
-  { value: 3, label: '周三' },
-  { value: 4, label: '周四' },
-  { value: 5, label: '周五' },
-  { value: 6, label: '周六' },
-  { value: 0, label: '周日' },
+  {
+    value: 1,
+    get label() {
+      return tVm('vm:vmTestSchedule.monday')
+    },
+  },
+  {
+    value: 2,
+    get label() {
+      return tVm('vm:vmTestSchedule.tuesday')
+    },
+  },
+  {
+    value: 3,
+    get label() {
+      return tVm('vm:vmTestSchedule.wednesday')
+    },
+  },
+  {
+    value: 4,
+    get label() {
+      return tVm('vm:vmTestSchedule.thursday')
+    },
+  },
+  {
+    value: 5,
+    get label() {
+      return tVm('vm:vmTestSchedule.friday')
+    },
+  },
+  {
+    value: 6,
+    get label() {
+      return tVm('vm:vmTestSchedule.saturday')
+    },
+  },
+  {
+    value: 0,
+    get label() {
+      return tVm('vm:vmTestSchedule.sunday')
+    },
+  },
 ]
 
 const MINUTES = Array.from({ length: 60 }, (_, i) => i)
@@ -105,7 +142,7 @@ function defaultStructure(): ScheduleStructure {
 function formatAt(value: string | null, timezone: string) {
   if (!value) return '—'
   try {
-    return new Intl.DateTimeFormat('zh-CN', {
+    return new Intl.DateTimeFormat(i18n.language, {
       timeZone: timezone,
       year: 'numeric',
       month: '2-digit',
@@ -205,10 +242,12 @@ export function VmTestSchedule({
   onPromptChange,
   onLoadSchedule,
 }: TestParams) {
+  const { t: tVm } = useTranslation('vm')
+
   const codex = isCodexVm(vm)
   const qc = useQueryClient()
   const me = useQuery(meQueryOptions())
-  const isAdmin = me.data?.role === 'admin'
+  const isAdmin = me.data?.role === 'super_admin'
   const queryKey = ['panel', 'vm', vm.id, 'test-schedule'] as const
   const endpoint = `/api/panel/vms/${encodeURIComponent(vm.id)}/test-schedule`
   const loaded = useRef(false)
@@ -321,7 +360,9 @@ export function VmTestSchedule({
         onPromptChange(data.schedule.prompt)
       }
       toast.success(
-        data.schedule?.enabled ? '定时测试已启用' : '测试计划已保存'
+        data.schedule?.enabled
+          ? tVm('vm:vmTestSchedule.scheduledTestingEnabled')
+          : tVm('vm:vmTestSchedule.testScheduleSaved')
       )
     },
     onError: (error: Error) => toast.error(error.message),
@@ -336,7 +377,7 @@ export function VmTestSchedule({
       setStale(false)
       setEnabled(false)
       setStructure(defaultStructure())
-      toast.success('测试计划已删除')
+      toast.success(tVm('vm:vmTestSchedule.testScheduleDeleted'))
     },
     onError: (error: Error) => toast.error(error.message),
     onSettled: () => qc.invalidateQueries({ queryKey }),
@@ -349,7 +390,7 @@ export function VmTestSchedule({
       }),
     onSuccess: (data) => {
       qc.setQueryData(['panel', 'test-schedule', 'default'], data)
-      toast.success('已保存全局默认调度模板')
+      toast.success(tVm('vm:vmTestSchedule.globalDefaultScheduleTemplateSaved'))
     },
     onError: (error: Error) => toast.error(error.message),
   })
@@ -379,8 +420,14 @@ export function VmTestSchedule({
     onSuccess: (data, scope) => {
       toast.success(
         scope === 'all'
-          ? `已把定时测试同步到 ${data.updated.length} 个槽`
-          : `已覆盖 ${data.updated.length} 个槽的调度时间`
+          ? tVm('vm:vmTestSchedule.scheduledTestingSyncedToSlots', {
+              length: data.updated.length,
+              count: data.updated.length,
+            })
+          : tVm('vm:vmTestSchedule.scheduleTimingOverwrittenForSlots', {
+              length: data.updated.length,
+              count: data.updated.length,
+            })
       )
       void qc.invalidateQueries({
         predicate: (query) =>
@@ -415,14 +462,20 @@ export function VmTestSchedule({
     <section className='space-y-3 border-t pt-3'>
       <div className='flex items-center justify-between gap-3'>
         <h3 className='flex items-center gap-1.5 text-sm font-medium'>
-          <Clock3 className='size-4' /> 定时测试
+          <Trans
+            ns='vm'
+            i18nKey='vmTestSchedule.scheduledTest'
+            components={{ part0: <Clock3 className='size-4' /> }}
+          />
         </h3>
         <div className='flex items-center gap-2'>
           {dirty && loaded.current ? (
-            <span className='text-xs text-muted-foreground'>未保存</span>
+            <span className='text-xs text-muted-foreground'>
+              <Trans ns='vm' i18nKey='vmTestSchedule.unsaved' />
+            </span>
           ) : null}
           <Switch
-            aria-label='启用定时测试'
+            aria-label={tVm('vm:vmTestSchedule.enableScheduledTesting')}
             checked={enabled}
             onCheckedChange={setEnabled}
             disabled={scheduleQuery.isPending || scheduleQuery.isError || busy}
@@ -435,7 +488,12 @@ export function VmTestSchedule({
           className='flex items-center gap-2 text-xs text-amber-600'
           role='alert'
         >
-          <span>此槽的计划已在别处修改，保存会覆盖它。</span>
+          <span>
+            <Trans
+              ns='vm'
+              i18nKey='vmTestSchedule.thisSlotSScheduleWasChangedElsewhereSavingWill'
+            />
+          </span>
           <Button
             size='sm'
             variant='ghost'
@@ -443,34 +501,47 @@ export function VmTestSchedule({
               scheduleQuery.data?.schedule && adopt(scheduleQuery.data.schedule)
             }
           >
-            载入最新
+            <Trans ns='vm' i18nKey='vmTestSchedule.loadLatest' />
           </Button>
         </div>
       ) : null}
 
       {scheduleQuery.isPending ? (
-        <p className='text-xs text-muted-foreground'>正在读取计划…</p>
+        <p className='text-xs text-muted-foreground'>
+          <Trans ns='vm' i18nKey='vmTestSchedule.loadingSchedule' />
+        </p>
       ) : scheduleQuery.isError ? (
         <div className='flex items-center gap-2 text-xs text-destructive'>
-          <span role='alert'>计划读取失败：{scheduleQuery.error.message}</span>
+          <span role='alert'>
+            <Trans
+              ns='vm'
+              i18nKey='vmTestSchedule.failedToLoadSchedule'
+              values={{ message: scheduleQuery.error.message }}
+            />
+          </span>
           <Button
             size='sm'
             variant='ghost'
             onClick={() => void scheduleQuery.refetch()}
           >
-            重试
+            <Trans ns='vm' i18nKey='vmTestSchedule.retry' />
           </Button>
         </div>
       ) : (
         <>
           {saved?.parse_error ? (
             <p className='text-xs text-destructive' role='alert'>
-              已存计划无法识别为结构化调度，请重新选择频率与时间后保存。
+              <Trans
+                ns='vm'
+                i18nKey='vmTestSchedule.theSavedPlanCannotBeParsedAsAStructured'
+              />
             </p>
           ) : null}
           <div className='grid gap-3 sm:grid-cols-2'>
             <div className='space-y-1.5 sm:col-span-2'>
-              <Label htmlFor={`vm-test-frequency-${vm.id}`}>频率</Label>
+              <Label htmlFor={`vm-test-frequency-${vm.id}`}>
+                <Trans ns='vm' i18nKey='vmTestSchedule.frequency' />
+              </Label>
               <Select
                 value={structure.frequency}
                 onValueChange={(value: ScheduleFrequency) =>
@@ -487,16 +558,24 @@ export function VmTestSchedule({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value='hourly'>每小时</SelectItem>
-                  <SelectItem value='daily'>每天</SelectItem>
-                  <SelectItem value='weekly'>每周</SelectItem>
+                  <SelectItem value='hourly'>
+                    <Trans ns='vm' i18nKey='vmTestSchedule.hourly' />
+                  </SelectItem>
+                  <SelectItem value='daily'>
+                    <Trans ns='vm' i18nKey='vmScheduling.everyDayAlternative' />
+                  </SelectItem>
+                  <SelectItem value='weekly'>
+                    <Trans ns='vm' i18nKey='vmTestSchedule.weekly' />
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             {structure.frequency === 'hourly' ? (
               <div className='space-y-1.5'>
-                <Label htmlFor={`vm-test-minute-${vm.id}`}>分钟</Label>
+                <Label htmlFor={`vm-test-minute-${vm.id}`}>
+                  <Trans ns='vm' i18nKey='vmTestSchedule.minute' />
+                </Label>
                 <Select
                   value={String(structure.minute ?? 0)}
                   onValueChange={(value) =>
@@ -509,7 +588,9 @@ export function VmTestSchedule({
                   <SelectContent className='max-h-60'>
                     {MINUTES.map((minute) => (
                       <SelectItem key={minute} value={String(minute)}>
-                        {minute === 0 ? '整点 (0)' : String(minute)}
+                        {minute === 0
+                          ? tVm('vm:vmTestSchedule.onTheHour0')
+                          : String(minute)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -517,7 +598,9 @@ export function VmTestSchedule({
               </div>
             ) : (
               <div className='space-y-1.5'>
-                <Label htmlFor={`vm-test-time-${vm.id}`}>时刻</Label>
+                <Label htmlFor={`vm-test-time-${vm.id}`}>
+                  <Trans ns='vm' i18nKey='vmTestSchedule.timeOfDay' />
+                </Label>
                 <Input
                   id={`vm-test-time-${vm.id}`}
                   type='time'
@@ -533,7 +616,9 @@ export function VmTestSchedule({
             )}
 
             <div className='space-y-1.5'>
-              <Label>时区</Label>
+              <Label>
+                <Trans ns='vm' i18nKey='physicalFeaturesCard.timezone' />
+              </Label>
               <TimezonePicker
                 value={structure.timezone}
                 onChange={(timezone) =>
@@ -542,13 +627,19 @@ export function VmTestSchedule({
                 className='w-full'
               />
               <p className='text-xs text-muted-foreground'>
-                当前：{structure.timezone} · 真实调用会消耗额度
+                <Trans
+                  ns='vm'
+                  i18nKey='vmTestSchedule.currentRealRequestsConsumeQuota'
+                  values={{ timezone: structure.timezone }}
+                />
               </p>
             </div>
 
             {structure.frequency === 'weekly' ? (
               <div className='space-y-2 sm:col-span-2'>
-                <Label>星期</Label>
+                <Label>
+                  <Trans ns='vm' i18nKey='vmTestSchedule.daysOfWeek' />
+                </Label>
                 <div className='flex flex-wrap gap-3'>
                   {WEEKDAY_OPTIONS.map((day) => {
                     const checked = (structure.weekdays || []).includes(
@@ -587,15 +678,19 @@ export function VmTestSchedule({
               }
               loading={save.isPending}
             >
-              <Save /> 保存计划
+              <Trans
+                ns='vm'
+                i18nKey='vmTestSchedule.saveSchedule'
+                components={{ part0: <Save /> }}
+              />
             </Button>
             {saved ? (
               <Button
                 size='icon'
                 variant='ghost'
                 className='size-8 text-muted-foreground'
-                aria-label='删除定时测试'
-                title='删除定时测试'
+                aria-label={tVm('vm:vmTestSchedule.deleteScheduledTest')}
+                title={tVm('vm:vmTestSchedule.deleteScheduledTest')}
                 onClick={() => remove.mutate()}
                 disabled={busy}
               >
@@ -608,7 +703,7 @@ export function VmTestSchedule({
               disabled={busy}
               onClick={() => setSyncOpen(true)}
             >
-              同步到本槽
+              <Trans ns='vm' i18nKey='vmTestSchedule.syncToThisSlot' />
             </Button>
             <Button
               size='sm'
@@ -616,7 +711,7 @@ export function VmTestSchedule({
               disabled={busy || !selectedModel || !prompt.trim()}
               onClick={() => setSyncAllOpen(true)}
             >
-              同步到全部槽
+              <Trans ns='vm' i18nKey='vmTestSchedule.syncToAllSlots' />
             </Button>
             {isAdmin ? (
               <Button
@@ -626,7 +721,7 @@ export function VmTestSchedule({
                 onClick={() => saveDefault.mutate()}
                 loading={saveDefault.isPending}
               >
-                保存为全局默认
+                <Trans ns='vm' i18nKey='vmTestSchedule.saveAsGlobalDefault' />
               </Button>
             ) : null}
           </div>
@@ -634,18 +729,49 @@ export function VmTestSchedule({
           {saved ? (
             <div className='space-y-1 text-xs text-muted-foreground'>
               <p>
-                当前计划：{saved.enabled ? '启用' : '暂停'} · {saved.model}
-                {saved.running ? ' · 运行中' : ''}
+                <Trans
+                  ns='vm'
+                  i18nKey='vmTestSchedule.currentSchedule'
+                  values={{
+                    value: saved.enabled
+                      ? tVm('vm:vmGroups.enabled')
+                      : tVm('vm:vmTestSchedule.paused'),
+                    model: saved.model,
+                    value1: saved.running
+                      ? tVm('vm:vmTestSchedule.running')
+                      : '',
+                  }}
+                />
               </p>
-              <p>下次运行：{formatAt(saved.next_run_at, saved.timezone)}</p>
               <p>
-                上次运行：{formatAt(saved.last_run_at, saved.timezone)}
-                {saved.last_ok != null
-                  ? ` · ${saved.last_ok ? '成功' : '失败'}`
-                  : ''}
-                {saved.last_duration_ms != null
-                  ? ` · ${saved.last_duration_ms}ms`
-                  : ''}
+                <Trans
+                  ns='vm'
+                  i18nKey='vmTestSchedule.nextRun'
+                  values={{
+                    formatAt: formatAt(saved.next_run_at, saved.timezone),
+                  }}
+                />
+              </p>
+              <p>
+                <Trans
+                  ns='vm'
+                  i18nKey='vmTestSchedule.lastRun'
+                  values={{
+                    formatAt: formatAt(saved.last_run_at, saved.timezone),
+                    value:
+                      saved.last_ok != null
+                        ? tVm('vm:vmTestSchedule.summary', {
+                            value1: saved.last_ok
+                              ? tVm('vm:testChatResultCard.succeeded')
+                              : tVm('vm:officialCcCard.failed'),
+                          })
+                        : '',
+                    value1:
+                      saved.last_duration_ms != null
+                        ? ` · ${saved.last_duration_ms}ms`
+                        : '',
+                  }}
+                />
               </p>
               {saved.last_error ? (
                 <p className='break-words text-destructive'>
@@ -654,7 +780,9 @@ export function VmTestSchedule({
               ) : null}
             </div>
           ) : (
-            <p className='text-xs text-muted-foreground'>尚未创建计划</p>
+            <p className='text-xs text-muted-foreground'>
+              <Trans ns='vm' i18nKey='vmTestSchedule.noScheduleCreatedYet' />
+            </p>
           )}
         </>
       )}
@@ -662,16 +790,20 @@ export function VmTestSchedule({
       <AlertDialog open={syncOpen} onOpenChange={setSyncOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>同步调度时间？</AlertDialogTitle>
+            <AlertDialogTitle>
+              <Trans ns='vm' i18nKey='vmTestSchedule.syncScheduleTiming' />
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              将把当前表单的调度时间（频率、时刻/分钟、星期、时区）覆盖写入本槽
-              {saved ? '' : '（若无计划将创建且保持关闭）'}
-              。不会修改 Prompt、模型、token/effort 或启用开关。
+              {tVm(
+                saved
+                  ? 'vm:messages.syncTiming'
+                  : 'vm:messages.syncTimingCreate'
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={syncSchedule.isPending}>
-              取消
+              <Trans ns='vm' i18nKey='authSchemeEditor.cancel' />
             </AlertDialogCancel>
             <AlertDialogAction
               disabled={syncSchedule.isPending}
@@ -680,7 +812,7 @@ export function VmTestSchedule({
                 syncSchedule.mutate('ids')
               }}
             >
-              覆盖写入
+              <Trans ns='vm' i18nKey='vmTestSchedule.overwrite' />
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -689,19 +821,30 @@ export function VmTestSchedule({
       <AlertDialog open={syncAllOpen} onOpenChange={setSyncAllOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>同步到全部槽？</AlertDialogTitle>
+            <AlertDialogTitle>
+              <Trans
+                ns='vm'
+                i18nKey='vmTestSchedule.syncToAllSlotsAlternative'
+              />
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              把本槽当前显示的定时测试整个覆盖到你有权限的全部槽（租户仅自己的槽）：
-              开关（{enabled ? '启用' : '暂停'}
-              ）、频率、时刻/分钟、星期、时区、模型、Prompt、
-              {codex ? 'effort' : 'token 上限'}。不用先点保存。
-              另一类槽（Claude/Codex 不同）只同步开关和时间，保留自己的模型与
-              Prompt。
+              <Trans
+                ns='vm'
+                i18nKey='vmTestSchedule.overwriteAllSlotsYouCanManageWithThisSlot'
+                values={{
+                  value: enabled
+                    ? tVm('vm:vmGroups.enabled')
+                    : tVm('vm:vmTestSchedule.paused'),
+                  value1: codex
+                    ? 'effort'
+                    : tVm('vm:vmTestSchedule.tokenLimit'),
+                }}
+              />
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={syncSchedule.isPending}>
-              取消
+              <Trans ns='vm' i18nKey='authSchemeEditor.cancel' />
             </AlertDialogCancel>
             <AlertDialogAction
               disabled={syncSchedule.isPending}
@@ -710,7 +853,7 @@ export function VmTestSchedule({
                 syncSchedule.mutate('all')
               }}
             >
-              覆盖全部
+              <Trans ns='vm' i18nKey='vmTestSchedule.overwriteAll' />
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

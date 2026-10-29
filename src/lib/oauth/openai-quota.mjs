@@ -447,13 +447,20 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     })
   }
 
+  const windowsReset = int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0
+  if (windowsReset > 0) {
+    // A redeemed credit starts a new billing interval even if WHAM keeps the
+    // old reset timestamp or the follow-up usage query fails.
+    const at = new Date().toISOString()
+    persistCodexQuotaSnapshot(projectRoot, vmId, { clearedWindows: { '5h': at, '7d': at } })
+  }
   const after = await queryUpstream(current, { fetchImpl, rotate: false, projectRoot, vmId, policy })
   if (!after.ok) {
     return {
       ok: true,
       warning: 'reset_credit_cache_refresh_failed',
       code: res.payload?.code || 'ok',
-      windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+      windows_reset: windowsReset,
       reset_credits: null,
       credits: null,
       usage: null,
@@ -464,7 +471,7 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
   return {
     ok: true,
     code: res.payload?.code || 'ok',
-    windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+    windows_reset: windowsReset,
     ...after,
   }
 }

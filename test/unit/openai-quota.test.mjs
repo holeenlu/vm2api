@@ -275,6 +275,36 @@ test('queryOpenaiQuota rejects Claude slots', async () => {
   assert.equal(result.error, 'not_gpt_slot')
 })
 
+for (const outcome of ['refresh-failed', 'consume-failed', 'no-windows-reset']) {
+  test(`Codex billing reset boundary: ${outcome}`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-reset-boundary-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    writeGptSlot(root)
+    const old = '2026-01-01T00:00:00.000Z'
+    persistCodexQuotaSnapshot(root, 'vm-codex-01', { clearedWindows: { '5h': old, '7d': old } })
+    const result = await resetOpenaiQuota({
+      projectRoot: root,
+      vmId: 'vm-codex-01',
+      fetchImpl: async (url) =>
+        String(url) === CHATGPT_RESET_CONSUME_URL
+          ? {
+              status: outcome === 'consume-failed' ? 409 : 200,
+              json: async () => ({ code: 'ok', windows_reset: outcome === 'no-windows-reset' ? 0 : 2 }),
+            }
+          : { status: 503, json: async () => ({}) },
+    })
+    const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+    assert.equal(result.ok, outcome !== 'consume-failed')
+    if (outcome === 'refresh-failed') {
+      assert.equal(result.warning, 'reset_credit_cache_refresh_failed')
+      assert.ok(Date.parse(vm.codex.cleared_windows['5h']) > Date.parse(old))
+      assert.equal(vm.codex.cleared_windows['5h'], vm.codex.cleared_windows['7d'])
+    } else {
+      assert.deepEqual(vm.codex.cleared_windows, { '5h': old, '7d': old })
+    }
+  })
+}
+
 test('persistCodexQuotaSnapshot keeps expiration list', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-snap-'))
   writeGptSlot(root)

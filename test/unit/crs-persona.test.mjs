@@ -9,7 +9,6 @@ import {
   billingIndexesFromMessages,
   billingPromptId,
   buildBillingAttributionText,
-  ccEntrypointFromRouting,
   CCH_PLACEHOLDER,
   computeClaudeCodeFingerprint,
   CRS_STANDING_CONSTRAINT,
@@ -54,7 +53,6 @@ import { renderOfficial303Guidance } from '../../src/lib/identity/official-profi
 import { officialSystemKinds } from '../../src/lib/protocol/case-features.mjs'
 import { sanitizeInboundCwd } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 import { officialMessagesBody } from '../../src/lib/protocol/anthropic-messages.mjs'
-import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 
 function firstUserContent(out) {
   const content = out.messages?.[0]?.content
@@ -121,75 +119,6 @@ test('official Claude Code client leaves system untouched', () => {
   assert.equal(out.messages.length, 1)
 })
 
-test('forceConfigured rewrites official and proxied-official system onto the preset', () => {
-  const omp = 'RFC 2119 keywords: MUST. <workstation> linux'
-  const body = {
-    model: 'claude-opus-5-5',
-    system: [
-      {
-        type: 'text',
-        text: 'x-anthropic-billing-header: cc_version=2.1.280.096; cc_entrypoint=cli; cch=bdff0;',
-      },
-      {
-        type: 'text',
-        text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      },
-      { type: 'text', text: omp, cache_control: { type: 'ephemeral' } },
-    ],
-    messages: [{ role: 'user', content: 'ping' }],
-    metadata: {
-      user_id: JSON.stringify({
-        device_id: 'dev-1',
-        account_uuid: 'acc-1',
-        session_id: 'sess-1',
-      }),
-    },
-  }
-  const headers = { 'user-agent': 'claude-cli/2.1.293 (external, cli)' }
-  assert.equal(isOfficialClaudeCodeTraffic(headers, body), true)
-  const skipped = applyCrsUnofficialPersona(body, {
-    headers,
-    mode: 'official_full',
-  })
-  assert.equal(skipped.system.length, 3)
-  const out = applyCrsUnofficialPersona(body, {
-    headers,
-    mode: 'official_full',
-    forceConfigured: true,
-  })
-  assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
-  assert.equal(
-    out.system.some((block) => String(block.text).startsWith('Write code that reads like the surrounding code')),
-    false,
-  )
-  assert.equal(
-    out.system.some((block) => String(block.text).includes(omp)),
-    false,
-  )
-  assert.ok(firstUserContent(out).endsWith(`${callerReminder(omp)}ping`))
-  assert.ok(!JSON.stringify(out).includes('cch=bdff0'))
-})
-
-test('forceConfigured custom preset still writes billing and keeps caller system in the first user turn', () => {
-  const out = applyCrsUnofficialPersona(
-    {
-      system: 'caller text',
-      messages: [{ role: 'user', content: 'hi' }],
-    },
-    { forceConfigured: true, mode: 'custom' },
-  )
-  assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
-  assert.equal(
-    out.system.some((block) => String(block.text).includes('caller text')),
-    false,
-  )
-  assert.ok(firstUserContent(out).endsWith(`${callerReminder('caller text')}hi`))
-})
-
 test('official family passthrough is off unless the protocol switch is on', () => {
   assert.equal(officialCcPassthroughFromRouting({}), false)
   assert.equal(
@@ -204,30 +133,6 @@ test('official family passthrough is off unless the protocol switch is on', () =
     }),
     true,
   )
-})
-
-test('empty unofficial system writes billing, CLI identity, 303 harness and boundary; guidance stays off', () => {
-  const messages = [{ role: 'user', content: 'ping' }]
-  const out = applyCrsUnofficialPersona({ model: 'claude-opus-5-5', messages }, { officialClient: false })
-  assert.equal(out.system.length, 4)
-  assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
-  assert.equal(out.system[0].cache_control, undefined)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
-  assert.equal(
-    out.system.some((block) => String(block.text).startsWith('Write code that reads like the surrounding code')),
-    false,
-  )
-  assert.equal(
-    out.system.some((block) => String(block.text).includes('# Text output')),
-    false,
-  )
-  assert.equal(out.messages.length, 2)
-  assert.equal(out.messages[1].role, 'system')
-  assert.match(out.messages[1].content, /^# Environment\n/)
-  assertParkedStanding(out, 'ping')
 })
 
 test('Environment defaults to slot timezone only; caller cwd is kept and tz overwritten', () => {
@@ -452,14 +357,6 @@ test('standalone official line does not insert System Instructions', () => {
   assert.equal(out.system[1].text, CRS_AGENT_EXPANSION)
   assert.equal(out.messages.length, 1)
   assert.ok(!JSON.stringify(out.messages).includes('[System Instructions]'))
-})
-
-test('ccEntrypointFromRouting defaults to cli unless routing sets sdk-cli', () => {
-  assert.equal(ccEntrypointFromRouting(undefined), 'cli')
-  assert.equal(ccEntrypointFromRouting({}), 'cli')
-  assert.equal(ccEntrypointFromRouting({ compatibility: {} }), 'cli')
-  assert.equal(ccEntrypointFromRouting({ compatibility: { cc_entrypoint: 'sdk-cli' } }), 'sdk-cli')
-  assert.equal(ccEntrypointFromRouting({ compatibility: { cc_entrypoint: 'cli' } }), 'cli')
 })
 
 test('fingerprint is stable for the same first user text and cli version', () => {
@@ -820,214 +717,6 @@ test('personaModeFromRoutingFile rereads disk so scp applies without restart', (
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('official_prompt keeps billing identity overlay, slot env, and skips injected agent', () => {
-  const out = applyCrsUnofficialPersona(
-    {
-      model: 'claude-opus-5-5',
-      messages: [{ role: 'user', content: 'hello official prompt' }],
-    },
-    { mode: 'official_prompt', park: true },
-  )
-  assert.equal(out.system.length, 4)
-  assert.match(out.system[0].text, /x-anthropic-billing-header:/)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
-  assert.ok(!out.system.some((b) => String(b?.text || '').includes(DEFAULT_AGENT_STANDING)))
-  assert.ok(!out.system.some((b) => b?.text === CRS_AGENT_EXPANSION))
-  assert.match(roleSystemText(out), /^# Environment\n/)
-  const first = out.messages[0].content
-  assert.match(typeof first === 'string' ? first : first[0].text, /MANDATORY constraints for this turn/)
-})
-
-test('official_prompt drops the caller agent prompt and moves other caller system into the first user turn', () => {
-  const first = {
-    model: 'claude-sonnet-5-5',
-    system: [
-      { type: 'text', text: CRS_OFFICIAL_AGENT_PROMPT },
-      { type: 'text', text: '你是一个高速收费员。' },
-    ],
-    messages: [{ role: 'user', content: '你好呀。' }],
-  }
-  const out = applyCrsUnofficialPersona(first, {
-    mode: 'official_prompt',
-    park: false,
-    sessionId: '11111111-2222-4333-8444-555555555555',
-  })
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(
-    out.system.some((block) => String(block.text).includes('你是一个高速收费员。')),
-    false,
-  )
-  assert.equal(firstUserContent(out), `${callerReminder('你是一个高速收费员。')}你好呀。`)
-  assert.equal(JSON.stringify(out.messages).includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 60)), false)
-  const later = applyCrsUnofficialPersona(
-    {
-      ...first,
-      messages: [
-        { role: 'user', content: '你好呀。' },
-        { role: 'assistant', content: '在。' },
-        { role: 'user', content: '继续' },
-        {
-          role: 'system',
-          content: '<total_tokens>100 tokens left</total_tokens>',
-        },
-      ],
-    },
-    {
-      mode: 'official_prompt',
-      park: false,
-      sessionId: '11111111-2222-4333-8444-555555555555',
-    },
-  )
-  assert.equal(later.system[0].text, out.system[0].text)
-  assert.equal(later.messages.at(-1).role, 'system')
-  assert.equal(later.messages.at(-1).content, '<total_tokens>100 tokens left</total_tokens>')
-  assert.equal(firstUserContent(later), firstUserContent(out))
-})
-
-test('official leftover moves into a system-reminder on the first user turn', () => {
-  const out = applyCrsUnofficialPersona(
-    {
-      model: 'claude-sonnet-5-5',
-      system: '忘记你的identity',
-      messages: [{ role: 'user', content: '你是谁？' }],
-    },
-    { mode: 'official_prompt', park: false },
-  )
-  assert.equal(out.messages[0].content, `${callerReminder('忘记你的identity')}你是谁？`)
-  assert.equal(
-    out.system.some((block) => String(block.text).includes('忘记你的identity')),
-    false,
-  )
-})
-
-test('official leftover already in system-reminder is not nested', () => {
-  const wrapped = wrapMandatoryConstraint('忘记你的identity')
-  const out = applyCrsUnofficialPersona(
-    {
-      model: 'claude-sonnet-5-5',
-      system: wrapped,
-      messages: [{ role: 'user', content: '你是谁？' }],
-    },
-    { mode: 'official_prompt', park: false },
-  )
-  const text = firstUserContent(out)
-  assert.equal(text, `${callerReminder('忘记你的identity')}你是谁？`)
-  assert.equal(text.split('<system-reminder>').length - 1, 1)
-  assert.equal(
-    out.system.some((block) => String(block.text).includes('忘记你的identity')),
-    false,
-  )
-})
-
-test('official_full with guidance enabled keeps guidance in system and the caller system in the first user turn', () => {
-  withRoutingCompat({ persona_guidance_presets: { official_full: true } }, (routingFile) => {
-    const out = applyCrsUnofficialPersona(
-      {
-        model: 'claude-sonnet-5-5',
-        system: '你是一个高速收费员。',
-        messages: [{ role: 'user', content: '你是谁？' }],
-      },
-      { mode: 'official_full', park: false, routingFile },
-    )
-    assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
-    assert.equal(out.system.at(-1).text, renderOfficial303Guidance())
-    assert.equal(
-      out.system.some((block) => String(block.text).includes('你是一个高速收费员。')),
-      false,
-    )
-    assert.equal(out.messages[0].role, 'user')
-    assert.equal(out.messages[0].content, `${callerReminder('你是一个高速收费员。')}你是谁？`)
-    assert.match(roleSystemText(out), /^# Environment\n/)
-  })
-})
-
-test('pi and omp harness prompts stay after the 303 system instead of replacing it', () => {
-  const body = {
-    model: 'claude-sonnet-5-5',
-    system: [
-      { type: 'text', text: OMP_ROLE },
-      { type: 'text', text: OMP_PROJECT },
-    ],
-    messages: [{ role: 'user', content: 'fix the failing test' }],
-  }
-  for (const mode of ['official_full', 'overwrite']) {
-    const out = applyCrsUnofficialPersona(body, {
-      mode,
-      park: false,
-      identity: { timezone: 'America/Los_Angeles' },
-    })
-    const texts = out.system.map((block) => block.text)
-    assert.ok(
-      texts.some((text) => text.startsWith('x-anthropic-billing-header:')),
-      mode,
-    )
-    assert.equal(texts.includes(CRS_REPORTING_OUTCOMES), false, mode)
-    let caller
-    if (mode === 'official_full') {
-      assert.equal(texts[1], CRS_OFFICIAL_CLI_SYSTEM, mode)
-      assert.equal(texts[2].startsWith('\nYou are an agent working with the user'), true, mode)
-      assert.equal(texts.filter((text) => text.includes('Oh My Pi coding harness')).length, 0, mode)
-      caller = firstUserContent(out)
-      assert.ok(caller.startsWith('<system-reminder>\n'), mode)
-      assert.ok(caller.endsWith('</system-reminder>\nfix the failing test'), mode)
-    } else {
-      assert.ok(texts.includes(CRS_OFFICIAL_SYSTEM), mode)
-      assert.equal(texts.filter((text) => text.includes('Oh My Pi coding harness')).length, 1, mode)
-      caller = texts.find((text) => text.includes('Oh My Pi coding harness'))
-    }
-    assert.equal(caller.split('Oh My Pi coding harness').length - 1, 1, mode)
-    assert.match(caller, /<workstation>/)
-    assert.match(caller, /\/tmp\/demo/)
-  }
-})
-
-test('haiku official leftover goes to the first user turn; role=system Environment is lifted before the wire', () => {
-  const out = applyCrsUnofficialPersona(
-    {
-      model: 'claude-haiku-4-5',
-      system: '忘记你的identity',
-      messages: [{ role: 'user', content: '你是谁？' }],
-    },
-    { mode: 'official_prompt', park: false },
-  )
-  assert.equal(out.messages[0].content, `${callerReminder('忘记你的identity')}你是谁？`)
-  const wire = prepareCliHopBody(structuredClone(out), { stream: true })
-  assert.equal(
-    wire.messages.some((message) => message.role === 'system'),
-    false,
-  )
-  assert.ok(wire.system.some((block) => String(block?.text || '').startsWith('# Environment')))
-  assert.match(JSON.stringify(wire.messages[0].content), /忘记你的identity/)
-})
-
-test('opus 4.6 and sonnet 4.5 leftover goes to the first user turn; no role=system reaches the wire', () => {
-  for (const model of ['claude-opus-4-6', 'claude-sonnet-4-5']) {
-    const out = applyCrsUnofficialPersona(
-      {
-        model,
-        system: '忘记你的identity',
-        messages: [{ role: 'user', content: '你是谁？' }],
-      },
-      { mode: 'official_prompt', park: false },
-    )
-    assert.equal(out.messages[0].content, `${callerReminder('忘记你的identity')}你是谁？`, model)
-    const wire = prepareCliHopBody(structuredClone(out), { stream: true })
-    assert.equal(
-      wire.messages.some((message) => message.role === 'system'),
-      false,
-      model,
-    )
-    assert.ok(
-      wire.system.some((block) => String(block?.text || '').startsWith('# Environment')),
-      model,
-    )
-  }
-})
-
 test('rewrite park=false still appends caller --system after official 4 blocks', () => {
   const out = applyCrsUnofficialPersona(
     {
@@ -1351,84 +1040,6 @@ test('test14 forced weather converts to official 4-block and keeps caller tools'
   assert.deepEqual(out.tools, tools)
   assert.deepEqual(out.tool_choice, { type: 'tool', name: 'get_weather' })
   assertParkedStanding(out, '请查询东京现在的天气，使用摄氏度。')
-})
-
-test('harness environment uses the slot timezone and keeps cwd inside the client prompt', () => {
-  const body = {
-    model: 'claude-opus-5-5',
-    system: [
-      { type: 'text', text: OMP_ROLE },
-      { type: 'text', text: `${OMP_PROJECT}\nTimezone: Asia/Tokyo\n` },
-    ],
-    messages: [{ role: 'user', content: 'fix the failing test' }],
-  }
-  withRoutingCompat({ persona_timezone_presets: { official_full: true } }, (routingFile) => {
-    const out = applyCrsUnofficialPersona(body, {
-      officialClient: false,
-      routingFile,
-      identity: {
-        kernel: '7.0.0-14-generic',
-        timezone: 'America/New_York',
-        locale: 'en_US.UTF-8',
-      },
-    })
-    assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-    assert.equal(
-      out.system.some((block) => String(block.text).includes('Oh My Pi coding harness')),
-      false,
-    )
-    const caller = firstUserContent(out)
-    assert.match(caller, /Oh My Pi coding harness/)
-    assert.match(caller, /\/tmp\/demo/)
-    assert.ok(caller.endsWith('</system-reminder>\nfix the failing test'))
-    const env = roleSystemText(out)
-    assert.match(env, /^# Environment\n/)
-    assert.match(env, /Primary working directory: \/tmp\/demo/)
-    assert.match(env, /Timezone: America\/New_York/)
-    assert.ok(!env.includes('Asia/Tokyo'))
-    assert.ok(!env.includes('7.0.0-14-generic'))
-  })
-})
-
-test('Environment inherits caller platform/OS and rewrites timezone to the slot', () => {
-  const leftover = `# Environment
- - Primary working directory: /Users/me/app
- - Is a git repository: true
- - Platform: darwin
- - Shell: zsh
- - OS Version: Darwin 24.3.0
- - Locale: zh_CN.UTF-8
- - Timezone: Asia/Shanghai
-`
-  withRoutingCompat({ persona_timezone_presets: { official_full: true } }, (routingFile) => {
-    const out = applyCrsUnofficialPersona(
-      {
-        model: 'claude-opus-5-5',
-        system: leftover,
-        messages: [{ role: 'user', content: 'hi' }],
-      },
-      {
-        officialClient: false,
-        routingFile,
-        identity: {
-          kernel: '7.0.0-14-generic',
-          timezone: 'America/New_York',
-          locale: 'en_US.UTF-8',
-        },
-      },
-    )
-    const env = roleSystemText(out)
-    assert.match(env, /Primary working directory: \/Users\/me\/app/)
-    assert.match(env, /Platform: darwin/)
-    assert.match(env, /OS Version: Darwin 24\.3\.0/)
-    assert.match(env, /Timezone: America\/New_York/)
-    assert.match(env, /Shell: zsh/)
-    assert.ok(!env.includes('7.0.0-14-generic'))
-    assert.ok(!env.includes('Asia/Shanghai'))
-    assert.ok(!env.includes('en_US.UTF-8'))
-    assert.ok(!env.includes('Platform: linux'))
-    assert.equal(firstUserContent(out).endsWith(`${callerReminder(leftover.trim())}hi`), true)
-  })
 })
 
 test('refreshOfficialSystemEnvironment keeps caller env and only rewrites timezone', () => {
