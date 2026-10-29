@@ -1,7 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t as tVm } from '@/i18n'
 import type { OfficialCcStatus } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -9,53 +11,90 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { vmOfficialCcQueryOptions, vmQueryOptions } from '@/features/vm/queries'
+import { localizedOption } from './localized-option'
 
 const STEP_LABELS: Record<string, string> = {
-  queued: '排队',
-  wipe: '清空初装环境',
-  refresh: '刷新过期票',
-  login: '写入官方登录文件',
-  hello: '首次对话 hello',
-  usage: '槽内 /usage 额度',
-  profile: '读取账号等级与模型',
-  seed: '后置覆写播种',
-  telemetry: '写入遥测',
-  resident: 'hello 后常驻',
-  done: '完成',
+  get queued() {
+    return tVm('vm:officialCcCard.queued')
+  },
+  get wipe() {
+    return tVm('vm:officialCcCard.clearSetupEnvironment')
+  },
+  get refresh() {
+    return tVm('vm:officialCcCard.refreshExpiredToken')
+  },
+  get login() {
+    return tVm('vm:officialCcCard.writeOfficialLoginFiles')
+  },
+  get hello() {
+    return tVm('vm:officialCcCard.firstConversationHello')
+  },
+  get usage() {
+    return tVm('vm:officialCcCard.slotUsageQuota')
+  },
+  get profile() {
+    return tVm('vm:officialCcCard.readAccountTierAndModels')
+  },
+  get seed() {
+    return tVm('vm:officialCcCard.applySeedOverridesAfterward')
+  },
+  get telemetry() {
+    return tVm('vm:officialCcCard.writeTelemetryConfiguration')
+  },
+  get resident() {
+    return tVm('vm:officialCcCard.keepRunningAfterHello')
+  },
+  get done() {
+    return tVm('vm:officialCcCard.complete')
+  },
 }
 
 export function officialCcStepLabel(step?: string): string {
-  return STEP_LABELS[String(step || '')] || step || '准备'
+  return (
+    STEP_LABELS[String(step || '')] || step || tVm('vm:officialCcCard.prepare')
+  )
 }
 
 export function officialCcErrorHint(err?: string | null): string {
   const s = String(err || '')
   if (!s) return ''
   if (/invalid_grant|refresh token not found|could not be refreshed/i.test(s))
-    return '刷新票已失效。请重新换票；若票是新的，可再点一次「执行官方初装」。'
+    return tVm('vm:officialCcCard.refreshTokenIsInvalidExchangeTokensAgainIfIt')
   if (/not logged in|please run \/login/i.test(s))
-    return '官方 CLI 未登录。确认换票已写入后，再执行一次官方初装。'
+    return tVm(
+      'vm:officialCcCard.officialCLIIsNotLoggedInConfirmCredentialsWere'
+    )
   if (/timed out|timeout/i.test(s))
-    return '官方对话超时。可在本页再次执行官方初装。'
+    return tVm(
+      'vm:officialCcCard.officialConversationTimedOutRunOfficialSetupAgainOn'
+    )
   if (/\/usage|usage probe|official-cc-usage/i.test(s))
-    return '槽内 /usage 重试 2 次仍失败。检查槽位 SOCKS5 后，再执行一次官方初装。'
+    return tVm('vm:officialCcCard.slotUsageFailedAfterTwoRetriesCheckTheSlot')
   if (/no live oauth|no_credential|credential/i.test(s))
-    return '此槽没有可用 OAuth。先换票，再执行官方初装。'
-  if (/already_running/i.test(s)) return '初装已在运行，稍等或刷新进度。'
+    return tVm(
+      'vm:officialCcCard.noUsableOAuthCredentialsExchangeTokensBeforeRunningOfficial'
+    )
+  if (/already_running/i.test(s))
+    return tVm(
+      'vm:officialCcCard.setupIsAlreadyRunningWaitOrRefreshItsProgress'
+    )
   if (/disabled/i.test(s))
-    return '设置里关闭了换票后自动初装。可在本页手动执行。'
-  if (/bridge/i.test(s)) return '槽位 SOCKS5 桥没起来。检查代理后再次执行。'
-  return '可在本页再次执行官方初装。'
+    return tVm(
+      'vm:officialCcCard.automaticSetupAfterTokenExchangeIsDisabledYouCan'
+    )
+  if (/bridge/i.test(s))
+    return tVm('vm:officialCcCard.slotSOCKS5BridgeIsNotRunningCheckTheProxy')
+  return tVm('vm:officialCcCard.youCanRunOfficialSetupAgainHere')
 }
 
 const TRACK: [string, string][] = [
-  ['queued', '排队'],
-  ['wipe', '清空'],
-  ['login', '写入'],
-  ['hello', 'hello'],
-  ['stats', '额度'],
-  ['seed', '播种'],
-  ['done', '完成'],
+  localizedOption('queued', 'vm:officialCcCard.queued'),
+  localizedOption('wipe', 'vm:officialCcCard.empty'),
+  localizedOption('login', 'vm:officialCcCard.write'),
+  localizedOption('hello', 'vm:officialCcCard.greetingTest'),
+  localizedOption('stats', 'vm:detailStatusBoard.quota'),
+  localizedOption('seed', 'vm:officialCcCard.applySeed'),
+  localizedOption('done', 'vm:officialCcCard.complete'),
 ]
 
 function trackIndex(step?: string): number {
@@ -77,10 +116,15 @@ function trackIndex(step?: string): number {
 }
 
 export function OfficialCcTrack({ cc }: { cc: OfficialCcStatus | null }) {
+  const { t: tVm } = useTranslation('vm')
+
   const st = cc?.status || ''
   const idx = st === 'ok' ? TRACK.length - 1 : trackIndex(cc?.step)
   return (
-    <ol className='flex flex-wrap items-center gap-2' aria-label='初装进度'>
+    <ol
+      className='flex flex-wrap items-center gap-2'
+      aria-label={tVm('vm:officialCcCard.setupProgress')}
+    >
       {TRACK.map(([key, label], i) => {
         const on = idx > 0 && i < idx
         const cur =
@@ -115,39 +159,57 @@ export function OfficialCcTrack({ cc }: { cc: OfficialCcStatus | null }) {
 }
 
 export function OfficialCcFacts({ cc }: { cc: OfficialCcStatus | null }) {
+  const { t: tVm } = useTranslation('vm')
+
   if (!cc) {
     return (
       <p className='text-xs text-muted-foreground'>
-        用本槽凭证跑一次官方初装。成功后按设置写入官方身份并开遥测。
+        <Trans
+          ns='vm'
+          i18nKey='officialCcCard.runOfficialSetupUsingThisSlotSCredentialsOn'
+        />
       </p>
     )
   }
   const quota =
     cc.hello_ok && (cc.usage_ok || cc.stats_ok)
-      ? '额度已探测'
+      ? tVm('vm:officialCcCard.quotaProbed')
       : cc.hello_ok
         ? 'hello'
         : ''
-  const resident = cc.resident_ok ? '常驻中' : cc.resident ? '常驻未拉起' : ''
+  const resident = cc.resident_ok
+    ? tVm('vm:officialCcCard.persistentProcessRunning')
+    : cc.resident
+      ? tVm('vm:officialCcCard.persistentProcessNotStarted')
+      : ''
   const tel =
     cc.telemetry_enabled && cc.telemetry_official
-      ? '遥测已对齐'
+      ? tVm('vm:officialCcCard.telemetryAligned')
       : cc.telemetry_enabled
-        ? '遥测已写'
+        ? tVm('vm:officialCcCard.telemetryWritten')
         : ''
   const bits = [cc.account_tier, quota, resident, tel].filter(Boolean)
   return (
     <p className='text-xs text-muted-foreground'>
-      {bits.length ? bits.join(' · ') : '初装尚未产出探测结果。'}
+      {bits.length
+        ? bits.join(' · ')
+        : tVm('vm:officialCcCard.setupHasNotProducedProbeResultsYet')}
     </p>
   )
 }
 
 function toneOf(status?: string): StatusTone {
-  if (status === 'ok') return { key: 'ok', text: '已完成', cls: 'ok' }
-  if (status === 'running') return { key: 'warn', text: '进行中', cls: 'warn' }
-  if (status === 'error') return { key: 'bad', text: '失败', cls: 'bad' }
-  return { key: 'none', text: '未初装', cls: 'none' }
+  if (status === 'ok')
+    return { key: 'ok', text: tVm('vm:officialCcCard.completed'), cls: 'ok' }
+  if (status === 'running')
+    return {
+      key: 'warn',
+      text: tVm('vm:officialCcCard.inProgress'),
+      cls: 'warn',
+    }
+  if (status === 'error')
+    return { key: 'bad', text: tVm('vm:officialCcCard.failed'), cls: 'bad' }
+  return { key: 'none', text: tVm('vm:officialCcCard.notSetUp'), cls: 'none' }
 }
 
 /** `blockedReason` 非空时禁用「执行官方初装」并在按钮旁给出原因（如远端节点）。 */
@@ -158,6 +220,8 @@ export function OfficialCcCard({
   vmId: string
   blockedReason?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const queryOptions = vmOfficialCcQueryOptions(vmId)
   const key = queryOptions.queryKey
@@ -178,17 +242,23 @@ export function OfficialCcCard({
     seen.current = st
     if (st === 'ok') {
       toast.success(
-        '官方初装完成' +
-          (cc?.account_tier ? ` · ${cc.account_tier}` : '') +
-          (cc?.telemetry_official ? ' · 遥测已对齐' : '')
+        tVm(
+          cc?.telemetry_official
+            ? 'vm:messages.setupCompletedAligned'
+            : 'vm:messages.setupCompleted',
+          { tier: cc?.account_tier || '—' }
+        )
       )
     } else if (st === 'error') {
       const hint = officialCcErrorHint(cc?.error)
-      toast.error((cc?.error || '官方初装失败') + (hint ? `。${hint}` : ''))
+      const error = cc?.error || tVm('vm:officialCcCard.officialSetupFailed')
+      toast.error(
+        hint ? tVm('vm:messages.failureWithHint', { error, hint }) : error
+      )
     }
     qc.invalidateQueries({ queryKey: vmQueryOptions(vmId).queryKey })
     qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
-  }, [cc, qc, vmId])
+  }, [cc, qc, vmId, tVm])
 
   const run = useMutation({
     mutationFn: () =>
@@ -199,46 +269,70 @@ export function OfficialCcCard({
     onSuccess: (r) => {
       const d = (r as { scheduled?: boolean; reason?: string }) || {}
       if (d.scheduled === false && d.reason === 'already_initialized') {
-        toast.success('此槽已初装过，未再跑官方 CLI')
+        toast.success(
+          tVm('vm:officialCcCard.thisSlotWasAlreadySetUpOfficialCLIWas')
+        )
       } else if (d.scheduled === false && d.reason === 'disabled') {
-        toast.info('设置里关闭了换票后自动初装，本次为手动执行')
+        toast.info(
+          tVm(
+            'vm:officialCcCard.automaticSetupAfterTokenExchangeIsDisabledThisRun'
+          )
+        )
       } else if (
         d.scheduled === false &&
         d.reason === 'credential_mode_unsupported'
       ) {
         // 与「刷新凭证」的同名 400 语义不同：这里是初装不适用，不是凭证坏了
-        toast.info('官方初装只支持完整 OAuth 凭证，此槽不适用')
+        toast.info(
+          tVm(
+            'vm:officialCcCard.officialSetupRequiresFullOAuthCredentialsThisSlotIs'
+          )
+        )
       } else if (d.scheduled === false && d.reason) {
-        toast.info(`官方初装未排队 · ${d.reason}`)
+        toast.info(
+          tVm('vm:officialCcCard.officialSetupNotQueued', { reason: d.reason })
+        )
       } else {
-        toast.success('已排入官方初装，正在跟踪进度')
+        toast.success(
+          tVm('vm:officialCcCard.officialSetupQueuedTrackingProgress')
+        )
       }
       qc.invalidateQueries({ queryKey: key })
     },
-    onError: (e: Error) => toast.error(e.message || '官方初装失败'),
+    onError: (e: Error) =>
+      toast.error(e.message || tVm('vm:officialCcCard.officialSetupFailed')),
   })
 
   const tone = toneOf(cc?.status)
   const hint = cc?.status === 'error' ? officialCcErrorHint(cc.error) : ''
   const runLabel = running
-    ? '初装进行中…'
+    ? tVm('vm:officialCcCard.setupInProgress')
     : cc?.status === 'error'
-      ? '再次执行官方初装'
+      ? tVm('vm:officialCcCard.runOfficialSetupAgain')
       : cc?.status === 'ok'
-        ? '重新执行官方初装'
-        : '执行官方初装'
+        ? tVm('vm:officialCcCard.retryOfficialSetup')
+        : tVm('vm:detailOpsTab.runOfficialSetup')
 
   return (
     <Card>
       <CardHeader className='pb-2'>
         <CardTitle className='flex items-center gap-2 text-sm'>
-          官方 Claude Code 初装
-          <StatusMark tone={tone} variant='pill' />
-          {running ? (
-            <span className='text-xs font-normal text-muted-foreground'>
-              {officialCcStepLabel(cc?.step)}
-            </span>
-          ) : null}
+          <Trans
+            ns='vm'
+            i18nKey='officialCcCard.officialClaudeCodeSetup'
+            components={{
+              part0: <StatusMark tone={tone} variant='pill' />,
+              part1: (
+                <>
+                  {running ? (
+                    <span className='text-xs font-normal text-muted-foreground'>
+                      {officialCcStepLabel(cc?.step)}
+                    </span>
+                  ) : null}
+                </>
+              ),
+            }}
+          />
         </CardTitle>
       </CardHeader>
       <CardContent className='space-y-3'>
@@ -247,31 +341,57 @@ export function OfficialCcCard({
           {cc?.account_tier ? <span>{cc.account_tier}</span> : null}
           {cc?.available_models?.length ? (
             <span title={cc.available_models.join('\n')}>
-              {cc.available_models.length} 个可用模型
+              <Trans
+                ns='vm'
+                i18nKey='officialCcCard.availableModels'
+                values={{ length: cc.available_models.length }}
+                count={cc.available_models.length}
+              />
             </span>
           ) : null}
           {cc?.hello_ok && (cc?.usage_ok || cc?.stats_ok) ? (
-            <span>额度已探测</span>
+            <span>
+              <Trans ns='vm' i18nKey='officialCcCard.quotaProbed' />
+            </span>
           ) : cc?.hello_ok ? (
-            <span>hello 已完成</span>
+            <span>
+              <Trans ns='vm' i18nKey='officialCcCard.helloCompleted' />
+            </span>
           ) : null}
           {cc?.resident_ok ? (
             <span>
-              常驻中{cc.resident_pid ? ` · pid ${cc.resident_pid}` : ''}
+              <Trans
+                ns='vm'
+                i18nKey='officialCcCard.persistentProcessRunningAlternative'
+                values={{
+                  value: cc.resident_pid ? ` · pid ${cc.resident_pid}` : '',
+                }}
+              />
             </span>
           ) : cc?.resident ? (
             <StatusMark
-              tone={{ key: 'warn', text: '常驻未拉起', cls: 'warn' }}
+              tone={{
+                key: 'warn',
+                text: tVm('vm:officialCcCard.persistentProcessNotStarted'),
+                cls: 'warn',
+              }}
             />
           ) : null}
           {cc?.telemetry_enabled && cc?.telemetry_official ? (
-            <span>遥测已对齐</span>
+            <span>
+              <Trans ns='vm' i18nKey='officialCcCard.telemetryAligned' />
+            </span>
           ) : cc?.telemetry_enabled ? (
-            <span>遥测已写</span>
+            <span>
+              <Trans ns='vm' i18nKey='officialCcCard.telemetryWritten' />
+            </span>
           ) : null}
           {!cc ? (
             <span>
-              用本槽凭证跑一次官方初装。成功后按设置写入官方身份并开遥测。
+              <Trans
+                ns='vm'
+                i18nKey='officialCcCard.runOfficialSetupUsingThisSlotSCredentialsOn'
+              />
             </span>
           ) : null}
         </div>
@@ -279,8 +399,10 @@ export function OfficialCcCard({
         {cc?.error ? (
           <div className='space-y-1 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs'>
             <div>
-              <span className='font-medium'>错误</span> ·{' '}
-              <span className='font-mono break-all'>{cc.error}</span>
+              <span className='font-medium'>
+                <Trans ns='vm' i18nKey='officialCcCard.error' />
+              </span>{' '}
+              · <span className='font-mono break-all'>{cc.error}</span>
             </div>
             {hint ? <div className='text-muted-foreground'>{hint}</div> : null}
           </div>
@@ -293,7 +415,7 @@ export function OfficialCcCard({
             disabled={running || run.isPending || !!blockedReason}
             onClick={() => run.mutate()}
           >
-            {run.isPending ? '提交中…' : runLabel}
+            {run.isPending ? tVm('vm:officialCcCard.submitting') : runLabel}
           </Button>
           <Button
             size='sm'
@@ -302,10 +424,10 @@ export function OfficialCcCard({
             onClick={() => q.refetch()}
           >
             {running
-              ? '每 2.5s 自动刷新'
+              ? tVm('vm:officialCcCard.refreshesEvery25s')
               : q.isFetching
-                ? '读取中…'
-                : '刷新进度'}
+                ? tVm('vm:credentialEditor.loading')
+                : tVm('vm:officialCcCard.refreshProgress')}
           </Button>
           {blockedReason ? (
             <span className='text-xs text-muted-foreground'>

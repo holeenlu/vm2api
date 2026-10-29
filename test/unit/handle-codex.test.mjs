@@ -13,7 +13,11 @@ import {
 } from '../../src/lib/protocol/handle-codex.mjs'
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
-import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { reportOpenAIAttempt, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 
 beforeEach(() => resetOpenAIAccountRuntime())
 
@@ -94,6 +98,33 @@ function writeGptVm(root, id) {
     }),
   )
 }
+
+test('GPT candidates run the group priority before the smart score', (t) => {
+  const db = openDatabase({ dbPath: ':memory:' })
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-group-priority-'))
+  t.after(() => {
+    closeDatabase()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  const groups = new GroupsRepo(db)
+  const user = new PanelUserStore({ db }).create({ username: 'gpt-priority', password: 'testpass' })
+  const group = groups.create({ name: 'gpt-priority', platform: 'openai' })
+  groups.setGrants(user.id, [group.id])
+  const key = new ApiKeyStore({ db }).create({ user_id: user.id, group_id: group.id })
+  for (const id of ['vm-gpt-flaky', 'vm-gpt-steady']) {
+    writeGptVm(root, id)
+    groups.assignResource('vm', id, [group.id], 0)
+  }
+  // One recent failure drops the smart score well outside the 0.05 tie band.
+  reportOpenAIAttempt('vm-gpt-flaky', 'failed')
+  const req = { headers: {}, apiKeyKind: 'managed', apiKeyRecord: key, socket: { remoteAddress: '127.0.0.1' } }
+  assert.deepEqual(pickCodexCandidates(root, req).ids, ['vm-gpt-steady', 'vm-gpt-flaky'])
+  const setPriority = (id, priority) =>
+    db.prepare("UPDATE group_resources SET priority=? WHERE resource_kind='vm' AND resource_id=?").run(priority, id)
+  setPriority('vm-gpt-flaky', 10)
+  setPriority('vm-gpt-steady', 90)
+  assert.deepEqual(pickCodexCandidates(root, req).ids, ['vm-gpt-flaky', 'vm-gpt-steady'])
+})
 
 test('GPT candidates follow the caller owner scope', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-owner-'))

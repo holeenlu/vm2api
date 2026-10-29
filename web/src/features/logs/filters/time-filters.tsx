@@ -1,6 +1,9 @@
 import { useState } from 'react'
+import { i18n, t as translate } from '@/i18n'
+import { enUS, zhCN, zhTW, ja } from 'date-fns/locale'
 import { CalendarIcon, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { DateRange } from 'react-day-picker'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
@@ -27,10 +30,18 @@ import {
 } from './time-range'
 
 const PERIOD_LABELS: Record<QuickPeriod, string> = {
-  today: '今天',
-  yesterday: '昨天',
-  last7days: '近7天',
-  last30days: '近30天',
+  get today() {
+    return translate('logs:today')
+  },
+  get yesterday() {
+    return translate('logs:yesterday')
+  },
+  get last7days() {
+    return translate('logs:lastSevenDays')
+  },
+  get last30days() {
+    return translate('logs:lastThirtyDays')
+  },
 }
 
 function LogsDateRangePicker({
@@ -38,6 +49,8 @@ function LogsDateRangePicker({
   endDate,
   onChange,
 }: DateRangeStrings & { onChange: (range: DateRangeStrings) => void }) {
+  const { t: translate } = useTranslation('logs')
+
   const [calendarOpen, setCalendarOpen] = useState(false)
   const hasRange = Boolean(startDate && endDate)
   const today = formatDate(new Date())
@@ -48,10 +61,13 @@ function LogsDateRangePicker({
       : undefined
   const label =
     !startDate || !endDate
-      ? '自定义范围'
+      ? translate('logs:customRange')
       : startDate === endDate
-        ? startDate
-        : `${startDate} 至 ${endDate}`
+        ? parseDate(startDate).toLocaleDateString(i18n.language)
+        : translate('logs:rangeBetween', {
+            p0: parseDate(startDate).toLocaleDateString(i18n.language),
+            p1: parseDate(endDate).toLocaleDateString(i18n.language),
+          })
 
   return (
     <div className='flex flex-wrap items-center gap-2'>
@@ -81,7 +97,7 @@ function LogsDateRangePicker({
           size='icon'
           className='size-8'
           disabled={!hasRange}
-          title='上一周期'
+          title={translate('logs:previousPeriod')}
           onClick={() =>
             startDate &&
             endDate &&
@@ -108,6 +124,17 @@ function LogsDateRangePicker({
           <PopoverContent className='w-auto p-0' align='start'>
             <Calendar
               mode='range'
+              locale={
+                (
+                  {
+                    'en-US': enUS,
+                    'zh-CN': zhCN,
+                    'zh-TW': zhTW,
+                    'ja-JP': ja,
+                  } as const
+                )[i18n.language as 'en-US' | 'zh-CN' | 'zh-TW' | 'ja-JP'] ??
+                enUS
+              }
               defaultMonth={selected?.from}
               selected={selected}
               numberOfMonths={2}
@@ -134,7 +161,7 @@ function LogsDateRangePicker({
                     setCalendarOpen(false)
                   }}
                 >
-                  重置
+                  {translate('logs:reset')}
                 </Button>
               </div>
             ) : null}
@@ -146,7 +173,7 @@ function LogsDateRangePicker({
           size='icon'
           className='size-8'
           disabled={!hasRange || (endDate !== undefined && endDate >= today)}
-          title='下一周期'
+          title={translate('logs:nextPeriod')}
           onClick={() =>
             startDate &&
             endDate &&
@@ -167,6 +194,8 @@ export function TimeFilters({
   filters: LogsFilterState
   onChange: (filters: LogsFilterState) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const startDate =
     filters.startTime != null
       ? formatDate(new Date(filters.startTime))
@@ -198,7 +227,7 @@ export function TimeFilters({
   return (
     <div className='space-y-3'>
       <div className='space-y-2'>
-        <Label>日期范围</Label>
+        <Label>{translate('logs:dateRange')}</Label>
         <LogsDateRangePicker
           startDate={startDate}
           endDate={endDate}
@@ -207,7 +236,9 @@ export function TimeFilters({
       </div>
       <div className='grid grid-cols-1 gap-2 sm:grid-cols-2'>
         <div className='space-y-1'>
-          <Label className='text-xs text-muted-foreground'>开始时间</Label>
+          <Label className='text-xs text-muted-foreground'>
+            {translate('logs:startTime')}
+          </Label>
           <Input
             type='time'
             step={1}
@@ -224,7 +255,9 @@ export function TimeFilters({
           />
         </div>
         <div className='space-y-1'>
-          <Label className='text-xs text-muted-foreground'>结束时间</Label>
+          <Label className='text-xs text-muted-foreground'>
+            {translate('logs:endTime')}
+          </Label>
           <Input
             type='time'
             step={1}

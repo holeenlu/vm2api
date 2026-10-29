@@ -389,7 +389,7 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
   assert.equal(pool.bind('px-local', 'vm-tenant').proxy.id, 'px-local-node-a')
 
   const nodes = [{ id: 'node-a', label: '东京-01' }]
-  const adminSnap = pool.panelSnapshot({ role: 'admin', vms, nodes })
+  const adminSnap = pool.panelSnapshot({ role: 'super_admin', vms, nodes })
   const local = adminSnap.proxies.find((p) => p.id === 'px-local')
   assert.ok(local)
   assert.equal(local.node_id, null)
@@ -420,7 +420,7 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
     routingConfig: {},
     proxyPool: pool,
     clusterNodes: nodes,
-    role: 'admin',
+    role: 'super_admin',
   })
   const tokyo = listed.data.items.find((item) => item.id === 'vm-tokyo')
   assert.equal(tokyo.node_name, '东京-01')
@@ -438,18 +438,14 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
     role: 'user',
     ownerUserId: 'user-1',
   })
-  assert.equal(tenantList.data.items.length, 1)
-  const tenantVm = tenantList.data.items[0]
-  assert.equal(tenantVm.id, 'vm-tenant')
-  assert.equal(tenantVm.node_name, undefined)
-  assert.equal(tenantVm.proxy.node_name, undefined)
+  assert.equal(tenantList.data.items.length, 0)
 
   const adminAlloc = publicAllocatedProxy(
     pool,
     { id: 'px-local', kind: 'local' },
     {
       nodeId: 'node-a',
-      role: 'admin',
+      role: 'super_admin',
       nodes,
     },
   )

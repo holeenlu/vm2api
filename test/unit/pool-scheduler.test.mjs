@@ -8,7 +8,6 @@ import { AccountQuota } from '../../src/lib/pool/account-quota.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
 import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
-import { persistVmOwner } from '../../src/lib/vm/vm-registry.mjs'
 import { kernelFaults } from '../../src/lib/transport/rust-kernel-client.mjs'
 import {
   applyCrsIdentityReplace,
@@ -284,6 +283,83 @@ test('adaptive reset level and manual level order ordinary candidates', async (t
   selected = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
   assert.equal(selected.accountId, 'account-1')
   selected.release()
+})
+
+test('group resource priority breaks a tie between equal Claude slots', async (t) => {
+  const root = project()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const pool = scheduler(root)
+  const scopeWith = (priorities) => ({
+    group_id: 1,
+    group_type: 'anthropic',
+    allowed_vms: ['vm-01', 'vm-02'],
+    allowed_endpoints: [],
+    models: [],
+    resource_priorities: priorities,
+  })
+
+  // Same schedule level and load: only the group priority separates them.
+  let selected = await pool.selectAndReserve({
+    model: 'claude-test',
+    allowWait: false,
+    keyScope: scopeWith({ 'vm-01': 90, 'vm-02': 10 }),
+  })
+  assert.equal(selected.vmId, 'vm-02')
+  assert.equal(selected.groupPriority, 10)
+  selected.release()
+
+  selected = await pool.selectAndReserve({
+    model: 'claude-test',
+    allowWait: false,
+    keyScope: scopeWith({ 'vm-01': 10, 'vm-02': 90 }),
+  })
+  assert.equal(selected.vmId, 'vm-01')
+  selected.release()
+
+  // A key without a group leaves every candidate at the default: no band.
+  selected = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
+  assert.equal(selected.groupPriority, 50)
+  selected.release()
+})
+
+test('sticky and device affinity still outrank group resource priority', async (t) => {
+  const root = project()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const pool = scheduler(root, {
+    stickyRouter: {
+      resolve: (key) => (key === 'group-bound' ? { vmId: 'vm-01', accountId: 'account-1' } : null),
+    },
+  })
+  // The group prefers vm-02; the pinned conversation and the device seat do not.
+  const keyScope = {
+    group_id: 1,
+    group_type: 'anthropic',
+    allowed_vms: ['vm-01', 'vm-02'],
+    allowed_endpoints: [],
+    models: [],
+    resource_priorities: { 'vm-01': 90, 'vm-02': 10 },
+  }
+
+  const sticky = await pool.selectAndReserve({
+    model: 'claude-test',
+    stickyKey: 'group-bound',
+    allowWait: false,
+    keyScope,
+  })
+  assert.equal(sticky.vmId, 'vm-01')
+  assert.equal(sticky.selectionReason, 'sticky')
+  sticky.release()
+
+  const device = await pool.selectAndReserve({
+    model: 'claude-test',
+    stickyKey: 'group-device-session',
+    deviceVmId: 'vm-01',
+    allowWait: false,
+    keyScope,
+  })
+  assert.equal(device.vmId, 'vm-01')
+  assert.equal(device.selectionReason, 'device-affinity')
+  device.release()
 })
 
 test('soft-paused but schedulable account stays eligible', async (t) => {
@@ -1585,36 +1661,6 @@ test('platform scope skips tenant-owned VMs', async (t) => {
   assert.equal(miss.ok, false)
 })
 
-test('deleting a tenant makes its assigned spare selectable while the primary quota is exhausted', async (t) => {
-  const root = project()
-  const quota = new AccountQuota({ dataDir: path.join(root, 'data'), config: {} })
-  let pool
-  t.after(() => {
-    quota.db.close()
-    cleanupProject(root, pool)
-  })
-  const users = new PanelUserStore({ db: quota.db, projectRoot: root })
-  const user = users.create({ username: 'tenant', password: 'tenant-pass' })
-  persistVmOwner(root, 'vm-02', { ownerUserId: user.id, origin: 'admin_assigned' })
-  quota.ensure({ account_id: 'account-1', vm_id: 'vm-01' })
-  quota.ensure({ account_id: 'account-2', vm_id: 'vm-02' })
-  quota.ingestHeaders('account-1', {
-    'anthropic-ratelimit-unified-5h-utilization': '1',
-    'anthropic-ratelimit-unified-5h-status': 'rejected',
-    'anthropic-ratelimit-unified-5h-reset': new Date(Date.now() + 3600_000).toISOString(),
-  })
-  pool = scheduler(root, { accountQuota: quota })
-  const exhausted = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
-  assert.equal(exhausted.ok, false)
-
-  assert.equal(users.remove(user.id), true)
-  const recovered = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
-  assert.equal(recovered.ok, true)
-  assert.equal(recovered.vmId, 'vm-02')
-  assert.equal(recovered.accountId, 'account-2')
-  recovered.release()
-})
-
 function busyKernelHealth() {
   return { ok: true, ready_slots: 0, cli_pid: 9, credential: { generation: 1, has_access: true } }
 }
@@ -2835,7 +2881,7 @@ test('a key scope only reserves the checked VMs', async (t) => {
   assert.equal(blocked.ok, false)
   const open = await pool.eligibleCandidates({
     model: 'claude-haiku-4-5',
-    keyScope: { group_type: 'all', allowed_vms: [] },
+    keyScope: { platform: true, group_type: 'all', allowed_vms: [] },
   })
   assert.deepEqual(open.map((c) => c.vmId).sort(), ['vm-01', 'vm-02'])
 })
@@ -2854,7 +2900,7 @@ test('peekAccount honors the key scope', async (t) => {
   assert.equal(none.ok, false)
 })
 
-test('a vm pool drops a sticky VM that is no longer a member', async (t) => {
+test('a commercial group drops a sticky VM that is no longer a member', async (t) => {
   const root = project()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const unbound = []
@@ -2866,9 +2912,9 @@ test('a vm pool drops a sticky VM that is no longer a member', async (t) => {
   })
   const scope = {
     group_type: 'all',
-    vm_pool_id: 'pool_abcd1234',
+    group_id: 3,
     allowed_vms: ['vm-02'],
-    vm_pool_error: null,
+    error: null,
   }
   const selected = await pool.selectAndReserve({
     model: 'claude-haiku-4-5',
@@ -2883,7 +2929,7 @@ test('a vm pool drops a sticky VM that is no longer a member', async (t) => {
   const blocked = await pool.selectAndReserve({
     model: 'claude-haiku-4-5',
     allowWait: false,
-    keyScope: { ...scope, allowed_vms: [], vm_pool_error: 'disabled' },
+    keyScope: { ...scope, allowed_vms: [], error: 'disabled' },
   })
   assert.equal(blocked.ok, false)
   assert.equal(blocked.vmId, undefined)
@@ -2965,3 +3011,85 @@ test('a resting slot that cannot serve the model does not promise a Retry-After'
   assert.equal(selected.ok, false)
   assert.equal(selected.retry_after_ms, null)
 })
+
+test('deleting a customer cannot widen the platform resource scope', async (t) => {
+  const root = project()
+  const quota = new AccountQuota({ dataDir: path.join(root, 'data'), config: {} })
+  let pool
+  t.after(() => {
+    quota.db.close()
+    cleanupProject(root, pool)
+  })
+  const users = new PanelUserStore({ db: quota.db, projectRoot: root })
+  const user = users.create({ username: 'tenant', password: 'tenant-pass' })
+  fs.writeFileSync(
+    path.join(root, 'vms', 'vm-02.json'),
+    JSON.stringify({
+      ...JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-02.json'), 'utf8')),
+      owner_user_id: user.id,
+      origin: 'admin_assigned',
+    }),
+  )
+  quota.ensure({ account_id: 'account-1', vm_id: 'vm-01' })
+  quota.ensure({ account_id: 'account-2', vm_id: 'vm-02' })
+  quota.ingestHeaders('account-1', {
+    'anthropic-ratelimit-unified-5h-utilization': '1',
+    'anthropic-ratelimit-unified-5h-status': 'rejected',
+    'anthropic-ratelimit-unified-5h-reset': new Date(Date.now() + 3600_000).toISOString(),
+  })
+  pool = scheduler(root, { accountQuota: quota })
+  const exhausted = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
+  assert.equal(exhausted.ok, false)
+
+  assert.equal(users.remove(user.id), true)
+  const recovered = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
+  assert.equal(recovered.ok, false)
+})
+
+for (const kind of ['rpm', 'cooldown']) {
+  test(kind + ' expiry during eligibility inspection rechecks without sleeping to the request deadline', async (t) => {
+    const root = project()
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    let now = Date.now()
+    const resetAt = now + 40
+    t.mock.method(Date, 'now', () => now)
+    const repo = new RuntimeRepo()
+    const pool = scheduler(root, {
+      runtimeRepo: repo,
+      accountQuota: {
+        canAccept: () =>
+          kind === 'rpm' && now < resetAt
+            ? { ok: false, reason: 'rpm_limit', detail: { reset_at: resetAt } }
+            : { ok: true },
+        tryAcquire: () => ({ ok: true }),
+      },
+    })
+    if (kind === 'cooldown') {
+      repo.markCooldown('account-1', {
+        vmId: 'vm-01',
+        until: resetAt,
+        reason: 'provider_transient_error',
+        status: 'cooldown',
+      })
+    }
+    const inspect = pool.eligibleCandidates.bind(pool)
+    let inspections = 0
+    t.mock.method(pool, 'eligibleCandidates', async (...args) => {
+      const candidates = await inspect(...args)
+      if (++inspections === 1) now = resetAt
+      return candidates
+    })
+    t.mock.method(pool, 'waitForCapacity', async () => {
+      assert.fail('An expired eligibility snapshot must be refreshed before waiting')
+    })
+    const selected = await pool.selectAndReserve({
+      model: 'claude-test',
+      excluded: new Set(['account-2']),
+      allowWait: true,
+    })
+    assert.equal(selected.ok, true)
+    assert.equal(selected.accountId, 'account-1')
+    assert.equal(inspections, 2)
+    selected.release()
+  })
+}

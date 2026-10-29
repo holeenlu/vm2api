@@ -5,7 +5,6 @@ import os from 'node:os'
 import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { createRoutingRuntime } from '../../src/lib/admin/routing-runtime.mjs'
-import { OFFICIAL_CLI_VERSION } from '../../src/lib/identity/vm-identity.mjs'
 
 function runtimeFor(file) {
   return createRoutingRuntime({ routingConfigPath: file })
@@ -266,7 +265,7 @@ test('persistRoutingPatch writes persona_preset into Claude kernel system_layout
     assert.equal(kernel.system_layout, 'zero')
     assert.equal(kernel.persona_preset, 'zero')
     assert.equal(kernel.default_cache_ttl, '1h')
-    assert.equal(kernel.cli_version, OFFICIAL_CLI_VERSION)
+    assert.equal(kernel.cli_version, '2.1.303')
     assert.equal(fs.existsSync(path.join(vms, 'vm-codex', 'run', 'kernel.json')), false)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -406,6 +405,26 @@ function persistHarness(root, routingFile, routingConfig) {
   })
 }
 
+test('persistRoutingPatch exposes a config revision and rejects stale compare-and-swap updates', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-revision-'))
+  const routingFile = path.join(root, 'routing.json')
+  const routingConfig = { concurrency: {}, tiers: {} }
+  fs.writeFileSync(routingFile, JSON.stringify(routingConfig))
+  try {
+    const runtime = persistHarness(root, routingFile, routingConfig)
+    const applied = runtime.persistRoutingPatch({ sticky: { enabled: true }, config_revision: 1 })
+    assert.equal(applied.config_revision, 2)
+    const saved = fs.readFileSync(routingFile, 'utf8')
+    assert.throws(
+      () => runtime.persistRoutingPatch({ sticky: { enabled: false }, config_revision: 1 }),
+      (error) => error?.code === 'config_revision_conflict' && error?.status === 409 && error?.current_revision === 2,
+    )
+    assert.equal(fs.readFileSync(routingFile, 'utf8'), saved)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('loadRoutingConfig normalizes a missing or invalid vm section', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-vm-load-'))
   const file = path.join(root, 'routing.json')
@@ -501,7 +520,7 @@ test('PUT /api/panel/routing rejects an invalid vm patch before persist', async 
     },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {

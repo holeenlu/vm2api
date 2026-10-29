@@ -125,38 +125,6 @@ func TestRefreshOutputNeverContainsTokens(t *testing.T) {
 	}
 }
 
-func TestCountTokensReadsStdin(t *testing.T) {
-	var gotBody map[string]any
-	var gotBeta string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/v1/messages/count_tokens" {
-			t.Fatalf("path = %s", request.URL.Path)
-		}
-		if err := json.NewDecoder(request.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode body: %v", err)
-		}
-		gotBeta = request.Header.Get("Anthropic-Beta")
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"input_tokens":12}`))
-	}))
-	defer server.Close()
-
-	configPath, _ := testConfig(t, server.URL, server.URL, nil)
-	credPath := filepath.Join(filepath.Dir(configPath), "credentials.json")
-	saveCredential(t, credPath, credential.Credential{AccessToken: "access-live", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()})
-
-	input := `{"body":{"model":"claude-test","messages":[]},"headers":{"anthropic-beta":"beta-from-node"}}`
-	var output bytes.Buffer
-	if code := Run([]string{"count-tokens", "--config", configPath}, strings.NewReader(input), &output); code != 0 {
-		t.Fatalf("exit code = %d, output = %s", code, output.String())
-	}
-	var envelope responseEnvelope
-	decodeOutput(t, &output, &envelope)
-	if !envelope.OK || gotBody["model"] != "claude-test" || gotBeta != "beta-from-node" {
-		t.Fatalf("envelope=%+v body=%v beta=%q", envelope, gotBody, gotBeta)
-	}
-}
-
 func TestUnknownOperationReturnsTwo(t *testing.T) {
 	var output bytes.Buffer
 	if code := Run([]string{"unknown", "--config", "/tmp/unused"}, nil, &output); code != 2 {

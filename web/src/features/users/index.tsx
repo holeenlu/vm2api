@@ -1,25 +1,20 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { VIEW_TITLES } from '@/config/nav'
-import type { PanelRole } from '@/types/panel-auth'
+import { t } from '@/i18n'
 import type { PanelUser } from '@/types/panel-users'
-import { KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { useAuthStore } from '@/stores/auth-store'
 import { api } from '@/lib/api'
-import { fmtAgo } from '@/lib/format'
-import { Badge } from '@/components/ui/badge'
+import { idempotencyKey } from '@/lib/idempotency-key'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -27,639 +22,634 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { FormField as Label } from '@/components/form-field'
 import { PageHeader } from '@/components/page-header'
-import { TableSkeleton } from '@/components/page-skeletons'
-import { PasswordInput } from '@/components/password-input'
-import { QueryGate } from '@/components/query-gate'
-import { usersQueryOptions } from '@/features/users/queries'
+import { meQueryOptions } from '@/features/auth/queries'
+import { groupsQueryOptions } from '@/features/groups/queries'
+import { GroupGrants, type GroupGrant } from './group-grants'
+import { usersQueryOptions } from './queries'
 
-// Mirrors assertPassword() in src/lib/admin/panel-users.mjs.
-const PASSWORD_MIN = 8
-const PASSWORD_MAX = 128
-
-const ROLE_LABELS: Record<PanelRole, string> = {
-  admin: '管理员',
-  super: '运维',
-  user: '租户',
+const ROLES = {
+  get super_admin() {
+    return t('common:superAdmin')
+  },
+  get admin() {
+    return t('common:administrator')
+  },
+  get user() {
+    return t('users:user')
+  },
+  get vendor() {
+    return '供应商'
+  },
 }
-
-function passwordError(pass: string, confirm: string): string {
-  if (!pass) return ''
-  if (pass.length < PASSWORD_MIN) return `密码至少 ${PASSWORD_MIN} 位`
-  if (pass.length > PASSWORD_MAX) return `密码最多 ${PASSWORD_MAX} 位`
-  if (confirm && pass !== confirm) return '两次输入的密码不一致'
-  return ''
+const EMPTY = {
+  username: '',
+  password: '',
+  role: 'user' as 'user' | 'admin' | 'super_admin' | 'vendor',
+  enabled: true,
+  concurrency: 0,
+  rpm_limit: 0,
+  restrict_public_groups: true,
+  vendor_name: '',
+  vendor_email: '',
+  vendor_external_code: '',
+  vendor_create_child: false,
+  vendor_child_limit: 1,
+  vendor_contact_name: '',
+  vendor_settlement_email: '',
+  vendor_binance_id: '',
+  vendor_default_price_cny_per_usd: 1.6,
+  vendor_openai_price_cny_per_usd: '',
+  vendor_claude_price_cny_per_usd: '',
+  vendor_fx_cny_per_usdt: 6.7,
+  vendor_default_multiplier: 1,
 }
-
 export function UsersPage() {
-  const qc = useQueryClient()
-  const me = useAuthStore((s) => s.me)
-  const q = useQuery(usersQueryOptions())
-  const items = q.data?.items || []
-  const [createOpen, setCreateOpen] = useState(false)
-  const [edit, setEdit] = useState<PanelUser | null>(null)
-  const [pwTarget, setPwTarget] = useState<PanelUser | null>(null)
-  const [del, setDel] = useState<PanelUser | null>(null)
-  const refresh = () =>
-    qc.invalidateQueries({ queryKey: usersQueryOptions().queryKey })
+  const { t } = useTranslation('users')
 
+  const q = useQuery(usersQueryOptions())
+  const me = useQuery(meQueryOptions())
+  const sa = me.data?.role === 'super_admin'
+  const groups = useQuery({ ...groupsQueryOptions(), enabled: sa })
+  const qc = useQueryClient()
+  const [search, setSearch] = useState(''),
+    [page, setPage] = useState(0),
+    [remove, setRemove] = useState<PanelUser | null>(null)
+  const rows = (q.data?.items || []).filter((u) =>
+    u.username.toLowerCase().includes(search.toLowerCase())
+  )
+  const [edit, setEdit] = useState<PanelUser | null | undefined>()
+  const [form, setForm] = useState(EMPTY)
+  const [formGrants, setFormGrants] = useState<GroupGrant[]>([])
+  const [wallet, setWallet] = useState<PanelUser | null>(null)
+  const [amount, setAmount] = useState('')
+  const [reason, setReason] = useState('')
+  const [operation, setOperation] = useState('add')
+  const [idem, setIdem] = useState('')
+  const history = useQuery({
+    queryKey: ['panel', 'wallet', wallet?.id],
+    queryFn: () =>
+      api<{
+        items: {
+          id: string
+          kind: string
+          amount: number
+          reason: string
+          created_at: string
+        }[]
+        available: number
+      }>('/api/panel/users/' + wallet?.id + '/balance-history'),
+    enabled: !!wallet,
+  })
+  const change = useMutation({
+    mutationFn: ({
+      path,
+      method,
+      body,
+    }: {
+      path: string
+      method: string
+      body?: unknown
+    }) =>
+      api(path, {
+        method,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    onSuccess: async () => {
+      toast.success(t('users:saved'))
+      setEdit(undefined)
+      setAmount('')
+      setReason('')
+      setIdem(idempotencyKey())
+      await qc.invalidateQueries({ queryKey: ['panel'] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const open = (u: PanelUser | null) => {
+    setEdit(u)
+    setForm({ ...EMPTY, ...u, password: '', vendor_name: u?.vendor_name || '' })
+    const explicit = u?.groups || []
+    const publicGrants =
+      u?.restrict_public_groups === false
+        ? (groups.data?.items || [])
+            .filter(
+              (g) =>
+                !g.is_exclusive && !explicit.some((v) => v.group_id === g.id)
+            )
+            .map((g) => ({ group_id: g.id, rate_multiplier: null }))
+        : []
+    setFormGrants([...explicit, ...publicGrants])
+  }
   return (
     <PageHeader
-      title={VIEW_TITLES.users}
+      title={t('users:title')}
+      description={t('users:description')}
       extra={
-        <Button onClick={() => setCreateOpen(true)}>
-          <Plus />
-          新建用户
+        <Button disabled={sa && !groups.isSuccess} onClick={() => open(null)}>
+          {t('users:create')}
         </Button>
       }
     >
-      <QueryGate
-        loading={q.isLoading}
-        error={q.error}
-        skeleton={<TableSkeleton rows={8} columns={6} />}
-      >
-        <div className='overflow-x-auto rounded-md border'>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>用户名</TableHead>
-                <TableHead>角色</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>自建配额</TableHead>
-                <TableHead>最近登录</TableHead>
-                <TableHead className='text-end'>操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.length === 0 ? (
-                <TableRow>
-                  <TableCell
-                    colSpan={6}
-                    className='h-24 text-center text-muted-foreground'
+      {q.error ? (
+        <p role='alert' className='text-destructive'>
+          {q.error.message}
+        </p>
+      ) : null}
+      {sa && groups.error && (
+        <p role='alert' className='mb-4 text-destructive'>
+          {t('users:groupsFailed', { message: groups.error.message })}
+        </p>
+      )}
+      <Input
+        className='mb-4 max-w-xs'
+        placeholder={t('users:search')}
+        value={search}
+        onChange={(e) => {
+          setSearch(e.target.value)
+          setPage(0)
+        }}
+      />
+      <div className='overflow-auto rounded-md border'>
+        <table className='w-full text-sm'>
+          <thead>
+            <tr className='border-b bg-muted/40'>
+              {[
+                t('users:user'),
+                t('users:role'),
+                t('users:status'),
+                t('users:balanceUsd'),
+                t('users:concurrency'),
+                t('users:actions'),
+              ].map((v) => (
+                <th key={v} className='p-3 text-left'>
+                  {v}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice(page * 50, (page + 1) * 50).map((u) => (
+              <tr key={u.id} className='border-b'>
+                <td className='p-3'>{u.username}</td>
+                <td className='p-3'>{ROLES[u.role]}</td>
+                <td className='p-3'>
+                  {u.enabled ? t('users:enabled') : t('users:disabled')}
+                </td>
+                <td className='p-3 tabular-nums'>
+                  {Number(u.balance || 0).toFixed(6)}
+                </td>
+                <td className='p-3'>{u.concurrency || t('users:unlimited')}</td>
+                <td className='space-x-2 p-3'>
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    disabled={sa && !groups.isSuccess}
+                    onClick={() => open(u)}
                   >
-                    暂无用户
-                  </TableCell>
-                </TableRow>
-              ) : null}
-              {items.map((u) => {
-                const isSelf = u.username === me?.user
-                return (
-                  <TableRow key={u.id}>
-                    <TableCell className='font-medium'>
-                      {u.username}
-                      {isSelf ? (
-                        <span className='ms-2 text-xs text-muted-foreground'>
-                          (当前)
-                        </span>
-                      ) : null}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={u.role === 'admin' ? 'default' : 'secondary'}
-                      >
-                        {ROLE_LABELS[u.role] || u.role}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      {u.enabled === false ? (
-                        <Badge variant='outline'>已停用</Badge>
-                      ) : (
-                        <Badge variant='secondary'>启用</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className='tabular-nums'>
-                      {u.vm_create_quota ?? 0}
-                    </TableCell>
-                    <TableCell
-                      className='text-muted-foreground'
-                      title={u.last_login_at || ''}
+                    {t('users:edit')}
+                  </Button>
+                  {sa && (
+                    <Button
+                      size='sm'
+                      variant='outline'
+                      onClick={() => {
+                        setWallet(u)
+                        setAmount('')
+                        setReason('')
+                        setOperation('add')
+                        setIdem(idempotencyKey())
+                      }}
                     >
-                      {fmtAgo(u.last_login_at) || '从未'}
-                    </TableCell>
-                    <TableCell className='space-x-1 text-end whitespace-nowrap'>
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        onClick={() => setEdit(u)}
-                      >
-                        <Pencil />
-                        编辑
-                      </Button>
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        onClick={() => setPwTarget(u)}
-                      >
-                        <KeyRound />
-                        改密码
-                      </Button>
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        className='text-destructive hover:text-destructive'
-                        disabled={isSelf}
-                        title={isSelf ? '不能删除当前登录账号' : undefined}
-                        onClick={() => setDel(u)}
-                      >
-                        <Trash2 />
-                        删除
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      </QueryGate>
-
-      <CreateUserDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onDone={refresh}
-      />
-      <EditUserDialog
-        user={edit}
-        isSelf={!!edit && edit.username === me?.user}
-        onClose={() => setEdit(null)}
-        onDone={refresh}
-      />
-      <PasswordDialog
-        user={pwTarget}
-        isSelf={!!pwTarget && pwTarget.username === me?.user}
-        onClose={() => setPwTarget(null)}
-        onDone={refresh}
-      />
+                      {t('users:balanceHistory')}
+                    </Button>
+                  )}
+                  {sa && (
+                    <Button asChild size='sm' variant='ghost'>
+                      <a href={'#/keys?userId=' + encodeURIComponent(u.id)}>
+                        {t('users:apiKeys')}
+                      </a>
+                    </Button>
+                  )}
+                  <Button asChild size='sm' variant='ghost'>
+                    <a href={'#/logs?userId=' + encodeURIComponent(u.id)}>
+                      {t('users:usage')}
+                    </a>
+                  </Button>
+                  <Button
+                    size='sm'
+                    variant='ghost'
+                    onClick={() => setRemove(u)}
+                  >
+                    {t('users:delete')}
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Dialog
+        open={edit !== undefined}
+        onOpenChange={(v) => !v && setEdit(undefined)}
+      >
+        <DialogContent className='max-h-[90svh] overflow-y-auto sm:max-w-2xl'>
+          <DialogHeader>
+            <DialogTitle>
+              {edit ? t('users:editUser') : t('users:create')}
+            </DialogTitle>
+          </DialogHeader>
+          <form
+            className='space-y-5'
+            onSubmit={(e) => {
+              e.preventDefault()
+              const username = form.username.trim()
+              if (!/^[a-zA-Z][a-zA-Z0-9._-]{1,31}$/.test(username)) {
+                toast.error(t('users:usernameHelp'))
+                return
+              }
+              if (!edit && (form.password.length < 8 || form.password.length > 128)) {
+                toast.error(t('users:passwordHelp'))
+                return
+              }
+              change.mutate({
+                path: '/api/panel/users' + (edit ? '/' + edit.id : ''),
+                method: edit ? 'PATCH' : 'POST',
+                body: sa
+                  ? {
+                      ...form,
+                      username,
+                      groups: formGrants,
+                      restrict_public_groups: true,
+                    }
+                  : edit
+                    ? {
+                        ...(form.password ? { password: form.password } : {}),
+                        enabled: form.enabled,
+                      }
+                    : {
+                        username,
+                        password: form.password,
+                        role: 'user',
+                        enabled: form.enabled,
+                      },
+              })
+            }}
+          >
+            <Label>
+              {t('users:username')}
+              <Input
+                value={form.username}
+                disabled={!!edit}
+                required
+                minLength={2}
+                maxLength={32}
+                pattern='[a-zA-Z][a-zA-Z0-9._-]{1,31}'
+                aria-describedby='user-username-hint'
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+              />
+              {!edit && (
+                <p
+                  id='user-username-hint'
+                  className='text-xs leading-5 text-muted-foreground'
+                >
+                  {t('users:usernameHelp')}
+                </p>
+              )}
+            </Label>
+            <Label>
+              {edit ? t('users:optionalPassword') : t('users:password')}
+              <Input
+                type='password'
+                autoComplete='new-password'
+                value={form.password}
+                minLength={8}
+                maxLength={128}
+                aria-describedby='user-password-hint'
+                required={!edit}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+              {!edit && (
+                <p
+                  id='user-password-hint'
+                  className='text-xs leading-5 text-muted-foreground'
+                >
+                  {t('users:passwordHelp')}
+                </p>
+              )}
+            </Label>
+            <Label>
+              {t('users:role')}
+              <Select
+                value={form.role}
+                onValueChange={(role) =>
+                  setForm({ ...form, role: role as typeof form.role })
+                }
+              >
+                <SelectTrigger className='w-full'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(ROLES)
+                    .filter(([id]) => sa || id === 'user')
+                    .map(([id, name]) => (
+                      <SelectItem key={id} value={id}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </Label>
+            {sa && form.role === 'vendor' ? (
+              <div className='space-y-4 rounded-md border p-4'>
+                <p className='text-sm font-medium'>供应商设置</p>
+                <div className='grid gap-4 sm:grid-cols-2'>
+                  <Label>
+                    供应商名称
+                    <Input
+                      value={form.vendor_name}
+                      placeholder={form.username || '供应商名称'}
+                      onChange={(e) =>
+                        setForm({ ...form, vendor_name: e.target.value })
+                      }
+                    />
+                  </Label>
+                  <Label>
+                    供应商邮箱
+                    <Input
+                      type='email'
+                      value={form.vendor_email}
+                      placeholder='supplier@example.com'
+                      onChange={(e) =>
+                        setForm({ ...form, vendor_email: e.target.value })
+                      }
+                    />
+                  </Label>
+                </div>
+                <Label>
+                  供应商编码
+                  <Input
+                    value={form.vendor_external_code}
+                    placeholder={form.username || 'supplier-code'}
+                    onChange={(e) =>
+                      setForm({ ...form, vendor_external_code: e.target.value })
+                    }
+                  />
+                </Label>
+                <label className='flex items-center gap-2 text-sm'>
+                  <input
+                    type='checkbox'
+                    checked={form.vendor_create_child}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        vendor_create_child: e.target.checked,
+                        vendor_child_limit: e.target.checked
+                          ? form.vendor_child_limit
+                          : 0,
+                      })
+                    }
+                  />
+                  允许创建下级供应商
+                </label>
+                {form.vendor_create_child ? (
+                  <Label>
+                    下级供应商数量上限
+                    <Input
+                      type='number'
+                      min='0'
+                      value={form.vendor_child_limit}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          vendor_child_limit: Number(e.target.value),
+                        })
+                      }
+                    />
+                    <p className='text-xs leading-5 text-muted-foreground'>
+                      0 = 不限制下级供应商数量
+                    </p>
+                  </Label>
+                ) : null}
+                <div className='space-y-3 border-t pt-4'>
+                  <p className='text-sm font-medium'>结算档案</p>
+                  <div className='grid gap-4 sm:grid-cols-2'>
+                    <Label>联系人<Input value={form.vendor_contact_name} onChange={(e) => setForm({ ...form, vendor_contact_name: e.target.value })} /></Label>
+                    <Label>结算邮箱<Input type='email' value={form.vendor_settlement_email} onChange={(e) => setForm({ ...form, vendor_settlement_email: e.target.value })} /></Label>
+                    <Label>币安 ID<Input value={form.vendor_binance_id} onChange={(e) => setForm({ ...form, vendor_binance_id: e.target.value })} /></Label>
+                    <Label>默认采购单价（CNY/USD）<Input type='number' min='0.0001' step='0.0001' value={form.vendor_default_price_cny_per_usd} onChange={(e) => setForm({ ...form, vendor_default_price_cny_per_usd: Number(e.target.value) })} /></Label>
+                    <Label>OpenAI 采购单价<Input type='number' min='0.0001' step='0.0001' placeholder='使用默认单价' value={form.vendor_openai_price_cny_per_usd} onChange={(e) => setForm({ ...form, vendor_openai_price_cny_per_usd: e.target.value })} /></Label>
+                    <Label>Claude 采购单价<Input type='number' min='0.0001' step='0.0001' placeholder='使用默认单价' value={form.vendor_claude_price_cny_per_usd} onChange={(e) => setForm({ ...form, vendor_claude_price_cny_per_usd: e.target.value })} /></Label>
+                    <Label>结算汇率（CNY/USDT）<Input type='number' min='0.0001' step='0.0001' value={form.vendor_fx_cny_per_usdt} onChange={(e) => setForm({ ...form, vendor_fx_cny_per_usdt: Number(e.target.value) })} /></Label>
+                    <Label>结算倍率<Input type='number' min='0.0001' step='0.0001' value={form.vendor_default_multiplier} onChange={(e) => setForm({ ...form, vendor_default_multiplier: Number(e.target.value) })} /></Label>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            {sa && (
+              <div className='grid gap-4 sm:grid-cols-2'>
+                <div className='min-w-0 space-y-2'>
+                  <Label htmlFor='user-concurrency'>
+                    {t('users:concurrencyLimit')}
+                    <Input
+                      id='user-concurrency'
+                      aria-describedby='user-concurrency-hint'
+                      type='number'
+                      min='0'
+                      value={form.concurrency}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          concurrency: Number(e.target.value),
+                        })
+                      }
+                    />
+                  </Label>
+                  <p
+                    id='user-concurrency-hint'
+                    className='text-xs leading-5 text-muted-foreground'
+                  >
+                    {t('users:concurrencyHelp')}
+                  </p>
+                </div>
+                <div className='min-w-0 space-y-2'>
+                  <Label htmlFor='user-rpm'>
+                    {t('users:rpmLimit')}
+                    <Input
+                      id='user-rpm'
+                      aria-describedby='user-rpm-hint'
+                      type='number'
+                      min='0'
+                      value={form.rpm_limit}
+                      onChange={(e) =>
+                        setForm({ ...form, rpm_limit: Number(e.target.value) })
+                      }
+                    />
+                  </Label>
+                  <p
+                    id='user-rpm-hint'
+                    className='text-xs leading-5 text-muted-foreground'
+                  >
+                    {t('users:rpmHelp')}
+                  </p>
+                </div>
+              </div>
+            )}
+            <label className='flex items-center gap-2'>
+              <input
+                type='checkbox'
+                checked={form.enabled}
+                onChange={(e) =>
+                  setForm({ ...form, enabled: e.target.checked })
+                }
+              />
+              {t('users:enabled')}
+            </label>
+            {sa && (
+              <GroupGrants
+                groups={groups.data?.items || []}
+                value={formGrants}
+                onChange={setFormGrants}
+              />
+            )}
+            <DialogFooter>
+              <Button
+                type='button'
+                variant='outline'
+                onClick={() => setEdit(undefined)}
+              >
+                {t('users:cancel')}
+              </Button>
+              <Button
+                disabled={
+                  change.isPending ||
+                  (sa && (groups.isLoading || !!groups.error))
+                }
+              >
+                {t('users:save')}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!wallet} onOpenChange={(v) => !v && setWallet(null)}>
+        <DialogContent className='max-h-[90svh] overflow-y-auto sm:max-w-2xl'>
+          <DialogHeader>
+            <DialogTitle>
+              {t('users:walletTitle', { name: wallet?.username })}
+            </DialogTitle>
+          </DialogHeader>
+          <p>
+            {t('users:availableBalance', {
+              amount: history.data?.available?.toFixed(6) ?? '—',
+            })}
+          </p>
+          <form
+            className='space-y-5'
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (wallet)
+                change.mutate({
+                  path: '/api/panel/users/' + wallet.id + '/balance',
+                  method: 'POST',
+                  body: {
+                    amount: Number(amount),
+                    operation,
+                    reason,
+                    idempotency_key: idem,
+                  },
+                })
+            }}
+          >
+            <select
+              aria-label={t('users:fundAction')}
+              className='h-9 w-full rounded border bg-background px-2'
+              value={operation}
+              onChange={(e) => setOperation(e.target.value)}
+            >
+              <option value='add'>{t('users:credit')}</option>
+              <option value='subtract'>{t('users:debit')}</option>
+            </select>
+            <Label>
+              {t('users:amountUsd')}
+              <Input
+                type='number'
+                min='0.000001'
+                step='0.000001'
+                required
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </Label>
+            <Label>
+              {t('users:reason')}
+              <Input
+                required
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            </Label>
+            <Button disabled={change.isPending}>
+              {t(
+                operation === 'add'
+                  ? 'users:confirmCredit'
+                  : 'users:confirmDebit'
+              )}
+            </Button>
+          </form>
+          <div className='space-y-2'>
+            {history.data?.items.map((row) => (
+              <div key={row.id} className='border-t pt-2 text-sm'>
+                <b>{row.amount.toFixed(6)} USD</b> · {row.reason}
+                <p className='text-xs text-muted-foreground'>
+                  {row.created_at}
+                </p>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+      <div className='mt-4 flex items-center gap-3'>
+        <Button
+          variant='outline'
+          disabled={page === 0}
+          onClick={() => setPage(page - 1)}
+        >
+          {t('users:previous')}
+        </Button>
+        <span className='text-sm'>
+          {t('users:pagination', {
+            page: page + 1,
+            pages: Math.max(1, Math.ceil(rows.length / 50)),
+            count: rows.length,
+          })}
+        </span>
+        <Button
+          variant='outline'
+          disabled={(page + 1) * 50 >= rows.length}
+          onClick={() => setPage(page + 1)}
+        >
+          {t('users:next')}
+        </Button>
+      </div>
       <ConfirmDialog
-        open={!!del}
-        onOpenChange={() => setDel(null)}
-        title={`删除 ${del?.username}`}
-        desc='删除后该用户所有会话立即失效。不能删除最后一个管理员，也不能删除自己。'
-        confirmText='删除'
-        cancelBtnText='取消'
+        open={!!remove}
+        onOpenChange={(v) => !v && setRemove(null)}
+        title={t('users:deleteUser')}
+        desc={t('users:deleteHelp')}
+        confirmText={t('users:delete')}
         destructive
         handleConfirm={() => {
-          if (!del) return
-          api(`/api/panel/users/${encodeURIComponent(del.id)}`, {
-            method: 'DELETE',
-          })
+          if (!remove) return
+          void api('/api/panel/users/' + remove.id, { method: 'DELETE' })
             .then(() => {
-              toast.success('已删除')
-              setDel(null)
-              return refresh()
+              setRemove(null)
+              void qc.invalidateQueries({ queryKey: ['panel'] })
             })
             .catch((e: Error) => toast.error(e.message))
         }}
       />
     </PageHeader>
-  )
-}
-
-function CreateUserDialog({
-  open,
-  onOpenChange,
-  onDone,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onDone: () => Promise<unknown>
-}) {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [role, setRole] = useState<PanelRole>('user')
-  const [quota, setQuota] = useState(0)
-  const [enabled, setEnabled] = useState(true)
-  const pwErr = passwordError(password, confirm)
-
-  const reset = () => {
-    setUsername('')
-    setPassword('')
-    setConfirm('')
-    setRole('user')
-    setQuota(0)
-    setEnabled(true)
-  }
-
-  const create = useMutation({
-    mutationFn: () =>
-      api('/api/panel/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          username: username.trim(),
-          password,
-          role,
-          enabled,
-          vm_create_quota: quota,
-        }),
-      }),
-    onSuccess: async () => {
-      toast.success('已创建')
-      reset()
-      onOpenChange(false)
-      await onDone()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) reset()
-        onOpenChange(next)
-      }}
-    >
-      <DialogContent>
-        <form
-          className='space-y-4'
-          onSubmit={(e) => {
-            e.preventDefault()
-            create.mutate()
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>新建用户</DialogTitle>
-            <DialogDescription>
-              用户名 2–32 位，字母开头，仅字母数字 . _ -
-            </DialogDescription>
-          </DialogHeader>
-          <Field id='new-username' label='用户名'>
-            <Input
-              id='new-username'
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete='off'
-            />
-          </Field>
-          <PasswordFields
-            password={password}
-            setPassword={setPassword}
-            confirm={confirm}
-            setConfirm={setConfirm}
-            error={pwErr}
-          />
-          <RoleFields
-            role={role}
-            setRole={setRole}
-            enabled={enabled}
-            setEnabled={setEnabled}
-            quota={quota}
-            setQuota={setQuota}
-          />
-          <DialogFooter>
-            <Button
-              type='submit'
-              disabled={
-                !username.trim() ||
-                !password ||
-                password !== confirm ||
-                !!pwErr ||
-                create.isPending
-              }
-              loading={create.isPending}
-            >
-              创建
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function EditUserDialog({
-  user,
-  isSelf,
-  onClose,
-  onDone,
-}: {
-  user: PanelUser | null
-  isSelf: boolean
-  onClose: () => void
-  onDone: () => Promise<unknown>
-}) {
-  // Keyed by user id so the draft resets whenever a different row opens.
-  return (
-    <Dialog open={!!user} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent>
-        {user ? (
-          <EditUserForm
-            key={user.id}
-            user={user}
-            isSelf={isSelf}
-            onClose={onClose}
-            onDone={onDone}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function EditUserForm({
-  user,
-  isSelf,
-  onClose,
-  onDone,
-}: {
-  user: PanelUser
-  isSelf: boolean
-  onClose: () => void
-  onDone: () => Promise<unknown>
-}) {
-  const [role, setRole] = useState<PanelRole>(user.role)
-  const [enabled, setEnabled] = useState(user.enabled !== false)
-  const [quota, setQuota] = useState(user.vm_create_quota ?? 0)
-
-  const patch = useMutation({
-    mutationFn: () =>
-      api(`/api/panel/users/${encodeURIComponent(user.id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role, enabled, vm_create_quota: quota }),
-      }),
-    onSuccess: async () => {
-      toast.success('已更新')
-      onClose()
-      await onDone()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  return (
-    <form
-      className='space-y-4'
-      onSubmit={(e) => {
-        e.preventDefault()
-        patch.mutate()
-      }}
-    >
-      <DialogHeader>
-        <DialogTitle>编辑 {user.username}</DialogTitle>
-      </DialogHeader>
-      <RoleFields
-        role={role}
-        setRole={setRole}
-        enabled={enabled}
-        setEnabled={setEnabled}
-        quota={quota}
-        setQuota={setQuota}
-        lockSelf={isSelf}
-      />
-      <DialogFooter>
-        <Button
-          type='submit'
-          disabled={patch.isPending}
-          loading={patch.isPending}
-        >
-          保存
-        </Button>
-      </DialogFooter>
-    </form>
-  )
-}
-
-function PasswordDialog({
-  user,
-  isSelf,
-  onClose,
-  onDone,
-}: {
-  user: PanelUser | null
-  isSelf: boolean
-  onClose: () => void
-  onDone: () => Promise<unknown>
-}) {
-  return (
-    <Dialog open={!!user} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent>
-        {user ? (
-          <PasswordForm
-            key={user.id}
-            user={user}
-            isSelf={isSelf}
-            onClose={onClose}
-            onDone={onDone}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function PasswordForm({
-  user,
-  isSelf,
-  onClose,
-  onDone,
-}: {
-  user: PanelUser
-  isSelf: boolean
-  onClose: () => void
-  onDone: () => Promise<unknown>
-}) {
-  const [password, setPassword] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const pwErr = passwordError(password, confirm)
-
-  const save = useMutation({
-    mutationFn: () =>
-      api(`/api/panel/users/${encodeURIComponent(user.id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ password }),
-      }),
-    onSuccess: async () => {
-      toast.success(
-        isSelf
-          ? '密码已修改，其它设备的会话已退出'
-          : '密码已修改，该用户需重新登录'
-      )
-      onClose()
-      await onDone()
-    },
-    onError: (error: Error) => toast.error(error.message),
-  })
-
-  return (
-    <form
-      className='space-y-4'
-      onSubmit={(e) => {
-        e.preventDefault()
-        save.mutate()
-      }}
-    >
-      <DialogHeader>
-        <DialogTitle>修改密码 · {user.username}</DialogTitle>
-        <DialogDescription>
-          {isSelf
-            ? '保存后当前会话保留，其它设备上的登录会失效。'
-            : '保存后该用户所有已登录会话立即失效。'}
-        </DialogDescription>
-      </DialogHeader>
-      <PasswordFields
-        password={password}
-        setPassword={setPassword}
-        confirm={confirm}
-        setConfirm={setConfirm}
-        error={pwErr}
-        newLabel='新密码'
-      />
-      <DialogFooter>
-        <Button type='button' variant='outline' onClick={onClose}>
-          取消
-        </Button>
-        <Button
-          type='submit'
-          disabled={
-            !password || password !== confirm || !!pwErr || save.isPending
-          }
-          loading={save.isPending}
-        >
-          保存密码
-        </Button>
-      </DialogFooter>
-    </form>
-  )
-}
-
-function Field({
-  id,
-  label,
-  children,
-}: {
-  id?: string
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className='space-y-1.5'>
-      <Label htmlFor={id}>{label}</Label>
-      {children}
-    </div>
-  )
-}
-
-function PasswordFields({
-  password,
-  setPassword,
-  confirm,
-  setConfirm,
-  error,
-  newLabel = '密码',
-}: {
-  password: string
-  setPassword: (v: string) => void
-  confirm: string
-  setConfirm: (v: string) => void
-  error: string
-  newLabel?: string
-}) {
-  return (
-    <>
-      <Field id='pw-new' label={newLabel}>
-        <PasswordInput
-          id='pw-new'
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoComplete='new-password'
-          placeholder={`${PASSWORD_MIN}–${PASSWORD_MAX} 位`}
-          aria-invalid={!!error}
-          aria-describedby={error ? 'pw-error' : undefined}
-        />
-      </Field>
-      <Field id='pw-confirm' label='确认密码'>
-        <PasswordInput
-          id='pw-confirm'
-          value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
-          autoComplete='new-password'
-          aria-invalid={!!error}
-          aria-describedby={error ? 'pw-error' : undefined}
-        />
-      </Field>
-      {error ? (
-        <p id='pw-error' role='alert' className='text-xs text-destructive'>
-          {error}
-        </p>
-      ) : null}
-    </>
-  )
-}
-
-function RoleFields({
-  role,
-  setRole,
-  enabled,
-  setEnabled,
-  quota,
-  setQuota,
-  lockSelf,
-}: {
-  role: PanelRole
-  setRole: (role: PanelRole) => void
-  enabled: boolean
-  setEnabled: (on: boolean) => void
-  quota: number
-  setQuota: (n: number) => void
-  lockSelf?: boolean
-}) {
-  return (
-    <>
-      <Field id='user-role' label='角色'>
-        <Select
-          value={role}
-          onValueChange={(v) => setRole(v as PanelRole)}
-          disabled={lockSelf}
-        >
-          <SelectTrigger id='user-role' className='w-full'>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {(Object.keys(ROLE_LABELS) as PanelRole[]).map((r) => (
-              <SelectItem key={r} value={r}>
-                {ROLE_LABELS[r]} ({r})
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-      <Field id='user-quota' label='自建 VM 配额 (0–100)'>
-        <Input
-          id='user-quota'
-          type='number'
-          min={0}
-          max={100}
-          value={quota}
-          onChange={(e) =>
-            setQuota(Math.max(0, Math.min(100, Number(e.target.value) || 0)))
-          }
-        />
-      </Field>
-      <div className='flex items-center justify-between'>
-        <Label htmlFor='user-enabled'>启用</Label>
-        <Switch
-          id='user-enabled'
-          checked={enabled}
-          onCheckedChange={setEnabled}
-          disabled={lockSelf}
-        />
-      </div>
-      {lockSelf ? (
-        <p className='text-xs text-muted-foreground'>
-          不能修改自己的角色或停用自己 ——
-          保存后会立刻失去访问权限，且无法自助恢复。
-        </p>
-      ) : null}
-    </>
   )
 }

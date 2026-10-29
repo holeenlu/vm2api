@@ -1,3 +1,4 @@
+import { RelayBilling } from '../../admin/relay-billing.mjs'
 /**
  * redeem_codes repository — balance top-up codes (sub2api baseline shape).
  * Redeem is transactional: code flips unused→used and the user's balance is
@@ -83,7 +84,12 @@ export class RedeemCodesRepo {
     return withTransaction(this.db, () => {
       const info = this._markUsed.run(userId, new Date().toISOString(), rec.id)
       if (!info.changes) return { ok: false, error: 'code_used' }
-      this.users.addBalance(userId, rec.value)
+      new RelayBilling(this.db).adjust(
+        userId,
+        { amount: rec.value, operation: 'add', reason: '充值码兑换', idempotency_key: 'redeem-code:' + rec.id },
+        userId,
+        'redeem',
+      )
       return { ok: true, code: rowToRec(this._get.get(rec.id)) }
     })
   }

@@ -94,6 +94,65 @@ test('updateWindow persists session window without touching cooldowns', () => {
   }
 })
 
+test('account error protection state round trips through CAS revisions', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-runtime-protection-'))
+  const db = createDatabase({ dataDir: dir })
+  try {
+    const columns = new Set(
+      db
+        .prepare('PRAGMA table_info(account_runtime)')
+        .all()
+        .map((row) => row.name),
+    )
+    assert.equal(columns.has('protection_state_json'), true)
+    assert.equal(columns.has('protection_generation'), true)
+
+    const repo = new AccountRuntimeRepo(db)
+    repo.upsert({ account_id: 'protected-1', vm_id: 'vm-protected', status: 'ready' })
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: null, generation: 0 })
+
+    const frozen = {
+      policyFingerprint: 'policy-a',
+      credentialGeneration: 2,
+      windowStartedAt: 10,
+      count: 12,
+      frozenUntil: 20,
+      matchedRules: [{ id: 'auth-expired', name: '凭据失效' }],
+      generation: 1,
+      probePending: true,
+      lastProbeAt: 0,
+    }
+    assert.equal(repo.compareAndSwapProtectionState('protected-1', { expectedGeneration: 0, state: frozen }), 1)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: frozen, generation: 1 })
+    assert.deepEqual(repo.get('protected-1').protection_state, frozen)
+    assert.equal(repo.get('protected-1').protection_generation, 1)
+
+    // A stale scheduler write must not revert a newer CAS state merely
+    // because it also writes the shared runtime row.
+    repo.upsert({
+      ...repo.get('protected-1'),
+      protection_state: { count: 1 },
+      protection_generation: 0,
+    })
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: frozen, generation: 1 })
+
+    assert.equal(repo.compareAndSwapProtectionState('protected-1', { expectedGeneration: 0, state: {} }), null)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: frozen, generation: 1 })
+
+    const cleared = { ...frozen, count: 0, frozenUntil: 0, probePending: false, generation: 2 }
+    assert.equal(repo.clearProtectionState('protected-1', { expectedGeneration: 1, state: cleared }), 2)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: cleared, generation: 2 })
+    assert.equal(repo.clearProtectionState('protected-1', { expectedGeneration: 1 }), null)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: cleared, generation: 2 })
+
+    assert.equal(repo.clearProtectionState('protected-1', { expectedGeneration: 2 }), 3)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: null, generation: 3 })
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('clearAuthCooldown drops 401 leftover and keeps quota cools', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-runtime-auth-'))
   const db = createDatabase({ dataDir: dir })
@@ -184,7 +243,31 @@ test('request attempt ledger records final state and commit boundary', () => {
     assert.equal(attempts[0].action, 'continue-and-cooldown')
     assert.equal(attempts[1].terminal_state, 'verified')
     assert.equal(attempts[1].downstream_committed, true)
+    assert.equal(attempts[1].send_state, 'sent')
     assert.deepEqual(attempts[1].usage, { input_tokens: 2, output_tokens: 3 })
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('request attempt send state is monotonic across duplicate completion writers', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-attempt-send-state-'))
+  const db = createDatabase({ dataDir: dir })
+  try {
+    const repo = new RequestAttemptsRepo(db)
+    const started = repo.begin({ requestId: 'req-send-state', attemptNo: 1, vmId: 'vm-01' })
+    assert.equal(started.send_state, 'not_sent')
+
+    assert.equal(repo.complete('req-send-state', 1, { sendState: 'ambiguous' }).send_state, 'ambiguous')
+    assert.equal(repo.complete('req-send-state', 1, { sendState: 'not_sent' }).send_state, 'ambiguous')
+    const sent = repo.complete('req-send-state', 1, { sendState: 'not_sent', downstreamCommitted: true })
+    assert.equal(sent.send_state, 'sent')
+    assert.equal(sent.downstream_committed, true)
+
+    const duplicate = repo.complete('req-send-state', 1, { sendState: 'ambiguous', downstreamCommitted: false })
+    assert.equal(duplicate.send_state, 'sent')
+    assert.equal(duplicate.downstream_committed, true)
   } finally {
     db.close()
     fs.rmSync(dir, { recursive: true, force: true })

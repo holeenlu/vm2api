@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { api } from '@/lib/api'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
 import { Button } from '@/components/ui/button'
@@ -58,7 +60,12 @@ function windowRow(label: string, w: UsageWindow): string {
   const reset = fmtResetClock(w.resets_at)
   const left = resetCountdown(w.resets_at)
   const tail = reset
-    ? `  ${DIM}重置 ${reset}${left ? `（${left}）` : ''}${RESET}`
+    ? tVm('vm:vmShellCard.reset', {
+        DIM: DIM,
+        reset: reset,
+        value1: left ? `（${left}）` : '',
+        RESET: RESET,
+      })
     : ''
   const status =
     w.status && w.status !== 'allowed' ? `  ${RED}${w.status}${RESET}` : ''
@@ -67,8 +74,13 @@ function windowRow(label: string, w: UsageWindow): string {
 
 function usageLines(p: UsageProbe): string[] {
   const meta = [
-    p.account_tier ? `层级 ${p.account_tier}` : null,
-    `来源 ${probeSourceLabel(p.source)}${p.via ? ` · ${p.via}` : ''}`,
+    p.account_tier
+      ? tVm('vm:vmShellCard.tier', { account_tier: p.account_tier })
+      : null,
+    tVm('vm:vmShellCard.source', {
+      value1: probeSourceLabel(p.source),
+      value2: p.via ? ` · ${p.via}` : '',
+    }),
     fmtResetClock(p.probed_at),
   ]
     .filter(Boolean)
@@ -82,15 +94,31 @@ function usageLines(p: UsageProbe): string[] {
   if (p.seven_day_sonnet) lines.push(windowRow('Sonnet', p.seven_day_sonnet))
   if (p.extra_usage?.is_enabled) lines.push(windowRow('Extra', p.extra_usage))
   if (p.ok === false || p.error) {
-    lines.push(`${RED}✗ ${p.error || '探测失败'}${RESET}`)
+    lines.push(
+      tVm('vm:vmShellCard.summary', {
+        RED: RED,
+        value1: p.error || tVm('vm:probeStatus.probeFailed'),
+        RESET: RESET,
+      })
+    )
   }
   return lines
 }
 
 function stepText(s: Step | undefined): string {
   if (!s) return `${DIM}—${RESET}`
-  if (s.skipped) return `${DIM}跳过（${s.reason || '—'}）${RESET}`
-  if (s.ok === false) return `${RED}✗ ${s.error || s.reason || '失败'}${RESET}`
+  if (s.skipped)
+    return tVm('vm:vmShellCard.skipped', {
+      DIM: DIM,
+      value1: s.reason || '—',
+      RESET: RESET,
+    })
+  if (s.ok === false)
+    return tVm('vm:vmShellCard.summary', {
+      RED: RED,
+      value1: s.error || s.reason || tVm('vm:officialCcCard.failed'),
+      RESET: RESET,
+    })
   return `${GREEN}✓${RESET}${s.reason ? ` ${DIM}${s.reason}${RESET}` : ''}`
 }
 
@@ -116,6 +144,8 @@ export function VmShellCard({
   vm: Vm
   onChanged: () => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const [open, setOpen] = useState(false)
   const id = vm.id
   const container = String(
@@ -128,7 +158,7 @@ export function VmShellCard({
     () => [
       {
         name: '/usage',
-        desc: '查看用量（同「探测」）',
+        desc: tVm('vm:vmShellCard.viewUsageSameAsProbe'),
         run: async () => {
           const probe = await postVm<UsageProbe>(id, '/probe')
           onChanged()
@@ -137,7 +167,7 @@ export function VmShellCard({
       },
       {
         name: '/wrap',
-        desc: '重装 wrap-cli 并重启 kernel',
+        desc: tVm('vm:vmShellCard.reinstallWrapCliAndRestartKernel'),
         run: async () => {
           const r = await postVm<{
             wrap?: {
@@ -160,7 +190,7 @@ export function VmShellCard({
       },
       {
         name: '/reload',
-        desc: '重载 worker',
+        desc: tVm('vm:detailOpsTab.reloadWorker'),
         run: async () => {
           const r = await postVm<{ reload?: { rust?: Step } }>(id, '/reload')
           onChanged()
@@ -171,13 +201,15 @@ export function VmShellCard({
         },
       },
     ],
-    [id, onChanged]
+    [id, onChanged, tVm]
   )
 
   return (
     <Card>
       <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-        <CardTitle className='text-sm'>终端</CardTitle>
+        <CardTitle className='text-sm'>
+          <Trans ns='vm' i18nKey='vmShellCard.terminal' />
+        </CardTitle>
         {open ? (
           <Button
             size='sm'
@@ -185,7 +217,7 @@ export function VmShellCard({
             className='h-7'
             onClick={() => setOpen(false)}
           >
-            关闭
+            <Trans ns='vm' i18nKey='detailCircuitField.off' />
           </Button>
         ) : null}
       </CardHeader>
@@ -201,12 +233,18 @@ export function VmShellCard({
         ) : (
           <div className='flex flex-wrap items-center gap-3'>
             <Button size='sm' variant='outline' onClick={() => setOpen(true)}>
-              打开终端
+              <Trans ns='vm' i18nKey='vmShellCard.openTerminal' />
             </Button>
             <span className='text-xs text-muted-foreground'>
-              进入 <span className='font-mono'>{container || id}</span>{' '}
-              容器，启动时打印系统特征；空行输入{' '}
-              <span className='font-mono'>/help</span> 查看快捷指令
+              <Trans
+                ns='vm'
+                i18nKey='vmShellCard.openTheContainerSystemIdentityIsPrintedOnStartup'
+                values={{ value: container || id }}
+                components={{
+                  part0: <span className='font-mono' />,
+                  part1: <span className='font-mono' />,
+                }}
+              />
             </span>
           </div>
         )}
