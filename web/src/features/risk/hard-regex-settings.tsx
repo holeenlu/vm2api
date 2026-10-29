@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type { JevInterceptConfig, PolicyRule } from '@/types/panel-routing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -14,11 +16,21 @@ import { Group, ToggleItem, ToggleList } from './blocks'
 import { jevInterceptQueryOptions } from './queries'
 
 const RULE_LABELS: Record<string, string> = {
-  nsfw: '色情',
-  distill: '蒸馏',
-  crack: '破解',
-  jailbreak: '破限',
-  custom: '自定义',
+  get nsfw() {
+    return translate('risk:nsfw')
+  },
+  get distill() {
+    return translate('risk:distillation')
+  },
+  get crack() {
+    return translate('risk:cracking')
+  },
+  get jailbreak() {
+    return translate('risk:jailbreak')
+  },
+  get custom() {
+    return translate('risk:custom')
+  },
 }
 
 function linesOf(text: string) {
@@ -86,6 +98,8 @@ export function HardRegexSettings({
   focusRule: string | null
   onDirtyChange: (dirty: boolean) => void
 }) {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const q = useQuery(jevInterceptQueryOptions())
   const [draft, setDraft] = useServerDraft(q.data, draftOf, draftDiffers)
@@ -106,7 +120,7 @@ export function HardRegexSettings({
 
   const save = useMutation({
     mutationFn: () => {
-      if (!draft) throw new Error('没有可保存的配置')
+      if (!draft) throw new Error(translate('risk:noConfigToSave'))
       const body: Record<string, unknown> = {
         hard_regex_enabled: draft.hard_regex_enabled,
         openai_platform_enabled: draft.openai_platform_enabled,
@@ -126,7 +140,7 @@ export function HardRegexSettings({
       })
     },
     onSuccess: (data) => {
-      toast.success('已保存硬正则关')
+      toast.success(translate('risk:hardRegexSaved'))
       setDraft(draftOf(data))
       qc.setQueryData(jevInterceptQueryOptions().queryKey, data)
     },
@@ -153,9 +167,12 @@ export function HardRegexSettings({
 
   return (
     <div className='space-y-8 p-4'>
-      <Group title='何时拦截'>
+      <Group title={translate('risk:whenToBlock')}>
         <ToggleList>
-          <ToggleItem label='硬正则' desc='命中后 403，不 hop'>
+          <ToggleItem
+            label={translate('risk:hardRegex')}
+            desc={translate('risk:regexBlockHint')}
+          >
             <Switch
               checked={draft.hard_regex_enabled}
               onCheckedChange={(v) =>
@@ -164,8 +181,8 @@ export function HardRegexSettings({
             />
           </ToggleItem>
           <ToggleItem
-            label='OpenAI 平台'
-            desc='没设账号范围时，GPT 默认不过关卡。设了范围后，只有命中的平台和套餐进关卡'
+            label={translate('risk:openaiPlatform')}
+            desc={translate('risk:openaiScopeHint')}
           >
             <Switch
               checked={draft.openai_platform_enabled}
@@ -174,15 +191,18 @@ export function HardRegexSettings({
               }
             />
           </ToggleItem>
-          <ToggleItem label='展开 base64' desc='长文本还原后再扫'>
+          <ToggleItem
+            label={translate('risk:expandBase64')}
+            desc={translate('risk:expandBase64Hint')}
+          >
             <Switch
               checked={draft.expand_base64}
               onCheckedChange={(v) => setDraft({ ...draft, expand_base64: v })}
             />
           </ToggleItem>
           <ToggleItem
-            label='去掉 reminder'
-            desc='提醒块不参与判断，决策模型同样适用'
+            label={translate('risk:stripReminders')}
+            desc={translate('risk:stripRemindersHint')}
           >
             <Switch
               checked={draft.strip_reminders}
@@ -192,17 +212,22 @@ export function HardRegexSettings({
             />
           </ToggleItem>
           <ToggleItem
-            label='distill 类别'
-            desc='跟随「蒸馏」关的总开关，OpenAI 平台模型不扫'
+            label={translate('risk:distillCategory')}
+            desc={translate('risk:distillCategoryHint')}
           >
-            <span className='text-xs text-muted-foreground'>由蒸馏关控制</span>
+            <span className='text-xs text-muted-foreground'>
+              {translate('risk:controlledByDistillation')}
+            </span>
           </ToggleItem>
         </ToggleList>
       </Group>
 
       <Group
-        title='规则'
-        hint={`${enabledCount} / ${draft.rules.length} 条启用。误伤多的规则先停用，再改窄。`}
+        title={translate('risk:rules')}
+        hint={translate('risk:enabledRulesHint', {
+          p0: enabledCount,
+          p1: draft.rules.length,
+        })}
         action={
           <div className='flex gap-2'>
             <Button
@@ -220,7 +245,7 @@ export function HardRegexSettings({
                 })
               }
             >
-              加一条
+              {translate('risk:addRule')}
             </Button>
             <Button
               type='button'
@@ -231,7 +256,7 @@ export function HardRegexSettings({
                 setDraft({ ...draft, rules: q.data?.builtin_rules || [] })
               }
             >
-              恢复内置
+              {translate('risk:restoreBuiltIn')}
             </Button>
           </div>
         }
@@ -253,10 +278,10 @@ export function HardRegexSettings({
               <Switch
                 checked={rule.enabled !== false}
                 onCheckedChange={(enabled) => setRule(index, { enabled })}
-                aria-label='启用这条规则'
+                aria-label={translate('risk:enableRule')}
               />
               <select
-                aria-label='类别'
+                aria-label={translate('risk:category')}
                 className='h-8 shrink-0 rounded-md border bg-background px-2 text-xs'
                 value={rule.category || 'custom'}
                 onChange={(e) => setRule(index, { category: e.target.value })}
@@ -268,7 +293,7 @@ export function HardRegexSettings({
                 ))}
               </select>
               <Input
-                aria-label='正则'
+                aria-label={translate('risk:regex')}
                 className='h-8 font-mono text-xs'
                 value={rule.source}
                 onChange={(e) => setRule(index, { source: e.target.value })}
@@ -285,26 +310,29 @@ export function HardRegexSettings({
                   })
                 }
               >
-                删除
+                {translate('risk:delete')}
               </Button>
             </li>
           ))}
           {draft.rules.length ? null : (
             <li className='px-3 py-6 text-sm text-muted-foreground'>
-              没有规则。点「恢复内置」拿回出厂列表。
+              {translate('risk:noRules')}
             </li>
           )}
         </ul>
       </Group>
 
-      <Group title='附加正则' hint='一行一条，按「自定义」类别处理。'>
+      <Group
+        title={translate('risk:extraRegex')}
+        hint={translate('risk:extraRegexCategoryHint')}
+      >
         <Textarea
-          aria-label='附加正则'
+          aria-label={translate('risk:extraRegex')}
           rows={5}
           className='font-mono text-xs'
           value={draft.patterns}
           onChange={(e) => setDraft({ ...draft, patterns: e.target.value })}
-          placeholder='一行一条'
+          placeholder={translate('risk:onePerLine')}
         />
       </Group>
 

@@ -31,12 +31,45 @@ export function totalTokens(row = {}) {
   )
 }
 
-/** Rows a panel `user` owns: own user_id, one of their live keys, or served by a slot they owned at the time. */
+export const ADMIN_DOMAIN_IDS_SQL = `
+  WITH RECURSIVE managed(id, role) AS (
+    SELECT id, role FROM users WHERE id = ? AND deleted_at IS NULL
+    UNION ALL
+    SELECT u.id, u.role FROM users u JOIN managed m ON u.parent_user_id = m.id
+    WHERE u.deleted_at IS NULL
+  ) SELECT id FROM managed WHERE role IN ('admin', 'user')
+`
+
+/** Customer visibility is the immutable authenticated caller snapshot. */
 export function ownerPred(ownerUserId) {
-  const id = String(ownerUserId || '').trim()
-  if (!id) return { sql: '', params: [] }
-  return {
-    sql: `(user_id = ? OR IFNULL(api_key_id, '') IN (SELECT id FROM api_keys WHERE user_id = ? AND deleted_at IS NULL) OR vm_owner_user_id = ?)`,
-    params: [id, id, id],
+  if (ownerUserId?.type === 'panel_key_creator') {
+    const id = String(ownerUserId.creatorId || '').trim()
+    return id
+      ? { sql: 'api_key_id IN (SELECT id FROM api_keys WHERE created_by_user_id = ?)', params: [id] }
+      : { sql: '1 = 0', params: [] }
   }
+  if (ownerUserId?.type === 'panel_admin_scope') {
+    const id = String(ownerUserId.adminId || '').trim()
+    const root = String(ownerUserId.scopeRootId || id).trim()
+    return id
+      ? {
+          sql: `(user_id IN (${ADMIN_DOMAIN_IDS_SQL}) OR api_key_id IN (
+            SELECT id FROM api_keys WHERE created_by_user_id IN (${ADMIN_DOMAIN_IDS_SQL})
+          ))`,
+          params: [root, root],
+        }
+      : { sql: '1 = 0', params: [] }
+  }
+  // Wallets/subscriptions have user_id, but no api_key_id. Keep their domain
+  // predicate separate from usage attributed to a key's creator.
+  if (ownerUserId?.type === 'panel_users') {
+    const root = String(ownerUserId.scopeRootId || '').trim()
+    if (!root) return { sql: '1 = 0', params: [] }
+    const sql = `user_id IN (${ADMIN_DOMAIN_IDS_SQL})`
+    return ownerUserId.userId
+      ? { sql: `(${sql} AND user_id = ?)`, params: [root, ownerUserId.userId] }
+      : { sql, params: [root] }
+  }
+  const id = String(ownerUserId || '').trim()
+  return id ? { sql: 'user_id = ?', params: [id] } : { sql: '', params: [] }
 }

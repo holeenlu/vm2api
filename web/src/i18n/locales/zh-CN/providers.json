@@ -1,0 +1,35 @@
+{
+  "title": "服务提供商",
+  "description": "查看上游账号、授权状态、额度窗口、用量与调度配置。",
+  "activeTotal": "活跃 / 总数",
+  "nearLimit": "接近 7D 限额",
+  "totalCost": "累计消耗",
+  "searchPlaceholder": "搜索账号、供应商或服务类型",
+  "unboundVm": "未绑定 VM",
+  "platformResource": "平台资源",
+  "recoveringSoon": "即将恢复",
+  "daysHoursLater": "{{days}}天{{hours}}小时后",
+  "hoursLater": "{{hours}}小时后",
+  "concurrency": "并发 {{value}}",
+  "rpm": " · RPM {{value}}",
+  "viewVm": "查看 VM",
+  "empty": "暂无服务提供商数据。",
+  "columns": {
+    "provider": "服务提供商",
+    "vendor": "供应商",
+    "status": "状态 / 调度",
+    "fiveHour": "5H",
+    "sevenDay": "7D",
+    "totalCost": "累计消耗",
+    "tokens": "Token",
+    "actions": "操作"
+  },
+  "status": {
+    "provisioning": "预配中",
+    "paused": "已暂停",
+    "archived": "已归档",
+    "schedulePaused": "已暂停调度",
+    "waitingAuth": "等待授权",
+    "enabled": "已启用"
+  }
+}

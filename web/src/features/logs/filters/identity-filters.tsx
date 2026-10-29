@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { UsageLogFilterOptions } from '@/types/panel-usage-logs'
+import { useTranslation } from 'react-i18next'
 import {
   Command,
   CommandEmpty,
@@ -11,18 +12,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { SearchSelect } from '@/components/search-select'
 import { usageLogSessionSuggestionsQueryOptions } from '../queries'
 import type { LogsFilterState } from '../search'
-import { FilterCombobox } from './filter-combobox'
-
-const ALL = '__all__'
 
 function SessionIdInput({
   value,
@@ -31,6 +23,8 @@ function SessionIdInput({
   value: string | undefined
   onChange: (value: string | undefined) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const [open, setOpen] = useState(false)
   const [term, setTerm] = useState('')
   const draft = value ?? ''
@@ -49,7 +43,7 @@ function SessionIdInput({
       <PopoverAnchor asChild>
         <Input
           value={draft}
-          placeholder='搜索 Session ID...'
+          placeholder={translate('logs:searchSessionId')}
           onFocus={() => setOpen(true)}
           onChange={(event) => {
             onChange(event.target.value.trim() || undefined)
@@ -66,10 +60,12 @@ function SessionIdInput({
           <CommandList className='max-h-[250px] overflow-y-auto'>
             {suggestions.isFetching && !suggestions.data ? (
               <div className='p-2 text-center text-sm text-muted-foreground'>
-                加载中...
+                {translate('logs:loading')}
               </div>
             ) : (
-              <CommandEmpty>未找到匹配的 Session ID</CommandEmpty>
+              <CommandEmpty>
+                {translate('logs:noMatchingSessions')}
+              </CommandEmpty>
             )}
             <CommandGroup>
               {(suggestions.data ?? []).map((id) => (
@@ -108,6 +104,8 @@ export function IdentityFilters({
   optionsLoading: boolean
   onChange: (filters: LogsFilterState) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const keys = (options?.keys ?? []).filter(
     (key) => !filters.userId || key.userId === filters.userId
   )
@@ -115,13 +113,13 @@ export function IdentityFilters({
     <div className='grid gap-4 sm:grid-cols-2'>
       {isAdmin ? (
         <div className='space-y-2'>
-          <Label>用户</Label>
-          <FilterCombobox
+          <Label>{translate('logs:user')}</Label>
+          <SearchSelect
             value={filters.userId}
             options={options?.users ?? []}
-            allLabel='全部用户'
-            searchPlaceholder='搜索用户...'
-            emptyLabel='未找到匹配的用户'
+            allLabel={translate('logs:allUsers')}
+            searchPlaceholder={translate('logs:searchUsers')}
+            emptyLabel={translate('logs:noMatchingUsers')}
             loading={optionsLoading}
             onChange={(userId) =>
               onChange({ ...filters, userId, keyId: undefined })
@@ -130,45 +128,33 @@ export function IdentityFilters({
         </div>
       ) : null}
       <div className='space-y-2'>
-        <Label>API 密钥</Label>
-        <Select
-          value={filters.keyId ?? ALL}
-          disabled={optionsLoading}
-          onValueChange={(value) =>
-            onChange({ ...filters, keyId: value === ALL ? undefined : value })
-          }
-        >
-          <SelectTrigger className='w-full'>
-            <SelectValue
-              placeholder={optionsLoading ? '加载中...' : '全部密钥'}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL}>全部密钥</SelectItem>
-            {keys.map((key) => (
-              <SelectItem key={key.id} value={key.id}>
-                {key.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <Label>{translate('logs:apiKey')}</Label>
+        <SearchSelect
+          value={filters.keyId}
+          options={keys}
+          allLabel={translate('logs:allKeys')}
+          label={translate('logs:apiKey')}
+          searchPlaceholder={translate('logs:searchKeys')}
+          loading={optionsLoading}
+          onChange={(keyId) => onChange({ ...filters, keyId })}
+        />
       </div>
       {isAdmin ? (
         <div className='space-y-2'>
-          <Label>供应商</Label>
-          <FilterCombobox
+          <Label>{translate('logs:provider')}</Label>
+          <SearchSelect
             value={filters.vmId}
             options={options?.vms ?? []}
-            allLabel='全部供应商'
-            searchPlaceholder='搜索供应商...'
-            emptyLabel='未找到匹配的供应商'
+            allLabel={translate('logs:allProviders')}
+            searchPlaceholder={translate('logs:searchProviders')}
+            emptyLabel={translate('logs:noMatchingProviders')}
             loading={optionsLoading}
             onChange={(vmId) => onChange({ ...filters, vmId })}
           />
         </div>
       ) : null}
       <div className='space-y-2'>
-        <Label>Session ID</Label>
+        <Label>{translate('logs:sessionId')}</Label>
         <SessionIdInput
           value={filters.sessionId}
           onChange={(sessionId) => onChange({ ...filters, sessionId })}

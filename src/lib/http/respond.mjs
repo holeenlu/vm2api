@@ -2,6 +2,8 @@
  * Shared HTTP helpers for protocol and panel. SSE headers flush immediately
  * and optionally disable Nagle so Claude Code subagent tokens are not delayed.
  */
+import * as zlib from 'node:zlib'
+import { promisify } from 'node:util'
 import { ErrorCode, ErrorType, makeError } from '../core/errors.mjs'
 import { CORS_ALLOW_HEADERS, corsHeadersForRequest } from './cors.mjs'
 
@@ -63,8 +65,103 @@ function collectBody(req, maxBytes) {
   })
 }
 
+const bodyDecoders = new Map(
+  [
+    ['gzip', zlib.gunzip],
+    ['deflate', zlib.inflate],
+    ['br', zlib.brotliDecompress],
+    ['zstd', zlib.zstdDecompress],
+  ]
+    .filter(([, decode]) => typeof decode === 'function')
+    .map(([name, decode]) => [name, promisify(decode)]),
+)
+
+// Node 22 can silently accept incomplete zstd frames. Check framing before
+// native decoding; leave block contents and checksums to zlib. Remove this
+// guard when all supported runtimes reject truncated frames themselves.
+// Format: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md
+function requireCompleteZstdFrames(buf) {
+  let offset = 0
+  const take = (size) => {
+    const start = offset
+    offset += size
+    if (offset > buf.length) throw new Error('Truncated zstd frame')
+    return start
+  }
+  if (!buf.length) throw new Error('Missing zstd frame')
+  while (offset < buf.length) {
+    const magic = buf.readUInt32LE(take(4))
+    if (magic >= 0x184d2a50 && magic <= 0x184d2a5f) {
+      take(buf.readUInt32LE(take(4)))
+      continue
+    }
+    if (magic !== 0xfd2fb528) throw new Error('Invalid zstd frame')
+    const descriptor = buf[take(1)]
+    if (descriptor & 8) throw new Error('Reserved zstd frame bit')
+    const singleSegment = (descriptor & 32) !== 0
+    const contentSizeFlag = descriptor >>> 6
+    take(singleSegment ? 0 : 1)
+    take([0, 1, 2, 4][descriptor & 3])
+    take(contentSizeFlag ? 2 ** contentSizeFlag : singleSegment ? 1 : 0)
+    let lastBlock = false
+    do {
+      const header = buf.readUIntLE(take(3), 3)
+      lastBlock = (header & 1) !== 0
+      const type = (header >>> 1) & 3
+      if (type === 3) throw new Error('Reserved zstd block type')
+      take(type === 1 ? 1 : header >>> 3)
+    } while (!lastBlock)
+    if (descriptor & 4) take(4)
+  }
+}
+
+async function decodeBody(buf, contentEncoding, maxBytes) {
+  const header = String(contentEncoding || '')
+    .trim()
+    .toLowerCase()
+  if (!header) return buf
+  const encodings = header.split(',').map((encoding) => encoding.trim())
+  for (const encoding of encodings) {
+    if (encoding !== 'identity' && !bodyDecoders.has(encoding)) {
+      throw makeError({
+        type: ErrorType.INVALID_REQUEST,
+        code: 'unsupported_content_encoding',
+        message: `Unsupported request Content-Encoding: ${encoding || '(empty)'}`,
+        status: 415,
+      })
+    }
+  }
+  // Content codings are applied in header order. Bound every decoded layer as
+  // well as the wire bytes so a small compressed body cannot bypass the limit.
+  for (const encoding of encodings.reverse()) {
+    if (encoding === 'identity') continue
+    try {
+      if (encoding === 'zstd') requireCompleteZstdFrames(buf)
+      buf = await bodyDecoders.get(encoding)(buf, { maxOutputLength: maxBytes })
+    } catch (error) {
+      if (error.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw makeError({
+          type: ErrorType.INVALID_REQUEST,
+          code: ErrorCode.BODY_TOO_LARGE,
+          message: `Decoded request body exceeds limit of ${maxBytes} bytes`,
+          status: 413,
+          details: { max_bytes: maxBytes },
+        })
+      }
+      throw makeError({
+        type: ErrorType.INVALID_REQUEST,
+        code: 'invalid_content_encoding',
+        message: `Request body could not be decoded as ${encoding}`,
+        status: 400,
+      })
+    }
+  }
+  return buf
+}
+
 export function readBody(req, maxBytes) {
-  return collectBody(req, maxBytes).then((buf) => {
+  return collectBody(req, maxBytes).then(async (encoded) => {
+    const buf = await decodeBody(encoded, req.headers?.['content-encoding'], maxBytes)
     const raw = buf.toString('utf8')
     if (!raw) return {}
     try {

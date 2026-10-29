@@ -3,7 +3,8 @@
  * `gateway-core` AccountSelector (`selection.rs`).
  *
  * Eligibility, then session affinity as a preferred account, then the
- * highest weight band. `smart` is the default strategy.
+ * highest weight band, then the lowest commercial group priority inside it.
+ * `smart` is the default strategy.
  */
 
 export const SMART_LOAD_WEIGHT = 1
@@ -23,6 +24,12 @@ function weightOf(candidate) {
   const weight = Number(candidate?.weight)
   if (!Number.isFinite(weight)) return 1
   return weight
+}
+
+/** Group-resource priority: lower runs first. Unknown sorts after any known value. */
+function groupPriorityOf(candidate) {
+  const priority = Number(candidate?.groupPriority)
+  return candidate?.groupPriority == null || !Number.isFinite(priority) ? Infinity : priority
 }
 
 function effectiveConcurrency(candidate, fallback) {
@@ -79,7 +86,7 @@ export function schedulingBlocker(candidate, context = {}) {
   return null
 }
 
-function preferredOutcome(candidates, context, highestWeight) {
+function preferredOutcome(candidates, context, highestWeight, bestGroupPriority) {
   const preferredId = context.preferredAccountId ? asId(context.preferredAccountId) : ''
   if (!preferredId) return { kind: 'not_requested', candidate: null, blocker: null }
   const candidate = candidates.find((item) => asId(item.id) === preferredId) || null
@@ -88,6 +95,9 @@ function preferredOutcome(candidates, context, highestWeight) {
   if (blocker) return { kind: 'blocked', candidate, blocker }
   if (!context.preferredOverridesWeight && weightOf(candidate) < highestWeight) {
     return { kind: 'blocked', candidate, blocker: 'lower_weight' }
+  }
+  if (!context.preferredOverridesWeight && groupPriorityOf(candidate) > bestGroupPriority) {
+    return { kind: 'blocked', candidate, blocker: 'lower_group_priority' }
   }
   return { kind: 'hit', candidate, blocker: null }
 }
@@ -152,11 +162,13 @@ export function selectOpenAIAccount(candidates, context = {}) {
   const eligible = list.filter((candidate) => !schedulingBlocker(candidate, context))
   if (!eligible.length) return null
   const highestWeight = eligible.reduce((max, candidate) => Math.max(max, weightOf(candidate)), -Infinity)
-  const preferred = preferredOutcome(list, context, highestWeight)
+  const weightBand = eligible.filter((candidate) => weightOf(candidate) === highestWeight)
+  const bestGroupPriority = weightBand.reduce((min, candidate) => Math.min(min, groupPriorityOf(candidate)), Infinity)
+  const preferred = preferredOutcome(list, context, highestWeight, bestGroupPriority)
   if (preferred.kind === 'hit') {
     return { candidate: preferred.candidate, preferred: 'hit', blocker: null }
   }
-  const band = eligible.filter((candidate) => weightOf(candidate) === highestWeight)
+  const band = weightBand.filter((candidate) => groupPriorityOf(candidate) === bestGroupPriority)
   const candidate = selectInBand(band, context)
   if (!candidate) return null
   return {

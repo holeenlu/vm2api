@@ -1,3 +1,5 @@
+import { i18n, t } from '@/i18n'
+
 /**
  * 时区工具。与 gateway `src/lib/core/timezone.mjs` 同一套判定：
  * 只接受 `Intl` 能解析的具名 IANA 时区，拒绝 `+09:00` 这类偏移量
@@ -21,7 +23,7 @@ export function zoneNowLabel(zone: unknown, now: number = Date.now()): string {
   const tz = validTimezone(zone)
   if (!tz) return ''
   try {
-    return new Intl.DateTimeFormat('zh-CN', {
+    return new Intl.DateTimeFormat(i18n.resolvedLanguage, {
       timeZone: tz,
       hour12: false,
       month: '2-digit',
@@ -36,7 +38,13 @@ export function zoneNowLabel(zone: unknown, now: number = Date.now()): string {
 
 /** 时区来源标签：手动钉住 / 跟随代理 / 创建时自动分配。 */
 export const TIMEZONE_SOURCE_LABELS: Record<string, string> = {
-  manual: '手动',
-  proxy_geo: '跟随代理',
-  auto: '自动',
+  get manual() {
+    return t('lib:timezone.manual')
+  },
+  get proxy_geo() {
+    return t('lib:timezone.proxy')
+  },
+  get auto() {
+    return t('lib:timezone.auto')
+  },
 }

@@ -1,3 +1,4 @@
+import { refreshKeyScope, keyAllowsModel, keyAllowsVm } from '../admin/key-scope.mjs'
 import {
   classifyUpstreamResult,
   isFableModel,
@@ -21,11 +22,13 @@ import { ensureWorkerCredential } from '../transport/go-worker-client.mjs'
 import { resolveOfficialCcInference } from '../vm/slot-engine.mjs'
 import { AttemptCoordinator } from './unit-decision.mjs'
 import { SOFT_COOLDOWN_REASONS } from './pool-scheduler.mjs'
+import { errorFactsFromResult, recordProtectionFailure, recordProtectionSuccess } from './account-error-protection.mjs'
 
 // Seat wait for the one-shot repair hop when the rejected hop already spent the deadline.
 const REPAIR_HOP_WAIT_MS = 30_000
 const SEARCH_REPAIR_IDLE_MS = 60 * 60 * 1000
 const SEARCH_REPAIR_LIMIT = 512
+const SEND_STATE_RANK = Object.freeze({ not_sent: 0, ambiguous: 1, sent: 2 })
 
 const DEFAULTS = {
   max_account_switches: 10,
@@ -53,6 +56,14 @@ function searchRepairKey(stickyKey, model, selected) {
 
 function usageOf(result) {
   return result?.usage || result?.body?.usage || null
+}
+
+function sendStateOf(result, observed = null) {
+  const resultState = result?.sendState || (result?.committed ? 'sent' : null)
+  const resultRank = resultState in SEND_STATE_RANK ? SEND_STATE_RANK[resultState] : -1
+  const observedRank = observed in SEND_STATE_RANK ? SEND_STATE_RANK[observed] : -1
+  if (observedRank > resultRank) return observed
+  return resultState || observed || null
 }
 
 function verifiedSuccess(result) {
@@ -443,6 +454,8 @@ export class FailoverRunner {
     scheduler,
     stickyRouter = null,
     attemptsRepo = null,
+    accountRuntimeRepo = null,
+    accountErrorProtection = null,
     rateLimitService = null,
     config = {},
     onProxyFailure = null,
@@ -454,6 +467,8 @@ export class FailoverRunner {
     this.scheduler = scheduler
     this.stickyRouter = stickyRouter
     this.attemptsRepo = attemptsRepo
+    this.accountRuntimeRepo = accountRuntimeRepo
+    this.accountErrorProtection = accountErrorProtection
     this.rateLimitService = rateLimitService
     this.config = { ...DEFAULTS, ...(config || {}) }
     this.onProxyFailure = onProxyFailure
@@ -467,6 +482,88 @@ export class FailoverRunner {
 
   reloadConfig(config = {}) {
     this.config = { ...DEFAULTS, ...(config || {}) }
+  }
+
+  reloadAccountProtection(compiled) {
+    this.accountErrorProtection = compiled || null
+  }
+
+  accountProtection(selected, result, policy) {
+    const compiled = this.accountErrorProtection
+    const runtimeRepo = this.accountRuntimeRepo
+    if (!compiled || !runtimeRepo || !selected?.accountId || !result || result.committed) return policy
+    // Provider and request failures have their own circuit/replay semantics.
+    // Account protection only counts a classified account/credential failure.
+    if (policy?.scope !== 'account' && policy?.scope !== 'credential') return policy
+    let snapshot = runtimeRepo.getProtectionState?.(selected.accountId)
+    if (!snapshot) {
+      try {
+        runtimeRepo.upsert?.({
+          account_id: selected.accountId,
+          vm_id: selected.vmId,
+          status: selected.state?.status || 'unknown',
+          credential_generation: selected.state?.credential_generation ?? 0,
+        })
+        snapshot = runtimeRepo.getProtectionState?.(selected.accountId)
+      } catch {}
+    }
+    if (!snapshot) return policy
+    const facts = errorFactsFromResult(result, {
+      provider: selected.provider || selected.platform || selected.family || 'claude',
+    })
+    const credentialGeneration =
+      selected.state?.credential_generation ??
+      current?.state?.credentialGeneration ??
+      current?.state?.credential_generation ??
+      0
+    let current = snapshot
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const outcome = recordProtectionFailure(compiled, current.state, facts, { credentialGeneration })
+      const stateChanged = JSON.stringify(outcome.state) !== JSON.stringify(current.state || null)
+      if (stateChanged) {
+        const nextGeneration = runtimeRepo.compareAndSwapProtectionState?.(selected.accountId, {
+          expectedGeneration: current.generation,
+          state: outcome.state,
+        })
+        if (nextGeneration == null) {
+          current = runtimeRepo.getProtectionState?.(selected.accountId)
+          if (!current) return policy
+          continue
+        }
+        current = { state: outcome.state, generation: nextGeneration }
+      }
+      if (!outcome.frozen) return policy
+      return {
+        ...policy,
+        scope: 'account',
+        action: 'continue-and-cooldown',
+        reason: 'account_error_protected',
+        cooldownUntil: outcome.state.frozenUntil,
+        retrySameAccount: false,
+        circuit: false,
+        detail: {
+          ...(policy.detail || {}),
+          protection_fingerprint: compiled.fingerprint,
+          protection_rules: outcome.rules,
+          protection_generation: outcome.state.generation,
+        },
+      }
+    }
+    return policy
+  }
+
+  accountProtectionSuccess(selected, result) {
+    const runtimeRepo = this.accountRuntimeRepo
+    const compiled = this.accountErrorProtection
+    if (!compiled || !runtimeRepo || !selected?.accountId || !result) return
+    const current = runtimeRepo.getProtectionState?.(selected.accountId)
+    if (!current || !current.state) return
+    const next = recordProtectionSuccess(current.state)
+    if (JSON.stringify(next) === JSON.stringify(current.state)) return
+    runtimeRepo.compareAndSwapProtectionState?.(selected.accountId, {
+      expectedGeneration: current.generation,
+      state: next,
+    })
   }
 
   noteUnitHealth(selected, policy, result) {
@@ -846,6 +943,12 @@ export class FailoverRunner {
       let result
       let policy
       let committed = false
+      let attemptSendState = 'not_sent'
+      const noteSendState = (state) => {
+        const next = String(state || '')
+        if (!(next in SEND_STATE_RANK)) return
+        if (SEND_STATE_RANK[next] >= SEND_STATE_RANK[attemptSendState]) attemptSendState = next
+      }
       let hopNoted = false
       const noteHop = (value) => {
         if (hopNoted) return
@@ -894,6 +997,21 @@ export class FailoverRunner {
             },
           )
         }
+        const liveScope = refreshKeyScope(keyScope)
+        if (!keyAllowsModel(liveScope, model) || !keyAllowsVm(liveScope, selected.vm || { id: selected.vmId })) {
+          this.attemptsRepo?.complete?.(requestId, attemptNo, {
+            action: 'stop',
+            errorScope: 'request',
+            terminalState: 'rejected',
+          })
+          return {
+            ok: false,
+            status: 403,
+            attempt_count: budget.hops,
+            terminalState: 'rejected',
+            body: { error: { type: 'permission_error', code: 'group_unavailable', message: '当前授权已失效' } },
+          }
+        }
         result = await callAttempt({
           candidate: selected,
           body,
@@ -905,6 +1023,7 @@ export class FailoverRunner {
           onCommit: () => {
             committed = true
           },
+          onSendState: noteSendState,
         })
         noteHop(result)
         if (result) result.committed = result.committed || committed
@@ -914,6 +1033,7 @@ export class FailoverRunner {
             errorScope: 'request',
             action: 'stop',
             downstreamCommitted: !!(result?.committed || committed),
+            sendState: sendStateOf(result, attemptSendState),
             terminalState: 'cancelled',
             latencyMs: Date.now() - attemptStarted,
           })
@@ -936,6 +1056,7 @@ export class FailoverRunner {
           this.searchRepairs.delete(repairKey)
           policy = { ...policy, action: 'stop' }
         }
+        policy = this.accountProtection(selected, result, policy)
         // One writer for rate_limit_reset_at / overload_until (sub2api HandleUpstreamError).
         const hardBlock =
           !result?.committed && !pinVmId
@@ -977,6 +1098,7 @@ export class FailoverRunner {
           action: policy.action,
           cooldownUntil: policy.cooldownUntil,
           downstreamCommitted: result?.committed || committed,
+          sendState: sendStateOf(result, attemptSendState),
           terminalState,
           usage: usageOf(result),
           ttftMs: result?.ttftMs ?? null,
@@ -997,6 +1119,7 @@ export class FailoverRunner {
           }
         }
         if (verifiedSuccess(result)) {
+          this.accountProtectionSuccess(selected, result)
           if (repairKey && (knownSearchRepair || searchRepair?.key === repairKey)) {
             this.searchRepairs.delete(repairKey)
             while (this.searchRepairs.size >= SEARCH_REPAIR_LIMIT) {
@@ -1102,6 +1225,7 @@ export class FailoverRunner {
             errorScope: 'request',
             action: 'stop',
             downstreamCommitted: !!committed,
+            sendState: attemptSendState,
             terminalState: 'cancelled',
             latencyMs: Date.now() - attemptStarted,
           })
@@ -1134,6 +1258,7 @@ export class FailoverRunner {
           },
           this.scheduler?.accountQuota,
         )
+        policy = this.accountProtection(selected, result, policy)
         lastResult = result
         lastPolicy = policy
         this.noteUnitHealth(selected, policy, result)
@@ -1144,6 +1269,7 @@ export class FailoverRunner {
           action: policy.action,
           cooldownUntil: policy.cooldownUntil,
           downstreamCommitted: committed,
+          sendState: sendStateOf(result, attemptSendState),
           terminalState: result.terminalState,
           latencyMs: Date.now() - attemptStarted,
         })

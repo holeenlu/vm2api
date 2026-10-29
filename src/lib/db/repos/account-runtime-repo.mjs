@@ -51,6 +51,8 @@ function mergeState(rt, acc) {
     refresh_status: rt?.refresh_status || null,
     worker_heartbeat_at: rt?.worker_heartbeat_at == null ? null : Number(rt.worker_heartbeat_at),
     worker_status: parse(rt?.worker_status_json),
+    protection_state: parse(rt?.protection_state_json, null),
+    protection_generation: Number(rt?.protection_generation) || 0,
     rate_limited_at: toMs(acc?.rate_limited_at),
     rate_limit_reset_at: toMs(acc?.rate_limit_reset_at),
     overload_until: toMs(acc?.overload_until),
@@ -74,7 +76,8 @@ export class AccountRuntimeRepo {
       a.session_window_end, a.session_window_status,
       r.account_id AS rt_account_id, r.vm_id AS rt_vm_id, r.status AS rt_status,
       r.updated_at AS rt_updated_at, r.model_states_json, r.credential_generation,
-      r.refresh_status, r.worker_heartbeat_at, r.worker_status_json
+      r.refresh_status, r.worker_heartbeat_at, r.worker_status_json,
+      r.protection_state_json, r.protection_generation
       FROM accounts a FULL JOIN account_runtime r ON r.account_id = a.id`
     this._snapshots = db.prepare(snapshot + ' WHERE COALESCE(a.id, r.account_id) IN (SELECT value FROM json_each(?))')
     this._allSnapshots = db.prepare(snapshot)
@@ -95,10 +98,7 @@ export class AccountRuntimeRepo {
       INSERT OR IGNORE INTO accounts (id, vm_id, name, extra, created_at, updated_at)
       VALUES (?, ?, ?, '{}', ?, ?)
     `)
-    this._linkDefaultGroup = db.prepare(`
-      INSERT OR IGNORE INTO account_groups (account_id, group_id, priority, created_at)
-      VALUES (?, 1, 50, ?)
-    `)
+
     this._updateAcc = db.prepare(`
       UPDATE accounts SET
         vm_id = ?,
@@ -112,8 +112,9 @@ export class AccountRuntimeRepo {
     this._upsertRt = db.prepare(`
       INSERT INTO account_runtime (
         account_id, vm_id, status, model_states_json, credential_generation,
-        refresh_status, worker_heartbeat_at, worker_status_json, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        refresh_status, worker_heartbeat_at, worker_status_json,
+        protection_state_json, protection_generation, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(account_id) DO UPDATE SET
         vm_id = excluded.vm_id,
         status = excluded.status,
@@ -122,7 +123,28 @@ export class AccountRuntimeRepo {
         refresh_status = CASE WHEN COALESCE(excluded.worker_heartbeat_at, 0) >= COALESCE(account_runtime.worker_heartbeat_at, 0) THEN excluded.refresh_status ELSE account_runtime.refresh_status END,
         worker_heartbeat_at = MAX(COALESCE(account_runtime.worker_heartbeat_at, 0), COALESCE(excluded.worker_heartbeat_at, 0)),
         worker_status_json = CASE WHEN COALESCE(excluded.worker_heartbeat_at, 0) >= COALESCE(account_runtime.worker_heartbeat_at, 0) THEN excluded.worker_status_json ELSE account_runtime.worker_status_json END,
+        protection_state_json = CASE
+          WHEN excluded.protection_generation >= account_runtime.protection_generation
+            THEN excluded.protection_state_json
+          ELSE account_runtime.protection_state_json
+        END,
+        protection_generation = MAX(account_runtime.protection_generation, excluded.protection_generation),
         updated_at = excluded.updated_at
+    `)
+    // Protection writes use the persisted revision as a CAS token.  The
+    // revision is incremented in SQLite so concurrent workers cannot both
+    // claim the same state transition after a read-then-write race.
+    this._protectionSnapshot = db.prepare(`
+      SELECT protection_state_json, protection_generation
+      FROM account_runtime
+      WHERE account_id = ?
+    `)
+    this._protectionCas = db.prepare(`
+      UPDATE account_runtime
+      SET protection_state_json = ?,
+          protection_generation = protection_generation + 1,
+          updated_at = ?
+      WHERE account_id = ? AND protection_generation = ?
     `)
     this._removeRt = db.prepare('DELETE FROM account_runtime WHERE account_id = ?')
   }
@@ -185,7 +207,6 @@ export class AccountRuntimeRepo {
       updated_at: new Date().toISOString(),
     }
     this._ensureAcc.run(next.account_id, next.vm_id, next.account_id, next.updated_at, next.updated_at)
-    this._linkDefaultGroup.run(next.account_id, next.updated_at)
     this._updateAcc.run(
       next.vm_id,
       next.priority,
@@ -211,9 +232,55 @@ export class AccountRuntimeRepo {
       next.refresh_status ?? null,
       next.worker_heartbeat_at ?? null,
       next.worker_status != null ? JSON.stringify(next.worker_status) : null,
+      next.protection_state != null ? JSON.stringify(next.protection_state) : null,
+      Number(next.protection_generation) || 0,
       next.updated_at,
     )
     return this.get(next.account_id)
+  }
+
+  /**
+   * Read the account protection summary and its SQLite CAS revision.
+   *
+   * The revision is separate from the semantic freeze `state.generation`:
+   * every successful write advances it, including an operator clear, so a
+   * late probe cannot overwrite a newer state transition.
+   */
+  getProtectionState(accountId) {
+    const row = this._protectionSnapshot.get(accountId)
+    if (!row) return null
+    return {
+      state: parse(row.protection_state_json, null),
+      generation: Number(row.protection_generation) || 0,
+    }
+  }
+
+  /**
+   * Store a bounded protection summary if the persisted CAS revision still
+   * equals `expectedGeneration`.
+   *
+   * Returns the new revision on success and `null` on a stale writer.  The
+   * caller should re-read and re-evaluate the transition after a conflict.
+   */
+  compareAndSwapProtectionState(
+    accountId,
+    { expectedGeneration = 0, state = null, updatedAt = new Date().toISOString() } = {},
+  ) {
+    const expected = Number(expectedGeneration)
+    if (!Number.isInteger(expected) || expected < 0) return null
+    const result = this._protectionCas.run(state == null ? null : JSON.stringify(state), updatedAt, accountId, expected)
+    if (!result.changes) return null
+    return expected + 1
+  }
+
+  /**
+   * Clear persisted protection state through the same CAS boundary.
+   *
+   * `state` may be supplied when a caller wants to retain policy/credential
+   * metadata while clearing counters; omitted state removes the JSON summary.
+   */
+  clearProtectionState(accountId, { expectedGeneration = 0, state = null, updatedAt = new Date().toISOString() } = {}) {
+    return this.compareAndSwapProtectionState(accountId, { expectedGeneration, state, updatedAt })
   }
 
   /**
