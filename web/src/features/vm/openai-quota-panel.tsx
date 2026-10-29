@@ -1,12 +1,15 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtUsd } from '@/lib/format'
 import { formatWindowSpend } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { ResetCreditExpiries } from './reset-credit-expiries'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { Meter, ResetAt } from '@/features/vm/detail-section-primitives'
 import { vmQueryOptions } from '@/features/vm/queries'
@@ -36,12 +39,13 @@ export function OpenaiQuotaPanel({
   cost5?: number
   cost7?: number
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const [confirm, setConfirm] = useState(false)
   const canUse = useVmPerms().credential
   const credits = vm.reset_credits
   const available = Math.max(0, Number(credits?.available_count) || 0)
-  const expiry = credits?.credits?.[0]?.expires_at
 
   const refreshAll = async () => {
     await Promise.all([
@@ -61,8 +65,10 @@ export function OpenaiQuotaPanel({
       const count = Number(data?.reset_credits?.available_count)
       toast.success(
         Number.isFinite(count)
-          ? `已查询，可用重置券 ${count} 张`
-          : '已刷新 GPT 额度'
+          ? tVm('vm:openaiQuotaActions.checkedResetCreditsAvailable', {
+              count: count,
+            })
+          : tVm('vm:openaiQuotaActions.gPTQuotaRefreshed')
       )
     },
     onError: (error: Error) => toast.error(error.message),
@@ -78,10 +84,12 @@ export function OpenaiQuotaPanel({
       setConfirm(false)
       await refreshAll()
       if (data?.warning === 'reset_credit_cache_refresh_failed') {
-        toast.warning('重置券已消费，但回读额度失败，请再点查询')
+        toast.warning(
+          tVm('vm:openaiQuotaActions.resetCreditConsumedButQuotaCouldNotBeRead')
+        )
         return
       }
-      toast.success('已使用一张重置券')
+      toast.success(tVm('vm:openaiQuotaActions.oneResetCreditUsed'))
     },
     onError: (error: Error) => toast.error(error.message),
   })
@@ -90,22 +98,32 @@ export function OpenaiQuotaPanel({
 
   return (
     <div className='grid gap-3'>
-      <p className='m-0 text-xs text-muted-foreground'>Codex 额度 · 短时窗口</p>
+      <p className='m-0 text-xs text-muted-foreground'>
+        <Trans ns='vm' i18nKey='openaiQuotaPanel.codexQuotaShortWindow' />
+      </p>
       <Meter
-        label='5 小时已用'
+        label={tVm('vm:detailStatusBoard.5HourUsage')}
         value={u5}
         hint={quotaHint(vm.status_5h, cost5, vm.estimate_5h)}
       />
       <div className='text-[11px] text-muted-foreground'>
-        5h 重置 <ResetAt value={vm.reset_5h} now={now} />
+        <Trans
+          ns='vm'
+          i18nKey='openaiQuotaPanel.5HourReset'
+          components={{ part0: <ResetAt value={vm.reset_5h} now={now} /> }}
+        />
       </div>
       <Meter
-        label='7 天已用'
+        label={tVm('vm:detailStatusBoard.7DayUsage')}
         value={u7}
         hint={quotaHint(vm.status_7d, cost7, vm.estimate_7d)}
       />
       <div className='text-[11px] text-muted-foreground'>
-        7d 重置 <ResetAt value={vm.reset_7d} now={now} />
+        <Trans
+          ns='vm'
+          i18nKey='openaiQuotaPanel.7DayReset'
+          components={{ part0: <ResetAt value={vm.reset_7d} now={now} /> }}
+        />
       </div>
       {canUse ? (
         <div className='flex flex-wrap items-center gap-2'>
@@ -116,8 +134,10 @@ export function OpenaiQuotaPanel({
             onClick={() => queryQuota.mutate()}
           >
             {queryQuota.isPending
-              ? '查询中…'
-              : `查询重置券${credits ? ` ${available}` : ''}`}
+              ? tVm('vm:openaiQuotaPanel.checking')
+              : tVm('vm:openaiQuotaPanel.checkResetCredits', {
+                  value1: credits ? ` ${available}` : '',
+                })}
           </Button>
           <Button
             size='sm'
@@ -125,21 +145,22 @@ export function OpenaiQuotaPanel({
             disabled={busy || available < 1}
             onClick={() => setConfirm(true)}
           >
-            {resetQuota.isPending ? '使用中…' : '使用重置券'}
+            {resetQuota.isPending
+              ? tVm('vm:openaiQuotaPanel.applying')
+              : tVm('vm:openaiQuotaActions.useResetCredit')}
           </Button>
         </div>
       ) : null}
-      {expiry ? (
-        <p className='m-0 text-[11px] text-muted-foreground'>
-          最近一张到期 <ResetAt value={expiry} now={now} />
-        </p>
-      ) : null}
+      <ResetCreditExpiries credits={credits?.credits} now={now} />
       <ConfirmDialog
         open={confirm}
         onOpenChange={setConfirm}
-        title='使用一张重置券'
-        desc={`将消费 1 / ${available} 张上游重置券，不可退回。`}
-        confirmText='确认使用'
+        title={tVm('vm:openaiQuotaActions.useOneResetCredit')}
+        desc={tVm(
+          'vm:openaiQuotaActions.thisConsumes1OfUpstreamResetCreditsItCannot',
+          { available: available }
+        )}
+        confirmText={tVm('vm:claudeResetActions.confirmUse')}
         destructive
         isLoading={resetQuota.isPending}
         handleConfirm={() => resetQuota.mutate()}
@@ -159,6 +180,7 @@ function quotaHint(
   const spend = formatWindowSpend(cost, est)
   if (spend.costText) bits.push(spend.costText)
   if (spend.remainText) bits.push(spend.remainText)
-  if (!spend.costText) bits.push(`合计 ${fmtUsd(cost, 2)}`)
+  if (!spend.costText)
+    bits.push(tVm('vm:openaiQuotaPanel.total', { value1: fmtUsd(cost, 2) }))
   return bits.join(' · ')
 }

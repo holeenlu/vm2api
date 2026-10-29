@@ -1,5 +1,6 @@
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import {
   expiresAtToMs,
   fmtResetClock,
@@ -37,11 +38,13 @@ function WindowRow({
   hasToken: boolean
   quiet: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   // 无凭证槽没有窗口，倒计时无意义；有票才算。
   const reset = hasToken ? resetCountdown(w.reset, now) : null
   const clock =
     hasToken && expiresAtToMs(w.reset)
-      ? `重置于 ${fmtResetClock(w.reset)}`
+      ? tVm('vm:usageWindows.resetsAt', { value1: fmtResetClock(w.reset) })
       : undefined
   const pct = w.pct
   return (
@@ -74,7 +77,9 @@ function WindowRow({
                 : // 分诊面上绿色数字铺满一屏是噪声，颜色只留给越过 70% 的档。
                   (!quiet || pct >= 70) && riskFg(pct)
             )}
-            title={pct == null ? '未探测' : undefined}
+            title={
+              pct == null ? tVm('vm:detailAccountTab.notProbed') : undefined
+            }
           >
             {pct == null ? '—' : `${pct.toFixed(0)}%`}
           </span>
@@ -92,8 +97,10 @@ function WindowRow({
 
 /** GPT 槽：查询 / 重置券；Claude 完整 OAuth：原生限额查询 / 重置。 */
 export function VmQuotaActions({ vm, now }: { vm: Vm; now: number }) {
+  useTranslation('vm')
+
   return isCodexVm(vm) ? (
-    <OpenaiQuotaActions vm={vm} compact />
+    <OpenaiQuotaActions vm={vm} compact now={now} />
   ) : (
     <ClaudeResetActions vm={vm} compact now={now} />
   )
@@ -117,6 +124,8 @@ export function VmUsageWindows({
   quotaActions?: boolean
   className?: string
 }) {
+  useTranslation('vm')
+
   const hasToken = Boolean(vm.has_token)
   return (
     <div className={cn('grid min-w-0 gap-1', className)}>
@@ -151,6 +160,8 @@ export function VmCostLedger({
   accounts?: UsageAccountRow[]
   className?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <div className={cn(LEDGER_GRID, 'min-w-0', className)}>
       {vmCostLedger(vm, accounts).map((r) => {
@@ -181,7 +192,9 @@ export function VmCostLedger({
                     ? 'font-semibold text-foreground'
                     : 'text-foreground/80'
               )}
+              title={r.estimated ? tVm('lib:usage.estimateCaveat') : undefined}
             >
+              {r.estimated ? '≈' : ''}
               {fmtUsd(r.cost, 2)}
             </span>
             <span
@@ -190,8 +203,12 @@ export function VmCostLedger({
                 r.tokens ? 'text-muted-foreground' : MUTED_NUM
               )}
             >
+              {r.estimated ? '≈' : ''}
               {fmtNum(r.tokens)}
-              <span className={MUTED_NUM}> tok</span>
+              <span className={MUTED_NUM}>
+                {' '}
+                <Trans ns='vm' i18nKey='units.tokensShort' />
+              </span>
             </span>
           </div>
         )
@@ -211,19 +228,28 @@ export function VmUsagePanel({
   vm: Vm
   accounts?: UsageAccountRow[]
 }) {
+  useTranslation('vm')
+
   const now = useNow()
   return (
     <div className='grid gap-x-5 gap-y-3 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]'>
       <div className='min-w-0'>
-        <h3 className={PANEL_HEAD}>用量窗口</h3>
+        <h3 className={PANEL_HEAD}>
+          <Trans ns='vm' i18nKey='usageWindows.usageWindows' />
+        </h3>
         <VmUsageWindows vm={vm} now={now} quotaActions />
       </div>
       <div className='min-w-0 sm:border-s sm:border-[color:var(--hairline)] sm:ps-5'>
         <h3 className={PANEL_HEAD}>
-          成本
-          <span className='text-[11px] font-normal text-[color:var(--text-tertiary)]'>
-            官方价
-          </span>
+          <Trans
+            ns='vm'
+            i18nKey='usageWindows.costOfficialPrice'
+            components={{
+              part0: (
+                <span className='text-[11px] font-normal text-[color:var(--text-tertiary)]' />
+              ),
+            }}
+          />
         </h3>
         <VmCostLedger vm={vm} accounts={accounts} />
       </div>

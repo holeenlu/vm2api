@@ -14,11 +14,11 @@ import fs from 'node:fs/promises'
 import http from 'node:http'
 import { setTimeout as delay } from 'node:timers/promises'
 
-const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api').replace(/\/+$/, '')
+const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/tapmodels').replace(/\/+$/, '')
 const concurrency = Number(process.argv[3] || 4)
 const port = String(process.env.PORT || '8787')
 const base = String(process.env.KIN_AUTO_SYNC_BASE || `http://127.0.0.1:${port}`).replace(/\/+$/, '')
-const envKey = String(process.env.VM2API_API_KEY || process.env.KIN_API_KEY || '').trim()
+const envKey = String(process.env.TAPMODELS_API_KEY || process.env.KIN_API_KEY || '').trim()
 const linkWaitMs = Number(process.env.KIN_FLEET_LINK_WAIT_MS || 120_000)
 const pollMs = Number(process.env.KIN_FLEET_POLL_MS || 2_000)
 // Node image builds stream the payload over SSH; fetch would give up after undici's 300 s header timeout.
@@ -28,7 +28,7 @@ async function apiKey() {
   if (envKey) return envKey
   try {
     const text = await fs.readFile(`${root}/.env`, 'utf8')
-    const line = text.split(/\r?\n/).find((entry) => /^(?:VM2API_API_KEY|KIN_API_KEY)=/.test(entry))
+    const line = text.split(/\r?\n/).find((entry) => /^(?:TAPMODELS_API_KEY|KIN_API_KEY)=/.test(entry))
     return line
       ? line
           .slice(line.indexOf('=') + 1)

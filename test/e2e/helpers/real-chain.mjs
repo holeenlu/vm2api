@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { DatabaseSync } from 'node:sqlite'
 import { createHandleProtocol } from '../../../src/lib/protocol/handle-protocol.mjs'
 import { createRespond, readBody } from '../../../src/lib/http/respond.mjs'
 import { rememberRustHealth, clearRustHealthCache } from '../../../src/lib/transport/kernel-router.mjs'
@@ -247,6 +248,9 @@ export async function startRealChain({
       limits: { max_body_bytes: 4 * 1024 * 1024, upstream_timeout_ms: 15000, stream_idle_timeout_ms: 15000 },
       paths: { project: temp, data: temp },
     }
+    // Master-key capture still commits its request log inside a real transaction.
+    const db = new DatabaseSync(':memory:')
+    cleanups.push(() => db.close())
     const logs = []
     const handler = createHandleProtocol({
       ...createRespond(cfg),
@@ -262,7 +266,7 @@ export async function startRealChain({
       routingConfigPath: routingPath,
       routingConfig: routing,
       getRoutingConfig: () => routing,
-      apiKeyStore: {},
+      apiKeyStore: { db },
       accountQuota: {},
       stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
       failoverRunner: {

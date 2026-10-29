@@ -526,17 +526,29 @@ test('repo routing.json and the Vite console expose init telemetry sync', () => 
   assert.match(pane, /id=\{`occ-\$\{key\}`\}/)
   assert.match(pane, /id='occ-resident'/)
   assert.match(pane, /sync_telemetry/)
-  assert.match(pane, /同步遥测/)
-  assert.match(pane, /hello 后常驻/)
-  assert.match(pane, /500 MB（推荐）/)
+  assert.ok(pane.includes("useTranslation('settings')"))
+  const settingsText = JSON.parse(fs.readFileSync(path.join(gw, 'web/src/i18n/locales/zh-CN/settings.json'), 'utf8'))
+  for (const [key, expected] of [
+    ['official.syncTelemetry', '同步遥测'],
+    ['official.resident', 'hello 后常驻'],
+    ['official.recommendedMemory', '500 MB（推荐）'],
+  ]) {
+    assert.ok(pane.includes('settings:' + key) || pane.includes("t('" + key + "')"), 'settings must render ' + key)
+    assert.equal(settingsText[key], expected)
+  }
 
   const nav = fs.readFileSync(path.join(gw, 'web/src/config/nav.ts'), 'utf8')
-  assert.match(nav, /settings: '设置'/)
+  assert.ok(nav.includes("t('common:settings')"))
+  const commonText = JSON.parse(fs.readFileSync(path.join(gw, 'web/src/i18n/locales/zh-CN/common.json'), 'utf8'))
+  assert.equal(commonText.settings, '设置')
 
   const card = fs.readFileSync(path.join(gw, 'web/src/features/vm/official-cc-card.tsx'), 'utf8')
-  assert.match(card, /telemetry: '写入遥测'/)
+  assert.ok(card.includes('vm:officialCcCard.writeTelemetryConfiguration'))
+  const vmText = JSON.parse(fs.readFileSync(path.join(gw, 'web/src/i18n/locales/zh-CN/vm.json'), 'utf8'))
+  assert.equal(vmText.officialCcCard.writeTelemetryConfiguration, '写入遥测')
   assert.match(card, /already_initialized/)
-  assert.match(card, /此槽已初装过/)
+  assert.ok(card.includes('vm:officialCcCard.thisSlotWasAlreadySetUpOfficialCLIWas'))
+  assert.match(vmText.officialCcCard.thisSlotWasAlreadySetUpOfficialCLIWas, /此槽已初装过/)
 })
 
 function writeSlotCliNode(home) {

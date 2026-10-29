@@ -223,6 +223,9 @@ export function codexAccountCandidate(vm, now = Date.now(), signals = null, poli
  * (quota, credential, operator, model); `resting` when it is outside its
  * working window (back tomorrow, but not for this request); a busy home is
  * still `live`.
+ *
+ * `resourcePriorities` is the key group's `vm id → priority` map; lower runs
+ * first inside the same weight band. Absent for keys without a group.
  */
 export function orderCodexSessionSlots(
   vms,
@@ -239,6 +242,7 @@ export function orderCodexSessionSlots(
     roundRobinCursor = null,
     model = null,
     excluded = null,
+    resourcePriorities = null,
   } = {},
 ) {
   const list = Array.isArray(vms) ? vms : []
@@ -286,7 +290,10 @@ export function orderCodexSessionSlots(
     return { error: 'session_window_full', ids: [], ready: [], parked: [], sticky: false, boundState, candidates: [] }
   }
   const cursor = roundRobinCursor == null ? readOpenAICursor() : roundRobinCursor
-  const candidates = ids.map((id) => codexAccountCandidate(byId.get(id), now, null, policy))
+  const candidates = ids.map((id) => ({
+    ...codexAccountCandidate(byId.get(id), now, null, policy),
+    groupPriority: resourcePriorities?.[id] ?? null,
+  }))
   const ordered = orderOpenAIAccounts(candidates, {
     strategy,
     now,

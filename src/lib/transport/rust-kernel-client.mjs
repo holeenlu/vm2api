@@ -41,11 +41,13 @@ function remapVia(result) {
 }
 
 export async function callRustKernel(opts = {}) {
-  return remapVia(await callGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
+  const { onSendState = null } = opts
+  return remapVia(await callGoWorker({ ...opts, onSendState, exec: withRustKernelExec(opts.exec) }))
 }
 
 export async function streamRustKernel(opts = {}) {
-  return remapVia(await streamGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
+  const { onSendState = null } = opts
+  return remapVia(await streamGoWorker({ ...opts, onSendState, exec: withRustKernelExec(opts.exec) }))
 }
 
 export async function rustKernelHealth(exec, opts = {}) {

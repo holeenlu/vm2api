@@ -5,7 +5,7 @@ import { slotExecArgv } from '../vm/slot-exec.mjs'
 
 const WORKER_CONFIG = '/run/kin/worker.json'
 const WORKER_BIN = '/usr/local/bin/kin-worker'
-const OPS = new Set(['refresh', 'usage', 'profile', 'models', 'count-tokens', 'reset-status', 'reset-redeem'])
+const OPS = new Set(['refresh', 'usage', 'profile', 'models', 'reset-status', 'reset-redeem'])
 
 function failure(code, message = undefined) {
   const error = { code }
@@ -91,7 +91,7 @@ function lastJsonLine(stdout) {
 export async function runSlotOauth(
   exec,
   op,
-  { body, headers, force = false, timeoutMs = 45000, runDocker = runDockerProcess } = {},
+  { body, force = false, timeoutMs = 45000, runDocker = runDockerProcess } = {},
 ) {
   if (process.env.KIN_CRS_MOCK === '1') return null
   if (!OPS.has(op)) return failure('worker_op_invalid', `unsupported oauth operation: ${op}`)
@@ -102,12 +102,7 @@ export async function runSlotOauth(
   const argv = slotExecArgv(vm, [WORKER_BIN, 'oauth', op, '--config', WORKER_CONFIG], { interactive: true, user })
   if (force) argv.push('--force')
 
-  const stdin =
-    op === 'count-tokens'
-      ? JSON.stringify({ body: body || {}, headers: headers || {} })
-      : op === 'reset-redeem'
-        ? JSON.stringify(body || {})
-        : ''
+  const stdin = op === 'reset-redeem' ? JSON.stringify(body || {}) : ''
   let result
   try {
     result = await runDocker(argv, { stdin, timeoutMs, env: host.dockerEnv() })

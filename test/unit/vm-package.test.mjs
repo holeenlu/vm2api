@@ -55,7 +55,7 @@ function claudePackage(id, token = 'sk-ant-oat01-PACKAGE') {
   })
 }
 
-function makeHandler(project, body, { pool, role = 'admin', panelUsers = null } = {}) {
+function makeHandler(project, body, { pool, role = 'super_admin', panelUsers = null } = {}) {
   const response = {}
   const handlePanel = createPanelHandler({
     cfg: { paths: { project } },
@@ -63,9 +63,9 @@ function makeHandler(project, body, { pool, role = 'admin', panelUsers = null } 
     panelUsers,
     packageImportBringUp: false,
     requireAuth(req) {
-      if (role === 'admin') {
+      if (role === 'super_admin') {
         req.apiKeyKind = 'master'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
       } else {
         req.panelUser = 'member'
         req.panelRole = 'user'
@@ -95,7 +95,7 @@ function makePool(t) {
 
 test('package keeps traits, SOCKS password and token, and drops runtime', () => {
   const doc = claudePackage('vm-pkg')
-  assert.equal(doc.type, 'vm2api-vm-package')
+  assert.equal(doc.type, 'tapmodels-vm-package')
   assert.equal(doc.proxy.password, 's3cret')
   assert.equal(doc.credential.export.accounts[0].credentials.access_token, 'sk-ant-oat01-PACKAGE')
   assert.equal(doc.vm.stats, undefined)
@@ -155,7 +155,7 @@ test('import creates the slot and rolls a colliding id forward', async (t) => {
   assert.equal(saved.claude.access_token, undefined)
   const cred = readWorkerCredentialFile(path.join(root, 'vms', 'vm-pkg', 'cli-home'))
   assert.equal(cred.access_token, 'sk-ant-oat01-PACKAGE')
-  assert.equal(pool.ensureSocks({ host: '10.2.2.2', port: 1080, username: 'alice', password: 's3cret' }).created, false)
+  assert.equal(pool.ensureProxy({ host: '10.2.2.2', port: 1080, username: 'alice', password: 's3cret' }).created, false)
 
   const again = makeHandler(root, doc, { pool })
   await again.handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/package'))
@@ -215,7 +215,7 @@ test('local egress imports as px-local and codex tokens stay out of vm.json', as
   assert.equal(localVm.proxy_cli_enabled, true)
 
   const codex = {
-    type: 'vm2api-vm-package',
+    type: 'tapmodels-vm-package',
     version: 1,
     vm: {
       id: 'vm-gpt',
@@ -246,7 +246,7 @@ test('local egress imports as px-local and codex tokens stay out of vm.json', as
   assert.equal(mismatch.response.body.error.code, 'credential_kind_mismatch')
 })
 
-test('user cannot download a package and cannot import past the create quota', async (t) => {
+test('customer cannot download or import infrastructure packages', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vm-pkg-user-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const pool = makePool(t)
@@ -261,24 +261,18 @@ test('user cannot download a package and cannot import past the create quota', a
   const importer = makeHandler(root, claudePackage('vm-other'), {
     pool,
     role: 'user',
-    panelUsers: {
-      getById() {
-        return { vm_create_quota: 0 }
-      },
-    },
   })
   await importer.handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/package'))
   assert.equal(importer.response.status, 403)
   assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-other.json')), false)
 })
 
-test('tenant import cannot bind px-local or another owner SOCKS and drops seed_policy', async (t) => {
+test('customers cannot import packages or modify infrastructure', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vm-pkg-tenant-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const pool = makePool(t)
-  const panelUsers = { getById: () => ({ vm_create_quota: 5 }) }
   const importAs = async (doc) => {
-    const h = makeHandler(root, doc, { pool, role: 'user', panelUsers })
+    const h = makeHandler(root, doc, { pool, role: 'user' })
     await h.handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/package'))
     return h.response
   }
@@ -287,28 +281,25 @@ test('tenant import cannot bind px-local or another owner SOCKS and drops seed_p
   local.proxy = { kind: 'local' }
   const localRes = await importAs(local)
   assert.equal(localRes.status, 403)
-  assert.equal(localRes.body.error.code, 'proxy_forbidden')
+  assert.equal(localRes.body.error.code, 'forbidden')
   assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-t-local.json')), false)
 
   // The platform already owns this SOCKS row; equal credentials must not hand it to the tenant.
-  pool.ensureSocks({ host: '10.2.2.2', port: 1080, username: 'alice', password: 's3cret' })
+  pool.ensureProxy({ host: '10.2.2.2', port: 1080, username: 'alice', password: 's3cret' })
   const taken = await importAs(claudePackage('vm-t-taken'))
   assert.equal(taken.status, 403)
-  assert.equal(taken.body.error.code, 'proxy_forbidden')
+  assert.equal(taken.body.error.code, 'forbidden')
   assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-t-taken.json')), false)
 
   const own = claudePackage('vm-t-own')
   own.proxy = { host: '10.3.3.3', port: 1080, username: 'bob', password: 'pw' }
   own.vm.seed_policy = { extra_env: { HTTP_PROXY: 'http://attacker:1' } }
   const ok = await importAs(own)
-  assert.equal(ok.status, 201, ok.body?.error?.message)
-  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-t-own.json'), 'utf8'))
-  assert.equal(saved.owner_user_id, 'user-1')
-  assert.equal(saved.proxy.host, '10.3.3.3')
-  assert.equal(JSON.stringify(saved.seed_policy).includes('attacker'), false)
+  assert.equal(ok.status, 403)
+  assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-t-own.json')), false)
 
   const reserved = await importAs(claudePackage('package'))
-  assert.equal(reserved.status, 400)
+  assert.equal(reserved.status, 403)
   assert.equal(fs.existsSync(path.join(root, 'vms', 'package.json')), false)
 })
 

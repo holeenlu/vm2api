@@ -1,0 +1,35 @@
+{
+  "title": "服務提供商",
+  "description": "查看上游帳號、授權狀態、額度視窗、用量與調度設定。",
+  "activeTotal": "活躍 / 總數",
+  "nearLimit": "接近 7D 額度",
+  "totalCost": "累計消耗",
+  "searchPlaceholder": "搜尋帳號、供應商或服務類型",
+  "unboundVm": "未綁定 VM",
+  "platformResource": "平台資源",
+  "recoveringSoon": "即將恢復",
+  "daysHoursLater": "{{days}}天{{hours}}小時後",
+  "hoursLater": "{{hours}}小時後",
+  "concurrency": "並發 {{value}}",
+  "rpm": " · RPM {{value}}",
+  "viewVm": "查看 VM",
+  "empty": "暫無服務提供商資料。",
+  "columns": {
+    "provider": "服務提供商",
+    "vendor": "供應商",
+    "status": "狀態 / 調度",
+    "fiveHour": "5H",
+    "sevenDay": "7D",
+    "totalCost": "累計消耗",
+    "tokens": "Token",
+    "actions": "操作"
+  },
+  "status": {
+    "provisioning": "預配中",
+    "paused": "已暫停",
+    "archived": "已歸檔",
+    "schedulePaused": "已暫停調度",
+    "waitingAuth": "等待授權",
+    "enabled": "已啟用"
+  }
+}
