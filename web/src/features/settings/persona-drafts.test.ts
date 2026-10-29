@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_PERSONA_TEMPLATES,
   stringifyPersonaTemplate,
@@ -9,6 +10,10 @@ import {
   personaTemplatesPayload,
   seedPersonaDrafts,
 } from './persona-drafts'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('persona drafts payload', () => {
   it('stores empty arrays when drafts still match built-in presets', () => {
@@ -21,7 +26,6 @@ describe('persona drafts payload', () => {
       official_full: [],
       zero: [],
       custom: [],
-      official_303: [],
     })
   })
 

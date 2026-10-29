@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   accountStatus,
   accountUsable,
@@ -33,6 +34,11 @@ function liveVm(over: Partial<Vm> = {}): Vm {
     ...over,
   }
 }
+
+// Keep the existing Chinese UI assertions independent of the host locale.
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('health probe must not paint a live ticket unavailable', () => {
   it('ignores availability.bad from test-chat credential_refresh_failed', () => {

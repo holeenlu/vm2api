@@ -1,5 +1,6 @@
 import type { Vm } from '@/types/panel-vm'
 import { Box, Cpu } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { runtimeTypeLabel, runtimeTypeOf } from '@/features/vm/machine-spec'
 
@@ -13,6 +14,8 @@ export function RuntimeChip({
   vm: Pick<Vm, 'runtime_type'>
   className?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const type = runtimeTypeOf(vm)
   const kvm = type === 'kvm'
   const label = runtimeTypeLabel(type)
@@ -26,7 +29,11 @@ export function RuntimeChip({
           : 'border-border/70 text-muted-foreground',
         className
       )}
-      title={kvm ? 'KVM 虚拟机' : 'Docker 容器'}
+      title={
+        kvm
+          ? tVm('vm:runtimeChip.kVMVirtualMachine')
+          : tVm('vm:runtimeChip.dockerContainer')
+      }
     >
       <Icon className='size-2.5 shrink-0' aria-hidden='true' />
       <span className='truncate'>{label}</span>

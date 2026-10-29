@@ -39,7 +39,7 @@ import { filterVmsForPanel } from './resource-owner.mjs'
 import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../pool/weekly-split.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { pickScheduleFields } from '../pool/schedule-state.mjs'
-import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
+import { proxyFamily, normalizeProxyHost } from '../vm/proxy-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
@@ -105,7 +105,7 @@ export function ok(data, meta) {
 }
 
 /** Start/create `allocated_proxy` must never carry SOCKS credentials. */
-export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'admin', nodes = [] } = {}) {
+export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'super_admin', nodes = [] } = {}) {
   if (!bound) return null
   const raw = bound.id && proxyPool?.state?.proxies?.find((p) => p.id === bound.id)
   let view =
@@ -647,7 +647,7 @@ export async function buildDashboard({
       liveById,
       projectRoot: cfg.paths.project,
       clusterNodes,
-      role: 'admin',
+      role: 'super_admin',
     }),
   )
   const snap = accountQuota.snapshot()
@@ -685,7 +685,7 @@ export async function buildDashboard({
   return ok({
     health: {
       status: 'ok',
-      service: 'vm2api',
+      service: 'tapmodels',
       rewrite: cfg.rewrite?.enabled ? 'on' : 'off',
       base_url: cfg.base_url,
     },
@@ -757,7 +757,7 @@ export async function buildVmList({
   poolScheduler = null,
   proxyPool = null,
   ownerUserId = null,
-  role = 'admin',
+  role = 'super_admin',
   requestLog = null,
   clusterNodes = [],
 } = {}) {
@@ -820,7 +820,7 @@ export async function buildVmDetail({
   kernelHealth = null,
   slotProcessStatus = readSlotProcessStatus,
   clusterNodes = [],
-  role = 'admin',
+  role = 'super_admin',
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -1735,7 +1735,7 @@ function canImportCredential(v, hit) {
   return !!(base.url || (base.host && base.port) || v.proxy_id)
 }
 
-function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
+function mergeVmProxy(v, poolSnap, { role = 'super_admin', nodes = [] } = {}) {
   const hit = poolProxyForVm(v, poolSnap)
   const base = v.proxy || {}
   const configured = proxyConfigured(v, hit)
@@ -1744,7 +1744,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   }
   const proxy = {
     id: hit?.id || base.id || v.proxy_id || null,
-    host: normalizeSocksHost(hit?.host || base.host) || hit?.host || base.host || null,
+    host: normalizeProxyHost(hit?.host || base.host) || hit?.host || base.host || null,
     port: hit?.port ?? base.port ?? null,
     label: hit?.label || null,
     scheme: hit?.scheme || base.scheme || (isLocalEgressId(hit?.id) || isLocalEgressId(base.id) ? 'local' : 'socks5'),
@@ -1752,7 +1752,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
     status: hit?.status ?? null,
     enabled: hit?.enabled ?? null,
     blocked_reason: hit ? hit.blocked_reason || null : proxyBlockedReason(base),
-    address_family: hit?.address_family || socksProxyFamily(base) || null,
+    address_family: hit?.address_family || proxyFamily(base) || null,
     latency_ms: hit?.latency_ms ?? null,
     last_error: hit?.last_error || null,
     last_probe_at: hit?.last_probe_at || null,
@@ -1813,7 +1813,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const u5 = mergedQuota.utilization_5h
   const u7 = mergedQuota.utilization_7d
   const merged = mergeVmProxy(v, extras.poolSnap || null, {
-    role: extras.role || 'admin',
+    role: extras.role || 'super_admin',
     nodes: extras.clusterNodes || [],
   })
   const expiresAt = normalizePanelExpiresAt(v.expires_at, workerCred?.expires_at)
@@ -1946,6 +1946,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     sessions: isCodex ? { active: codexSessions?.active, max: codexSessions?.max } : null,
   })
   return {
+    groups: v.groups || [],
+    groups_version: v.groups_version || 0,
     id: v.id,
     name: v.name,
     status: v.status,
@@ -1964,7 +1966,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     node_id: v.node_id || null,
     owner_user_id: v.owner_user_id || null,
     origin: v.origin || null,
-    ...(canRevealClusterNodes(extras.role || 'admin') && v.node_id
+    ...(canRevealClusterNodes(extras.role || 'super_admin') && v.node_id
       ? { node_name: nodeNameOf(extras.clusterNodes, v.node_id) }
       : {}),
     timezone: v.timezone || null,

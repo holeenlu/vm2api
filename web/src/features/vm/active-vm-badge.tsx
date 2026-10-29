@@ -1,3 +1,4 @@
+import { t as tr } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { cn } from '@/lib/utils'
 import { isActiveVmPointer } from '@/features/vm/active-vm'
@@ -18,9 +19,9 @@ export function ActiveVmBadge({
         'bg-[color:var(--tier-pro-bg)] text-[color:var(--tier-pro-solid)]',
         className
       )}
-      title='当前活跃槽（active.json）；部分面板接口默认指向此槽'
+      title={tr('vm:sync14008ActiveSlotHelp')}
     >
-      Active
+      {tr('vm:sync14008Active')}
     </span>
   )
 }

@@ -1,10 +1,16 @@
+import { i18n } from '@/i18n'
 import type { VmUsageStats, VmUsageStatsDay } from '@/types/panel-vm'
+import { beforeEach } from 'vitest'
 import { describe, expect, it } from 'vitest'
 import {
   projectionView,
   shanghaiDay,
   summarizeUsageStats,
 } from './vm-stats-model'
+
+beforeEach(() => {
+  void i18n.changeLanguage('zh-CN')
+})
 
 // 2026-09-29 20:00 UTC 已是上海 09-30 04:00：日界必须按 +8h 算。
 const NOW = Date.parse('2026-09-29T20:00:00Z')

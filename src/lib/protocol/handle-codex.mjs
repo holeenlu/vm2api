@@ -1,13 +1,14 @@
 /**
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
+import { hasCompleteUsage } from './usage-evidence.mjs'
 import path from 'node:path'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { isClientStream, fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions } from './convert.mjs'
 import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
-import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { keyAllowsVm, keyAllowsModel, keyScopeFromRequest, groupScopeDenial } from '../admin/key-scope.mjs'
 import { ownerScopeFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
 import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { restrictCodexClient } from './codex-restriction.mjs'
@@ -49,7 +50,12 @@ import {
   makeProxyFetch,
   refreshCodexAccessToken,
 } from './codex-models.mjs'
-import { orderCodexSessionSlots, codexSlotAllowsModel, isCodexFailoverError } from '../pool/codex-slot-pool.mjs'
+import {
+  orderCodexSessionSlots,
+  codexSlotAllowsModel,
+  isCodexFailoverError,
+  isCodexOverloadError,
+} from '../pool/codex-slot-pool.mjs'
 import {
   holdOpenAIAccount,
   reportOpenAIAttempt,
@@ -184,6 +190,7 @@ export function isRetryableSameCodexAccount(
   if (status === 408) return true
   if (status === 500 || status === 502 || status === 503 || status === 504) {
     return (
+      isCodexOverloadError(result) ||
       code === '' || /server_error|provider_error|upstream_error|overloaded_error|internal_error|transport/i.test(code)
     )
   }
@@ -221,7 +228,9 @@ export function pickCodexCandidates(
   const model = body?.model || null
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
   const scope = keyScopeFromRequest(req)
-  const poolDenial = vmPoolDenial(scope)
+  if (!keyAllowsModel(scope, model))
+    return { error: 'group_unavailable', message: '当前分组无权调用该模型', ids: [], candidates: [] }
+  const poolDenial = groupScopeDenial(scope)
   if (poolDenial) return { error: 'vm_pool_unavailable', message: poolDenial.message, ids: [], candidates: [] }
   if (scope.group_type === 'anthropic') return { error: 'key_group_mismatch', ids: [], candidates: [] }
   if (pin) {
@@ -249,9 +258,6 @@ export function pickCodexCandidates(
     (vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm),
   )
   const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
-  if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
-    return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
-  }
   const ordered = orderCodexSessionSlots(continuesResponse ? vms.filter((vm) => vm.id === bound.vmId) : vms, {
     boundVmId: bound?.vmId || null,
     sessionKey,
@@ -259,6 +265,7 @@ export function pickCodexCandidates(
     model,
     excluded,
     quotaPolicy: routingPolicy,
+    resourcePriorities: scope.resource_priorities || null,
   })
   // A resting home migrates the conversation like a gone one: the next slot rebinds it.
   const boundLeft = ordered.boundState === 'gone' || ordered.boundState === 'resting'
@@ -794,7 +801,19 @@ export async function handleCodexProtocol({
         let hopEmitted = false
         const runHop = () =>
           runCodexKernelHop({
-            hop,
+            hop: (args) => {
+              const live = keyScopeFromRequest(req)
+              if (
+                !keyAllowsModel(live, pickOpts.body?.model || inbound?.model || converted.body.model) ||
+                !keyAllowsVm(live, vm)
+              )
+                return {
+                  ok: false,
+                  status: 403,
+                  body: { error: { code: 'group_unavailable', message: '当前授权已失效' } },
+                }
+              return hop(args)
+            },
             args: {
               exec: execFor(projectRoot, vm),
               signal: gone.signal,
@@ -909,6 +928,7 @@ export async function handleCodexProtocol({
           logBag.upstream_service_tier = responseServiceTier
           const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
           logBag.usage = logged
+          logBag.usage_complete = hasCompleteUsage(logged)
           const imageUsage =
             result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
           if (imageUsage) logBag.image_usage = imageUsage
@@ -1453,6 +1473,7 @@ export async function handleCodexImages({
     logBag.error_code = payload?.error?.code || `upstream_${last.status}`
   } else if (payload?.usage && typeof payload.usage === 'object') {
     logBag.image_usage = payload.usage
+    logBag.usage_complete = hasCompleteUsage(payload.usage)
   }
   return json(res, last.status, payload)
 }

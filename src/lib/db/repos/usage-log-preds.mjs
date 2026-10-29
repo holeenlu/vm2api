@@ -31,12 +31,54 @@ export function totalTokens(row = {}) {
   )
 }
 
-/** Rows a panel `user` owns: own user_id, one of their live keys, or served by a slot they owned at the time. */
+/** Customer visibility is the immutable authenticated caller snapshot. */
 export function ownerPred(ownerUserId) {
-  const id = String(ownerUserId || '').trim()
-  if (!id) return { sql: '', params: [] }
-  return {
-    sql: `(user_id = ? OR IFNULL(api_key_id, '') IN (SELECT id FROM api_keys WHERE user_id = ? AND deleted_at IS NULL) OR vm_owner_user_id = ?)`,
-    params: [id, id, id],
+  if (ownerUserId?.type === 'panel_key_creator') {
+    const id = String(ownerUserId.creatorId || '').trim()
+    return id
+      ? { sql: 'api_key_id IN (SELECT id FROM api_keys WHERE created_by_user_id = ?)', params: [id] }
+      : { sql: '1 = 0', params: [] }
   }
+  if (ownerUserId?.type === 'panel_admin_scope') {
+    const id = String(ownerUserId.adminId || '').trim()
+    const root = String(ownerUserId.scopeRootId || id).trim()
+    return id
+      ? {
+          sql: `(user_id IN (
+              WITH RECURSIVE managed(id) AS (
+                SELECT id FROM users WHERE id = ? AND deleted_at IS NULL
+                UNION ALL
+                SELECT u.id FROM users u JOIN managed m ON u.parent_user_id = m.id
+                WHERE u.deleted_at IS NULL
+              ) SELECT id FROM managed WHERE role IN ('admin', 'user')
+            ) OR api_key_id IN (
+              SELECT id FROM api_keys WHERE created_by_user_id IN (
+                WITH RECURSIVE managed(id) AS (
+                  SELECT id FROM users WHERE id = ? AND deleted_at IS NULL
+                  UNION ALL
+                  SELECT u.id FROM users u JOIN managed m ON u.parent_user_id = m.id
+                  WHERE u.deleted_at IS NULL
+                ) SELECT id FROM managed WHERE role IN ('admin', 'user')
+              )
+            ))`,
+          params: [root, root],
+        }
+      : { sql: '1 = 0', params: [] }
+  }
+  if (ownerUserId?.type === 'panel_users') {
+    if (ownerUserId.userId) {
+      const sql = `user_id IN (
+        WITH RECURSIVE managed(id) AS (
+          SELECT id FROM users WHERE id = ? AND deleted_at IS NULL
+          UNION ALL
+          SELECT u.id FROM users u JOIN managed m ON u.parent_user_id = m.id
+          WHERE u.deleted_at IS NULL
+        ) SELECT id FROM managed WHERE role IN ('admin', 'user')
+      )`
+      return { sql, params: [ownerUserId.userId] }
+    }
+    return { sql: "user_id IN (SELECT id FROM users WHERE role = 'user')", params: [] }
+  }
+  const id = String(ownerUserId || '').trim()
+  return id ? { sql: 'user_id = ?', params: [id] } : { sql: '', params: [] }
 }

@@ -1,6 +1,10 @@
 # 部署
 
-推荐 **Docker Compose**，**拉预构建镜像**，不在你的机器上构建。安装目录任意（下文用 `/opt/vm2api`）。
+tapmodels 的源码与 Release 使用 `holeenlu/vm2api`，应用镜像使用 `ghcr.io/holeenlu/tapmodels-gateway`；交付及授权见 [交付规范](CHANGE_DELIVERY.md)，发布架构与版本入口见 [品牌与发布](BRANDING_AND_RELEASE.md)。文末历史上游迁移记录不作为当前 fork 的升级入口。未发布所需版本时，不自动回退上游 Release。
+
+本品牌仅全新部署，不支持将旧 vm2api 部署原地改名升级。新环境使用 TAPMODELS_* 配置，不复用旧数据、容器或环境变量；代码仓库名称不等同于产品/镜像名称。
+
+推荐 **Docker Compose**，**拉预构建镜像**，不在你的机器上构建。安装目录任意（下文用 `/opt/tapmodels`）。
 
 ## 机器
 
@@ -9,12 +13,12 @@ Ubuntu 24.04 + Docker Engine。Debian 12 上槽内核常常起不来。
 最少三个环境变量，写在仓库 `.env`（`chmod 600`），不要进 git：
 
 ```bash
-VM2API_API_KEY='很长的随机串'
-VM2API_ADMIN_PASSWORD='面板密码'
-VM2API_DB_SECRET='再一串'
+TAPMODELS_API_KEY='很长的随机串'
+TAPMODELS_ADMIN_PASSWORD='面板密码'
+TAPMODELS_DB_SECRET='再一串'
 ```
 
-抄本：[deploy/env.example](deploy/env.example)。`VM2API_*` 优先于 `KIN_*`。
+抄本：[deploy/env.example](deploy/env.example)。`TAPMODELS_*` 优先于 `KIN_*`。
 
 宿主机开了 UFW / firewalld 且入站默认拒绝时，必须先放行槽出口网关，见下文「防火墙」。否则槽内请求全部 `502 incomplete_response`，面板代理探测却显示正常。
 
@@ -22,7 +26,7 @@ VM2API_DB_SECRET='再一串'
 
 | 容器 | 说明 |
 |---|---|
-| `vm2api` | 控制面。Compose **只起这一个** |
+| `tapmodels` | 控制面。Compose **只起这一个** |
 | `kin-<槽>` | 每个**已启动**的槽 1 个 |
 | 没有 | 未启动的槽；同机其它项目的 postgres / newapi 等 |
 
@@ -34,38 +38,38 @@ KVM 槽需要宿主 `/dev/kvm` 可读写（控制面在容器内时，用一次 
 
 出现 `native stdin: Broken pipe` 时同时检查容器 OOM 事件与 CLI 子进程，不能只看 Rust PID 1 是否存活。CLI 退出或输出管道关闭后，内核必须清零 `cli_pid` / `ready_slots`、终止在途请求并拒绝新任务，由宿主 watchdog 恢复槽；不重放已发送的推理请求。
 
-挂 `docker.sock`，`network_mode: host`。安装目录不再限定 `/opt/vm2api`：控制面自省 `docker inspect vm2api` 的 Mounts，把槽的 `-v` 源换算成宿主路径；也可用 `VM2API_HOST_ROOT` 显式指定。
+挂 `docker.sock`，`network_mode: host`。安装目录不再限定 `/opt/tapmodels`：控制面自省 `docker inspect tapmodels` 的 Mounts，把槽的 `-v` 源换算成宿主路径；也可用 `TAPMODELS_HOST_ROOT` 显式指定。
 
 ## 安装
 
 **一键（推荐）：**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash
 ```
 
-脚本只下载 `docker-compose.yml` / `.env.example` / `VERSION`（不 clone 仓库），补全 `.env`（`chmod 600`），然后 `docker compose pull && up -d`。`.env` 缺失或 `VM2API_ADMIN_PASSWORD` 为空时写入默认管理台 **`admin` / `123456`**（已有密码不覆盖）。空的 `VM2API_API_KEY` / `VM2API_DB_SECRET` 会生成随机值。登录：`http://<ip>:8787/cc#/login`。以后：
+脚本只下载 `docker-compose.yml` / `.env.example` / `VERSION`（不 clone 仓库），补全 `.env`（`chmod 600`），然后 `docker compose pull && up -d`。`.env` 缺失或 `TAPMODELS_ADMIN_PASSWORD` 为空时为管理台 `admin` 生成随机初始密码并保存到 `.env`（已有密码不覆盖，日志不输出密码）。空的 `TAPMODELS_API_KEY` / `TAPMODELS_DB_SECRET` 会生成随机值。登录：`http://<ip>:8787/cc#/login`。以后：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
-sudo bash /opt/vm2api/deploy/install.sh check
-sudo bash /opt/vm2api/deploy/install.sh changelog
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+sudo bash /opt/tapmodels/deploy/install.sh check
+sudo bash /opt/tapmodels/deploy/install.sh changelog
 ```
 
-保留 `.env` / `vms/` / `data/`。一键更新会把新版 `share/wrap-cli`（包括 `kin-kernel.bin`、`cli-node`、`cc-node`）同步到本机槽并重启槽内 dataplane；集群槽使用同一份二进制加上当前 Go `kin-worker` 遥测重建槽位镜像，再换容器，不改凭证和指纹。如需暂时跳过可加 `--no-sync-wrap`。管理台 **设置 → 关于** 可复制同一条命令、看 changelog。指定版本：`--version v1.2.22`。槽位重建可选「保留原数据」或「重建新特征」。
+保留 `.env` / `vms/` / `data/`。一键更新会把新版 `share/wrap-cli`（包括 `kin-kernel.bin`、`cli-node`、`cc-node`）同步到本机槽并重启槽内 dataplane；集群槽使用同一份二进制加上当前 Go `kin-worker` 遥测重建槽位镜像，再换容器，不改凭证和指纹。如需暂时跳过可加 `--no-sync-wrap`。管理台 **设置 → 关于** 可复制同一条命令、看 changelog。指定版本需使用本仓库实际已发布的 tag。槽位重建可选「保留原数据」或「重建新特征」。
 
-首次登录后，在「用户」中找到当前管理员，点击「改密码」设置至少 8 位的新密码。默认密码管理员也会写入用户列表；修改后数据库密码优先，重启或更新不会被 `.env` 中的旧密码覆盖。
+首次登录后，在「用户」中找到当前管理员，点击「改密码」设置至少 8 位的新密码。首装管理员也会写入用户列表；修改后数据库密码优先，重启或更新不会被 `.env` 中的旧密码覆盖。
 
-**ARM64 主机（实验性）**：同一条命令按 `uname -m` 自动选择 `vX.Y.Z-arm64` 控制面镜像并准备 QEMU（slot 仍是 amd64）。`--version` 可带 `-amd64` / `-arm64` 后缀，须与宿主一致。详见 [ARM64.md](ARM64.md)。
+**ARM64 主机（保留的手动路径）**：当前 fork 正式发布仅有 linux/amd64，不提供 ARM64 控制面镜像。既存 ARM64 准备、源码构建与 QEMU 路径见 [ARM64.md](ARM64.md)，需单独核对环境和授权，不能假定当前版本有可拉取的 `-arm64` 发布物。
 
 **手动（同样只拉镜像）：**
 
 ```bash
-mkdir -p /opt/vm2api && cd /opt/vm2api
-curl -sSLO https://raw.githubusercontent.com/dofastted/vm2api/main/docker-compose.yml
-curl -sSL -o .env https://raw.githubusercontent.com/dofastted/vm2api/main/.env.example
+mkdir -p /opt/tapmodels && cd /opt/tapmodels
+curl -sSLO https://raw.githubusercontent.com/holeenlu/vm2api/main/docker-compose.yml
+curl -sSL -o .env https://raw.githubusercontent.com/holeenlu/vm2api/main/.env.example
 chmod 600 .env
-# 空密码默认 admin / 123456；API key / DB secret 为空时入口会生成
+# 空密码、API key / DB secret 由入口随机生成，持久保存到 data/runtime-secrets.json（0600）
 
 docker compose pull
 docker compose up -d
@@ -78,28 +82,28 @@ KVM / Docker 槽位将宿主 `data/run/slot-guest-bin/`（仅含 `kin-worker`、
 
 **新建槽位的闭源依赖**：`kin-computer` 只分发编译后二进制，不公开源码。它由 `deploy/payload.json` 固定大小与 SHA256，随 Release 和控制面镜像交付；镜像入口自动安装到 `bin/kin-computer`，无需额外挂载私有源码目录。源码直接运行前执行 `npm run fetch:payload`；默认读取仓库的 `bin/kin-computer`，也可用 `KIN_COMPUTER_BIN` 指定绝对路径。二进制为 linux amd64，按 Ubuntu 22.04 / GLIBC 2.35 构建，Debian 12 与 Ubuntu 24.04 可向上兼容；ARM64 控制面通过 QEMU 运行。Docker 与 KVM 槽默认生成 Linux PC 计算机（真实 DMI 档案），不依赖 Bash 或 Python 3；手动 `--os macos` 生成 macOS 人设时才需要两者（控制面镜像已安装）。缺失时面板建槽返回 HTTP 400 `computer_service_missing`，生成失败返回 `computer_create_failed`。已有容器启动不会重新发布身份或改写主机名。
 
-`v1.3.176` 原镜像未包含该依赖；补传 Release 附件不会改变旧镜像。继续使用该镜像时，需将附件安装到挂载的 `bin/kin-computer`，在 `.env` 设置 `KIN_COMPUTER_BIN=/opt/vm2api/bin/kin-computer` 后重新创建控制面容器以载入环境变量（不要重建槽位容器）。
+`v1.3.176` 原镜像未包含该依赖；补传 Release 附件不会改变旧镜像。继续使用该镜像时，需将附件安装到挂载的 `bin/kin-computer`，在 `.env` 设置 `KIN_COMPUTER_BIN=/opt/tapmodels/bin/kin-computer` 后重新创建控制面容器以载入环境变量（不要重建槽位容器）。
 
 集群节点已有目标槽镜像标签时跳过传输；仅在缺少云端基础系统时拉取它，母机只上传程序层。此优化不代表远端槽位已接入本机容器的全部计算机身份挂载。
 
 **源码模式（自己改代码时）：**
 
 ```bash
-git clone https://github.com/dofastted/vm2api.git /opt/vm2api
-cd /opt/vm2api && cp .env.example .env && chmod 600 .env
+git clone https://github.com/holeenlu/vm2api.git /opt/tapmodels
+cd /opt/tapmodels && cp .env.example .env && chmod 600 .env
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 一键脚本对应 `--from-source`；目录里有 `.git` 时 `upgrade` 自动走源码分支。仓库只有源码：镜像构建内编控制台与 Go helper，并按 `deploy/payload.json` 从 payload Release 下载、校验 kernel / CLI / kin-computer，构建机要能访问 GitHub。镜像入口再把它们写进挂载的 `bin/` 与 `share/`。
 
-2026-10-11 起仓库历史已重写以移除构建产物，所有 tag 的提交号都变了。旧的源码安装用新版 `deploy/install.sh upgrade`（脚本已改为 `git fetch --force --tags`），不要用旧面板的一键更新做这次迁移。
+当前 fork 的升级按已核验的本仓库 Release tag 获取源码；不沿用旧上游历史重写时的全量强制刷新标签方案，也不把上游同名 tag 当成本仓库版本。
 
-升级到 **v1.2.22** 见下面「已部署机升级到 1.2.22」。更新控制面和槽内 kernel，但不要 `docker rm` 槽。
+旧 **v1.2.22** 等版本的说明移入文末历史记录；当前升级使用本仓库已发布版本，并保留数据、凭据和槽位。
 
 Docker Desktop / WSL 下 `curl 127.0.0.1:8787` 可能失败：
 
 ```bash
-docker exec vm2api python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8787/health").read().decode())'
+docker exec tapmodels python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8787/health").read().decode())'
 ```
 
 槽位安装、同步和模板制作优先使用 `KIN_KERNEL_BIN` / `bin/kin-kernel`；母样本或槽内快照只在主内核不可用时使用。更新或上传主内核后，仍需同步并重启目标槽。控制面重启本身不会替换正在运行的槽内进程。
@@ -116,7 +120,7 @@ kin-<槽> 容器 → keg* 网桥 → 宿主机 kin-egress（网关 IP:端口）�
 
 升级时控制面会用 `docker update --restart no` 原地迁移已有本机代理槽位（包括暂停槽位的容器），不重建槽位、不改凭据。请先升级并确认控制面成功启动，再重启 Docker。迁移失败会阻止控制面启动并打印错误；不能仅凭版本号认定已启用保护。该保护针对 Docker 守护进程重启；不要手工 `docker start` 代理槽位或清除其防火墙规则，`live-restore` 场景也不在此启动顺序保证范围内。
 
-控制面用 iptables 把容器的 TCP 和 DNS 重定向到宿主机上的 `kin-egress`。这一跳的目的地是宿主机本身，要经过宿主机 **INPUT** 链。UFW 默认入站 `DROP`，而 vm2api 不改你的 INPUT 规则，所以需要手动放行：
+控制面用 iptables 把容器的 TCP 和 DNS 重定向到宿主机上的 `kin-egress`。这一跳的目的地是宿主机本身，要经过宿主机 **INPUT** 链。UFW 默认入站 `DROP`，而 tapmodels 不改你的 INPUT 规则，所以需要手动放行：
 
 | 项 | 值 |
 |---|---|
@@ -156,7 +160,7 @@ docker exec kin-<槽> curl -sS -o /dev/null -w '%{http_code}\n' --max-time 10 ht
 
 ## 上线后
 
-1. 打开 `/cc` 是欢迎页，右上角「登录」进入登录页 `/cc#/login`（未配置时为 `admin` / `123456`）。首次登录回到欢迎页，下方首配清单按真实状态列出改密码、出口、槽位账号、可调度、密钥、首个请求，每步可跳面板或文档；点「跳过引导」后再登录直接进总览，用户菜单「欢迎与引导」可重新打开。
+1. 打开 `/cc` 是欢迎页，右上角「登录」进入登录页 `/cc#/login`（账号默认 `admin`；使用安装时生成或自行配置的密码）。首次登录回到欢迎页，下方首配清单按真实状态列出改密码、出口、槽位账号、可调度、密钥、首个请求，每步可跳面板或文档；点「跳过引导」后再登录直接进总览，用户菜单「欢迎与引导」可重新打开。
 2. 代理池：添加本地出口，或导入 SOCKS5。
 3. 建槽、绑出口、启动。没出口会停在 `stopped`。
 4. 在槽里导入凭证，再用 `sk-vm-…` 或 master key 打 `POST /v1/messages`。
@@ -165,48 +169,62 @@ docker exec kin-<槽> curl -sS -o /dev/null -w '%{http_code}\n' --max-time 10 ht
 
 ## 反代
 
-Node 听 `:8787`。HTTPS 放在 nginx。
+Node 听 `:8787`。HTTPS 放在 nginx。反代在前时，在 `.env` 设 `HOST=127.0.0.1` 并重建控制面容器：控制面只在环回口可达，`:8787` 不再随公网 IP 暴露。槽位与控制面之间走 unix socket，集群是控制面主动外连，都不依赖该端口的公网监听。
+
+用一个 `map` 按请求有无 `Upgrade` 决定 `Connection`，一个 `location` 就同时覆盖普通 HTTP、SSE 和 WebSocket，不必为 shell / responses 单独写 location：
 
 ```nginx
-# 集群页 / 槽位运维终端是 WebSocket：必须透传 Upgrade，并直连 Node（前面若有会丢 Upgrade 的网关，也要绕过）。
-location ~ ^/api/panel/(cluster/nodes|vms)/[^/]+/shell$ {
-  proxy_pass http://127.0.0.1:8787;
-  proxy_http_version 1.1;
-  proxy_set_header Host $host;
-  proxy_set_header Upgrade $http_upgrade;
-  proxy_set_header Connection "upgrade";
-  proxy_buffering off;
-  proxy_read_timeout 3600s;
+# http 块内一次定义。有 Upgrade 时透传，没有时留空（否则空 Upgrade 头会被上游拒绝）。
+map $http_upgrade $kin_connection_upgrade {
+  default upgrade;
+  ''      '';
 }
 
-# Responses WebSocket 与 HTTP 共用路径，也必须直连 Node 并保留 Upgrade。
-location ~ ^/(v1/)?responses$ {
-  proxy_pass http://127.0.0.1:8787;
-  proxy_http_version 1.1;
-  proxy_set_header Host $host;
-  proxy_set_header Authorization $http_authorization;
-  proxy_set_header Upgrade $http_upgrade;
-  proxy_set_header Connection "upgrade";
-  proxy_buffering off;
-  proxy_read_timeout 3600s;
-}
+server {
+  listen 443 ssl http2;
+  server_name example.com;
 
-location / {
-  proxy_pass http://127.0.0.1:8787;
-  proxy_http_version 1.1;
-  proxy_set_header Host $host;
-  proxy_set_header Authorization $http_authorization;
-  proxy_set_header Connection "";
-  proxy_buffering off;
-  proxy_read_timeout 600s;
+  ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+  # Codex 请求体可达数十 MB；上限由控制面自己判。
+  client_max_body_size 0;
+
+  location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+
+    # 集群页 / 槽位运维终端和 Responses WS 都靠这两行拿到 101。
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $kin_connection_upgrade;
+
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    # SSE / 流式响应不能缓冲，也不能重试。
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_next_upstream off;
+  }
 }
 ```
 
-`Connection ""` 会剥掉 Upgrade，终端或 Responses WS 握手拿不到 101，所以 shell / responses 路径单独放在前面。生产机的 Go 前门在 `:8787`、Node 在 `:8788` 时，这些 location 必须 `proxy_pass` 到 Node。终端症状和核对命令见 [nginx-shell.md](nginx-shell.md)。
+写死 `Connection "upgrade"` 会让普通请求带上无效的 Upgrade 头；写死 `Connection ""` 会剥掉 Upgrade，终端或 Responses WS 握手拿不到 101。沿用 `Connection ""` 的旧配置时，shell / responses 必须另写 location 放在 `location /` **前面**，见 [nginx-shell.md](nginx-shell.md)。生产机的 Go 前门在 `:8787`、Node 在 `:8788` 时，这些 location 必须 `proxy_pass` 到 Node。
+
+证书用 certbot 管续期，别让它依赖已停用的入口程序。`:80` 放行 ACME 路径再跳转，并给未知 SNI 一个 `ssl_reject_handshake on` 的 `default_server`，这样直连公网 IP 的 TLS 请求到不了控制面：
+
+```bash
+certbot certonly --webroot -w /var/www/acme -d example.com \
+  --key-type ecdsa --deploy-hook 'systemctl reload nginx'
+```
 
 ## 本机 Node（备选）
 
-`npm run fetch:payload` 拉 `bin/kin-{kernel,codex-kernel,oauth-auth}` 与 `share/`；`npm run build:egress && npm run build:worker`；`npm ci`、`pnpm -C web install --frozen-lockfile && npm run build:web`；以及占位 `vms/active.json`。单元：[deploy/vm2api.service](deploy/vm2api.service)。细节见 [BUILD.md](BUILD.md)。
+`npm run fetch:payload` 拉 `bin/kin-{kernel,codex-kernel,oauth-auth}` 与 `share/`；`npm run build:egress && npm run build:worker`；`npm ci`、`pnpm -C web install --frozen-lockfile && npm run build:web`；以及占位 `vms/active.json`。单元：[deploy/tapmodels.service](deploy/tapmodels.service)。细节见 [BUILD.md](BUILD.md)。
 
 ## 一键安装 / 更新
 
@@ -219,32 +237,38 @@ location / {
 v1.2.7 的 `.dockerignore` 用 `*.md` 把 changelog 挡在构建上下文外。脚本会自动补一行；若仍失败：
 
 ```bash
-cd /opt/vm2api
+cd /opt/tapmodels
 grep -q '!CHANGELOG.md' .dockerignore || echo '!CHANGELOG.md' >> .dockerignore
 docker compose up -d --build
 ```
 
-或 `curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade`。
+或 `curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade`。
 
 **2. 管理台「Missing credentials」/「鉴权失效，请重新登录」**
 
-打开登录页 `http://<ip>:8787/cc#/login`。未配置时账密是 `admin` / `123456`。已有密码：`grep '^VM2API_ADMIN_PASSWORD=' /opt/vm2api/.env`。
+打开登录页 `http://<ip>:8787/cc#/login`。账号默认 `admin`，没有公共默认密码。一键安装生成的初始密码保存在 `.env`；容器直接启动时生成在数据目录 `runtime-secrets.json` 的 `TAPMODELS_ADMIN_PASSWORD` 字段，文件权限 0600，仅由有权访问宿主机的管理员读取。不要把密码或该文件贴到日志、工单。已有 `.env` 密码：`grep '^TAPMODELS_ADMIN_PASSWORD=' /opt/tapmodels/.env`。
 
 ```bash
 # 安装
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash
 
 # 更新到最新 Release
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
 
-# 指定 tag
-sudo bash /opt/vm2api/deploy/install.sh upgrade --version v1.2.22
+# 指定本仓库实际已发布的 tag（替换 vX.Y.Z）
+sudo bash /opt/tapmodels/deploy/install.sh upgrade --version vX.Y.Z
 
 # 只检查
-sudo bash /opt/vm2api/deploy/install.sh check
+sudo bash /opt/tapmodels/deploy/install.sh check
 ```
 
-面板：`GET /api/panel/version`、`GET /api/panel/changelog`、`POST /api/panel/update`。确认更新后，控制面会通过已挂载的 `docker.sock` 自省当前 Compose 项目和全部配置文件，拉起独立升级助手。助手记录更新前正常运行的槽位，按源码/镜像模式更新，保留已有 `src/config` 配置并 `--force-recreate` 控制面；通过健康检查、版本接口和槽位详情接口确认后端版本正确、此前健康的槽内内核仍能通过控制面鉴权，完成后才报告成功。忙碌但进程健康的槽位不视为故障；更新前已故障或停止的槽位不计入本次回归检查。助手失败时保留 `docker logs vm2api-upgrade-<project>`；容器里没有可识别的 Compose 服务时返回 `409 host_upgrade_required`，响应里带同一条 curl 命令。槽位内核健康检查不调用模型，不消耗上游额度。
+面板：`GET /api/panel/version`、`GET /api/panel/changelog`、`POST /api/panel/update`。确认更新后，控制面会通过已挂载的 `docker.sock` 自省当前 Compose 项目和全部配置文件，拉起独立升级助手。助手记录更新前正常运行的槽位，按源码/镜像模式更新，保留已有 `src/config` 配置并 `--force-recreate` 控制面；通过健康检查、版本接口和槽位详情接口确认后端版本正确、此前健康的槽内内核仍能通过控制面鉴权，完成后才报告成功。忙碌但进程健康的槽位不视为故障；更新前已故障或停止的槽位不计入本次回归检查。助手失败时保留 `docker logs tapmodels-upgrade-<project>`；容器里没有可识别的 Compose 服务时返回 `409 host_upgrade_required`，响应里带同一条 curl 命令。槽位内核健康检查不调用模型，不消耗上游额度。
+
+GPT 的 Codex kernel 位于控制面容器内，更新控制面会结束它，即使槽位容器仍在运行。启用现有 `kernel_watchdog.enabled`（默认开启）和 `inference.eager_start`（默认开启）时，启动恢复会重新启动这些运行中槽位的 kernel，保留手动调度状态，停止槽位不自动开机。如果日志出现 `Previously healthy slot ... failed kernel verification`，表示版本可能已更新但槽位验收失败，不能只凭新版本号认定更新成功。
+
+## 历史上游版本迁移记录
+
+以下记录保留原上游版本号、来源和当时操作，供核查对应旧部署的变更；不是当前 `holeenlu/vm2api` 的安装/更新指令。不要对当前 fork 直接执行其中的上游下载命令，当前入口见上方“一键安装 / 更新”。
 
 ## 已部署机升级到 1.2.22
 

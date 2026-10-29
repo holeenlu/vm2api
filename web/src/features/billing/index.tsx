@@ -1,175 +1,287 @@
-import { useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { VIEW_TITLES } from '@/config/nav'
-import { fmtNum, fmtUsd } from '@/lib/format'
-import type { VmKind } from '@/lib/vm-kind'
-import { useVmIndex } from '@/hooks/use-vm-index'
+import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { EmptyState } from '@/components/empty-state'
+import { Input } from '@/components/ui/input'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
-import { TableSkeleton } from '@/components/page-skeletons'
-import { SlotIdentity } from '@/components/platform-chip'
-import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { StatCard } from '@/components/stat-card'
-import { billingQueryOptions } from '@/features/billing/queries'
-import { emptyTotals, splitBilling } from './split'
+import { meQueryOptions } from '@/features/auth/queries'
+import { usersQueryOptions } from '@/features/users/queries'
 
-type PlatformFilter = 'all' | VmKind
-
+type Ledger = {
+  id: string
+  user_id: string
+  user_name?: string | null
+  kind: string
+  amount: number
+  balance_after: number
+  reason: string
+  created_at: string
+}
+type Pending = {
+  request_id: string
+  user_id: string
+  status: string
+  reserved_micros: number
+  model: string
+}
 export function BillingPage() {
-  const [groupBy, setGroupBy] = useState<'vm' | 'key'>('vm')
-  const [platform, setPlatform] = useState<PlatformFilter>('all')
-  const q = useQuery(billingQueryOptions(groupBy))
-  const { vms } = useVmIndex()
-  const items = q.data?.items || []
+  const { t } = useTranslation('billing')
+  const kindLabels: Record<string, string> = {
+    adjustment: t('ledgerAdjustment'),
+    redeem: t('ledgerRedeem'),
+    transfer: t('ledgerTransfer'),
+    usage: t('ledgerUsage'),
+    reversal: t('ledgerReversal'),
+  }
+  const pendingLabels: Record<string, string> = {
+    pending: t('pending'),
+    pending_usage: t('pendingUsage'),
+    pending_pricing: t('pendingPricing'),
+  }
 
-  const split = useMemo(
-    () => splitBilling(items, groupBy, vms),
-    [groupBy, items, vms]
-  )
-
-  const visible = split.rows.filter((item) => {
-    if (groupBy !== 'vm' || platform === 'all') return true
-    return item.kind === platform
+  const me = useQuery(meQueryOptions())
+  const canWrite = me.data?.role === 'super_admin'
+  const admin = me.data?.role === 'super_admin' || me.data?.role === 'admin'
+  const qc = useQueryClient()
+  const users = useQuery({ ...usersQueryOptions(), enabled: admin })
+  const [userId, setUserId] = useState('')
+  const aggregateBalance = me.data?.role === 'super_admin' && !userId
+  const [cursors, setCursors] = useState<{ at: string; id: string }[]>([])
+  const cursor = cursors[cursors.length - 1]
+  const q = useQuery({
+    queryKey: ['panel', 'billing', admin, userId, cursor],
+    queryFn: () =>
+      api<{
+        balance: number
+        reserved?: number
+        available?: number
+        items: Ledger[]
+        pending?: Pending[]
+      }>(
+        '/api/panel/billing?' +
+          new URLSearchParams({
+            ...(admin && userId ? { user_id: userId } : {}),
+            ...(cursor ? { before: cursor.at, before_id: cursor.id } : {}),
+          })
+      ),
   })
-  const totals =
-    groupBy === 'vm' && platform !== 'all'
-      ? platform === 'codex'
-        ? split.gpt
-        : split.claude
-      : q.data?.totals || emptyTotals()
-
+  const [reason, setReason] = useState('')
+  const [reverse, setReverse] = useState<Ledger | null>(null)
+  const change = useMutation({
+    mutationFn: ({ path, body }: { path: string; body: unknown }) =>
+      api(path, { method: 'POST', body: JSON.stringify(body) }),
+    onSuccess: async () => {
+      toast.success(t('billing:success'))
+      await qc.invalidateQueries({ queryKey: ['panel'] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
   return (
     <PageHeader
-      title={VIEW_TITLES.billing}
-      extra={
-        <div className='flex flex-wrap gap-2'>
-          <Button
-            size='sm'
-            variant={groupBy === 'vm' ? 'default' : 'outline'}
-            onClick={() => setGroupBy('vm')}
-          >
-            按虚拟机
-          </Button>
-          <Button
-            size='sm'
-            variant={groupBy === 'key' ? 'default' : 'outline'}
-            onClick={() => {
-              setGroupBy('key')
-              setPlatform('all')
-            }}
-          >
-            按密钥
-          </Button>
-          {groupBy === 'vm' ? (
-            <>
-              <Button
-                size='sm'
-                variant={platform === 'all' ? 'default' : 'outline'}
-                onClick={() => setPlatform('all')}
-              >
-                全部
-              </Button>
-              <Button
-                size='sm'
-                variant={platform === 'claude' ? 'default' : 'outline'}
-                onClick={() => setPlatform('claude')}
-              >
-                Claude
-              </Button>
-              <Button
-                size='sm'
-                variant={platform === 'codex' ? 'default' : 'outline'}
-                onClick={() => setPlatform('codex')}
-              >
-                GPT
-              </Button>
-            </>
-          ) : null}
-        </div>
-      }
+      title={t('billing:title')}
+      description={t('billing:description')}
     >
-      <QueryGate
-        loading={q.isLoading}
-        error={q.error}
-        skeleton={<TableSkeleton rows={8} columns={6} />}
-      >
-        <div className='mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
-          <StatCard label='请求' value={fmtNum(totals.requests || 0)} />
-          <StatCard label='成功' value={fmtNum(totals.ok || 0)} />
-          <StatCard label='失败' value={fmtNum(totals.fail || 0)} />
-          <StatCard label='费用' value={fmtUsd(totals.cost_usd || 0)} />
-        </div>
-        {groupBy === 'vm' ? (
-          <div className='mb-4 grid gap-3 sm:grid-cols-2'>
-            <StatCard
-              label='Claude 费用'
-              value={fmtUsd(split.claude.cost_usd)}
-              hint={`${fmtNum(split.claude.requests)} 请求`}
-            />
-            <StatCard
-              label='GPT 费用'
-              value={fmtUsd(split.gpt.cost_usd)}
-              hint={`${fmtNum(split.gpt.requests)} 请求`}
-            />
-          </div>
+      {q.error ? (
+        <p role='alert' className='text-destructive'>
+          {q.error.message}
+        </p>
+      ) : null}
+      {admin ? (
+        <SearchSelect
+          className='mb-3 min-w-56'
+          label={t('billing:user')}
+          searchPlaceholder={t('billing:searchUser')}
+          value={userId}
+          options={(users.data?.items || []).map((u) => ({
+            id: u.id,
+            name: u.username,
+          }))}
+          onChange={(value) => {
+            setUserId(value || '')
+            setCursors([])
+          }}
+          allLabel={t('billing:allTransactions')}
+        />
+      ) : null}
+      <div className='mb-5 grid gap-4 sm:grid-cols-3'>
+        <StatCard
+          label={
+            aggregateBalance
+              ? t('billing:totalBalance')
+              : t('billing:accountBalance')
+          }
+          value={q.data?.balance?.toFixed(6) ?? '—'}
+        />
+        <StatCard
+          label={t('billing:reserved')}
+          value={q.data?.reserved?.toFixed(6) ?? '—'}
+        />
+        <StatCard
+          label={t('billing:available')}
+          value={q.data?.available?.toFixed(6) ?? '—'}
+        />
+      </div>
+      <div className='overflow-auto rounded border'>
+        <table className='w-full text-sm'>
+          <thead>
+            <tr className='border-b bg-muted/40'>
+              {[
+                t('billing:time'),
+                ...(admin ? [t('billing:username')] : []),
+                t('billing:kind'),
+                t('billing:amount'),
+                t('billing:balanceAfter'),
+                t('billing:reason'),
+              ].map((v) => (
+                <th key={v} className='p-3 text-left'>
+                  {v}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {q.data?.items.map((r) => (
+              <tr key={r.id} className='border-b'>
+                <td className='p-3'>
+                  {new Date(r.created_at).toLocaleString(i18n.language)}
+                </td>
+                {admin ? (
+                  <td className='p-3 text-sm' title={r.user_id}>
+                    {r.user_name ||
+                      users.data?.items?.find((u) => u.id === r.user_id)
+                        ?.username ||
+                      t('billing:deletedUser')}
+                  </td>
+                ) : null}
+                <td className='p-3'>{kindLabels[r.kind] ?? r.kind}</td>
+                <td className='p-3 tabular-nums'>{r.amount.toFixed(6)}</td>
+                <td className='p-3 tabular-nums'>
+                  {r.balance_after.toFixed(6)}
+                </td>
+                <td className='p-3'>
+                  {r.reason}
+                  {canWrite && r.kind !== 'reversal' && r.amount !== 0 ? (
+                    <Button
+                      size='sm'
+                      variant='ghost'
+                      onClick={() => {
+                        setReverse(r)
+                        setReason('')
+                      }}
+                    >
+                      {t('billing:reverse')}
+                    </Button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!q.isLoading && !q.data?.items.length ? (
+          <p className='p-6 text-center text-muted-foreground'>
+            {t('billing:noTransactions')}
+          </p>
         ) : null}
-        {visible.length === 0 ? (
-          <EmptyState reason='暂无计费数据' />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{groupBy === 'vm' ? '账号' : '密钥'}</TableHead>
-                <TableHead>请求</TableHead>
-                <TableHead>成功</TableHead>
-                <TableHead>失败</TableHead>
-                <TableHead>输入 token</TableHead>
-                <TableHead>输出 token</TableHead>
-                <TableHead>费用</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {visible.map((item) => {
-                const id =
-                  groupBy === 'vm' ? item.row.vm_id : item.row.api_key_id
-                return (
-                  <TableRow key={id || 'none'}>
-                    <TableCell>
-                      {groupBy === 'vm' && id ? (
-                        <Link
-                          to='/vm/$id'
-                          params={{ id }}
-                          className='inline-flex min-w-0 hover:underline'
-                        >
-                          <SlotIdentity vm={item.vm} vmId={id} />
-                        </Link>
-                      ) : (
-                        id || '—'
-                      )}
-                    </TableCell>
-                    <TableCell>{fmtNum(item.row.requests)}</TableCell>
-                    <TableCell>{fmtNum(item.row.ok)}</TableCell>
-                    <TableCell>{fmtNum(item.row.fail)}</TableCell>
-                    <TableCell>{fmtNum(item.row.tokens_in)}</TableCell>
-                    <TableCell>{fmtNum(item.row.tokens_out)}</TableCell>
-                    <TableCell>{fmtUsd(item.row.cost_usd)}</TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        )}
-      </QueryGate>
+      </div>
+      {admin && q.data?.pending?.length ? (
+        <section className='mt-6 space-y-3'>
+          <h2 className='font-semibold'>{t('billing:pendingRequests')}</h2>
+          <Input
+            aria-label={t('billing:reconciliationReason')}
+            placeholder={t('billing:manualReason')}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+          {q.data.pending.map((r) => (
+            <div
+              key={r.request_id}
+              className='flex flex-wrap items-center gap-3 rounded border p-3 text-sm'
+            >
+              <span className='flex-1'>
+                {r.request_id} · {r.model} ·{' '}
+                {pendingLabels[r.status] ?? r.status}
+              </span>
+              <Button
+                variant='outline'
+                disabled={change.isPending || !reason.trim()}
+                onClick={() =>
+                  change.mutate({
+                    path:
+                      '/api/panel/billing/requests/' +
+                      encodeURIComponent(r.request_id),
+                    body: { action: 'reprice', reason },
+                  })
+                }
+              >
+                {t('billing:reprice')}
+              </Button>
+              <Button
+                variant='outline'
+                disabled={change.isPending || !reason.trim()}
+                onClick={() =>
+                  change.mutate({
+                    path:
+                      '/api/panel/billing/requests/' +
+                      encodeURIComponent(r.request_id),
+                    body: { action: 'release', reason },
+                  })
+                }
+              >
+                {t('billing:release')}
+              </Button>
+            </div>
+          ))}
+        </section>
+      ) : null}
+      <ConfirmDialog
+        open={!!reverse}
+        onOpenChange={(v) => !v && setReverse(null)}
+        title={t('billing:reverseTitle')}
+        desc={t('billing:reverseDescription')}
+        confirmText={t('billing:confirmReverse')}
+        disabled={!reason.trim()}
+        handleConfirm={() => {
+          if (reverse)
+            change.mutate({
+              path: '/api/panel/billing/ledger/' + reverse.id + '/reverse',
+              body: { reason },
+            })
+          setReverse(null)
+        }}
+      >
+        <Input
+          aria-label={t('billing:reversalReason')}
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder={t('billing:reversalPlaceholder')}
+        />
+      </ConfirmDialog>
+      <div className='mt-4 flex gap-3'>
+        <Button
+          variant='outline'
+          disabled={!cursors.length}
+          onClick={() => setCursors(cursors.slice(0, -1))}
+        >
+          {t('billing:newer')}
+        </Button>
+        <Button
+          variant='outline'
+          disabled={(q.data?.items.length || 0) < 50}
+          onClick={() => {
+            const last = q.data?.items[(q.data?.items.length || 0) - 1]
+            if (last)
+              setCursors([...cursors, { at: last.created_at, id: last.id }])
+          }}
+        >
+          {t('billing:older')}
+        </Button>
+      </div>
     </PageHeader>
   )
 }

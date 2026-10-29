@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { credTypeOf } from '@/lib/cred-type'
@@ -24,6 +25,8 @@ export function ConvertOauthToSetupButton({
   vm: Vm
   onCommitted?: (data: ConvertOauthResult, vmId: string, what: string) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
   const perms = useVmPerms()
@@ -39,7 +42,7 @@ export function ConvertOauthToSetupButton({
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
         qc.invalidateQueries({ queryKey: vmQueryOptions(vm.id).queryKey }),
       ])
-      const what = '已转为 Setup Token'
+      const what = tVm('vm:convertOauthButton.convertedToSetupToken')
       if (onCommitted) onCommitted(data, vm.id, what)
       else toast.success(what)
     },
@@ -59,15 +62,19 @@ export function ConvertOauthToSetupButton({
         loading={convert.isPending}
         onClick={() => setOpen(true)}
       >
-        {convert.isPending ? '转换中…' : '转为 Setup Token'}
+        {convert.isPending
+          ? tVm('vm:convertOauthButton.converting')
+          : tVm('vm:convertOauthButton.convertToSetupToken')}
       </Button>
       <ConfirmDialog
         open={open}
         onOpenChange={setOpen}
-        title='转为 Setup Token'
-        desc='保留当前 access token、refresh token、真实过期时间及全部已授权 scope。仅切换为 Setup Token 运行模式，不跑官方初装；不会增加或删减 profile / usage 权限。'
-        confirmText='确认转换'
-        cancelBtnText='取消'
+        title={tVm('vm:convertOauthButton.convertToSetupToken')}
+        desc={tVm(
+          'vm:convertOauthButton.keepsTheCurrentAccessTokenRefreshTokenActualExpiry'
+        )}
+        confirmText={tVm('vm:convertOauthButton.confirmConversion')}
+        cancelBtnText={tVm('vm:authSchemeEditor.cancel')}
         isLoading={convert.isPending}
         handleConfirm={() => convert.mutate()}
       />

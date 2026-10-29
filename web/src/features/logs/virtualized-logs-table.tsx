@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import type { UsageLogFilters, UsageLogRow } from '@/types/panel-usage-logs'
 import { ArrowUp, Loader2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   calculateOutputRate,
   formatCurrency,
-  formatDuration,
   formatTokenAmount,
   isNonBillingEndpoint,
+  shouldHideOutputRate,
 } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { useVirtualizedInfiniteList } from '@/hooks/use-virtualized-infinite-list'
@@ -18,6 +19,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { formatDuration } from '@/features/logs/display-time'
 import type { LogsTableColumn } from './column-visibility'
 import { CostTooltipContent } from './cost-tooltip'
 import {
@@ -56,6 +58,8 @@ function HeadCell({
   title?: string
   children: string
 }) {
+  useTranslation('logs')
+
   return (
     <div className={cn('truncate px-1.5', className)} title={title ?? children}>
       {children}
@@ -64,6 +68,8 @@ function HeadCell({
 }
 
 function CostBadges({ row }: { row: UsageLogRow }) {
+  const { t: translate } = useTranslation('logs')
+
   const fast = hasFastMode(row)
   const context1m = Boolean(row.context1mApplied)
   if (fast && context1m) {
@@ -71,11 +77,15 @@ function CostBadges({ row }: { row: UsageLogRow }) {
       <Badge
         variant='outline'
         className='gap-0 px-0.5 text-[9px] leading-3'
-        title='fast + 1M 上下文'
+        title={translate('logs:fastMillionContext')}
       >
-        <span className='text-orange-700 dark:text-orange-300'>fast</span>
+        <span className='text-orange-700 dark:text-orange-300'>
+          {translate('logs:fast')}
+        </span>
         <span className='text-muted-foreground'>·</span>
-        <span className='text-purple-700 dark:text-purple-300'>1M</span>
+        <span className='text-purple-700 dark:text-purple-300'>
+          {translate('logs:million')}
+        </span>
       </Badge>
     )
   }
@@ -84,16 +94,16 @@ function CostBadges({ row }: { row: UsageLogRow }) {
       <Badge
         variant='outline'
         className={FAST_BADGE}
-        title='优先服务等级（fast 模式）'
+        title={translate('logs:priorityService')}
       >
-        fast
+        {translate('logs:fast')}
       </Badge>
     )
   }
   if (context1m) {
     return (
       <Badge variant='outline' className={CONTEXT_1M_BADGE}>
-        1M
+        {translate('logs:million')}
       </Badge>
     )
   }
@@ -109,15 +119,18 @@ function LogRow({
   hidden: (column: LogsTableColumn) => boolean
   onOpenDetail: OpenDetail
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const nonBilling = isNonBillingEndpoint(row.endpoint)
   const cache = cacheWriteSplit({
-    total: row.cacheCreationInputTokens,
+    total: row.cacheCreationInputTokens ?? null,
     fiveM: row.cacheCreation5mInputTokens,
     oneH: row.cacheCreation1hInputTokens,
     ttl: row.cacheTtlApplied,
   })
-  const rate = calculateOutputRate(row.outputTokens, row.generationMs)
-  const showRate = rate != null
+  const rate = calculateOutputRate(row.outputTokens, row.durationMs, row.ttftMs)
+  const showRate =
+    rate != null && !shouldHideOutputRate(rate, row.durationMs, row.ttftMs)
 
   return (
     <>
@@ -155,12 +168,16 @@ function LogRow({
               </TooltipTrigger>
               <TooltipContent side='bottom' className='max-w-[500px] space-y-1'>
                 <span className='block font-mono text-xs break-all'>
-                  出站 {row.sessionId}
+                  {translate('logs:outboundSessionValue', {
+                    session: row.sessionId,
+                  })}
                 </span>
                 {row.clientSessionId &&
                 row.clientSessionId !== row.sessionId ? (
                   <span className='block font-mono text-xs break-all opacity-70'>
-                    客户端 {row.clientSessionId}
+                    {translate('logs:clientSessionValue', {
+                      session: row.clientSessionId,
+                    })}
                   </span>
                 ) : null}
               </TooltipContent>
@@ -175,7 +192,7 @@ function LogRow({
           {row.clientIp ? (
             <button
               type='button'
-              title='点击复制'
+              title={translate('logs:clickToCopy')}
               className='block w-full max-w-full min-w-0 cursor-pointer truncate text-left font-mono text-xs hover:underline'
               onClick={() => row.clientIp && void copyText(row.clientIp)}
             >
@@ -232,8 +249,16 @@ function LogRow({
               </div>
             </TooltipTrigger>
             <TooltipContent align='end' className='space-y-1 text-xs'>
-              <div>输入: {formatTokenAmount(row.inputTokens)}</div>
-              <div>输出: {formatTokenAmount(row.outputTokens)}</div>
+              <div>
+                {translate('logs:inputAmount', {
+                  amount: formatTokenAmount(row.inputTokens),
+                })}
+              </div>
+              <div>
+                {translate('logs:outputAmount', {
+                  amount: formatTokenAmount(row.outputTokens),
+                })}
+              </div>
             </TooltipContent>
           </Tooltip>
         </div>
@@ -259,10 +284,20 @@ function LogRow({
               </div>
             </TooltipTrigger>
             <TooltipContent align='end' className='space-y-1 text-xs'>
-              <div className='font-medium'>缓存写入</div>
-              <div className='pl-2'>5m: {formatTokenAmount(cache.fiveM)}</div>
-              <div className='pl-2'>1h: {formatTokenAmount(cache.oneH)}</div>
-              <div className='mt-1 font-medium'>缓存读取</div>
+              <div className='font-medium'>{translate('logs:cacheWrite')}</div>
+              <div className='pl-2'>
+                {translate('logs:cacheFiveMinuteAmount', {
+                  amount: formatTokenAmount(cache.fiveM),
+                })}
+              </div>
+              <div className='pl-2'>
+                {translate('logs:cacheHourAmount', {
+                  amount: formatTokenAmount(cache.oneH),
+                })}
+              </div>
+              <div className='mt-1 font-medium'>
+                {translate('logs:cacheRead')}
+              </div>
               <div className='pl-2'>
                 {formatTokenAmount(row.cacheReadInputTokens)}
               </div>
@@ -272,7 +307,11 @@ function LogRow({
       )}
       {hidden('cost') ? null : (
         <div className='min-w-[50px] flex-[0.6] px-1.5 text-right font-mono text-xs'>
-          {nonBilling || row.costUsd == null ? (
+          {row.billingStatus?.startsWith('pending') ? (
+            <span className='text-amber-600'>
+              {translate('logs:pendingReconciliation')}
+            </span>
+          ) : nonBilling || row.costUsd == null ? (
             '-'
           ) : (
             <Tooltip delayDuration={250}>
@@ -297,30 +336,36 @@ function LogRow({
                 <span>{formatDuration(row.durationMs)}</span>
                 {row.ttftMs != null && row.ttftMs > 0 ? (
                   <span className='text-[10px] text-muted-foreground'>
-                    TTFT {formatDuration(row.ttftMs)}
+                    {translate('logs:ttftValue', {
+                      duration: formatDuration(row.ttftMs),
+                    })}
                   </span>
                 ) : null}
                 {showRate ? (
                   <span className='text-[10px] text-muted-foreground'>
-                    {rate.toFixed(0)} tok/s
+                    {translate('logs:rateValue', { rate: rate.toFixed(0) })}
                   </span>
                 ) : null}
               </div>
             </TooltipTrigger>
             <TooltipContent align='end' className='space-y-1 text-xs'>
-              <div>总耗时: {formatDuration(row.durationMs)}</div>
-              {row.firstByteMs != null ? (
-                <div>首字节时间（TTFB）: {formatDuration(row.firstByteMs)}</div>
-              ) : null}
+              <div>
+                {translate('logs:totalDurationValue', {
+                  duration: formatDuration(row.durationMs),
+                })}
+              </div>
               {row.ttftMs != null ? (
-                <div>首 Token 时间（TTFT）: {formatDuration(row.ttftMs)}</div>
-              ) : null}
-              {row.generationMs != null && row.generationMs > 0 ? (
                 <div>
-                  上游输出时间（含推理）: {formatDuration(row.generationMs)}
+                  {translate('logs:ttftDurationValue', {
+                    duration: formatDuration(row.ttftMs),
+                  })}
                 </div>
               ) : null}
-              {showRate ? <div>输出速率: {rate.toFixed(1)} tok/s</div> : null}
+              {showRate ? (
+                <div>
+                  {translate('logs:outputRateValue', { rate: rate.toFixed(1) })}
+                </div>
+              ) : null}
             </TooltipContent>
           </Tooltip>
         </div>
@@ -366,6 +411,8 @@ export function VirtualizedLogsTable({
   bodyClassName?: string
   onOpenDetail: OpenDetail
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const scrolledDownRef = useRef(false)
   const query = useInfiniteQuery(
     usageLogsBatchQueryOptions({
@@ -427,20 +474,26 @@ export function VirtualizedLogsTable({
     return (
       <div className='flex items-center justify-center py-12'>
         <Loader2 className='h-6 w-6 animate-spin text-muted-foreground' />
-        <span className='ml-2 text-muted-foreground'>加载中...</span>
+        <span className='ml-2 text-muted-foreground'>
+          {translate('logs:loading')}
+        </span>
       </div>
     )
   }
   if (query.error) {
     return (
       <div className='py-8 text-center text-destructive'>
-        {query.error instanceof Error ? query.error.message : '加载失败'}
+        {query.error instanceof Error
+          ? query.error.message
+          : translate('logs:loadFailed')}
       </div>
     )
   }
   if (!allLogs.length && !hasNextPage) {
     return (
-      <div className='py-8 text-center text-muted-foreground'>暂无数据</div>
+      <div className='py-8 text-center text-muted-foreground'>
+        {translate('logs:noData')}
+      </div>
     )
   }
 
@@ -448,14 +501,16 @@ export function VirtualizedLogsTable({
     <div className='space-y-4'>
       {hideStatusBar ? null : (
         <div className='flex items-center justify-between px-3 pt-2 text-xs text-muted-foreground/70'>
-          <span>已加载 {allLogs.length} 条记录</span>
+          <span>
+            {translate('logs:loadedRecords', { count: allLogs.length })}
+          </span>
           {isFetchingNextPage ? (
             <span className='flex items-center gap-1.5'>
               <Loader2 className='h-3 w-3 animate-spin' />
-              加载更多中...
+              {translate('logs:loadingMore')}
             </span>
           ) : !hasNextPage && allLogs.length > 0 ? (
-            <span>已加载全部记录</span>
+            <span>{translate('logs:allRecordsLoaded')}</span>
           ) : null}
         </div>
       )}
@@ -465,59 +520,69 @@ export function VirtualizedLogsTable({
           <div className='sticky top-0 z-10 [scrollbar-gutter:stable] overflow-y-hidden border-b bg-muted/30'>
             <div className='flex h-8 items-center text-[11px] font-medium tracking-wide text-muted-foreground/80'>
               <HeadCell className='min-w-[56px] flex-[0.6] pr-1.5 pl-3'>
-                时间
+                {translate('logs:time')}
               </HeadCell>
               {isHidden('user') ? null : (
-                <HeadCell className='min-w-[50px] flex-[0.8]'>用户</HeadCell>
+                <HeadCell className='min-w-[50px] flex-[0.8]'>
+                  {translate('logs:user')}
+                </HeadCell>
               )}
               {isHidden('key') ? null : (
-                <HeadCell className='min-w-[50px] flex-[0.6]'>密钥</HeadCell>
+                <HeadCell className='min-w-[50px] flex-[0.6]'>
+                  {translate('logs:key')}
+                </HeadCell>
               )}
               {isHidden('sessionId') ? null : (
                 <HeadCell
                   className='min-w-[80px] flex-[0.8]'
-                  title='实际发往上游的会话 id'
+                  title={translate('logs:outboundSessionHint')}
                 >
-                  出站 Session
+                  {translate('logs:outboundSession')}
                 </HeadCell>
               )}
               {isHidden('ip') ? null : (
-                <HeadCell className='min-w-[90px] flex-[0.8]'>IP</HeadCell>
+                <HeadCell className='min-w-[90px] flex-[0.8]'>
+                  {translate('logs:ip')}
+                </HeadCell>
               )}
               {isHidden('provider') ? null : (
-                <HeadCell className='min-w-[100px] flex-[1.5]'>供应商</HeadCell>
+                <HeadCell className='min-w-[100px] flex-[1.5]'>
+                  {translate('logs:provider')}
+                </HeadCell>
               )}
-              <HeadCell className='min-w-[100px] flex-[1.3]'>计费模型</HeadCell>
+              <HeadCell className='min-w-[100px] flex-[1.3]'>
+                {translate('logs:billingModel')}
+              </HeadCell>
               {isHidden('reasoningEffort') ? null : (
                 <HeadCell
                   className='min-w-[64px] flex-[0.6]'
-                  title='该模型请求的思考强度'
+                  title={translate('logs:modelReasoningHint')}
                 >
-                  思考强度
+                  {translate('logs:reasoningEffort')}
                 </HeadCell>
               )}
               {isHidden('tokens') ? null : (
                 <HeadCell className='min-w-[70px] flex-[0.7] text-right'>
-                  Tokens
+                  {translate('logs:tokens')}
                 </HeadCell>
               )}
               {isHidden('cache') ? null : (
                 <HeadCell className='min-w-[70px] flex-[0.8] text-right'>
-                  缓存
+                  {translate('logs:cache')}
                 </HeadCell>
               )}
               {isHidden('cost') ? null : (
                 <HeadCell className='min-w-[50px] flex-[0.6] text-right'>
-                  成本
+                  {translate('logs:cost')}
                 </HeadCell>
               )}
               {isHidden('performance') ? null : (
                 <HeadCell className='min-w-[80px] flex-[0.8] text-right'>
-                  性能
+                  {translate('logs:performance')}
                 </HeadCell>
               )}
               <HeadCell className='min-w-[70px] flex-[0.7] pr-3 pl-1.5'>
-                状态
+                {translate('logs:status')}
               </HeadCell>
             </div>
           </div>
@@ -604,7 +669,7 @@ export function VirtualizedLogsTable({
           onClick={scrollToTop}
         >
           <ArrowUp className='mr-1 h-4 w-4' />
-          回到顶部
+          {translate('logs:backToTop')}
         </Button>
       ) : null}
     </div>

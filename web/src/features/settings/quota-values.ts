@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { OpenAIQuotaPolicy } from '@/types/panel-vm'
 import { cn } from '@/lib/utils'
 
@@ -11,18 +12,20 @@ export const OPENAI_DEFAULTS: OpenAIQuotaPolicy = {
   max_sessions: 0,
 }
 
-export const OPENAI_SESSION_STEPS: [number, string][] = [
-  [0, '不限'],
-  [1, '1'],
-  [2, '2'],
-  [4, '4'],
-  [8, '8'],
-  [16, '16'],
-  [32, '32'],
-  [64, '64'],
-  [128, '128'],
-  [256, '256'],
-]
+export function getOpenaiSessionSteps(): [number, string][] {
+  return [
+    [0, translate('settings:unlimited')],
+    [1, '1'],
+    [2, '2'],
+    [4, '4'],
+    [8, '8'],
+    [16, '16'],
+    [32, '32'],
+    [64, '64'],
+    [128, '128'],
+    [256, '256'],
+  ]
+}
 
 export function numberOf(value: unknown, fallback: number): number {
   return Number.isFinite(Number(value)) ? Number(value) : fallback
@@ -35,7 +38,7 @@ export function recordOf(value: unknown): Obj {
 }
 
 export function formatRpm(value: number): string {
-  return value === 0 ? '不限' : `${value}`
+  return value === 0 ? translate('settings:unlimited') : `${value}`
 }
 
 export function openaiPolicy(
