@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="440" viewBox="0 0 1600 440" role="img" aria-labelledby="title desc">
+  <title id="title">tapmodels</title>
+  <desc id="desc">Isolated runtimes. One API gateway.</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#08111f"/><stop offset="1" stop-color="#102d42"/></linearGradient></defs>
+  <rect width="1600" height="440" rx="24" fill="url(#bg)"/>
+  <path d="M160 154l54 66-54 66M250 286l58-132" fill="none" stroke="#55e4ed" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="360" y="243" fill="#f1f7fb" font-family="Arial, sans-serif" font-size="108" font-weight="700" letter-spacing="-4">tapmodels</text>
+  <text x="368" y="302" fill="#9ebdce" font-family="Arial, sans-serif" font-size="27" letter-spacing="2">ISOLATED RUNTIMES. ONE API GATEWAY.</text>
+</svg>

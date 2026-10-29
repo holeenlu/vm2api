@@ -1,9 +1,10 @@
-import { format } from 'date-fns'
+import { i18n } from '@/i18n'
 import type { UsageLogFilterOptions } from '@/types/panel-usage-logs'
 import { X } from 'lucide-react'
-import { ERROR_CLASS_META } from '@/lib/log-mute'
+import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { errorClassLabel } from '@/features/logs/log-display'
 import type { LogsFilterState } from '../search'
 import { inclusiveEndFromExclusive } from './time-range'
 
@@ -26,80 +27,104 @@ export function ActiveFiltersDisplay({
   onRemove: (filters: LogsFilterState) => void
   onClearAll: () => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const chips: { key: ChipKey; label: string; value: string }[] = []
   if (isAdmin && filters.userId)
     chips.push({
       key: 'userId',
-      label: '用户',
+      label: translate('logs:user'),
       value: nameOf(options?.users, filters.userId),
     })
   if (filters.keyId)
     chips.push({
       key: 'keyId',
-      label: 'API 密钥',
+      label: translate('logs:apiKey'),
       value: nameOf(options?.keys, filters.keyId),
     })
   if (isAdmin && filters.vmId)
     chips.push({
       key: 'vmId',
-      label: '供应商',
+      label: translate('logs:provider'),
       value: nameOf(options?.vms, filters.vmId),
     })
   if (filters.sessionId)
     chips.push({
       key: 'sessionId',
-      label: 'Session ID',
+      label: translate('logs:sessionId'),
       value:
         filters.sessionId.length > 12
           ? `${filters.sessionId.slice(0, 12)}...`
           : filters.sessionId,
     })
   if (filters.startTime != null && filters.endTime != null) {
-    const start = format(new Date(filters.startTime), 'MM/dd')
-    const end = format(
-      new Date(inclusiveEndFromExclusive(filters.endTime)),
-      'MM/dd'
+    const start = new Date(filters.startTime).toLocaleDateString(
+      i18n.language,
+      { month: 'short', day: 'numeric' }
     )
+    const end = new Date(
+      inclusiveEndFromExclusive(filters.endTime)
+    ).toLocaleDateString(i18n.language, { month: 'short', day: 'numeric' })
     chips.push({
       key: 'time',
-      label: '日期范围',
+      label: translate('logs:dateRange'),
       value: start === end ? start : `${start} - ${end}`,
     })
   }
   if (filters.model)
-    chips.push({ key: 'model', label: '模型', value: filters.model })
+    chips.push({
+      key: 'model',
+      label: translate('logs:model'),
+      value: filters.model,
+    })
   if (filters.mismatch)
     chips.push({
       key: 'mismatch',
-      label: '计费/实际模型不一致',
-      value: '已开启',
+      label: translate('logs:modelMismatch'),
+      value: translate('logs:enabled'),
     })
   if (filters.endpoint)
-    chips.push({ key: 'endpoint', label: '端点', value: filters.endpoint })
+    chips.push({
+      key: 'endpoint',
+      label: translate('logs:endpoint'),
+      value: filters.endpoint,
+    })
   if (filters.protocol)
-    chips.push({ key: 'protocol', label: '协议', value: filters.protocol })
+    chips.push({
+      key: 'protocol',
+      label: translate('logs:protocol'),
+      value: filters.protocol,
+    })
   if (filters.excludeStatus200)
-    chips.push({ key: 'status', label: '状态码', value: '!200' })
+    chips.push({
+      key: 'status',
+      label: translate('logs:statusCode'),
+      value: '!200',
+    })
   else if (filters.statusCode != null)
     chips.push({
       key: 'status',
-      label: '状态码',
+      label: translate('logs:statusCode'),
       value: String(filters.statusCode),
     })
   if ((filters.minRetry ?? 0) > 0)
     chips.push({
       key: 'minRetry',
-      label: '重试次数≥',
+      label: translate('logs:minimumRetries'),
       value: `>=${filters.minRetry}`,
     })
   if (filters.errorClass)
     chips.push({
       key: 'errorClass',
-      label: '错误类',
-      value: ERROR_CLASS_META[filters.errorClass]?.label ?? filters.errorClass,
+      label: translate('logs:errorClass'),
+      value: errorClassLabel(filters.errorClass),
     })
   if (filters.debugOnly)
-    chips.push({ key: 'debugOnly', label: 'Debug 采样', value: '已开启' })
+    chips.push({
+      key: 'debugOnly',
+      label: translate('logs:debugSampling'),
+      value: translate('logs:enabled'),
+    })
 
   if (!chips.length) return null
 
@@ -120,7 +145,7 @@ export function ActiveFiltersDisplay({
   return (
     <div className='-mb-1 flex [scrollbar-width:none] flex-wrap items-center gap-2 overflow-x-auto pb-1'>
       <span className='shrink-0 text-xs font-medium text-muted-foreground'>
-        已激活筛选:
+        {translate('logs:activeFilters')}
       </span>
       {chips.map((chip) => (
         <Badge
@@ -132,7 +157,7 @@ export function ActiveFiltersDisplay({
           <span className='font-semibold'>{chip.value}</span>
           <button
             type='button'
-            aria-label='移除筛选'
+            aria-label={translate('logs:removeFilter')}
             onClick={() => remove(chip.key)}
             className='ml-1 cursor-pointer rounded-full outline-none hover:bg-muted-foreground/20 focus:ring-2 focus:ring-ring/50'
           >
@@ -148,7 +173,7 @@ export function ActiveFiltersDisplay({
           className='h-auto shrink-0 px-2 py-1 text-xs'
           onClick={onClearAll}
         >
-          清除全部
+          {translate('logs:clearAll')}
         </Button>
       ) : null}
     </div>

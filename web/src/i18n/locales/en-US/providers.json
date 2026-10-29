@@ -1,0 +1,36 @@
+{
+  "title": "Service providers",
+  "description": "View supplier-added accounts, supplier login names, quotas, usage, and scheduling.",
+  "activeTotal": "Active / total",
+  "nearLimit": "Near 7D limit",
+  "totalCost": "Total spend",
+  "searchPlaceholder": "Search accounts, suppliers, or service types",
+  "unboundVm": "No VM bound",
+  "recoveringSoon": "Recovering soon",
+  "daysHoursLater": "{{days}}d {{hours}}h later",
+  "concurrency": "Concurrency {{value}}",
+  "rpm": "RPM {{value}}",
+  "viewVm": "View VM",
+  "empty": "No service provider data.",
+  "columns": {
+    "vendor": "Supplier",
+    "status": "Status / schedule",
+    "fiveHour": "5H",
+    "sevenDay": "7D",
+    "totalCost": "Total spend",
+    "tokens": "Token",
+    "actions": "Actions",
+    "account": "Account",
+    "schedule": "Scheduling"
+  },
+  "status": {
+    "provisioning": "Provisioning",
+    "paused": "Paused",
+    "schedulePaused": "Scheduling paused",
+    "waitingAuth": "Waiting for authorization",
+    "enabled": "Enabled"
+  },
+  "hoursMinutesLater": "In {{hours}}h {{minutes}}m",
+  "requests": "Requests {{value}}",
+  "unlimited": "Unlimited"
+}

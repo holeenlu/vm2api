@@ -265,15 +265,16 @@ async function runHop({ mode, opts }) {
     }
   }
   const send = mode === 'stream' ? streamRustKernel : callRustKernel
+  const onSendState = opts.onSendState
   beginWrapHop(opts.exec)
   let result
   try {
-    result = await send(opts)
+    result = await send({ ...opts, onSendState })
     noteWrapHop(opts.exec)
     if (opts.signal?.aborted || isClientCancelledResult(result)) {
       result = clientCancelledResult(result)
     } else if (result.transportError === true && result.committed !== true) {
-      result = await send(opts)
+      result = await send({ ...opts, onSendState })
       result = { ...result, rust_transport_retried: true }
       noteWrapHop(opts.exec)
     }
@@ -284,7 +285,7 @@ async function runHop({ mode, opts }) {
       else {
         // The CLI invalidates its OAuth cache from the shared credential file
         // before creating each API client. Recycling here kills sibling hops.
-        result = await send(opts)
+        result = await send({ ...opts, onSendState })
         result = { ...result, credential_retried: true }
         noteWrapHop(opts.exec)
       }

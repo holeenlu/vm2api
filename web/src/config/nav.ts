@@ -1,4 +1,9 @@
+import { t } from '@/i18n'
+
 export type ViewId =
+  | 'groups'
+  | 'ops'
+  | 'subscriptions'
   | 'overview'
   | 'cluster'
   | 'vm'
@@ -17,33 +22,105 @@ export type ViewId =
   | 'database'
   | 'settings'
   | 'users'
+  | 'providers'
   | 'wrap'
 
 export const VIEW_TITLES: Record<ViewId, string> = {
-  overview: '总览',
-  cluster: '集群',
-  vm: '虚拟机',
-  import: '导入',
-  specs: '规格',
-  billing: '计费',
-  proxies: '代理池',
-  models: '模型',
-  risk: '风险审计',
-  system: 'system提示词',
-  keys: '密钥',
-  api: 'API',
-  anthropic: 'Anthropic',
-  logs: '日志',
-  statistics: '统计',
-  database: '数据库',
-  settings: '设置',
-  users: '用户',
-  wrap: '内核',
+  get groups() {
+    return t('common:groups')
+  },
+  get ops() {
+    return t('common:operations')
+  },
+  get subscriptions() {
+    return t('common:subscriptions')
+  },
+  get overview() {
+    return t('common:overview')
+  },
+  get cluster() {
+    return t('common:cluster')
+  },
+  get vm() {
+    return t('common:virtualMachines')
+  },
+  get import() {
+    return t('common:import')
+  },
+  get specs() {
+    return t('common:specifications')
+  },
+  get billing() {
+    return t('common:billing')
+  },
+  get proxies() {
+    return t('common:proxyPool')
+  },
+  get models() {
+    return t('common:models')
+  },
+  get risk() {
+    return t('common:riskAudit')
+  },
+  get system() {
+    return t('common:systemPrompts')
+  },
+  get keys() {
+    return t('common:apiKeys')
+  },
+  get api() {
+    return t('common:upstreamAPIs')
+  },
+  get anthropic() {
+    return t('common:anthropic')
+  },
+  get logs() {
+    return t('common:usageHistory')
+  },
+  get statistics() {
+    return t('common:statistics')
+  },
+  get database() {
+    return t('common:database')
+  },
+  get settings() {
+    return t('common:settings')
+  },
+  get users() {
+    return t('common:users')
+  },
+  get providers() {
+    return t('common:providers')
+  },
+  get wrap() {
+    return t('common:kernel')
+  },
 }
 
 // 监控组四页的职责边界，避免同一块数据在多页重复出现。
 export const VIEW_DESCRIPTIONS: Partial<Record<ViewId, string>> = {
-  overview: '集群健康、账号可用性与近 1 小时服务质量',
-  statistics: '请求、消费与耗时趋势，以及用户 / 供应商 / 模型排行',
-  logs: '逐条请求记录，支持筛选、导出与查看详情',
+  get overview() {
+    return t('common:overviewDescription')
+  },
+  get statistics() {
+    return t('common:statisticsDescription')
+  },
+  get logs() {
+    return t('common:logsDescription')
+  },
+}
+
+export function firstAllowedPath(views?: string[] | null): string {
+  const allow = new Set((views || []).map((v) => String(v).replace(/^\//, '')))
+  for (const candidate of [
+    'overview',
+    'users',
+    'keys',
+    'statistics',
+    'logs',
+    'billing',
+  ]) {
+    if (allow.has(candidate)) return `/${candidate}`
+  }
+  return '/welcome'
 }

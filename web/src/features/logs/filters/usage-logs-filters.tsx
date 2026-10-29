@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Clock, Network, Server, User } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { usageLogFilterOptionsQueryOptions } from '../queries'
 import type { LogsFilterState } from '../search'
@@ -27,6 +28,8 @@ export function UsageLogsFilters({
   onApply: (filters: LogsFilterState) => void
   onReset: () => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const [draft, setDraft] = useState(filters)
   useEffect(() => setDraft(filters), [filters])
   const options = useQuery(usageLogFilterOptionsQueryOptions())
@@ -62,8 +65,8 @@ export function UsageLogsFilters({
       />
       <div className='grid gap-4 lg:grid-cols-2'>
         <FilterSection
-          title='时间范围'
-          description='按日期和时间筛选'
+          title={translate('logs:timeRange')}
+          description={translate('logs:timeFiltersHint')}
           icon={Clock}
           defaultOpen
           activeCount={draft.startTime != null && draft.endTime != null ? 1 : 0}
@@ -71,9 +74,11 @@ export function UsageLogsFilters({
           <TimeFilters filters={draft} onChange={setDraft} />
         </FilterSection>
         <FilterSection
-          title='身份信息'
+          title={translate('logs:identity')}
           description={
-            isAdmin ? '按用户、密钥、供应商和会话筛选' : '按密钥和会话筛选'
+            isAdmin
+              ? translate('logs:adminIdentityHint')
+              : translate('logs:userIdentityHint')
           }
           icon={User}
           defaultOpen
@@ -88,8 +93,8 @@ export function UsageLogsFilters({
           />
         </FilterSection>
         <FilterSection
-          title='请求参数'
-          description='按模型、端点、协议筛选'
+          title={translate('logs:requestParameters')}
+          description={translate('logs:requestFiltersHint')}
           icon={Network}
           activeCount={requestCount}
         >
@@ -101,8 +106,8 @@ export function UsageLogsFilters({
           />
         </FilterSection>
         <FilterSection
-          title='状态信息'
-          description='按状态码、重试次数和错误类筛选'
+          title={translate('logs:statusInformation')}
+          description={translate('logs:statusFiltersHint')}
           icon={Server}
           activeCount={statusCount}
         >
@@ -115,7 +120,7 @@ export function UsageLogsFilters({
       </div>
       <div className='flex flex-wrap items-center gap-2 pt-2'>
         <Button type='button' onClick={() => onApply(draft)}>
-          应用筛选
+          {translate('logs:applyFilters')}
         </Button>
         <Button
           type='button'
@@ -125,7 +130,7 @@ export function UsageLogsFilters({
             onReset()
           }}
         >
-          重置
+          {translate('logs:reset')}
         </Button>
       </div>
     </div>

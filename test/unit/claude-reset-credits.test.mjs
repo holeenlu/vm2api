@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { canClaudeResetCredits } from '../../src/lib/oauth/credential-mode.mjs'
+import { AccountQuota } from '../../src/lib/pool/account-quota.mjs'
 import test from 'node:test'
 import { buildClaudeResetQuery, buildClaudeResetRedeem } from '../../src/lib/admin/panel-api.mjs'
 import {
@@ -83,6 +84,81 @@ function scripted({
 
 test.beforeEach(() => {
   resetClaudeResetLeasesForTest()
+})
+
+test('quota query persists the same response usage and a new reader sees it immediately', async () => {
+  const root = rootDir()
+  writeVm(root)
+  const quota = new AccountQuota({ dataDir: path.join(root, 'data') })
+  try {
+    const reset = new Date(Date.now() + 86400000).toISOString()
+    const result = await buildClaudeResetQuery({
+      cfg: { paths: { project: root } },
+      id: 'vm-1',
+      accountQuota: quota,
+      transport: async () => ({
+        ok: true,
+        status: 200,
+        body: {
+          ...REDEEMABLE,
+          five_hour: { utilization: 1, resets_at: reset },
+          seven_day: { utilization: 69, resets_at: reset },
+        },
+      }),
+    })
+    assert.equal(result.data.usage_refreshed, true)
+    const reloaded = new AccountQuota({ db: quota.db })
+    assert.equal(reloaded.repo.get('vm-1').unified.official['7d'].utilization, 0.69)
+    assert.equal(reloaded.repo.get('vm-1').unified.official['5h'].utilization, 0.01)
+  } finally {
+    quota.db.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('confirmed reset persists a new interval even when the follow-up read fails', async () => {
+  const root = rootDir()
+  writeVm(root)
+  const quota = new AccountQuota({ dataDir: path.join(root, 'data') })
+  try {
+    quota.ensure({ account_id: 'vm-1', vm_id: 'vm-1' })
+    quota.ingestOAuthUsage('vm-1', {
+      ok: true,
+      seven_day: { utilization: 1, resets_at: new Date(Date.now() + 86400000).toISOString() },
+    })
+    const clock = Date.now()
+    const { transport, posts } = scripted()
+    const result = await buildClaudeResetRedeem({
+      cfg: { paths: { project: root } },
+      id: 'vm-1',
+      accountQuota: quota,
+      idempotencyKey: 'fresh-window',
+      now: () => clock,
+      transport: async (exec, op, opts) => (op === 'usage' ? { ok: false, status: 503 } : transport(exec, op, opts)),
+    })
+    assert.equal(result.data.outcome, 'reset')
+    assert.equal(result.data.usage_refreshed, false)
+    assert.equal(posts.length, 1)
+    const reloaded = new AccountQuota({ db: quota.db })
+    const u = reloaded.repo.get('vm-1').unified
+    assert.equal(u.official['7d'].utilization, 0)
+    assert.equal(u.official['7d'].reset, null)
+    assert.equal(Date.parse(u.cleared_windows['7d']), clock)
+    const replay = await buildClaudeResetRedeem({
+      cfg: { paths: { project: root } },
+      id: 'vm-1',
+      accountQuota: quota,
+      idempotencyKey: 'fresh-window',
+      now: () => clock + 1000,
+      transport,
+    })
+    assert.equal(replay.data.replayed, true)
+    assert.equal(posts.length, 1)
+    assert.equal(Date.parse(reloaded.repo.get('vm-1').unified.cleared_windows['7d']), clock)
+  } finally {
+    quota.db.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('query projects the next grant and hides grant ids', async () => {

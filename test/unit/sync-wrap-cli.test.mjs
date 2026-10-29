@@ -43,7 +43,7 @@ test('container wrap sync waits for health then replaces every slot', async () =
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
     const port = server.address().port
-    const result = await runSync({ KIN_AUTO_SYNC_BASE: `http://127.0.0.1:${port}`, VM2API_API_KEY: 'test-key' })
+    const result = await runSync({ KIN_AUTO_SYNC_BASE: `http://127.0.0.1:${port}`, TAPMODELS_API_KEY: 'test-key' })
     assert.equal(result.code, 0, result.stderr)
     assert.match(result.stdout, /2\/2, failed=0/)
     assert.deepEqual(
@@ -69,7 +69,7 @@ test('container wrap sync fails when any slot update fails', async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   try {
     const port = server.address().port
-    const result = await runSync({ KIN_AUTO_SYNC_BASE: `http://127.0.0.1:${port}`, VM2API_API_KEY: 'test-key' })
+    const result = await runSync({ KIN_AUTO_SYNC_BASE: `http://127.0.0.1:${port}`, TAPMODELS_API_KEY: 'test-key' })
     assert.equal(result.code, 1)
     assert.match(result.stderr, /slot sync failed/)
   } finally {
