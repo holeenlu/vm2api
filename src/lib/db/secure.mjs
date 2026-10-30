@@ -2,7 +2,7 @@
  * Optional at-rest encryption for credential fields in the DB
  * (sub2api AESEncryptor counterpart, zero-dependency node:crypto).
  *
- * Enabled when VM2API_DB_SECRET (or KIN_DB_SECRET) is set: AES-256-GCM, key = SHA-256(secret).
+ * Enabled when TAPMODELS_DB_SECRET (or KIN_DB_SECRET) is set: AES-256-GCM, key = SHA-256(secret).
  * Format: enc:v1:<iv_b64>:<tag_b64>:<ciphertext_b64>
  * Without the secret, values are stored as-is (matching the previous
  * plaintext-file-with-0600 behavior).
@@ -13,7 +13,7 @@ import crypto from 'node:crypto'
 const PREFIX = 'enc:v1:'
 
 function dbSecret() {
-  return process.env.VM2API_DB_SECRET || process.env.KIN_DB_SECRET
+  return process.env.TAPMODELS_DB_SECRET || process.env.KIN_DB_SECRET
 }
 
 export function encryptionEnabled() {

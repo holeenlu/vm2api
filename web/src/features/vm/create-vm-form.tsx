@@ -6,9 +6,11 @@ import {
   type UseMutationResult,
 } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import { t as tVm } from '@/i18n'
 import type { PreflightCheck } from '@/types/panel-cluster'
 import type { RuntimeType } from '@/types/panel-vm'
 import { ChevronRight } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api, isApiError } from '@/lib/api'
 import { importErrorMessage } from '@/lib/import-errors'
@@ -47,7 +49,7 @@ import {
   kernelProfile,
 } from '@/features/vm/create-options'
 import {
-  TCG_WARNING,
+  tcgWarning,
   VM_DISK_GB_MAX,
   VM_DISK_GB_MIN,
   VM_MEMORY_LABELS,
@@ -163,6 +165,8 @@ export function useCreateVmDraft({
   pinnedAfter?: CreateVmAfter
   onCreated?: (id: string) => void
 } = {}): CreateVmDraft {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const [platform, setPlatform] = useState<Platform>('anthropic')
   const [kernel, setKernel] = useState<string>(KERNELS[0].id)
@@ -240,16 +244,29 @@ export function useCreateVmDraft({
     },
     onSuccess: async (created) => {
       if (created.proxyError) {
-        toast.warning(`出口未绑定：${created.proxyError}`)
+        toast.warning(
+          tVm('vm:createVmForm.egressNotBound', {
+            proxyError: created.proxyError,
+          })
+        )
       }
       if (created.startError) {
         toast.warning(
           created.id
-            ? `已创建 ${created.id}，开机失败：${created.startError}`
-            : `已创建，开机失败：${created.startError}`
+            ? tVm('vm:createVmForm.createdButStartupFailed', {
+                id: created.id,
+                startError: created.startError,
+              })
+            : tVm('vm:createVmForm.createdButStartupFailedAlternative', {
+                startError: created.startError,
+              })
         )
       } else {
-        toast.success(created.id ? `已创建 ${created.id}` : '已创建')
+        toast.success(
+          created.id
+            ? tVm('vm:createVmForm.created', { id: created.id })
+            : tVm('vm:createVmForm.createdAlternative')
+        )
       }
       setName('')
       await Promise.all([
@@ -269,7 +286,7 @@ export function useCreateVmDraft({
   })
 
   return {
-    isAdmin: me.data?.role === 'admin',
+    isAdmin: me.data?.role === 'super_admin',
     pinnedAfter,
     platform,
     setPlatform,
@@ -317,8 +334,8 @@ export function machineLine(
 ): string {
   const mem = memory
     ? VM_MEMORY_LABELS[memory as VmMemoryOption] || memory
-    : '默认内存'
-  if (runtime !== 'kvm') return `${mem} 内存`
+    : tVm('vm:createVmForm.defaultMemory')
+  if (runtime !== 'kvm') return tVm('vm:createVmForm.memory', { mem: mem })
   return [mem, vcpus ? `${vcpus} vCPU` : null, diskGb ? `${diskGb} GB` : null]
     .filter(Boolean)
     .join(' · ')
@@ -334,6 +351,8 @@ export function SpecSheet({
   rows: SpecRow[]
   className?: string
 }) {
+  useTranslation('vm')
+
   return (
     <dl
       className={cn('grid grid-cols-[4.5rem_minmax(0,1fr)] gap-y-2', className)}
@@ -356,33 +375,40 @@ export function draftSpecRows(d: CreateVmDraft): SpecRow[] {
     : null
   return [
     {
-      label: '平台',
+      label: tVm('vm:createVmForm.platform'),
       value: (
         <PlatformChip kind={d.platform === 'openai' ? 'codex' : 'claude'} />
       ),
     },
     {
-      label: '形态',
+      label: tVm('vm:createVmForm.runtime'),
       value:
         d.runtimeType === 'kvm'
           ? d.kvmAvail.status === 'ok' && d.kvmAvail.accel === 'tcg'
-            ? '虚拟机 (KVM · TCG)'
-            : '虚拟机 (KVM)'
-          : '容器 (Docker)',
+            ? tVm('vm:createVmForm.virtualMachineKVMTCG')
+            : tVm('vm:createVmForm.virtualMachineKVM')
+          : tVm('vm:createVmForm.containerDocker'),
     },
-    { label: '系统', value: kernelProfile(d.kernel)?.name || d.kernel },
     {
-      label: '规格',
+      label: tVm('vm:createVmForm.operatingSystem'),
+      value: kernelProfile(d.kernel)?.name || d.kernel,
+    },
+    {
+      label: tVm('vm:createVmForm.specifications'),
       value: machineLine(d.runtimeType, d.memory, d.vcpus, d.diskGb),
     },
     {
-      label: '放置',
-      value: node ? node.label || node.host : '本机',
+      label: tVm('vm:createVmForm.placement'),
+      value: node
+        ? node.label || node.host
+        : tVm('vm:createExitField.localMachine'),
     },
     {
-      label: '名称',
+      label: tVm('vm:createVmForm.name'),
       value: d.typedName || (
-        <span className='text-muted-foreground'>自动编号</span>
+        <span className='text-muted-foreground'>
+          <Trans ns='vm' i18nKey='createVmForm.automaticID' />
+        </span>
       ),
     },
   ]
@@ -404,6 +430,8 @@ function Section({
   summaryCaution?: boolean
   children: ReactNode
 }) {
+  useTranslation('vm')
+
   const [open, setOpen] = useState(summary == null)
   const head = (
     <div className='flex items-baseline justify-between gap-3'>
@@ -465,16 +493,20 @@ function Section({
 }
 
 function kvmDetail(avail: KvmAvailability, remote: boolean): ReactNode {
-  if (avail.status === 'loading') return '正在检测宿主 KVM…'
+  if (avail.status === 'loading') return tVm('vm:createVmForm.checkingHostKVM')
   if (avail.status === 'disabled' || avail.status === 'unknown') {
-    return remote ? `节点：${avail.reason}` : avail.reason
+    return remote
+      ? tVm('vm:createVmForm.node', { reason: avail.reason })
+      : avail.reason
   }
   if (avail.accel === 'tcg') {
     return (
-      <span className='text-[color:var(--status-caution)]'>{TCG_WARNING}</span>
+      <span className='text-[color:var(--status-caution)]'>{tcgWarning()}</span>
     )
   }
-  return '独立内核与硬件指纹（SMBIOS、MAC、磁盘序列号），需宿主 /dev/kvm。'
+  return tVm(
+    'vm:createVmForm.dedicatedKernelAndHardwareIdentitySMBIOSMACDiskSerial'
+  )
 }
 
 /**
@@ -493,45 +525,63 @@ export function CreateVmForm({
   variant: 'flow' | 'dialog'
   onCancel?: () => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const remote = !!d.placement.nodeId
   const kvm = d.runtimeType === 'kvm'
 
   return (
     <div className='space-y-5'>
-      <Section title='平台' hint='决定槽里跑哪种账号，创建后不能改。'>
+      <Section
+        title={tVm('vm:createVmForm.platform')}
+        hint={tVm(
+          'vm:createVmForm.determinesTheAccountPlatformCannotBeChangedAfterCreation'
+        )}
+      >
         <ChoiceTiles
-          label='槽位平台'
+          label={tVm('vm:createVmForm.slotPlatform')}
           value={d.platform}
           onChange={d.setPlatform}
           choices={[
             {
               value: 'anthropic',
               title: <PlatformChip kind='claude' />,
-              detail: 'OAuth、Setup Token 或 Console Key，可跑官方初装。',
+              detail: tVm(
+                'vm:createVmForm.oAuthSetupTokenOrConsoleKeySupportsOfficialSetup'
+              ),
             },
             {
               value: 'openai',
               title: <PlatformChip kind='codex' />,
-              detail: 'Codex OAuth 或 auth.json。只能放在本机。',
+              detail: tVm(
+                'vm:createVmForm.codexOAuthOrAuthJsonLocalPlacementOnly'
+              ),
             },
           ]}
         />
       </Section>
 
-      <Section title='形态' hint='容器轻、快；虚拟机给每个槽一台独立的机器。'>
+      <Section
+        title={tVm('vm:createVmForm.runtime')}
+        hint={tVm(
+          'vm:createVmForm.containersAreLightweightAndFastVirtualMachinesProvideA'
+        )}
+      >
         <ChoiceTiles
-          label='槽位形态'
+          label={tVm('vm:createVmForm.slotRuntime')}
           value={d.runtimeType}
           onChange={d.setRuntime}
           choices={[
             {
               value: 'docker',
-              title: '容器 (Docker)',
-              detail: '共享宿主内核，秒级开机。规格只读内存。',
+              title: tVm('vm:createVmForm.containerDocker'),
+              detail: tVm(
+                'vm:createVmForm.sharesTheHostKernelAndStartsInSecondsOnly'
+              ),
             },
             {
               value: 'kvm',
-              title: '虚拟机 (KVM)',
+              title: tVm('vm:createVmForm.virtualMachineKVM'),
               detail: kvmDetail(d.kvmAvail, remote),
               disabled: d.kvmBlocked,
             },
@@ -539,9 +589,14 @@ export function CreateVmForm({
         />
       </Section>
 
-      <Section title='系统' hint='客体操作系统，决定槽里的发行版与包管理器。'>
+      <Section
+        title={tVm('vm:createVmForm.operatingSystem')}
+        hint={tVm(
+          'vm:createVmForm.guestOperatingSystemIncludingDistributionAndPackageManager'
+        )}
+      >
         <ChoiceTiles
-          label='客体系统'
+          label={tVm('vm:createVmForm.guestOperatingSystem')}
           value={d.kernel}
           onChange={d.setKernel}
           className='grid-cols-2 lg:grid-cols-4'
@@ -554,13 +609,13 @@ export function CreateVmForm({
       </Section>
 
       <Section
-        title='规格'
+        title={tVm('vm:createVmForm.specifications')}
         summary={machineLine(d.runtimeType, d.memory, d.vcpus, d.diskGb)}
         summaryCaution={d.memory === '256m' || d.memory === '512m'}
         hint={
           kvm
-            ? '固化到槽位，开机后不变。'
-            : '容器只用内存上限；vCPU 与磁盘只对虚拟机生效。'
+            ? tVm('vm:createVmForm.fixedForThisSlotUnchangedAfterStartup')
+            : tVm('vm:createVmForm.containersUseOnlyTheMemoryLimitVCPUAndDisk')
         }
         action={
           d.isAdmin ? (
@@ -568,16 +623,18 @@ export function CreateVmForm({
               to='/specs'
               className='text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline'
             >
-              修改默认值
+              <Trans ns='vm' i18nKey='createVmForm.changeDefaults' />
             </Link>
           ) : null
         }
       >
         <div className='flex flex-wrap items-end gap-x-6 gap-y-3'>
           <div className='space-y-1.5'>
-            <Label id='vm-memory-label'>内存</Label>
+            <Label id='vm-memory-label'>
+              <Trans ns='vm' i18nKey='createVmForm.memoryAlternative' />
+            </Label>
             <Segmented
-              label='槽位内存'
+              label={tVm('vm:createVmForm.slotMemory')}
               value={d.memory as VmMemoryOption}
               onChange={d.setMemory}
               options={VM_MEMORY_OPTIONS.map((id) => ({
@@ -597,7 +654,7 @@ export function CreateVmForm({
                   <SelectTrigger
                     id='vm-vcpus'
                     className='w-24'
-                    aria-label='槽位 vCPU'
+                    aria-label={tVm('vm:createVmForm.slotVCPU')}
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -611,7 +668,9 @@ export function CreateVmForm({
                 </Select>
               </div>
               <div className='space-y-1.5'>
-                <Label htmlFor='vm-disk'>磁盘</Label>
+                <Label htmlFor='vm-disk'>
+                  <Trans ns='vm' i18nKey='createVmForm.disk' />
+                </Label>
                 <div className='flex items-center gap-1.5'>
                   <Input
                     id='vm-disk'
@@ -633,39 +692,45 @@ export function CreateVmForm({
         </div>
         {d.memory === '256m' || d.memory === '512m' ? (
           <p className='text-xs text-[color:var(--status-caution)]'>
-            低于 1G：常驻 CLI 与官方初装同时运行时可能被 OOM
-            {kvm ? '，虚拟机系统本身还要占一部分' : ''}。
+            {tVm(kvm ? 'vm:messages.lowMemoryKvm' : 'vm:messages.lowMemory')}
           </p>
         ) : null}
       </Section>
 
       <Section
-        title='环境'
-        hint='写进槽位的地区标签与系统语言（LANG）。时区不在这里选：绑定出口并完成地理探测后自动写入。'
+        title={tVm('vm:createVmForm.environment')}
+        hint={tVm('vm:createVmForm.regionTagAndSystemLanguageLANGSavedToThe')}
       >
         <div className='space-y-4'>
           <div className='space-y-1.5'>
-            <Label>区域</Label>
+            <Label>
+              <Trans ns='vm' i18nKey='createVmForm.region' />
+            </Label>
             <Segmented
-              label='区域'
+              label={tVm('vm:createVmForm.region')}
               value={d.region}
               onChange={d.setRegion}
               options={VM_REGIONS.map(([value, label]) => ({ value, label }))}
             />
           </div>
           <div className='space-y-1.5'>
-            <Label>语言</Label>
+            <Label>
+              <Trans ns='vm' i18nKey='createVmForm.language' />
+            </Label>
             <Segmented
-              label='语言'
+              label={tVm('vm:createVmForm.language')}
+              className='w-full gap-y-1'
               value={d.locale}
               onChange={d.setLocale}
               options={VM_LOCALES.map(([value, label]) => ({
                 value,
                 label: (
-                  <span className='inline-flex items-baseline gap-1.5'>
+                  <span className='inline-flex shrink-0 items-baseline gap-1.5 whitespace-nowrap'>
                     {label}
                     <span className='font-mono text-[11px] opacity-70'>
-                      {value.replace('.UTF-8', '')}
+                      {value.includes('_')
+                        ? value.replace('.UTF-8', '')
+                        : value}
                     </span>
                   </span>
                 ),
@@ -676,7 +741,10 @@ export function CreateVmForm({
       </Section>
 
       {d.placement.visible ? (
-        <Section title='放置' hint='放到集群节点前会先预检。'>
+        <Section
+          title={tVm('vm:createVmForm.placement')}
+          hint={tVm('vm:createVmForm.clusterNodesAreCheckedBeforePlacement')}
+        >
           <PlacementField
             placement={d.placement}
             kernel={d.kernel}
@@ -685,25 +753,29 @@ export function CreateVmForm({
         </Section>
       ) : null}
 
-      <Section title='名称'>
+      <Section title={tVm('vm:createVmForm.name')}>
         <Input
-          aria-label='槽位名称'
+          aria-label={tVm('vm:createVmForm.slotName')}
           value={d.name}
           onChange={(e) => d.setName(e.target.value)}
-          placeholder='留空自动编号，如 vm-08'
+          placeholder={tVm(
+            'vm:createVmForm.leaveBlankForAnAutomaticIDSuchAsVm'
+          )}
           className='max-w-sm'
         />
         <p className='text-xs text-muted-foreground'>
-          并发跟随设置里的全局默认（创建后可在槽位详情钉住单槽值），权重为默认
-          1。
+          <Trans
+            ns='vm'
+            i18nKey='createVmForm.concurrencyFollowsGlobalSettingsYouCanOverrideItIn'
+          />
         </p>
       </Section>
 
       {variant === 'dialog' && !d.pinnedAfter ? (
-        <Section title='创建后'>
-          <Field label='接着做'>
+        <Section title={tVm('vm:createVmForm.afterCreation')}>
+          <Field label={tVm('vm:createVmForm.nextAction')}>
             <Select value={d.after} onValueChange={d.setAfter}>
-              <SelectTrigger aria-label='创建后'>
+              <SelectTrigger aria-label={tVm('vm:createVmForm.afterCreation')}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -724,7 +796,7 @@ export function CreateVmForm({
       {d.placementChecks.length ? (
         <div className='space-y-1 rounded-lg border border-[color:var(--status-bad)]/40 p-3'>
           <p className='text-xs text-[color:var(--status-bad)]'>
-            目标节点预检未通过：
+            <Trans ns='vm' i18nKey='createVmForm.targetNodePreflightFailed' />
           </p>
           <PreflightCheckList checks={d.placementChecks} />
         </div>
@@ -744,12 +816,15 @@ export function CreateVmForm({
           </p>
         ) : variant === 'flow' ? (
           <p className='me-auto text-xs text-muted-foreground'>
-            创建后在下面绑出口、导入账号。
+            <Trans
+              ns='vm'
+              i18nKey='createVmForm.bindAnEgressAndImportAnAccountBelowAfter'
+            />
           </p>
         ) : null}
         {onCancel ? (
           <Button variant='outline' onClick={onCancel}>
-            取消
+            <Trans ns='vm' i18nKey='authSchemeEditor.cancel' />
           </Button>
         ) : null}
         <Button
@@ -757,7 +832,9 @@ export function CreateVmForm({
           disabled={d.create.isPending || d.blocked}
           loading={d.create.isPending}
         >
-          {variant === 'flow' ? '创建空槽' : '创建'}
+          {variant === 'flow'
+            ? tVm('vm:createVmForm.createEmptySlot')
+            : tVm('vm:createVmForm.create')}
         </Button>
       </div>
     </div>
@@ -765,6 +842,8 @@ export function CreateVmForm({
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
+  useTranslation('vm')
+
   return (
     <div className='space-y-1.5'>
       <Label>{label}</Label>

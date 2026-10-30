@@ -1,3 +1,4 @@
+import { useTranslation, Trans } from 'react-i18next'
 import {
   Dialog,
   DialogContent,
@@ -18,13 +19,20 @@ export function CreateVmDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  useTranslation('vm')
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-2xl'>
         <DialogHeader>
-          <DialogTitle>创建槽位</DialogTitle>
+          <DialogTitle>
+            <Trans ns='vm' i18nKey='createVmDialog.createSlot' />
+          </DialogTitle>
           <DialogDescription>
-            只建槽。要一路导入账号到上线，用「导入」页。
+            <Trans
+              ns='vm'
+              i18nKey='createVmDialog.createsASlotOnlyUseImportToAddAn'
+            />
           </DialogDescription>
         </DialogHeader>
         {open ? <DialogBody onDone={() => onOpenChange(false)} /> : null}
@@ -35,6 +43,8 @@ export function CreateVmDialog({
 
 // 每次打开都是新草稿：关闭即卸载，不残留上次的选择。
 function DialogBody({ onDone }: { onDone: () => void }) {
+  useTranslation('vm')
+
   const draft = useCreateVmDraft({ onCreated: onDone })
   return <CreateVmForm draft={draft} variant='dialog' onCancel={onDone} />
 }

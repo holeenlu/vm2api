@@ -1,5 +1,7 @@
+import { t as translate, i18n } from '@/i18n'
 import type { StatusTone } from '@/types/status'
 import { ChevronRight } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { StatusMark } from '@/components/status-mark'
 import { STAGES, type StageId, type ViewKey, share } from './model'
@@ -8,10 +10,34 @@ import type { GateStats } from './queries'
 export type StageState = 'on' | 'off' | 'unset' | 'loading'
 
 const TONES: Record<StageState, StatusTone> = {
-  on: { key: 'on', text: '开', cls: 'ok' },
-  off: { key: 'off', text: '关', cls: 'off' },
-  unset: { key: 'unset', text: '未配置', cls: 'caution' },
-  loading: { key: 'loading', text: '读取中', cls: 'none' },
+  on: {
+    key: 'on',
+    get text() {
+      return translate('risk:on')
+    },
+    cls: 'ok',
+  },
+  off: {
+    key: 'off',
+    get text() {
+      return translate('risk:off')
+    },
+    cls: 'off',
+  },
+  unset: {
+    key: 'unset',
+    get text() {
+      return translate('risk:unconfigured')
+    },
+    cls: 'caution',
+  },
+  loading: {
+    key: 'loading',
+    get text() {
+      return translate('risk:loading')
+    },
+    cls: 'none',
+  },
 }
 
 function Cell({
@@ -35,6 +61,8 @@ function Cell({
   foot: React.ReactNode
   alert?: React.ReactNode
 }) {
+  useTranslation('risk')
+
   const selected = view === current
   return (
     <button
@@ -70,7 +98,7 @@ function Cell({
         {state ? <StatusMark tone={TONES[state]} /> : null}
       </span>
       <span className='text-2xl leading-none font-semibold tracking-tight tabular-nums'>
-        {value == null ? '—' : value.toLocaleString()}
+        {value == null ? '—' : value.toLocaleString(i18n.language)}
       </span>
       <span className='mt-auto text-xs text-muted-foreground tabular-nums'>
         {foot}
@@ -95,6 +123,8 @@ export function GateRail({
   view: ViewKey
   onView: (view: ViewKey) => void
 }) {
+  const { t: translate } = useTranslation('risk')
+
   const blocks = stats?.blocks || []
   const passes = stats?.passes || []
   const blocked = stats?.blocked ?? null
@@ -108,7 +138,7 @@ export function GateRail({
   return (
     <div
       role='tablist'
-      aria-label='关卡'
+      aria-label={translate('risk:gates')}
       className='grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-3 lg:grid-cols-6'
       onKeyDown={(event) => {
         const step =
@@ -125,12 +155,15 @@ export function GateRail({
         view='all'
         current={view}
         onView={onView}
-        name='今日入站'
+        name={translate('risk:todayInbound')}
         value={total}
         foot={
           total == null
-            ? '读取中'
-            : `拦下 ${(blocked ?? 0).toLocaleString()} · ${share(blocked ?? 0, total)}`
+            ? translate('risk:loading')
+            : translate('risk:blockedShare', {
+                p0: (blocked ?? 0).toLocaleString(i18n.language),
+                p1: share(blocked ?? 0, total),
+              })
         }
       />
       {STAGES.map((stage, index) => {
@@ -148,7 +181,11 @@ export function GateRail({
             state={states[stage.id]}
             value={stats ? count : null}
             foot={
-              stats ? `拦下 · 占入站 ${share(count, total ?? 0)}` : '读取中'
+              stats
+                ? translate('risk:blockedInboundShare', {
+                    p0: share(count, total ?? 0),
+                  })
+                : translate('risk:loading')
             }
           />
         )
@@ -158,13 +195,17 @@ export function GateRail({
         current={view}
         onView={onView}
         step={STAGES.length + 1}
-        name='放行出站'
+        name={translate('risk:allowedOutbound')}
         value={passed}
-        foot={total == null ? '读取中' : `放行率 ${share(passed ?? 0, total)}`}
+        foot={
+          total == null
+            ? translate('risk:loading')
+            : translate('risk:allowRate', { p0: share(passed ?? 0, total) })
+        }
         alert={
           failOpen ? (
             <span className='w-fit rounded-md bg-[var(--status-caution-bg)] px-1.5 py-0.5 text-xs text-[var(--status-caution)] tabular-nums'>
-              {failOpen.toLocaleString()} 条故障放行
+              {translate('risk:failOpenCount', { count: failOpen })}
             </span>
           ) : null
         }

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { VmProxySnap } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { localProxyText, type LocalProxyLabelOpts } from '@/lib/vm-status'
 import { Label } from '@/components/ui/label'
 import {
@@ -83,11 +84,15 @@ export function CreateExitField({
   /** 目标是集群节点。 */
   remote: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <div className='space-y-1'>
-      <Label>出口</Label>
+      <Label>
+        <Trans ns='vm' i18nKey='createExitField.egress' />
+      </Label>
       <Select value={exit.value} onValueChange={exit.setValue}>
-        <SelectTrigger aria-label='出口'>
+        <SelectTrigger aria-label={tVm('vm:createExitField.egress')}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -96,13 +101,25 @@ export function CreateExitField({
               {proxyOptionLabel(p, exit.poolLimit, exit.labelOpts)}
             </SelectItem>
           ))}
-          <SelectItem value={AUTO_EXIT}>自动分配空闲出口</SelectItem>
+          <SelectItem value={AUTO_EXIT}>
+            <Trans
+              ns='vm'
+              i18nKey='createExitField.automaticallyAssignAnAvailableEgress'
+            />
+          </SelectItem>
         </SelectContent>
       </Select>
       <p className='text-xs text-muted-foreground'>
-        本地代理 = {localProxyText(exit.labelOpts)}
-        ：槽位与控制面代发请求都从{remote ? '目标节点' : '本机'}
-        自身出网，绑定额度按这台 VPS 单独计。
+        <Trans
+          ns='vm'
+          i18nKey='createExitField.localProxySlotTrafficAndControlPlaneRequestsBoth'
+          values={{
+            localProxyText: localProxyText(exit.labelOpts),
+            value: remote
+              ? tVm('vm:createExitField.targetNode')
+              : tVm('vm:createExitField.localMachine'),
+          }}
+        />
       </p>
     </div>
   )

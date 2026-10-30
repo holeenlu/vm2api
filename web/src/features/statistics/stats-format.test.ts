@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   SERIES_PALETTE,
   formatBucketTick,
@@ -41,10 +42,26 @@ describe('formatBucketTick', () => {
 })
 
 describe('formatBucketTitle', () => {
-  it('uses zh-CN month names like date-fns MMMM', () => {
+  it('uses the selected locale while preserving the requested timezone', () => {
     const iso = '2026-12-31T23:30:00.000Z'
-    expect(formatBucketTitle(iso, 'hour', 'UTC')).toBe('十二月 31 23:30')
-    expect(formatBucketTitle(iso, 'day', 'Asia/Shanghai')).toBe('2027 一月 1')
+    expect(formatBucketTitle(iso, 'hour', 'UTC')).toBe(
+      new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'UTC',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(new Date(iso))
+    )
+    expect(formatBucketTitle(iso, 'day', 'Asia/Shanghai')).toBe(
+      new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      }).format(new Date(iso))
+    )
   })
 })
 
@@ -94,4 +111,8 @@ describe('sessionDisplay', () => {
       'IDLE'
     )
   })
+})
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
 })

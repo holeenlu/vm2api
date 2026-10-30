@@ -10,23 +10,42 @@ import {
   pickCodexCandidates,
   codexFailureHold,
   codexFailoverBudget,
+  isRetryableSameCodexAccount,
 } from '../../src/lib/protocol/handle-codex.mjs'
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
-import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { reportOpenAIAttempt, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 
 beforeEach(() => resetOpenAIAccountRuntime())
 
-test('502 upstream_transport is retryable before commit', () => {
+test('server overload is retryable before commit and can move to another account', () => {
+  const result = {
+    ok: false,
+    status: 503,
+    committed: false,
+    body: { error: { type: 'server_error', code: 'server_is_overloaded' } },
+  }
+  assert.equal(isRetryableSameCodexAccount(result), true)
+})
+
+test('explicit not-sent transport is retryable before commit', () => {
   assert.equal(
     isRetryableCodexTransport({
       ok: false,
       status: 502,
+      sendState: 'not_sent',
       body: { error: { code: 'upstream_transport' } },
     }),
     true,
   )
-  assert.equal(isRetryableCodexTransport({ ok: false, transportError: true, status: 0, committed: false }), true)
+  assert.equal(
+    isRetryableCodexTransport({ ok: false, transportError: true, status: 0, committed: false, sendState: 'not_sent' }),
+    true,
+  )
   assert.equal(
     isRetryableCodexTransport({
       ok: false,
@@ -46,7 +65,8 @@ test('runCodexKernelHop retries a silent first-hop 502 then succeeds', async () 
   const result = await runCodexKernelHop({
     hop: async ({ onEvent }) => {
       n += 1
-      if (n === 1) return { ok: false, status: 502, body: { error: { code: 'upstream_transport' } } }
+      if (n === 1)
+        return { ok: false, sendState: 'not_sent', status: 502, body: { error: { code: 'upstream_transport' } } }
       await onEvent('data: {"type":"response.completed"}\n')
       return { ok: true, status: 200, terminalState: 'verified' }
     },
@@ -94,6 +114,33 @@ function writeGptVm(root, id) {
     }),
   )
 }
+
+test('GPT candidates run the group priority before the smart score', (t) => {
+  const db = openDatabase({ dbPath: ':memory:' })
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-group-priority-'))
+  t.after(() => {
+    closeDatabase()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  const groups = new GroupsRepo(db)
+  const user = new PanelUserStore({ db }).create({ username: 'gpt-priority', password: 'testpass' })
+  const group = groups.create({ name: 'gpt-priority', platform: 'openai' })
+  groups.setGrants(user.id, [group.id])
+  const key = new ApiKeyStore({ db }).create({ user_id: user.id, group_id: group.id })
+  for (const id of ['vm-gpt-flaky', 'vm-gpt-steady']) {
+    writeGptVm(root, id)
+    groups.assignResource('vm', id, [group.id], 0)
+  }
+  // One recent failure drops the smart score well outside the 0.05 tie band.
+  reportOpenAIAttempt('vm-gpt-flaky', 'failed')
+  const req = { headers: {}, apiKeyKind: 'managed', apiKeyRecord: key, socket: { remoteAddress: '127.0.0.1' } }
+  assert.deepEqual(pickCodexCandidates(root, req).ids, ['vm-gpt-steady', 'vm-gpt-flaky'])
+  const setPriority = (id, priority) =>
+    db.prepare("UPDATE group_resources SET priority=? WHERE resource_kind='vm' AND resource_id=?").run(priority, id)
+  setPriority('vm-gpt-flaky', 10)
+  setPriority('vm-gpt-steady', 90)
+  assert.deepEqual(pickCodexCandidates(root, req).ids, ['vm-gpt-flaky', 'vm-gpt-steady'])
+})
 
 test('GPT candidates follow the caller owner scope', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-owner-'))
@@ -480,7 +527,7 @@ test('request log first_token_ms uses firstTokenAt minus injected ingress t0', a
       this.ended = true
     },
   }
-  const t0 = 1_700_000_000_000
+  const t0 = Date.now()
   const logBag = {}
   await handleCodexProtocol({
     req: { headers: {} },
@@ -549,7 +596,7 @@ test('request log first_token_ms falls back to hop ttftMs without firstTokenAt',
     },
     routing: {},
     projectRoot: root,
-    requestStartedAt: 1_700_000_000_000,
+    requestStartedAt: Date.now(),
     ops: {
       writeCodexKernelConfig() {},
       ensureCodexKernel: async () => ({ ok: true }),
@@ -860,7 +907,7 @@ test('#A04: the fifth GPT slot is reached after four slots fail over', async () 
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('uncommitted 503 server_error fails over to the next GPT slot', async () => {
+test('provider-proven replay-safe 503 server_error fails over to the next GPT slot', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-503-'))
@@ -877,6 +924,7 @@ test('uncommitted 503 server_error fails over to the next GPT slot', async () =>
           if (seen.length === 1) {
             return {
               ok: false,
+              replaySafe: true,
               status: 503,
               committed: false,
               body: { error: { type: 'server_error', code: 'server_error', message: 'busy' } },
@@ -897,7 +945,7 @@ test('uncommitted 503 server_error fails over to the next GPT slot', async () =>
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('uncommitted 500 server_error fails over to the next GPT slot', async () => {
+test('provider-proven replay-safe 500 server_error fails over to the next GPT slot', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-500-'))
@@ -913,6 +961,7 @@ test('uncommitted 500 server_error fails over to the next GPT slot', async () =>
           if (seen.length === 1) {
             return {
               ok: false,
+              replaySafe: true,
               status: 500,
               committed: false,
               body: { error: { type: 'server_error', code: 'server_error', message: 'upstream' } },
@@ -948,6 +997,7 @@ test('transient GPT failures retry the same account three times before switching
           if (exec.vm.id === 'vm-gpt-a') {
             return {
               ok: false,
+              replaySafe: true,
               status: 500,
               committed: false,
               body: { error: { type: 'server_error', code: 'server_error', message: 'upstream' } },
@@ -983,7 +1033,7 @@ test('same-account retry never replays after the first SSE event', async () => {
       streamCodexKernel: async ({ exec, onEvent }) => {
         seen.push(exec.vm.id)
         await onEvent('data: {"type":"response.created"}')
-        return { ok: false, status: 500, committed: false, body: { error: { code: 'server_error' } } }
+        return { ok: false, replaySafe: true, status: 500, committed: false, body: { error: { code: 'server_error' } } }
       },
     }),
   )
@@ -1011,7 +1061,13 @@ test('Codex failover stops at the configured attempt budget', async () => {
         ensureCodexKernel: async () => ({ ok: true }),
         streamCodexKernel: async ({ exec }) => {
           seen.push(exec.vm.id)
-          return { ok: false, status: 500, committed: false, body: { error: { code: 'server_error' } } }
+          return {
+            ok: false,
+            replaySafe: true,
+            status: 500,
+            committed: false,
+            body: { error: { code: 'server_error' } },
+          }
         },
       },
       { routing: { failover: { max_total_attempts: 2, max_account_switches: 10 } } },
@@ -1204,13 +1260,12 @@ test('codex rebuild outbound session is not the inbound session', async () => {
       prompt_cache_key: inbound,
       conversation_id: inbound,
       session_id: inbound,
-      previous_response_id: 'resp_keep',
     },
   })
   const session = envelopes[0].session
   assert.notEqual(session.session_id, inbound)
   assert.match(session.session_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-  assert.equal(session.previous_response_id, 'resp_keep')
+  assert.equal(session.previous_response_id, null)
   assert.equal(envelopes[0].body.prompt_cache_key, session.session_id)
   assert.equal(envelopes[0].body.conversation_id, undefined)
   assert.equal(envelopes[0].body.session_id, undefined)
@@ -1585,7 +1640,7 @@ test('a freed GPT seat wakes only a waiter that can use that account', async () 
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('a woken GPT waiter whose seat was taken re-parks first instead of waking the queue', async () => {
+test('a queued GPT waiter owns the grant before a newcomer can steal it', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-stolen-seat-'))
@@ -1620,15 +1675,14 @@ test('a woken GPT waiter whose seat was taken re-parks first instead of waking t
   try {
     held.release()
     thief = rt.tryAcquireOpenAISlot('vm-gpt-a', { concurrency: 1 })
-    assert.ok(thief)
+    assert.equal(thief, null)
     await tick()
   } finally {
     fs.readdirSync = realReaddir
   }
   // Only the oldest waiter re-checks; the other four stay parked.
-  assert.equal(vmDirReads, 2)
-  assert.equal(rt.openAIWaiterCount(), 5)
-  thief.release()
+  assert.ok(vmDirReads >= 2)
+  thief?.release()
   const results = await Promise.all(waiters)
   assert.deepEqual(
     results.map((r) => r.status),

@@ -1,0 +1,17 @@
+{
+  "passwordMismatch": "兩次輸入的新密碼不一致",
+  "saved": "資料已儲存",
+  "passwordChanged": "密碼已變更，其他登入工作階段已登出",
+  "title": "個人資料",
+  "description": "管理您的個人資料與登入密碼。",
+  "username": "使用者名稱",
+  "displayName": "顯示名稱",
+  "email": "電子郵件",
+  "identityHelp": "登入使用者名稱無法變更；顯示名稱與聯絡電子郵件不影響權限。",
+  "emailHelp": "電子郵件僅供聯絡，不用於登入或重設密碼。",
+  "save": "儲存資料",
+  "changePassword": "變更密碼",
+  "currentPassword": "目前密碼",
+  "newPassword": "新密碼",
+  "confirmPassword": "確認新密碼"
+}

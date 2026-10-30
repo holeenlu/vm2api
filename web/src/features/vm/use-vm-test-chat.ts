@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { TestModelsPayload, Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api, isApiError } from '@/lib/api'
 import { isCodexVm } from '@/lib/vm-kind'
@@ -10,6 +11,8 @@ import { useVmPerms } from '@/features/vm/vm-perms'
 
 /** 详情页测试 Tab 与列表弹窗共用：模型列表、参数、发送与结果。 */
 export function useVmTestChat(vm: Vm) {
+  const { t: tVm } = useTranslation('vm')
+
   const id = vm.id
   const qc = useQueryClient()
   const canTest = useVmPerms().testModels
@@ -96,11 +99,20 @@ export function useVmTestChat(vm: Vm) {
       // 外层 envelope 的 ok 恒为 true（业务成败在剥壳后的 data.ok），
       // 所以失败也会走到这里 —— 不能只 toast.success。
       if (data?.ok) {
-        toast.success(`测试成功 · ${data.duration_ms ?? 0}ms`)
+        toast.success(
+          tVm('vm:useVmTestChat.testSucceededMs', {
+            value1: data.duration_ms ?? 0,
+          })
+        )
       } else {
         const code = data?.error?.code
-        const msg = data?.error?.message || '未知错误'
-        toast.error(code ? `测试失败：[${code}] ${msg}` : `测试失败：${msg}`)
+        const msg =
+          data?.error?.message || tVm('vm:testChatResultCard.unknownError')
+        toast.error(
+          code
+            ? tVm('vm:useVmTestChat.testFailed', { code: code, msg: msg })
+            : tVm('vm:useVmTestChat.testFailedAlternative', { msg: msg })
+        )
       }
     },
     onError: (error: Error) => {
@@ -120,7 +132,14 @@ export function useVmTestChat(vm: Vm) {
         },
       })
       const code = isApiError(error) ? error.code : ''
-      toast.error(code ? `测试失败：[${code}] ${error.message}` : error.message)
+      toast.error(
+        code
+          ? tVm('vm:useVmTestChat.testFailedAlternativeWithcodeMessage', {
+              code: code,
+              message: error.message,
+            })
+          : error.message
+      )
     },
   })
 
@@ -133,7 +152,9 @@ export function useVmTestChat(vm: Vm) {
       qc.setQueryData(testModelsQueryOptions(id).queryKey, data)
     },
     onError: (error: Error) => {
-      toast.error(error.message || '刷新模型失败')
+      toast.error(
+        error.message || tVm('vm:useVmTestChat.failedToRefreshModels')
+      )
     },
   })
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import {
   TIMEZONE_SOURCE_LABELS,
   validTimezone,
@@ -29,6 +30,8 @@ export function VmEnvironmentCard({
   onSave,
   onFollowProxy,
 }: VmEnvironmentCardProps) {
+  const { t: tVm } = useTranslation('vm')
+
   const current = String(vm.timezone || '')
   const [draft, setDraft] = useState(current)
   // 槽位切换或后端回写新时区后，草稿跟随服务端值重置。
@@ -44,37 +47,43 @@ export function VmEnvironmentCard({
   return (
     <Card>
       <CardHeader className='pb-2'>
-        <CardTitle className='text-sm'>环境</CardTitle>
+        <CardTitle className='text-sm'>
+          <Trans ns='vm' i18nKey='createVmForm.environment' />
+        </CardTitle>
       </CardHeader>
       <p className='px-6 pb-2 text-xs text-muted-foreground'>
-        时区写入 kernel.json，kernel 热读，persona 的 Environment
-        段随下一次请求生效。容器环境变量 TZ 要换容器才变。
+        <Trans
+          ns='vm'
+          i18nKey='environmentCard.timezoneIsWrittenToKernelJsonAndReloadedLive'
+        />
       </p>
       <CardContent className='divide-y pt-0'>
-        <Field label='当前时区'>
+        <Field label={tVm('vm:environmentCard.currentTimezone')}>
           {current ? (
             <span className='flex items-center gap-2 text-xs'>
               <span className='field-host'>{current}</span>
               <span className='text-muted-foreground'>
                 {TIMEZONE_SOURCE_LABELS[String(vm.timezone_source || 'auto')] ||
-                  '自动'}
+                  tVm('vm:createOptions.automatic')}
               </span>
               <span className='field-metric text-muted-foreground'>
                 {zoneNowLabel(current)}
               </span>
             </span>
           ) : (
-            <span className='text-sm'>时区未配置</span>
+            <span className='text-sm'>
+              <Trans ns='vm' i18nKey='environmentCard.timezoneNotConfigured' />
+            </span>
           )}
         </Field>
-        <Field label='代理出口'>
+        <Field label={tVm('vm:environmentCard.proxyEgress')}>
           <span className='text-xs text-muted-foreground'>
             {proxyZone
               ? `${proxyZone}${geoText ? ` · ${geoText}` : ''}`
-              : '未检测（到代理池点「地理」）'}
+              : tVm('vm:environmentCard.notCheckedUseLocationInTheProxyPool')}
           </span>
         </Field>
-        <Field label='设置时区'>
+        <Field label={tVm('vm:environmentCard.setTimezone')}>
           <div className='w-full max-w-[320px] space-y-2'>
             <TimezonePicker
               value={draft}
@@ -88,7 +97,7 @@ export function VmEnvironmentCard({
                 loading={saving}
                 onClick={() => onSave(draft.trim())}
               >
-                保存
+                <Trans ns='vm' i18nKey='authSchemeEditor.save' />
               </Button>
               <Button
                 size='sm'
@@ -96,17 +105,21 @@ export function VmEnvironmentCard({
                 disabled={saving || !proxyZone || proxyZone === current}
                 title={
                   proxyZone
-                    ? `改为 ${proxyZone}`
-                    : '代理还没有地理位置，先在代理池检测'
+                    ? tVm('vm:environmentCard.changeTo', {
+                        proxyZone: proxyZone,
+                      })
+                    : tVm(
+                        'vm:environmentCard.proxyLocationIsUnknownCheckItInTheProxy'
+                      )
                 }
                 onClick={onFollowProxy}
               >
-                跟随代理时区
+                <Trans ns='vm' i18nKey='environmentCard.followProxyTimezone' />
               </Button>
             </div>
             {dirty && !valid ? (
               <p className='text-xs text-[color:var(--status-bad)]'>
-                不是有效的 IANA 时区
+                <Trans ns='vm' i18nKey='environmentCard.invalidIANATimezone' />
               </p>
             ) : null}
           </div>
