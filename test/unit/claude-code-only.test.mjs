@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { isClaudeCodeFamilyRequest } from '../../src/lib/identity/claude-code-only.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
-import { handleUserCountTokens } from '../../src/lib/protocol/user-count-tokens.mjs'
 import { validatePersonaRoutingPatch } from '../../src/lib/admin/panel-api.mjs'
 import {
   applyCrsUnofficialPersona,
@@ -14,7 +13,7 @@ const CLI_UA = 'claude-cli/2.1.293 (external, cli)'
 const SESSION = '11111111-2222-4333-8444-555555555555'
 const USER_ID = JSON.stringify({ device_id: 'd'.repeat(64), session_id: SESSION })
 const BILLING = 'x-anthropic-billing-header: cc_version=2.1.293.9; cc_entrypoint=cli; cch=ab;'
-// Header set a real 2.1.280 CLI sent on both /v1/messages and count_tokens.
+// Header set a real 2.1.280 CLI sent on /v1/messages.
 const CLI_HEADERS = {
   'user-agent': CLI_UA,
   'x-app': 'cli',
@@ -94,17 +93,10 @@ test('local-agent still rejects incomplete headers, inconsistent sessions/builds
   ]) {
     const body = { ...DESKTOP_BODY, system: [...DESKTOP_BODY.system, { type: 'text', text }] }
     assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body), false, text)
-    assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body, { countTokens: true }), false, text)
     assert.equal(isOfficialClaudeCodeTraffic(DESKTOP_HEADERS, body), false, text)
   }
   const tools = [{ type: 'function', function: { name: 'read_file' } }]
   assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, { ...DESKTOP_BODY, tools }), false)
-})
-
-test('local-agent desktop count_tokens follows the existing header-only admission contract', () => {
-  const body = { model: DESKTOP_BODY.model, system: DESKTOP_BODY.system, messages: DESKTOP_BODY.messages }
-  assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body, { countTokens: true }), true)
-  assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body), false)
 })
 
 test('Claude Code family recognition needs the full client fingerprint, not the UA', () => {
@@ -139,15 +131,9 @@ const QUOTA_PROBE = {
   metadata: { user_id: USER_ID },
 }
 
-test('Claude Code family recognition: bodiless calls need the header set, not just the UA', () => {
+test('Claude Code family recognition: quota probes need the header set, not just the UA', () => {
   assert.equal(isClaudeCodeFamilyRequest(CLI_HEADERS, QUOTA_PROBE), true)
   assert.equal(isClaudeCodeFamilyRequest({ 'user-agent': CLI_UA }, QUOTA_PROBE), false)
-
-  const count = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'hi' }] }
-  assert.equal(isClaudeCodeFamilyRequest(CLI_HEADERS, count, { countTokens: true }), true)
-  assert.equal(isClaudeCodeFamilyRequest({ 'user-agent': CLI_UA }, count, { countTokens: true }), false)
-  const ohMyPi = { ...count, system: 'x\ncc_entrypoint=local-agent\n' }
-  assert.equal(isClaudeCodeFamilyRequest(CLI_HEADERS, ohMyPi, { countTokens: true }), false)
 })
 
 test('Claude Code family recognition: max_tokens 1 is not a bypass for arbitrary bodies', () => {
@@ -190,7 +176,7 @@ function protocolHarness({ routing, body, healthMonitor }) {
     requestLog: { start: () => ({ request_id: 'cc-only-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {
       pick: () => {
         throw REACHED
@@ -318,49 +304,6 @@ test('switch on: GPT models are never gated', async () => {
     protocol: 'openai.responses',
   }).catch(() => ({ code: null }))
   assert.notEqual(result.code, 'claude_code_only')
-})
-
-function countTokensDeps(routing, model) {
-  const seen = { peeked: 0 }
-  return {
-    seen,
-    deps: {
-      json: (_res, status, body) => {
-        seen.status = status
-        seen.body = body
-      },
-      requireAuth: () => true,
-      readBody: async () => ({ model, messages: [{ role: 'user', content: 'hi' }] }),
-      cfg: { limits: { max_body_bytes: 4096 } },
-      stickyRouter: { extractPoolKey: () => null },
-      getRoutingConfig: () => routing,
-      getPoolScheduler: () => ({
-        peekAccount: async () => {
-          seen.peeked++
-          return { ok: true, vmId: 'vm-01', accountId: 'a', vm: { credential_mode: 'setup-token' }, exec: {} }
-        },
-      }),
-      countTokensViaWorker: async () => ({ ok: true, status: 200, body: { input_tokens: 5 } }),
-    },
-  }
-}
-
-test('count_tokens: switch on blocks third-party Claude, admits the CLI and GPT models', async () => {
-  for (const headers of [AXIOS, { 'user-agent': CLI_UA }]) {
-    const third = countTokensDeps(ON, 'claude-sonnet-5')
-    await handleUserCountTokens({ headers }, {}, third.deps)
-    assert.equal(third.seen.status, 403)
-    assert.equal(third.seen.body.error.code, 'claude_code_only')
-    assert.equal(third.seen.peeked, 0)
-  }
-
-  const cli = countTokensDeps(ON, 'claude-sonnet-5')
-  await handleUserCountTokens({ headers: CLI_HEADERS }, {}, cli.deps)
-  assert.equal(cli.seen.status, 200)
-
-  const gpt = countTokensDeps(ON, 'gpt-5.5')
-  await handleUserCountTokens({ headers: AXIOS }, {}, gpt.deps)
-  assert.equal(gpt.seen.peeked, 1)
 })
 
 test('routing patch rejects a non-boolean claude_code_only', () => {

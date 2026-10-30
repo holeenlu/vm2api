@@ -1,8 +1,10 @@
 import { useState, type KeyboardEvent, type ReactNode } from 'react'
+import { t as tVm } from '@/i18n'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
 import { GripVertical, RotateCcw } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { expiresAtToMs, fmtResetClock } from '@/lib/fable-status'
 import { fmtNum } from '@/lib/format'
 import { subscriptionListLabel } from '@/lib/subscription-expiry'
@@ -15,8 +17,7 @@ import {
   poolStatus,
   seatTitle,
   vmCircuitTitle,
-  vmCooldown,
-  vmCooldownTitle,
+  vmRestrictionRecovery,
 } from '@/lib/vm-status'
 import { vmTodayStats, vmWeekOutcome, type VmWeekOutcome } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
@@ -53,16 +54,18 @@ import {
 } from '@/features/vm/use-vm-column-order'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
-import { VmOwnerLine } from '@/features/vm/vm-owner-line'
+import { VmGroupLabels } from '@/features/vm/vm-groups'
+import { useVmPerms } from './vm-perms'
 
 /** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
 const COL_CLS: Record<VmColumnKey | 'actions', string> = {
+  groups: 'min-w-[130px] flex-[0.8]',
   vm: 'min-w-[170px] flex-[1.15]',
   sched: 'min-w-[62px] flex-[0.3]',
   type: 'min-w-[120px] flex-[0.75]',
-  status: 'min-w-[140px] flex-[1.1]',
+  status: 'min-w-[180px] flex-[1.1]',
   req: 'min-w-[124px] flex-[0.7]',
-  usage: 'min-w-[208px] flex-[1.3]',
+  usage: 'min-w-[248px] flex-[1.4]',
   cost: 'min-w-[212px] flex-[1.1]',
   actions: 'w-[44px] shrink-0 pr-2',
 }
@@ -99,36 +102,63 @@ function healthModel(vm: Vm): { dots: DotTone[]; text: string; tone: DotTone } {
   const tone = credDot(cred.cls)
   return {
     dots: Array.from({ length: 16 }, () => tone),
-    text: cred.text || (tone === 'none' ? '无凭证' : '可用'),
+    text:
+      cred.text ||
+      (tone === 'none'
+        ? tVm('vm:detailStatusBoard.noCredentials')
+        : tVm('vm:vmListTable.available')),
     tone,
   }
 }
 
-function StatusReason({ vm, tone }: { vm: Vm; tone: StatusTone }) {
+function StatusReason({
+  vm,
+  tone,
+  now,
+}: {
+  vm: Vm
+  tone: StatusTone
+  now: number
+}) {
+  useTranslation('vm')
+
+  const recovery = vmRestrictionRecovery(vm, now)
   const mark = <StatusMark tone={tone} variant='pill' className='text-xs' />
   const title =
-    tone.key === 'circuit'
-      ? vmCircuitTitle(vm)
-      : vmCooldown(vm)
-        ? vmCooldownTitle(vm)
-        : null
+    tone.key === 'circuit' ? vmCircuitTitle(vm, now) : recovery?.description
   if (!title) return mark
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span>{mark}</span>
+        <span className='grid gap-1' title={title}>
+          {mark}
+          {recovery && (
+            <span className='text-[11px] whitespace-nowrap text-muted-foreground tabular-nums'>
+              {recovery.remaining}
+            </span>
+          )}
+        </span>
       </TooltipTrigger>
-      <TooltipContent>{title}</TooltipContent>
+      <TooltipContent className='max-w-sm whitespace-normal'>
+        {title}
+      </TooltipContent>
     </Tooltip>
   )
 }
 
 function PriorityChip({ vm }: { vm: Vm }) {
+  const { t: tVm } = useTranslation('vm')
+
   const level = Number(vm.schedule_level)
   const valid = Number.isInteger(level) && level >= 0
-  const text = valid ? `优先级-${level}` : '优先级-—'
-  const mode = vm.schedule_level_mode === 'manual' ? '手动' : '自动'
-  const title = `${mode}调度等级`
+  const text = valid
+    ? tVm('vm:vmListTable.priority', { level: level })
+    : tVm('vm:vmListTable.priorityAlternative')
+  const mode =
+    vm.schedule_level_mode === 'manual'
+      ? tVm('vm:vmListTable.manual')
+      : tVm('vm:createOptions.automatic')
+  const title = tVm('vm:vmListTable.schedulingLevel', { mode: mode })
   return (
     <span
       className='inline-flex rounded border border-border/70 px-1.5 py-0.5 font-mono text-[11px] leading-none font-semibold text-muted-foreground tabular-nums'
@@ -144,6 +174,8 @@ function PriorityChip({ vm }: { vm: Vm }) {
  * 平台（Claude / GPT）与 pro / max 等级都在「账号」列，不在这里重复。
  */
 function TypeCell({ vm, now }: { vm: Vm; now: number }) {
+  const { t: tVm } = useTranslation('vm')
+
   const hasToken = Boolean(vm.has_token)
   const resetAt = vm.reset_7d || vm.reset_7d_oi
   const clock = hasToken ? fmtResetClock(resetAt) : null
@@ -158,16 +190,22 @@ function TypeCell({ vm, now }: { vm: Vm; now: number }) {
         {hasToken ? (
           <CredLaneChip vm={vm} />
         ) : (
-          <span className='text-xs text-muted-foreground'>无凭证</span>
+          <span className='text-xs text-muted-foreground'>
+            <Trans ns='vm' i18nKey='detailStatusBoard.noCredentials' />
+          </span>
         )}
         <PriorityChip vm={vm} />
       </div>
       {clock ? (
         <div
           className={cn('font-mono text-[11px] tabular-nums', dueCls)}
-          title='周窗口重置时刻'
+          title={tVm('vm:vmListTable.weeklyWindowResetTime')}
         >
-          重置 {clock.slice(0, 11)}
+          <Trans
+            ns='vm'
+            i18nKey='vmListTable.resets'
+            values={{ value: clock.slice(0, 11) }}
+          />
         </div>
       ) : null}
     </div>
@@ -175,6 +213,8 @@ function TypeCell({ vm, now }: { vm: Vm; now: number }) {
 }
 
 function CountPill({ tone, n }: { tone: 'ok' | 'bad'; n: number }) {
+  useTranslation('vm')
+
   return (
     <span
       className={cn(
@@ -191,6 +231,8 @@ function CountPill({ tone, n }: { tone: 'ok' | 'bad'; n: number }) {
 
 /** 实时席位占用（预调度席位簿）；Codex 行没有席位。 */
 function SeatTag({ vm }: { vm: Vm }) {
+  const { t: tVm } = useTranslation('vm')
+
   if (vm.seats_max == null) return null
   const used = Number(vm.seats_used) || 0
   const queued = Number(vm.queue_depth) || 0
@@ -203,13 +245,32 @@ function SeatTag({ vm }: { vm: Vm }) {
       )}
       title={seatTitle(vm)}
     >
-      席位 {used}/{vm.seats_max}
-      {queued ? ` · 排队 ${queued}` : ''}
+      <Trans
+        ns='vm'
+        i18nKey='vmListTable.seats'
+        values={{
+          used: used,
+          seats_max: vm.seats_max,
+          value: queued
+            ? tVm('vm:vmDetailCard.queued', { queued: queued })
+            : '',
+        }}
+      />
     </span>
   )
 }
 
-function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
+function StatusCell({
+  vm,
+  show,
+  now,
+}: {
+  vm: Vm
+  show: StatusBarShow
+  now: number
+}) {
+  const { t: tVm } = useTranslation('vm')
+
   const tone = poolStatus(vm)
   const inflight = Number(vm.inflight) || 0
   const health = healthModel(vm)
@@ -221,12 +282,12 @@ function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
   return (
     <div className='min-w-0 space-y-1'>
       {show.label ? (
-        <div className='flex items-center gap-1.5'>
-          <StatusReason vm={vm} tone={tone} />
+        <div className='flex flex-wrap items-center gap-1.5'>
+          <StatusReason vm={vm} tone={tone} now={now} />
           {showInflight ? (
             <span
               className='inline-flex size-5 items-center justify-center rounded-full bg-[color:var(--tier-pro-solid)] text-[11px] font-semibold text-[color:var(--tier-pro-solid-fg)] tabular-nums'
-              title={`在飞 ${inflight}`}
+              title={tVm('vm:vmListTable.inFlight', { inflight: inflight })}
             >
               {inflight}
             </span>
@@ -273,6 +334,8 @@ function RequestCell({
   accounts?: UsageAccountRow[]
   week: VmWeekOutcome
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const s = vmTodayStats(vm, accounts)
   return (
     <div className='grid min-w-0 gap-1'>
@@ -283,12 +346,15 @@ function RequestCell({
         )}
       >
         <span className='w-7 shrink-0 font-sans text-xs font-medium text-muted-foreground'>
-          今日
+          <Trans ns='vm' i18nKey='detailAccountTab.today' />
         </span>
         {s.req > 0 ? (
           <span className='font-medium'>
             {fmtNum(s.req)}
-            <span className='font-normal text-muted-foreground'> req</span>
+            <span className='font-normal text-muted-foreground'>
+              {' '}
+              <Trans ns='vm' i18nKey='units.requestsShort' />
+            </span>
           </span>
         ) : (
           <span className='text-[color:var(--text-tertiary)]'>—</span>
@@ -296,10 +362,10 @@ function RequestCell({
       </div>
       <div
         className={cn('flex items-center gap-1.5', METRIC_ROW)}
-        title='7D 窗口：成功 / 失败'
+        title={tVm('vm:vmListTable.7DayWindowSucceededFailed')}
       >
         <span className='w-7 shrink-0 text-xs font-medium text-muted-foreground'>
-          7D
+          <Trans ns='vm' i18nKey='units.sevenDays' />
         </span>
         <WeekPills week={week} />
       </div>
@@ -308,6 +374,8 @@ function RequestCell({
 }
 
 function WeekPills({ week }: { week: VmWeekOutcome }) {
+  useTranslation('vm')
+
   if (!week.known) {
     return week.req <= 0 ? (
       <>
@@ -317,7 +385,9 @@ function WeekPills({ week }: { week: VmWeekOutcome }) {
     ) : (
       <>
         <CountPill tone='ok' n={week.req} />
-        <span className='text-xs text-muted-foreground'>失败 —</span>
+        <span className='text-xs text-muted-foreground'>
+          <Trans ns='vm' i18nKey='vmListTable.failures' />
+        </span>
       </>
     )
   }
@@ -331,6 +401,8 @@ function WeekPills({ week }: { week: VmWeekOutcome }) {
 
 /** pro / max（GPT 为套餐名）跟着账号走，放在账号名同一行。 */
 function TierBadge({ vm }: { vm: Vm }) {
+  useTranslation('vm')
+
   if (isCodexVm(vm)) return <OpenaiPlanBadge vm={vm} />
   const skin = tierVisual(vm)
   if (skin.key !== 'pro' && skin.key !== 'max' && skin.key !== 'unknown') {
@@ -349,6 +421,8 @@ function TierBadge({ vm }: { vm: Vm }) {
 }
 
 function SlotCell({ vm, now }: { vm: Vm; now: number }) {
+  useTranslation('vm')
+
   const name = slotNameLabel(vm)
   const email = String(vm.email || '').trim()
   const sub = subscriptionListLabel(vm, now)
@@ -378,7 +452,7 @@ function SlotCell({ vm, now }: { vm: Vm; now: number }) {
       >
         {sub.text}
       </div>
-      <VmOwnerLine
+      <VmGroupLabels
         vm={vm}
         className='truncate text-[10.5px] text-muted-foreground'
       />
@@ -398,9 +472,22 @@ const COLUMNS: Record<
   VmColumnKey,
   { label: string; cell: (ctx: CellCtx) => ReactNode }
 > = {
-  vm: { label: '账号', cell: ({ vm, now }) => <SlotCell vm={vm} now={now} /> },
+  groups: {
+    get label() {
+      return tVm('vm:vmListTable.groups')
+    },
+    cell: ({ vm }) => <VmGroupLabels vm={vm} />,
+  },
+  vm: {
+    get label() {
+      return tVm('vm:detailAccountTab.account')
+    },
+    cell: ({ vm, now }) => <SlotCell vm={vm} now={now} />,
+  },
   sched: {
-    label: '调度',
+    get label() {
+      return tVm('vm:vmListTable.scheduling')
+    },
     cell: ({ vm }) => (
       <div onClick={(e) => e.stopPropagation()}>
         <SchedulableSwitch {...vmSchedulableProps(vm)} />
@@ -408,27 +495,39 @@ const COLUMNS: Record<
     ),
   },
   type: {
-    label: '类型',
+    get label() {
+      return tVm('vm:detailAccountTab.type')
+    },
     cell: ({ vm, now }) => <TypeCell vm={vm} now={now} />,
   },
   status: {
-    label: '状态',
-    cell: ({ vm, statusShow }) => <StatusCell vm={vm} show={statusShow} />,
+    get label() {
+      return tVm('vm:detailAccountTab.status')
+    },
+    cell: ({ vm, statusShow, now }) => (
+      <StatusCell vm={vm} show={statusShow} now={now} />
+    ),
   },
   req: {
-    label: '今日 / 7D 请求',
+    get label() {
+      return tVm('vm:vmListTable.today7DayRequests')
+    },
     cell: ({ vm, accounts, week }) => (
       <RequestCell vm={vm} accounts={accounts} week={week} />
     ),
   },
   usage: {
-    label: '用量窗口',
+    get label() {
+      return tVm('vm:usageWindows.usageWindows')
+    },
     cell: ({ vm, now }) => (
       <VmUsageWindows vm={vm} now={now} quiet quotaActions />
     ),
   },
   cost: {
-    label: '成本',
+    get label() {
+      return tVm('vm:vmListTable.costTotal')
+    },
     cell: ({ vm, accounts }) => <VmCostLedger vm={vm} accounts={accounts} />,
   },
 }
@@ -440,10 +539,13 @@ export function VmTable({
   vms: Vm[]
   accounts?: UsageAccountRow[]
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const actions = useVmActions()
   const now = useNow()
   const statusBar = useStatusBarShow()
   const columns = useVmColumnOrder()
+  const canSeeMoney = useVmPerms().admin
   const [dragKey, setDragKey] = useState<VmColumnKey | null>(null)
   const [overKey, setOverKey] = useState<VmColumnKey | null>(null)
   const onRowKey = (e: KeyboardEvent<HTMLDivElement>, vm: Vm) => {
@@ -467,62 +569,64 @@ export function VmTable({
   }
   return (
     <div className='overflow-x-auto rounded-lg border border-border/60'>
-      <div className='min-w-[1180px]'>
+      <div className='min-w-[1300px]'>
         <div className='sticky top-0 z-10 flex h-8 items-center border-b bg-muted/30 pl-1.5 text-xs font-medium tracking-wide text-muted-foreground'>
-          {columns.order.map((key) => {
-            const dragging = dragKey === key
-            const target = overKey === key && dragKey && dragKey !== key
-            const forward =
-              dragKey != null &&
-              columns.order.indexOf(dragKey) < columns.order.indexOf(key)
-            return (
-              <div
-                key={key}
-                draggable
-                tabIndex={0}
-                title='拖动调整列顺序（Alt+←/→）'
-                className={cn(
-                  'group/col flex cursor-grab items-center gap-0.5 px-1.5 py-1 select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:cursor-grabbing',
-                  COL_CLS[key],
-                  dragging && 'opacity-40',
-                  target &&
-                    (forward
-                      ? 'shadow-[inset_-2px_0_0_0_var(--ring)]'
-                      : 'shadow-[inset_2px_0_0_0_var(--ring)]')
-                )}
-                onDragStart={(e) => {
-                  e.dataTransfer.effectAllowed = 'move'
-                  e.dataTransfer.setData('text/plain', key)
-                  setDragKey(key)
-                }}
-                onDragOver={(e) => {
-                  if (!dragKey) return
-                  e.preventDefault()
-                  e.dataTransfer.dropEffect = 'move'
-                  if (overKey !== key) setOverKey(key)
-                }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  if (dragKey) columns.move(dragKey, key)
-                  endDrag()
-                }}
-                onDragEnd={endDrag}
-                onKeyDown={(e) => onHeaderKey(e, key)}
-              >
-                <GripVertical
-                  className='size-3 shrink-0 opacity-0 transition-opacity group-hover/col:opacity-60'
-                  aria-hidden
-                />
-                <span className='truncate'>{COLUMNS[key].label}</span>
-                {key === 'status' ? (
-                  <StatusBarOptions
-                    show={statusBar.show}
-                    onToggle={statusBar.toggle}
+          {columns.order
+            .filter((k) => canSeeMoney || k !== 'cost')
+            .map((key) => {
+              const dragging = dragKey === key
+              const target = overKey === key && dragKey && dragKey !== key
+              const forward =
+                dragKey != null &&
+                columns.order.indexOf(dragKey) < columns.order.indexOf(key)
+              return (
+                <div
+                  key={key}
+                  draggable
+                  tabIndex={0}
+                  title={tVm('vm:vmListTable.dragToReorderColumnsAlt')}
+                  className={cn(
+                    'group/col flex cursor-grab items-center gap-0.5 px-1.5 py-1 select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:cursor-grabbing',
+                    COL_CLS[key],
+                    dragging && 'opacity-40',
+                    target &&
+                      (forward
+                        ? 'shadow-[inset_-2px_0_0_0_var(--ring)]'
+                        : 'shadow-[inset_2px_0_0_0_var(--ring)]')
+                  )}
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('text/plain', key)
+                    setDragKey(key)
+                  }}
+                  onDragOver={(e) => {
+                    if (!dragKey) return
+                    e.preventDefault()
+                    e.dataTransfer.dropEffect = 'move'
+                    if (overKey !== key) setOverKey(key)
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (dragKey) columns.move(dragKey, key)
+                    endDrag()
+                  }}
+                  onDragEnd={endDrag}
+                  onKeyDown={(e) => onHeaderKey(e, key)}
+                >
+                  <GripVertical
+                    className='size-3 shrink-0 opacity-0 transition-opacity group-hover/col:opacity-60'
+                    aria-hidden
                   />
-                ) : null}
-              </div>
-            )
-          })}
+                  <span className='truncate'>{COLUMNS[key].label}</span>
+                  {key === 'status' ? (
+                    <StatusBarOptions
+                      show={statusBar.show}
+                      onToggle={statusBar.toggle}
+                    />
+                  ) : null}
+                </div>
+              )
+            })}
           <div className={cn(COL_CLS.actions, 'flex justify-end')}>
             {columns.isDefault ? null : (
               <Button
@@ -530,8 +634,8 @@ export function VmTable({
                 size='icon'
                 variant='ghost'
                 className='size-6 text-muted-foreground'
-                title='恢复默认列顺序'
-                aria-label='恢复默认列顺序'
+                title={tVm('vm:vmListTable.restoreDefaultColumnOrder')}
+                aria-label={tVm('vm:vmListTable.restoreDefaultColumnOrder')}
                 onClick={columns.reset}
               >
                 <RotateCcw className='size-3.5' />
@@ -555,7 +659,7 @@ export function VmTable({
               key={vm.id}
               role='button'
               tabIndex={0}
-              aria-label={`查看 ${vm.id} 详情`}
+              aria-label={tVm('vm:vmListTable.viewDetailsFor', { id: vm.id })}
               className={cn(
                 'group flex cursor-pointer items-start border-b border-border/40 py-2 pl-1.5 transition-colors duration-150 last:border-b-0 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring',
                 // 等级色只走行首 2px，不染整行底色：行是密集数字，底色一染就没对比空间了。
@@ -565,11 +669,13 @@ export function VmTable({
               onClick={() => actions.openDetail(vm)}
               onKeyDown={(e) => onRowKey(e, vm)}
             >
-              {columns.order.map((key) => (
-                <div key={key} className={cn('px-1.5', COL_CLS[key])}>
-                  {COLUMNS[key].cell(ctx)}
-                </div>
-              ))}
+              {columns.order
+                .filter((k) => canSeeMoney || k !== 'cost')
+                .map((key) => (
+                  <div key={key} className={cn('px-1.5', COL_CLS[key])}>
+                    {COLUMNS[key].cell(ctx)}
+                  </div>
+                ))}
               <div
                 className={cn(COL_CLS.actions, 'flex justify-end')}
                 onClick={(e) => e.stopPropagation()}

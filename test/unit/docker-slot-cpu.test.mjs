@@ -10,8 +10,8 @@ import { slotContainerBody, startRemoteSlot } from '../../src/lib/cluster/remote
 const options = { image: 'fixture', network: 'none', remoteDir: '/fixture', user: '1000:1000', routing: {} }
 const vm = (machine = {}) => ({ id: 'vm-01', machine, runtime: { type: 'docker' } })
 
-test('Docker CPU quota is opt-in; legacy vcpus never becomes a hard cap', () => {
-  const legacy = spec.resolveMachineSpec({ runtime: 'docker', config: { vcpus: 2 } })
+test('existing records without a Docker CPU quota keep their runtime policy', () => {
+  const legacy = { vcpus: 2, memory: '4g' }
   assert.equal(Object.hasOwn(legacy, 'docker_cpus'), false)
   assert.equal(slotContainerBody(vm(legacy), options).HostConfig.NanoCpus, undefined)
   assert.equal(runtime.dockerSlotResourceArgs(vm(legacy), {}).includes('--cpus'), false)
@@ -22,7 +22,7 @@ test('create freezes an explicit Docker CPU quota separately from KVM vcpus', ()
     const machine = spec.resolveMachineSpec({ runtime: 'docker', overrides: { docker_cpus: quota } })
     assert.equal(machine.docker_cpus, quota)
     const args = runtime.dockerSlotResourceArgs(vm(machine), {})
-    assert.deepEqual(args.slice(0, 4), ['--memory', '512m', '--memory-swap', '512m'])
+    assert.deepEqual(args.slice(0, 4), ['--memory', '4g', '--memory-swap', '4g'])
     const expected = quota > 0 ? ['--cpus', String(quota)] : []
     assert.deepEqual(args.slice(4), expected)
     assert.equal(
@@ -85,4 +85,20 @@ test('invalid persisted quotas are rejected before local/remote lifecycle work, 
   assert.equal(result.ok, false)
   assert.match(result.error, /docker_cpus/)
   assert.deepEqual(fs.readdirSync(root), [])
+})
+
+test('new Docker defaults reach both the local CLI and remote Engine resource limits', () => {
+  const machine = spec.resolveMachineSpec({ runtime: 'docker' })
+  assert.deepEqual(runtime.dockerSlotResourceArgs(vm(machine), {}), [
+    '--memory',
+    '4g',
+    '--memory-swap',
+    '4g',
+    '--cpus',
+    '4',
+  ])
+  const host = slotContainerBody(vm(machine), options).HostConfig
+  assert.equal(host.Memory, 4 * 1024 ** 3)
+  assert.equal(host.MemorySwap, 8 * 1024 ** 3)
+  assert.equal(host.NanoCpus, 4_000_000_000)
 })

@@ -1,6 +1,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
+import { ApiKeysRepo } from '../../src/lib/db/repos/api-keys-repo.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { toClaudeMessages } from '../../src/lib/protocol/convert.mjs'
 import { officialMessagesBody } from '../../src/lib/protocol/anthropic-messages.mjs'
@@ -18,7 +19,7 @@ const tools = [
 ]
 const messages = [{ role: 'user', content: 'Use the supplied tool.' }]
 const fixture = () => ({
-  model: 'claude-haiku-5-5',
+  model: 'claude-haiku-4-5',
   max_tokens: 256,
   thinking: { type: 'disabled' },
   messages,
@@ -125,6 +126,7 @@ for (const protocol of ['anthropic.messages', 'openai.chat', 'openai.responses']
       stickyRouter: {},
       accountQuota: {},
       apiKeyStore: {
+        canAccept: (record) => ({ ok: true, record }),
         acquire: () => {
           admissions++
           return { ok: true }
@@ -143,21 +145,27 @@ for (const protocol of ['anthropic.messages', 'openai.chat', 'openai.responses']
       routingConfig: { failover: {} },
       groupsRepo: { rateMultiplier: () => 1 },
     })
+    const key = new ApiKeysRepo().insert({
+      id: protocol,
+      key: protocol,
+      key_hash: protocol,
+      status: 'active',
+      category: 'api',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     const req = {
       method: 'POST',
       url: '/v1/messages',
       headers: { 'user-agent': 'test-client' },
       apiKeyKind: 'managed',
-      apiKeyRecord: { category: 'api', user_id: 'admin' },
+      apiKeyRecord: key,
       once() {},
       off() {},
     }
     await handler.handleProtocol(req, response, protocol, '/v1/messages')
     assert.equal(response.status, 400)
-    assert.equal(
-      response.body.error.code,
-      protocol === 'openai.responses' ? 'protocol_not_allowed' : 'tool_choice_incompatible',
-    )
+    assert.equal(response.body.error.code, 'tool_choice_incompatible')
     assert.equal(admissions, 0)
     assert.equal(selections, 0)
   })
