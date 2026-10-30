@@ -1,0 +1,15 @@
+{
+  "back": "返回上一頁",
+  "home": "返回首頁",
+  "forbiddenTitle": "拒絕存取",
+  "forbiddenDescription": "您沒有檢視此資源所需的權限。",
+  "generalTitle": "發生錯誤",
+  "generalDescription": "很抱歉造成您的不便，請稍後再試。",
+  "maintenanceTitle": "網站維護中",
+  "maintenanceDescription": "網站暫時無法使用，我們將盡快恢復服務。",
+  "learnMore": "瞭解更多",
+  "notFoundTitle": "找不到頁面",
+  "notFoundDescription": "您要尋找的頁面不存在或已移除。",
+  "unauthorizedTitle": "需要登入",
+  "unauthorizedDescription": "請使用具有適當權限的帳號登入以存取此資源。"
+}

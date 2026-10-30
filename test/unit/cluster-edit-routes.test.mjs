@@ -95,8 +95,8 @@ test('node edit and probe cannot bypass panel admin permissions', async () => {
     ['POST', '/probe'],
   ]) {
     const pathname = `/api/panel/cluster/nodes/node-a${suffix}`
-    assert.equal(authorizePanelRoute(method, pathname, 'admin').ok, true)
-    for (const role of ['user', 'super']) {
+    assert.equal(authorizePanelRoute(method, pathname, 'super_admin').ok, true)
+    for (const role of ['user', 'admin']) {
       let response
       const panel = createPanelHandler({
         cfg: { paths: {} },

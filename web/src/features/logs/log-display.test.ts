@@ -1,7 +1,7 @@
+import { i18n } from '@/i18n'
 import type { ProviderChainItem } from '@/types/panel-usage-logs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import {
-  queueWaitMs,
   cacheCostSplit,
   cacheWriteSplit,
   chainItemStatus,
@@ -39,8 +39,6 @@ function attempt(over: Partial<ProviderChainItem>): ProviderChainItem {
     action: null,
     downstreamCommitted: false,
     waitMs: null,
-    queueWaitMs: null,
-    schedulingMs: null,
     ttftMs: null,
     latencyMs: null,
     startedAt: null,
@@ -87,89 +85,23 @@ describe('cache TTL split', () => {
 })
 
 describe('latency segments', () => {
-  it('splits queue / prefill / visible-wait / output / finalization', () => {
+  it('splits wait / ttft / generation and keeps a minimum width', () => {
     const segments = latencySegments({
       waitMs: 10,
-      firstByteMs: 200,
-      ttftMs: 15565,
-      generationMs: 15488,
-      durationMs: 15688,
-    })
-    expect(segments?.map((s) => [s.key, s.ms])).toEqual([
-      ['scheduling', 0],
-      ['wait', 10],
-      ['prefill', 190],
-      ['tokenWait', 15365],
-      ['generation', 123],
-      ['finalization', 0],
-    ])
-    expect(
-      segmentWidth(segments!.find((segment) => segment.key === 'wait')!)
-    ).toBe(3)
-  })
-
-  it('keeps trailing time as finalization instead of generation', () => {
-    const segments = latencySegments({
-      waitMs: 0,
-      firstByteMs: 200,
-      ttftMs: 500,
-      generationMs: 1000,
-      durationMs: 1500,
-    })
-    expect(segments?.map((s) => [s.key, s.ms])).toEqual([
-      ['scheduling', 0],
-      ['wait', 0],
-      ['prefill', 200],
-      ['tokenWait', 300],
-      ['generation', 700],
-      ['finalization', 300],
-    ])
-  })
-
-  it('does not estimate generation from duration minus TTFT', () => {
-    const segments = latencySegments({
-      waitMs: 10,
-      firstByteMs: null,
       ttftMs: 1000,
-      generationMs: null,
       durationMs: 5000,
     })
-    expect(segments?.find((s) => s.key === 'generation')?.ms).toBe(0)
-    expect(segments?.find((s) => s.key === 'tokenWait')?.ms).toBe(990)
-    expect(segments?.find((s) => s.key === 'finalization')?.ms).toBe(0)
+    expect(segments?.map((s) => s.ms)).toEqual([10, 990, 4000])
+    expect(segmentWidth(segments![0])).toBe(3)
   })
 
   it('drops an out-of-range wait and rejects impossible ttft', () => {
     expect(
-      latencySegments({
-        waitMs: 2000,
-        firstByteMs: 200,
-        ttftMs: 1000,
-        generationMs: 800,
-        durationMs: 5000,
-      })?.[0].ms
+      latencySegments({ waitMs: 2000, ttftMs: 1000, durationMs: 5000 })?.[0].ms
     ).toBe(0)
     expect(
-      latencySegments({
-        waitMs: 0,
-        firstByteMs: null,
-        ttftMs: 6000,
-        generationMs: null,
-        durationMs: 5000,
-      })
+      latencySegments({ waitMs: 0, ttftMs: 6000, durationMs: 5000 })
     ).toBeNull()
-  })
-
-  it('ignores a zero generation window', () => {
-    const segments = latencySegments({
-      waitMs: 0,
-      firstByteMs: 200,
-      ttftMs: 500,
-      generationMs: 0,
-      durationMs: 1000,
-    })
-    expect(segments?.find((s) => s.key === 'generation')?.ms).toBe(0)
-    expect(segments?.find((s) => s.key === 'finalization')?.ms).toBe(0)
   })
 })
 
@@ -242,6 +174,16 @@ describe('display helpers', () => {
 })
 
 describe('logs search', () => {
+  it('retains personal scope when applying filters', () => {
+    const filters = searchToFilters(
+      validateLogsSearch({ scope: 'mine', model: 'test' })
+    )
+    expect(filtersToSearch(filters).scope).toBe('mine')
+    expect(usageLogFiltersQuery(filtersToApi(filters, [])).get('scope')).toBe(
+      'mine'
+    )
+  })
+
   it('keeps legacy kind=error / error_class deep links working', () => {
     const search = validateLogsSearch({ kind: 'error', error_class: 'auth' })
     const filters = searchToFilters(search)
@@ -276,40 +218,10 @@ describe('logs search', () => {
   })
 })
 
-describe('scheduler versus capacity queue timings', () => {
-  it('does not relabel historical selection elapsed time as actual queue residence', () => {
-    expect(queueWaitMs([attempt({ waitMs: 5500 })])).toBeNull()
-    expect(
-      queueWaitMs([attempt({ waitMs: 250, queueWaitMs: 0, schedulingMs: 250 })])
-    ).toBe(0)
-    const parts = latencySegments({
-      waitMs: 5500,
-      firstByteMs: 6000,
-      ttftMs: 6200,
-      generationMs: 2000,
-      durationMs: 8500,
-    })
-    expect(parts?.find((part) => part.key === 'wait')?.label).toBe(
-      '调度与排队（未拆分）'
-    )
-  })
-  it('shows measured scheduling and queue time as separate non-overlapping segments', () => {
-    const parts = latencySegments({
-      waitMs: 500,
-      queueWaitMs: 300,
-      schedulingMs: 200,
-      firstByteMs: 1000,
-      ttftMs: 1100,
-      generationMs: 500,
-      durationMs: 1600,
-    })
-    expect(parts?.map((part) => [part.key, part.ms])).toEqual([
-      ['scheduling', 200],
-      ['wait', 300],
-      ['prefill', 500],
-      ['tokenWait', 100],
-      ['generation', 400],
-      ['finalization', 100],
-    ])
-  })
+const initialLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(initialLanguage)
 })

@@ -6,7 +6,9 @@ import type { UsageLogFilters } from '@/types/panel-usage-logs'
  * 全部可选：任何只带一个键的 search 对象都要能通过类型检查。
  */
 export type LogsSearch = {
+  scope?: 'mine'
   userId?: string
+  groupId?: string
   keyId?: string
   /** 供应商 = 槽位。 */
   vmId?: string
@@ -33,7 +35,9 @@ export type LogsSearch = {
 
 /** 筛选面板编辑的草稿形状；`kind=error` 在这里已折叠成 `excludeStatus200`。 */
 export type LogsFilterState = {
+  scope?: 'mine'
   userId?: string
+  groupId?: string
   keyId?: string
   vmId?: string
   sessionId?: string
@@ -81,7 +85,9 @@ export function validateLogsSearch(
         : int(rawStatus)
   const minRetry = search.minRetry == null ? undefined : int(search.minRetry)
   return {
+    scope: search.scope === 'mine' ? 'mine' : undefined,
     userId: str(search.userId),
+    groupId: str(search.groupId),
     keyId: str(search.keyId),
     vmId: str(search.vmId),
     sessionId: str(search.sessionId),
@@ -102,7 +108,9 @@ export function validateLogsSearch(
 export function searchToFilters(search: LogsSearch): LogsFilterState {
   const exclude = search.statusCode === '!200' || search.kind === 'error'
   return {
+    scope: search.scope,
     userId: search.userId,
+    groupId: search.groupId,
     keyId: search.keyId,
     vmId: search.vmId,
     sessionId: search.sessionId,
@@ -124,7 +132,9 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
 /** 草稿 → URL。`kind` 不再写回，统一由 `statusCode=!200` 表达。 */
 export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   const out: LogsSearch = {}
+  if (filters.scope === 'mine') out.scope = 'mine'
   if (filters.userId) out.userId = filters.userId
+  if (filters.groupId) out.groupId = filters.groupId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
   if (filters.sessionId?.trim()) out.sessionId = filters.sessionId.trim()
@@ -151,7 +161,9 @@ export function filtersToApi(
   muted: readonly string[]
 ): UsageLogFilters {
   const out: UsageLogFilters = {}
+  if (filters.scope === 'mine') out.scope = 'mine'
   if (filters.userId) out.userId = filters.userId
+  if (filters.groupId) out.groupId = filters.groupId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
   if (filters.sessionId) out.sessionId = filters.sessionId
@@ -178,10 +190,13 @@ export function usageLogFiltersQuery(
   filters: UsageLogFilters
 ): URLSearchParams {
   const qs = new URLSearchParams()
+  if (filters.scope === 'mine') qs.set('scope', 'mine')
   const set = (key: string, value: string | number | undefined) => {
     if (value !== undefined && value !== '') qs.set(key, String(value))
   }
   set('user_id', filters.userId)
+  if (filters.errorsOnly) qs.set('errors_only', '1')
+  set('group_id', filters.groupId)
   set('key_id', filters.keyId)
   set('vm_id', filters.vmId)
   set('account_id', filters.accountId)
@@ -208,6 +223,7 @@ export function activeFilterCount(filters: LogsFilterState): number {
   let count = 0
   if (filters.startTime != null || filters.endTime != null) count++
   if (filters.userId) count++
+  if (filters.groupId) count++
   if (filters.keyId) count++
   if (filters.vmId) count++
   if (filters.sessionId) count++

@@ -10,6 +10,8 @@
  * Those slots get one /usage hop, then back off.
  */
 import { createHash } from 'node:crypto'
+import { API_CACHE_TTL_MS } from './usage-cache.mjs'
+import { isCodexVm } from '../vm/vm-kind.mjs'
 import { shouldProbeFable, usageProbeBackoffRemainingMs } from './crs-usage-probe.mjs'
 import { hasRefreshPresence } from './oauth-credentials.mjs'
 import { vmHasProxyPath } from './credential-refresh-monitor.mjs'
@@ -238,8 +240,17 @@ export function createUsageProbeMonitor(opts = {}) {
     const run = worker
       .then(async () => {
         try {
-          const result = await withTimeout(Promise.resolve(opts.probeOne(vm)), config.timeout_ms)
-          const ok = result?.ok !== false
+          const result = await withTimeout(
+            Promise.resolve(opts.probeOne(vm, { readOnly: ['request_completed', 'panel_refresh'].includes(reason) })),
+            config.timeout_ms,
+          )
+          const ok =
+            !!result &&
+            result.ok !== false &&
+            result.body?.ok !== false &&
+            !(Number(result.status) >= 400) &&
+            result.data?.ok !== false &&
+            !result.data?.rate_limited
           if (ok) backoff.delete(id)
           else {
             const failures = (backoff.get(id)?.failures || 0) + 1
@@ -271,6 +282,48 @@ export function createUsageProbeMonitor(opts = {}) {
     const vm = listTargets().find((item) => item.id === vmId)
     if (!vm) return Promise.resolve({ vm_id: vmId, ok: false, reason: 'not_target', source: null })
     return probeVm(vm, reason)
+  }
+
+  // Normal inference already carries quota headers when supported. If the CLI
+  // omits them, refresh official usage asynchronously with the same TTL and
+  // bounded workers as explicit probes. Never send a model entitlement request.
+  const refreshUsage = (vm, headers = {}, reason = 'request_completed') => {
+    if (!vm || isCodexVm(vm)) return Promise.resolve({ ok: false, reason: 'not_target' })
+    const account = opts.accountForVm?.(vm) || {}
+    const unified = account.unified || {}
+    const now = nowFn()
+    if (usageProbeBackoffRemainingMs(unified, now) > 0) return Promise.resolve({ ok: false, reason: 'usage_backoff' })
+    const entries = typeof headers.entries === 'function' ? [...headers.entries()] : Object.entries(headers)
+    const h = Object.fromEntries(entries.map(([key, value]) => [key.toLowerCase(), value]))
+    const windows = unified.usage_has_fable === false ? ['5h', '7d'] : ['5h', '7d', '7d_oi']
+    const complete = windows.every((key) => {
+      const value = h[`anthropic-ratelimit-unified-${key}-utilization`]
+      return (
+        value != null &&
+        value !== '' &&
+        Number.isFinite(Number(value)) &&
+        parseResetMs(h[`anthropic-ratelimit-unified-${key}-reset`]) > now
+      )
+    })
+    if (complete) return Promise.resolve({ ok: true, reason: 'live_headers' })
+    const probe = account.last_probe || unified.last_probe
+    const sampled = Date.parse(probe?.at || probe?.probed_at || '')
+    if (probe?.ok && hasOfficialUsageSample(unified) && Number.isFinite(sampled) && now - sampled < API_CACHE_TTL_MS)
+      return Promise.resolve({ ok: true, reason: 'sample_fresh' })
+    return probeVm(vm, reason)
+  }
+  const refreshAfterRequest = (vmId, headers = {}) =>
+    refreshUsage(
+      listTargets().find((item) => item.id === vmId),
+      headers,
+    )
+  const refreshVisible = (vmIds = []) => {
+    const visible = new Set(vmIds)
+    return Promise.all(
+      listTargets()
+        .filter((vm) => visible.has(vm.id))
+        .map((vm) => refreshUsage(vm, {}, 'panel_refresh')),
+    )
   }
 
   const runOnce = async () => {
@@ -365,6 +418,8 @@ export function createUsageProbeMonitor(opts = {}) {
     getSnapshot: () => lastRun,
     runOnce,
     probeNow,
+    refreshAfterRequest,
+    refreshVisible,
     start,
     stop,
   }

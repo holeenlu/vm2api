@@ -16,7 +16,7 @@ flowchart LR
 
 | 密钥 | 来源 | 能调 |
 |------|------|------|
-| Master `VM2API_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
+| Master `TAPMODELS_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
 | `sk-vm-…` | 控制台签发 | **只** `/v1/*` |
 | 面板会话 | 面板登录 | **只** `/api/panel/*` |
 
@@ -40,7 +40,12 @@ x-api-key: sk-vm-…
 | `POST` | `/v1/responses` 或 `/responses` | OpenAI Responses | OpenAI Responses |
 | `GET` + Upgrade | `/v1/responses` 或 `/responses` | Responses WebSocket | JSON `response.*` 帧，不包 SSE |
 | `GET` | `/v1/models` | — | 本地模型策略目录 |
-| `GET` | `/health` · `/` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
+| `GET` / `HEAD` | `/` | 无鉴权 | `307` 跳转 `/console/`，`Cache-Control: no-store`；沿用管理台现有欢迎、登录与会话流程 |
+| `GET` | `/health` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
+
+原先通过 `/` 读取状态 JSON 的程序应改用 `/health`；仅检查服务存活可使用已有的 `/healthz`。其他入口和 API 行为不变。
+
+控制台入口 `/console`、`/console/`、`/cc`、`/cc/` 及前端静态资源均支持 `HEAD`：返回与 `GET` 一致的状态、内容类型和缓存策略，不发送响应体。`HEAD /` 跟随跳转后，控制台文件存在时返回 `200`，缺失时返回 `404`。
 
 上游 hop **永远** `stream: true`。客户端 `stream: true` 收 SSE；`stream: false` 或 `x-kin-delivery: verified` 由网关聚合成 JSON。
 
@@ -177,6 +182,9 @@ curl -sS http://127.0.0.1:8787/v1/models -H "Authorization: Bearer $KEY"
 读面板持久化的 `model_policy`，**不** hop 槽位 `/v1/models`。列表按密钥 `group_type` 过滤：`openai` 只列 GPT，`anthropic` 只列 Claude，`all` 与 master 两者都列。`POST /admin/models/refresh` 仍回完整目录。未入库的 id → `400`，请求被拒，不上游。别名如 `claude-haiku-4-5` 可解析到带日期的目录项。出站 `model` 去掉 `[1m]` 后缀。
 
 ## usage
+
+商业分组 Key 的 `GET /v1/usage` 返回调用用户的 USD 余额、订阅和本人 Key 用量，不返回上游账号窗口。下面的 Claude/Codex 窗口选择仅适用于无组的平台诊断 Key；平台诊断排除历史私人槽位，不能借 `platform` 参数扩大授权范围。
+
 ```bash
 curl -sS http://127.0.0.1:8787/v1/usage -H "Authorization: Bearer $KEY"
 ```
@@ -382,3 +390,10 @@ stateDiagram-v2
 4. 同请求加 `"stream": true`，能收到 `message_stop`  
 5. `POST /v1/chat/completions` 一条 system + user  
 6. 带 `x-session-id` 连打两轮，日志 attempt 落同一槽（该槽仍可用时）
+
+
+## Images（1.3.218）
+
+`POST /v1/images/generations` 与 `POST /v1/images/edits` 提供 GPT 生图和编辑；同样接受 `/images/generations`、`/images/edits`。编辑支持 JSON 和 multipart。此入口使用获授权的 OpenAI/混合 VM 分组，不支持 API endpoint 分组；受模型白名单、用户/Key/分组限流、并发和商业账务约束。未指定模型时，授权与计价采用上游默认 gpt-image-2.5-flare。Free-plan GPT 槽位不能生图。
+
+生图使用独立 image_usage 与 image_cost，Responses image_generation 工具成本与文本成本合计结算。图像文本/图像 token 拆分不足不能推算费用；不满足上游计量条件时不扣费，不创建待对账记录。请求摘要仅记录字段名、模型及图片数量，不记录上传 base64。需要前向迁移 049，既有迁移不变。

@@ -1,5 +1,6 @@
-import { format } from 'date-fns'
+import { t, i18n } from '@/i18n'
 import { Calendar as CalendarIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
 import {
@@ -17,8 +18,9 @@ type DatePickerProps = {
 export function DatePicker({
   selected,
   onSelect,
-  placeholder = 'Pick a date',
+  placeholder = t('common:pickDate'),
 }: DatePickerProps) {
+  useTranslation('common')
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -28,7 +30,9 @@ export function DatePicker({
           className='w-60 justify-start text-start font-normal data-[empty=true]:text-muted-foreground'
         >
           {selected ? (
-            format(selected, 'MMM d, yyyy')
+            new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+              dateStyle: 'medium',
+            }).format(selected)
           ) : (
             <span>{placeholder}</span>
           )}

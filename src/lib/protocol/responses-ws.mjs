@@ -351,7 +351,6 @@ function createProtocolReq(upgradeReq, body) {
   req.panelUser = upgradeReq.panelUser
   req.panelRole = upgradeReq.panelRole
   req.panelUserId = upgradeReq.panelUserId
-  req.panelVmCreateQuota = upgradeReq.panelVmCreateQuota
   req.abort = () => {
     if (req.aborted) return
     req.aborted = true

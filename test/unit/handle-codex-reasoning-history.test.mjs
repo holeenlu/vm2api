@@ -27,6 +27,7 @@ function serverError(status = 500, extra = {}) {
     status,
     committed: false,
     transportError: false,
+    replaySafe: true,
     body: {
       type: 'error',
       status: 500,
@@ -247,7 +248,7 @@ test('reasoningHistoryFallback stays off at 128 KiB and when nothing can be omit
   )
 })
 
-test('runCodexKernelHop retries an uncommitted 500/502 server_error once with trimmed history', async () => {
+test('runCodexKernelHop retries a provider-proven replay-safe 500/502 server_error once with trimmed history', async () => {
   for (const status of [500, 502]) {
     const args = qualifyingArgs()
     const originalInput = args.body.input
@@ -290,7 +291,13 @@ test('runCodexKernelHop does not stack reasoning fallback after emit, transport 
     hop: async () => {
       n += 1
       if (n === 1)
-        return { ok: false, status: 502, transportError: true, body: { error: { code: 'upstream_transport' } } }
+        return {
+          ok: false,
+          sendState: 'not_sent',
+          status: 502,
+          transportError: true,
+          body: { error: { code: 'upstream_transport' } },
+        }
       return serverError(500)
     },
     args: qualifyingArgs(),

@@ -1,9 +1,12 @@
+import { t as tVm } from '@/i18n'
 import type { PreflightCheck, PreflightCheckId } from '@/types/panel-cluster'
 import type { Vm } from '@/types/panel-vm'
 import { isApiError } from '@/lib/api'
 
 /** 远端槽位上被后端 409 `remote_unsupported` 拒绝的操作统一用这句说明。 */
-export const REMOTE_UNSUPPORTED_TEXT = '远端节点暂不支持'
+export function remoteUnsupportedText() {
+  return tVm('vm:placement.notSupportedOnRemoteNodesYet')
+}
 
 /** `node_id` 为空 / 缺省即本机。 */
 export function isRemoteVm(vm: Pick<Vm, 'node_id'> | null | undefined) {
@@ -13,21 +16,39 @@ export function isRemoteVm(vm: Pick<Vm, 'node_id'> | null | undefined) {
 export const PREFLIGHT_CHECK_LABEL: Record<PreflightCheckId, string> = {
   ssh: 'SSH',
   docker: 'Docker',
-  arch: '架构',
-  memory: '内存',
-  disk: '磁盘',
+  get arch() {
+    return tVm('vm:physicalFeaturesCard.architecture')
+  },
+  get memory() {
+    return tVm('vm:createVmForm.memoryAlternative')
+  },
+  get disk() {
+    return tVm('vm:createVmForm.disk')
+  },
   sudo: 'sudo',
   swap: 'Swap',
-  image: '镜像',
+  get image() {
+    return tVm('vm:detailStatusBoard.image')
+  },
   hostd: 'hostd',
-  relay: '中继',
+  get relay() {
+    return tVm('vm:placement.relay')
+  },
   kvm: 'KVM',
-  runtime: '运行方式',
+  get runtime() {
+    return tVm('vm:placement.executionMode')
+  },
   macos: 'macOS',
   launchd: 'launchd',
-  sleep: '休眠',
-  socket_path: '套接字',
-  payload: '产物',
+  get sleep() {
+    return tVm('vm:placement.sleep')
+  },
+  get socket_path() {
+    return tVm('vm:placement.socket')
+  },
+  get payload() {
+    return tVm('vm:placement.artifacts')
+  },
 }
 
 export type PreflightMark = 'ok' | 'fail' | 'warn'

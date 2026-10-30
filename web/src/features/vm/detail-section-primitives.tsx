@@ -1,5 +1,7 @@
+import { t as tVm, i18n } from '@/i18n'
 import type { Dashboard } from '@/types/panel-overview'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import {
   expiresAtToMs,
   fableCap,
@@ -23,6 +25,8 @@ export function Field({
   children: React.ReactNode
   compact?: boolean
 }) {
+  useTranslation('vm')
+
   return (
     <div
       className={cn(
@@ -51,6 +55,8 @@ export function Meter({
   /** 闸线百分比（0–100），到这里写成受限并切号。 */
   gate?: number
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const p = Math.max(0, Math.min(100, Number(value) || 0))
   const anomaly =
     kind === 'remain'
@@ -82,7 +88,11 @@ export function Meter({
           {p.toFixed(0)}%
           {gate != null ? (
             <span className='ml-1 text-[11px] font-normal text-muted-foreground'>
-              / 闸 {Math.round(gate)}%
+              <Trans
+                ns='vm'
+                i18nKey='detailSectionPrimitives.gate'
+                values={{ value: Math.round(gate) }}
+              />
             </span>
           ) : null}
         </span>
@@ -92,7 +102,9 @@ export function Meter({
         {gate != null ? (
           <span
             aria-hidden
-            title={`闸线 ${Math.round(gate)}%`}
+            title={tVm('vm:detailSectionPrimitives.gateAlternative', {
+              value1: Math.round(gate),
+            })}
             className='absolute -top-0.5 h-2.5 w-0.5 -translate-x-1/2 rounded-full bg-foreground/80'
             style={{ left: `${Math.max(0, Math.min(100, gate))}%` }}
           />
@@ -111,10 +123,13 @@ export function quotaWindowHint(
   now: number
 ): string {
   const remain = Math.max(0, Math.min(100, 100 - (Number(usedPct) || 0)))
-  const bits = [`剩余 ${remain.toFixed(0)}%`]
+  const bits = [
+    tVm('vm:detailSectionPrimitives.remaining', { value1: remain.toFixed(0) }),
+  ]
   const clock = fmtResetClock(resetAt)
   const cd = resetCountdown(resetAt, now)
-  if (clock) bits.push(`重置 ${clock}`)
+  if (clock)
+    bits.push(tVm('vm:detailSectionPrimitives.reset', { clock: clock }))
   if (cd) bits.push(cd)
   return bits.join(' · ')
 }
@@ -122,13 +137,35 @@ export function quotaWindowHint(
 /** 重置时刻：绝对时间 + 分钟精度倒计时。后端给的是秒级 epoch 串，
     `fmtExpiresAt` 解析不了会回显原始数字，这里走 `expiresAtToMs`。 */
 export function ResetAt({ value, now }: { value: unknown; now: number }) {
+  useTranslation('vm')
+
   const at = expiresAtToMs(value)
   const cd = resetCountdown(value, now)
   if (!at) return <span>{value ? String(value) : '—'}</span>
   return (
     <span className='tabular-nums'>
-      {new Date(at).toLocaleString()}
+      {new Date(at).toLocaleString(i18n.language)}
       {cd ? <span className='ml-1.5 text-muted-foreground'>· {cd}</span> : null}
+    </span>
+  )
+}
+
+/** 重置券到期时间：月/日、24 小时制时分，不显示年份、秒数或倒计时。 */
+export function ExpiryAt({ value }: { value: unknown }) {
+  const at = expiresAtToMs(value)
+  if (!at) return <span>{value ? String(value) : '—'}</span>
+  const date = new Date(at)
+  const clock = [
+    `${date.getMonth() + 1}`.padStart(2, '0'),
+    `${date.getDate()}`.padStart(2, '0'),
+  ].join('/')
+  const time = [
+    `${date.getHours()}`.padStart(2, '0'),
+    `${date.getMinutes()}`.padStart(2, '0'),
+  ].join(':')
+  return (
+    <span className='tabular-nums'>
+      {clock} {time}
     </span>
   )
 }
@@ -142,6 +179,8 @@ export function UtilCard({
   value: number
   hint?: string
 }) {
+  useTranslation('vm')
+
   const tone =
     value >= 100
       ? 'bg-destructive'
@@ -179,6 +218,8 @@ export function MoneyCard({
   amount: number
   hint?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <Card>
       <CardHeader className='pb-2'>
@@ -190,7 +231,9 @@ export function MoneyCard({
         <div className='text-2xl font-semibold text-[color:var(--status-ok)] tabular-nums'>
           {fmtUsd(amount, 2)}
         </div>
-        <p className='text-xs text-muted-foreground'>{hint || '官方价'}</p>
+        <p className='text-xs text-muted-foreground'>
+          {hint || tVm('vm:detailSectionPrimitives.officialPrice')}
+        </p>
       </CardContent>
     </Card>
   )
@@ -206,6 +249,8 @@ export function FableCard({
   tierKey: string
   dashRouting: Dashboard | undefined
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const info = fableCardInfo(vm, tierKey, fableCap(dashRouting))
   return (
     <Card>
@@ -234,7 +279,10 @@ export function FableCard({
         )}
         <p className='text-xs text-muted-foreground'>
           {info.usedPct != null
-            ? `用 ${info.usedPct.toFixed(1)}%${info.reset ? ' · ' + fmtReset(info.reset) : ''}`
+            ? tVm('vm:detailSectionPrimitives.used', {
+                value1: info.usedPct.toFixed(1),
+                value2: info.reset ? ' · ' + fmtReset(info.reset) : '',
+              })
             : info.bits.join(' · ')}
         </p>
       </CardContent>

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { Check, CircleAlert, Loader2, Minus, X } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api, isApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -18,6 +19,8 @@ import { dashboardQueryOptions } from '@/features/overview/queries'
 import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
 import { vmDiagnoseQueryOptions } from '@/features/vm/use-vm-recovery'
 import {
+  diagnosisCheckLabel,
+  recoveryStepLabel,
   firstFailingCheck,
   firstRecoverFailure,
   type CheckStatus,
@@ -40,6 +43,8 @@ function toastApiError(error: Error) {
 }
 
 function CheckRow({ check }: { check: DiagnosisCheck }) {
+  useTranslation('vm')
+
   const tone = CHECK_TONE[check.status] ?? CHECK_TONE.skip
   const Icon = tone.icon
   return (
@@ -51,7 +56,7 @@ function CheckRow({ check }: { check: DiagnosisCheck }) {
       />
       <div className='min-w-0 flex-1'>
         <div className='flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5'>
-          <span className='font-medium'>{check.label}</span>
+          <span className='font-medium'>{diagnosisCheckLabel(check)}</span>
           {check.code ? (
             <span className='font-mono text-xs text-muted-foreground'>
               {check.code}
@@ -67,6 +72,8 @@ function CheckRow({ check }: { check: DiagnosisCheck }) {
 }
 
 function DiagnosisList({ diagnosis }: { diagnosis: Diagnosis }) {
+  useTranslation('vm')
+
   return (
     <ul className='space-y-2'>
       {diagnosis.checks.map((check) => (
@@ -77,6 +84,8 @@ function DiagnosisList({ diagnosis }: { diagnosis: Diagnosis }) {
 }
 
 function StepRow({ step }: { step: RecoverStep }) {
+  useTranslation('vm')
+
   const Icon = step.ok ? Check : X
   const color = step.ok ? 'var(--status-ok)' : 'var(--status-bad)'
   return (
@@ -88,7 +97,7 @@ function StepRow({ step }: { step: RecoverStep }) {
       />
       <div className='min-w-0 flex-1'>
         <div className='flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5'>
-          <span className='font-medium'>{step.label}</span>
+          <span className='font-medium'>{recoveryStepLabel(step)}</span>
           {step.code ? (
             <span className='font-mono text-xs text-muted-foreground'>
               {step.code}
@@ -115,6 +124,8 @@ export function VmRecoveryDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const vmId = vm?.id ?? ''
   const [report, setReport] = useState<RecoverReport | null>(null)
@@ -144,14 +155,23 @@ export function VmRecoveryDialog({
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
       ])
       if (data.ok) {
-        toast.success(`服务已恢复 · ${data.duration_ms}ms`)
+        toast.success(
+          tVm('vm:vmRecoveryDialog.serviceRecoveredMs', {
+            duration_ms: data.duration_ms,
+          })
+        )
         return
       }
       const fail = firstRecoverFailure(data)
       toast.error(
         fail.code
-          ? `恢复失败：[${fail.code}] ${fail.message}`
-          : `恢复失败：${fail.message}`
+          ? tVm('vm:vmRecoveryDialog.recoveryFailed', {
+              code: fail.code,
+              message: fail.message,
+            })
+          : tVm('vm:vmRecoveryDialog.recoveryFailedAlternative', {
+              message: fail.message,
+            })
       )
     },
     onError: (error: Error) => toastApiError(error),
@@ -162,8 +182,10 @@ export function VmRecoveryDialog({
   const summary = !diagnosis
     ? null
     : diagnosis.ok
-      ? '正常'
-      : (failing?.label ?? '异常')
+      ? tVm('vm:vmRecoveryDialog.healthy')
+      : failing
+        ? diagnosisCheckLabel(failing)
+        : tVm('vm:proxyHealth.abnormal')
   const summaryColor = !diagnosis
     ? undefined
     : diagnosis.ok
@@ -179,25 +201,47 @@ export function VmRecoveryDialog({
       <DialogContent className='flex max-h-[88vh] flex-col gap-3 sm:max-w-lg'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2 text-base'>
-            恢复服务
-            {vm ? <SlotIdentity vm={vm} compact /> : null}
+            <Trans
+              ns='vm'
+              i18nKey='vmRecoveryDialog.recoverService'
+              components={{
+                part0: <>{vm ? <SlotIdentity vm={vm} compact /> : null}</>,
+              }}
+            />
           </DialogTitle>
           <DialogDescription>
-            检查槽位链路，必要时关机再开机拉起服务。
+            <Trans
+              ns='vm'
+              i18nKey='vmRecoveryDialog.checkTheSlotConnectionAndRestartServicesIfNeeded'
+            />
           </DialogDescription>
         </DialogHeader>
         <div className='-me-3 min-h-0 flex-1 space-y-3 overflow-y-auto pe-3'>
           {summary ? (
             <p className='text-sm'>
-              检查结果：
-              <span className='font-medium' style={{ color: summaryColor }}>
-                {summary}
-              </span>
+              <Trans
+                ns='vm'
+                i18nKey='vmRecoveryDialog.checkResult'
+                values={{ summary: summary }}
+                components={{
+                  part0: (
+                    <span
+                      className='font-medium'
+                      style={{ color: summaryColor }}
+                    />
+                  ),
+                }}
+              />
             </p>
           ) : diagnose.isLoading ? (
             <p className='flex items-center gap-1.5 text-sm text-muted-foreground'>
-              <Loader2 className='size-3.5 animate-spin' />
-              正在检查槽位服务…
+              <Trans
+                ns='vm'
+                i18nKey='vmRecoveryDialog.checkingSlotService'
+                components={{
+                  part0: <Loader2 className='size-3.5 animate-spin' />,
+                }}
+              />
             </p>
           ) : null}
           {diagnose.isError ? (
@@ -209,10 +253,14 @@ export function VmRecoveryDialog({
           {report ? (
             <div className='space-y-2'>
               <p className='text-xs font-medium text-muted-foreground'>
-                执行步骤
-                <span className='ms-2 font-normal tabular-nums'>
-                  {report.duration_ms}ms
-                </span>
+                <Trans
+                  ns='vm'
+                  i18nKey='vmRecoveryDialog.recoveryStepsMs'
+                  values={{ duration_ms: report.duration_ms }}
+                  components={{
+                    part0: <span className='ms-2 font-normal tabular-nums' />,
+                  }}
+                />
               </p>
               <ul className='space-y-2'>
                 {report.steps.map((step) => (
@@ -223,12 +271,20 @@ export function VmRecoveryDialog({
           ) : null}
           {pending ? (
             <p className='flex items-center gap-1.5 text-sm text-muted-foreground'>
-              <Loader2 className='size-3.5 animate-spin' />
-              正在关机并重新拉起服务，大约需要 30–60 秒…
+              <Trans
+                ns='vm'
+                i18nKey='vmRecoveryDialog.stoppingAndRestartingServicesThisTakesAbout3060'
+                components={{
+                  part0: <Loader2 className='size-3.5 animate-spin' />,
+                }}
+              />
             </p>
           ) : null}
           <p className='text-xs text-[color:var(--status-warn)]'>
-            恢复服务会中断该槽位正在进行的对话。
+            <Trans
+              ns='vm'
+              i18nKey='vmRecoveryDialog.recoveringTheServiceInterruptsOngoingConversationsOnThisSlot'
+            />
           </p>
         </div>
         <DialogFooter>
@@ -240,14 +296,14 @@ export function VmRecoveryDialog({
               void diagnose.refetch()
             }}
           >
-            重新检查
+            <Trans ns='vm' i18nKey='vmRecoveryDialog.recheck' />
           </Button>
           <Button
             disabled={!vmId || pending}
             loading={pending}
             onClick={() => recover.mutate(vmId)}
           >
-            恢复服务（关机→开机）
+            <Trans ns='vm' i18nKey='vmRecoveryDialog.recoverServiceStopStart' />
           </Button>
         </DialogFooter>
       </DialogContent>
