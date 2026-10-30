@@ -1,5 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import { Activity, Globe } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -8,6 +9,8 @@ import { useRefreshProxies } from './queries'
 
 /** 整池测通 / 测地理。天天用的两下，放在页头而不是收进设置抽屉。 */
 export function ProxyBulkActions({ empty }: { empty: boolean }) {
+  const { t: translate } = useTranslation('proxies')
+
   const refresh = useRefreshProxies()
   const probeAll = useMutation({
     mutationFn: () =>
@@ -28,7 +31,9 @@ export function ProxyBulkActions({ empty }: { empty: boolean }) {
     onSuccess: async (data) => {
       const rows = data.results || []
       const ok = rows.filter((r) => r.ok).length
-      toast.success(`地理检测完成 ${ok}/${rows.length}`)
+      toast.success(
+        translate('proxies:geoCompleted', { p0: ok, p1: rows.length })
+      )
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -42,10 +47,10 @@ export function ProxyBulkActions({ empty }: { empty: boolean }) {
         onClick={() => probeAll.mutate()}
         disabled={probeAll.isPending || empty}
         loading={probeAll.isPending}
-        title='只测 SOCKS TCP，不打 Anthropic'
+        title={translate('proxies:tcpOnlyHint')}
       >
         <Activity aria-hidden='true' />
-        全部测通
+        {translate('proxies:probeAll')}
       </Button>
       <Button
         variant='outline'
@@ -53,10 +58,10 @@ export function ProxyBulkActions({ empty }: { empty: boolean }) {
         onClick={() => geoAll.mutate()}
         disabled={geoAll.isPending || empty}
         loading={geoAll.isPending}
-        title='经每条代理查出口 IP 的国家 / 城市 / 时区'
+        title={translate('proxies:geoAllHint')}
       >
         <Globe aria-hidden='true' />
-        全部测地理
+        {translate('proxies:geoAll')}
       </Button>
     </>
   )

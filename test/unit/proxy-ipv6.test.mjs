@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import { once } from 'node:events'
-import { ProxyPool, parseSocks5Fields, parseSocks5Line } from '../../src/lib/vm/proxy-pool.mjs'
+import { ProxyPool, parseProxyFields, parseProxyLine } from '../../src/lib/vm/proxy-pool.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
-import { socksProxyUrl } from '../../src/lib/vm/socks-address.mjs'
+import { proxyUrl } from '../../src/lib/vm/proxy-address.mjs'
 import { boundProxyUrl } from '../../src/lib/vm/egress.mjs'
 import { resolveImportProxy } from '../../src/lib/vm/proxy-resolve.mjs'
 import { evaluateSlotGate } from '../../src/lib/pool/schedule-eligibility.mjs'
@@ -28,24 +28,24 @@ test('IPv6 aliases normalize and deduplicate after loading bracketed historical 
   assert.equal(full.host, '2001:db8::1')
   assert.equal(full.username, 'a:b')
   assert.equal(full.password, 'p@:/%')
-  assert.equal(full.url, 'socks5://a%3Ab:p%40%3A%2F%25@[2001:db8::1]:1080')
-  assert.equal(parseSocks5Line(full.url).password, full.password)
+  assert.equal(full.url, 'socks5h://a%3Ab:p%40%3A%2F%25@[2001:db8::1]:1080')
+  assert.equal(parseProxyLine(full.url).password, full.password)
   pool.db.prepare('UPDATE proxies SET host = ? WHERE id = ?').run('[2001:0db8::1]', id)
   pool.reload()
   assert.equal(pool.state.proxies[0].host, '2001:db8::1')
   const result = pool.importLines('', {
-    fields: [{ host: '2001:db8::1', port: 1080, username: 'a:b', password: 'p@:/%' }],
+    fields: [{ protocol: 'socks5h', host: '2001:db8::1', port: 1080, username: 'a:b', password: 'p@:/%' }],
   })
   assert.equal(result.added, 0)
   assert.equal(result.skip_details[0].reason, 'duplicate')
-  assert.equal(socksProxyUrl(parseSocks5Fields({ host: '[::1]', port: '1080' })), 'socks5h://[::1]:1080')
+  assert.equal(proxyUrl(parseProxyFields({ host: '[::1]', port: '1080' })), 'socks5://[::1]:1080')
 })
 
 test('bracketed IPv6 input works without changing hostname vendor credentials', () => {
-  assert.equal(parseSocks5Line('[2001:db8::1]:1080:user:p:a').password, 'p:a')
-  assert.equal(parseSocks5Line('user:pass@[::1]:1080').host, '::1')
-  assert.equal(parseSocks5Line('abc:1080:def:abcdef').password, 'abcdef')
-  assert.equal(parseSocks5Line('proxy.example:1080:user:p:a').password, 'p:a')
+  assert.equal(parseProxyLine('[2001:db8::1]:1080:user:p:a').password, 'p:a')
+  assert.equal(parseProxyLine('user:pass@[::1]:1080').host, '::1')
+  assert.equal(parseProxyLine('abc:1080:def:abcdef').password, 'abcdef')
+  assert.equal(parseProxyLine('proxy.example:1080:user:p:a').password, 'p:a')
   for (const value of [
     '2001:db8::1:1080',
     '2001:db8:0:0:0:0:0:1:1080',
@@ -54,7 +54,7 @@ test('bracketed IPv6 input works without changing hostname vendor credentials', 
     '[127.0.0.1]:1080',
     'user:pass@::1:1080',
   ]) {
-    assert.equal(parseSocks5Line(value), null, value)
+    assert.equal(parseProxyLine(value), null, value)
   }
 })
 
@@ -130,7 +130,7 @@ test('IPv6 policy survives reload and preserves binding and health instead of re
   pool.updateConfig({ ipv6_enabled: true })
   pool.reload()
   assert.equal(pool.getProxyForVm('vm-01').id, ipv6.id)
-  assert.equal(boundProxyUrl(vm.proxy), 'socks5h://[2001:db8::1]:1080')
+  assert.equal(boundProxyUrl(vm.proxy), 'socks5://[2001:db8::1]:1080')
 })
 
 test('URL-imported IPv6 probes connect only when enabled and closing cancels in-flight sockets', async (t) => {

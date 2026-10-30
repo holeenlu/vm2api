@@ -167,3 +167,21 @@ test('native telemetry publication uses the current stored VM kind and reports u
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('mixed fleet telemetry refresh skips Codex without changing its policy', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-mixed-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeSlot(root, 'vm-01', { platform: 'openai' })
+  writeSlot(root, 'vm-02', { platform: 'anthropic' })
+  const visited = []
+  const result = await runFleetUpdate(root, {
+    action: 'telemetry',
+    telemetryFn: async ({ vm }) => {
+      visited.push(vm.id)
+      return { ok: true }
+    },
+  })
+  assert.deepEqual(visited, ['vm-02'])
+  assert.equal(result.failed_count, 0)
+  assert.equal(result.skipped_count, 1)
+})

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { JevInterceptConfig, PolicyQuestion } from '@/types/panel-routing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -88,6 +89,8 @@ export function ModelSettings({
 }: {
   onDirtyChange: (dirty: boolean) => void
 }) {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const q = useQuery(jevInterceptQueryOptions())
   // 只同步本块字段：别的块保存会改写同一份缓存，本块有未保存改动时保留草稿。
@@ -115,7 +118,7 @@ export function ModelSettings({
 
   const save = useMutation({
     mutationFn: () => {
-      if (!draft) throw new Error('没有可保存的配置')
+      if (!draft) throw new Error(translate('risk:noConfigToSave'))
       const body: Record<string, unknown> = {
         enabled: draft.enabled,
         provider: draft.provider || 'jev',
@@ -140,7 +143,7 @@ export function ModelSettings({
       })
     },
     onSuccess: (data) => {
-      toast.success('已保存决策模型关')
+      toast.success(translate('risk:decisionModelSaved'))
       load(data)
       qc.setQueryData(jevInterceptQueryOptions().queryKey, data)
     },
@@ -149,7 +152,8 @@ export function ModelSettings({
 
   const fetchModels = useMutation({
     mutationFn: () => {
-      if (!draft?.base_url.trim()) throw new Error('先填模型地址')
+      if (!draft?.base_url.trim())
+        throw new Error(translate('risk:modelUrlRequired'))
       return api<{ models: string[] }>('/api/panel/jev-intercept/models', {
         method: 'POST',
         body: JSON.stringify({
@@ -172,7 +176,9 @@ export function ModelSettings({
         return pick ? { ...prev, model: pick } : prev
       })
       toast.success(
-        ids.length ? `拉到 ${ids.length} 个模型` : '上游没有返回模型'
+        ids.length
+          ? translate('risk:modelsFetched', { count: ids.length })
+          : translate('risk:noModelsReturned')
       )
     },
     onError: (error: Error) => toast.error(error.message),
@@ -238,13 +244,13 @@ export function ModelSettings({
   return (
     <div className='space-y-8 p-4'>
       <Group
-        title='何时拦截'
-        hint='前三关都没拦的正文才会送到这里。没配地址时这一关跳过。'
+        title={translate('risk:whenToBlock')}
+        hint={translate('risk:decisionModelDescription')}
       >
         <ToggleList>
           <ToggleItem
-            label='决策模型'
-            desc='三题各自打分，任一题低于阈值就拦。色情命中会封设备'
+            label={translate('risk:decisionModel')}
+            desc={translate('risk:scoreAllQuestionsHint')}
           >
             <Switch
               checked={draft.enabled}
@@ -252,15 +258,18 @@ export function ModelSettings({
             />
           </ToggleItem>
           <ToggleItem
-            label='失败放行'
-            desc='打分失败照常出站，记为「模型故障放行」。关掉后只拦截这一次，不封禁设备'
+            label={translate('risk:failOpen')}
+            desc={translate('risk:failOpenSettingHint')}
           >
             <Switch
               checked={draft.fail_open !== false}
               onCheckedChange={(v) => setDraft({ ...draft, fail_open: v })}
             />
           </ToggleItem>
-          <ToggleItem label='低于阈值拦截' desc='关掉则高于阈值才拦'>
+          <ToggleItem
+            label={translate('risk:blockBelowThreshold')}
+            desc={translate('risk:blockThresholdHint')}
+          >
             <Switch
               checked={draft.block_if_below !== false}
               onCheckedChange={(v) => setDraft({ ...draft, block_if_below: v })}
@@ -269,7 +278,7 @@ export function ModelSettings({
         </ToggleList>
       </Group>
 
-      <Group title='连接'>
+      <Group title={translate('risk:connection')}>
         <div className='space-y-4 rounded-xl border p-4'>
           <Segmented
             value={provider}
@@ -280,7 +289,7 @@ export function ModelSettings({
             onChange={(id) => applyProvider(id)}
           />
           <div className='space-y-3'>
-            <FieldLine label='地址' htmlFor='jev-base'>
+            <FieldLine label={translate('risk:url')} htmlFor='jev-base'>
               <div className='flex gap-2'>
                 <Input
                   id='jev-base'
@@ -302,11 +311,11 @@ export function ModelSettings({
                     })
                   }
                 >
-                  默认
+                  {translate('risk:default')}
                 </Button>
               </div>
             </FieldLine>
-            <FieldLine label='Key' htmlFor='jev-key'>
+            <FieldLine label={translate('risk:key')} htmlFor='jev-key'>
               <Input
                 id='jev-key'
                 type='password'
@@ -314,8 +323,10 @@ export function ModelSettings({
                 value={apiKey}
                 placeholder={
                   draft.api_key_count
-                    ? `已存 ${draft.api_key_count} 把，留空不改`
-                    : '本地服务可留空'
+                    ? translate('risk:savedKeysUnchanged', {
+                        p0: draft.api_key_count,
+                      })
+                    : translate('risk:localServiceKeyHint')
                 }
                 onChange={(e) => {
                   setApiKey(e.target.value)
@@ -323,13 +334,15 @@ export function ModelSettings({
                 }}
               />
             </FieldLine>
-            <FieldLine label='模型' htmlFor='jev-model'>
+            <FieldLine label={translate('risk:model')} htmlFor='jev-model'>
               <div className='flex gap-2'>
                 <Input
                   id='jev-model'
                   className='font-mono'
                   value={draft.model}
-                  placeholder={current.default_model || '留空则由上游路由'}
+                  placeholder={
+                    current.default_model || translate('risk:modelEmptyHint')
+                  }
                   onChange={(e) =>
                     setDraft({ ...draft, model: e.target.value })
                   }
@@ -342,11 +355,14 @@ export function ModelSettings({
                   disabled={fetchModels.isPending || !draft.base_url.trim()}
                   onClick={() => fetchModels.mutate()}
                 >
-                  获取模型
+                  {translate('risk:fetchModels')}
                 </Button>
               </div>
             </FieldLine>
-            <FieldLine label='超时 ms' htmlFor='jev-timeout'>
+            <FieldLine
+              label={translate('risk:timeoutMilliseconds')}
+              htmlFor='jev-timeout'
+            >
               <Input
                 id='jev-timeout'
                 type='number'
@@ -380,33 +396,38 @@ export function ModelSettings({
             </div>
           ) : (
             <p className='border-t pt-3 text-xs text-muted-foreground'>
-              获取模型会请求这个地址的 /v1/models。Key 留空时用已保存的第一把。
+              {translate('risk:fetchModelsHint')}
             </p>
           )}
         </div>
         <FoldStack>
           <Fold
             flush
-            title='多把 Key'
+            title={translate('risk:multipleKeys')}
             meta={
               draft.api_key_count
-                ? `已存 ${draft.api_key_count} 把，401/429/529 不再调度`
-                : `最多 ${KEY_MAX} 把`
+                ? translate('risk:savedKeyScheduling', {
+                    p0: draft.api_key_count,
+                  })
+                : translate('risk:maxKeys', { count: KEY_MAX })
             }
           >
             <div className='space-y-3'>
               <Textarea
-                aria-label='多把 Key'
+                aria-label={translate('risk:multipleKeys')}
                 rows={3}
                 className='font-mono text-xs'
                 value={keysText}
-                placeholder='一行一把。URL 空格 Key 打到该地址，否则用上面的模型地址'
+                placeholder={translate('risk:multipleKeysHint')}
                 onChange={(e) => {
                   setKeysText(e.target.value)
                   if (e.target.value.trim()) setClearKey(false)
                 }}
               />
-              <ToggleItem label='清除已存 Key' desc='留空且不勾选则保持原密钥'>
+              <ToggleItem
+                label={translate('risk:clearSavedKeys')}
+                desc={translate('risk:keepSavedKeysHint')}
+              >
                 <Switch
                   checked={clearKey}
                   disabled={!draft.api_key_set && !clearKey}
@@ -425,21 +446,21 @@ export function ModelSettings({
       </Group>
 
       <Group
-        title='打分'
-        hint='高分表示安全。相同正文在去重窗口内不再打模型。阈值越低越不容易误伤。'
+        title={translate('risk:scoring')}
+        hint={translate('risk:scoringHint')}
         action={
           <button
             type='button'
             className='cursor-pointer text-xs text-muted-foreground underline-offset-4 transition-colors duration-200 hover:text-foreground hover:underline'
             onClick={restoreScore}
           >
-            恢复默认
+            {translate('risk:restoreDefaults')}
           </button>
         }
       >
         <div className='grid gap-3 sm:grid-cols-3'>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-threshold'>阈值</Label>
+            <Label htmlFor='jev-threshold'>{translate('risk:threshold')}</Label>
             <Input
               id='jev-threshold'
               type='number'
@@ -454,7 +475,9 @@ export function ModelSettings({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-dedup'>去重（秒）</Label>
+            <Label htmlFor='jev-dedup'>
+              {translate('risk:deduplicationSeconds')}
+            </Label>
             <Input
               id='jev-dedup'
               type='number'
@@ -468,7 +491,9 @@ export function ModelSettings({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-state'>送模上限（字）</Label>
+            <Label htmlFor='jev-state'>
+              {translate('risk:modelCharacterLimit')}
+            </Label>
             <Input
               id='jev-state'
               type='number'
@@ -483,12 +508,14 @@ export function ModelSettings({
           </div>
         </div>
         <div className='space-y-1.5'>
-          <Label htmlFor='jev-instruction'>自定义要求</Label>
+          <Label htmlFor='jev-instruction'>
+            {translate('risk:customRequirement')}
+          </Label>
           <Textarea
             id='jev-instruction'
             rows={2}
             value={draft.safety_instruction || ''}
-            placeholder='留空则只用题库。填写后会多问这一题'
+            placeholder={translate('risk:customRequirementHint')}
             onChange={(e) =>
               setDraft({ ...draft, safety_instruction: e.target.value })
             }
@@ -497,8 +524,11 @@ export function ModelSettings({
       </Group>
 
       <Group
-        title='题库'
-        hint={`启用的题在同一次请求里一起问。当前启用 ${enabledQuestions} / ${questions.length} 题。`}
+        title={translate('risk:questionBank')}
+        hint={translate('risk:enabledQuestionsHint', {
+          p0: enabledQuestions,
+          p1: questions.length,
+        })}
         action={
           <Button
             size='sm'
@@ -506,7 +536,7 @@ export function ModelSettings({
             className='cursor-pointer'
             onClick={() => setQuestions(q.data?.builtin_questions || [])}
           >
-            恢复内置
+            {translate('risk:restoreBuiltIn')}
           </Button>
         }
       >

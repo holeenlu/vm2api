@@ -1,5 +1,5 @@
 {
-  "name": "vm2api",
+  "name": "tapmodels",
   "private": true,
   "description": "VM-fidelity subscription-to-API gateway",
   "type": "module",

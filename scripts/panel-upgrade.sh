@@ -28,7 +28,10 @@ probe() {
     const [mode, target, baseline = "[]"] = process.argv.slice(1)
     const port = process.env.PORT || "8787"
     const base = `http://127.0.0.1:${port}`
-    const key = process.env.KIN_API_KEY || process.env.VM2API_API_KEY || ""
+    const fs = await import("node:fs")
+    let saved = {}
+    try { saved = JSON.parse(fs.readFileSync((process.env.KIN_DATA_DIR || "/opt/tapmodels/data") + "/runtime-secrets.json", "utf8")) } catch {}
+    const key = process.env.TAPMODELS_API_KEY || process.env.KIN_API_KEY || saved.TAPMODELS_API_KEY || ""
     async function json(path) {
       const res = await fetch(`${base}${path}`, {
         headers: { Authorization: `Bearer ${key}` },
@@ -58,7 +61,7 @@ probe() {
       } else {
         const health = await fetch(`${base}/health`, { signal: AbortSignal.timeout(4000) })
         if (!health.ok) throw new Error(`Backend health: HTTP ${health.status}`)
-        const version = await json("/api/panel/version")
+        const version = await json("/api/panel/version?status=1")
         if (version.current_tag !== target) throw new Error(`Backend still at ${version.current_tag}`)
         for (const id of JSON.parse(baseline)) {
           if (!kernelHealthy(await json(`/api/panel/vms/${encodeURIComponent(id)}`))) {
@@ -87,8 +90,9 @@ if [ -d .git ]; then
   export GIT_TERMINAL_PROMPT=0
   command -v git >/dev/null || apk add --no-cache git >/dev/null
   git config --global --add safe.directory "$ROOT"
-  # History was rewritten once to drop build artifacts; --force lets old clones take the new tags.
-  git fetch --force --tags origin
+  # Fetch only the fork tag, without reusing an upstream tag of the same name.
+  git fetch --no-tags https://github.com/holeenlu/vm2api.git "refs/tags/$TAG"
+  RELEASE_COMMIT=$(git rev-parse 'FETCH_HEAD^{commit}')
   # Routing and interception rules are tracked defaults but live operator config.
   CONFIG_BACKUP=$(mktemp -d)
   if [ -d src/config ]; then cp -a src/config "$CONFIG_BACKUP/config"; fi
@@ -99,7 +103,7 @@ if [ -d .git ]; then
     fi
     rm -rf "$CONFIG_BACKUP"
   }
-  if ! git checkout -f --detach "$TAG"; then
+  if ! git checkout -f --detach "$RELEASE_COMMIT"; then
     restore_config
     exit 1
   fi
@@ -112,21 +116,27 @@ if [ -d .git ]; then
       *) COMPOSE_FILE_LIST="$COMPOSE_FILE_LIST:$ROOT/docker-compose.build.yml" ;;
     esac
   fi
-  compose build vm2api
+  compose build tapmodels
 else
   IMAGE_TAG=$TAG
   [ "$ARCH" != arm64 ] || IMAGE_TAG=$TAG-arm64
   touch .env
-  if grep -q '^VM2API_IMAGE_TAG=' .env; then
-    sed -i.bak "s|^VM2API_IMAGE_TAG=.*|VM2API_IMAGE_TAG=$IMAGE_TAG|" .env
+  if grep -q '^TAPMODELS_IMAGE=' .env; then
+    sed -i.bak 's|^TAPMODELS_IMAGE=.*|TAPMODELS_IMAGE=ghcr.io/holeenlu/tapmodels-gateway|' .env
     rm -f .env.bak
   else
-    printf '\nVM2API_IMAGE_TAG=%s\n' "$IMAGE_TAG" >> .env
+    printf '\nTAPMODELS_IMAGE=ghcr.io/holeenlu/tapmodels-gateway\n' >> .env
   fi
-  compose pull vm2api
+  if grep -q '^TAPMODELS_IMAGE_TAG=' .env; then
+    sed -i.bak "s|^TAPMODELS_IMAGE_TAG=.*|TAPMODELS_IMAGE_TAG=$IMAGE_TAG|" .env
+    rm -f .env.bak
+  else
+    printf '\nTAPMODELS_IMAGE_TAG=%s\n' "$IMAGE_TAG" >> .env
+  fi
+  compose pull tapmodels
 fi
 
-compose up -d --no-deps --force-recreate vm2api
+compose up -d --no-deps --force-recreate tapmodels
 CURRENT_ID=$(docker inspect --format '{{.Id}}' "$CONTAINER")
 if [ "$CURRENT_ID" = "$PREVIOUS_ID" ]; then
   echo 'Compose did not replace the running control plane' >&2
@@ -143,9 +153,9 @@ while [ "$attempt" -lt 45 ]; do
     # rebuilt slot image, then every slot restarts kin-worker/kin-egress.
     # Older control-plane images may not carry the helper yet; retry on the
     # next image update instead of invalidating an otherwise verified upgrade.
-    if ! docker exec "$CONTAINER" test -f /opt/vm2api/scripts/fleet-services.mjs >/dev/null 2>&1; then
+    if ! docker exec "$CONTAINER" test -f /opt/tapmodels/scripts/fleet-services.mjs >/dev/null 2>&1; then
       echo "Slot refresh helper is not present in the control plane; retry after the next image update" >&2
-    elif ! docker exec "$CONTAINER" node /opt/vm2api/scripts/fleet-services.mjs; then
+    elif ! docker exec "$CONTAINER" node /opt/tapmodels/scripts/fleet-services.mjs; then
       echo "Slot payload/service refresh failed; inspect the per-slot report" >&2
       exit 1
     fi

@@ -5,7 +5,6 @@ import {
   credentialModeFromOauth,
   canOfficialCc,
   canOfficialUsage,
-  canCountTokens,
   canRefreshCredential,
   looksLikeConsoleApiKey,
   looksLikeOauthAccessToken,
@@ -25,27 +24,23 @@ test('normalizeCredentialMode maps aliases', () => {
 test('setup-token cannot official-cc, can official usage and refresh', () => {
   assert.equal(canOfficialCc('setup-token'), false)
   assert.equal(canOfficialUsage('setup-token'), true)
-  assert.equal(canCountTokens('setup-token'), true)
   assert.equal(canRefreshCredential('setup-token'), true)
 })
 
 test('official-setup-token is inference-only and cannot refresh', () => {
   assert.equal(canOfficialCc('official-setup-token'), false)
   assert.equal(canOfficialUsage('official-setup-token'), false)
-  assert.equal(canCountTokens('official-setup-token'), true)
   assert.equal(canRefreshCredential('official-setup-token'), false)
 })
 
 test('apikey cannot official-cc, usage, or refresh', () => {
   assert.equal(canOfficialCc('apikey'), false)
   assert.equal(canOfficialUsage('apikey'), false)
-  assert.equal(canCountTokens('apikey'), true)
   assert.equal(canRefreshCredential('apikey'), false)
 })
 
-test('oauth can usage, cannot count_tokens', () => {
+test('oauth supports usage', () => {
   assert.equal(canOfficialUsage('oauth'), true)
-  assert.equal(canCountTokens('oauth'), false)
 })
 
 test('credentialModeFromOauth infers from type, prefix, and scope', () => {

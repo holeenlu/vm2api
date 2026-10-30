@@ -957,7 +957,7 @@ export function personaPreviewVars({ timezone = 'UTC', model = 'claude-sonnet-5'
     cli_version: vars.cli_version,
     main_prompt_303: vars.main_prompt_303(),
     harness_303: vars.harness_303,
-    guidance_303: vars.guidance_303(),
+    guidance_303: renderOfficial303Guidance(),
     env_303: vars.env_303(),
     env_instructions_303: OFFICIAL_303_ENV_INSTRUCTIONS,
     env_timezone: ` - Timezone: ${timezone}`,
