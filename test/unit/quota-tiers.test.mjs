@@ -80,8 +80,8 @@ test('buildRouting returns normalized vm defaults', () => {
     stickyRouter: { stats: () => ({ active_sessions: 0 }) },
   }).data
   assert.equal(data.vm.default_runtime, 'docker')
-  assert.equal(data.vm.memory, '512m')
-  assert.equal(data.vm.vcpus, 2)
+  assert.equal(data.vm.memory, '4g')
+  assert.equal(data.vm.vcpus, 4)
   assert.equal(data.vm.disk_gb, 20)
   assert.equal(data.vm.allow_tcg, false)
 })

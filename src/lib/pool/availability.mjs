@@ -150,7 +150,6 @@ function quotaWindows(quota = {}, account = {}) {
     utilization_7d: w7.utilization,
     status_5h: w5.status,
     status_7d: w7.status,
-    weekly_split: quota.weekly_split || account.weekly_split || u.weekly_split,
     reset_5h: w5.reset,
     reset_7d: w7.reset,
     last_used_at: account.last_used_at || quota.last_used_at || null,
@@ -417,17 +416,6 @@ export function evaluateAccount({
       reason: 'quota_7d_safety',
       window: '7d',
       until: resetUntilMs(w7.reset, now),
-    })
-  }
-
-  const split = q.weekly_split
-  if (split?.enabled && split.mode === 'fable_only') {
-    return finish(base, {
-      key: 'quota',
-      text: '普通限制',
-      accept: true,
-      usable: true,
-      reason: 'weekly_split_regular',
     })
   }
 

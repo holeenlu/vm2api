@@ -1,3 +1,5 @@
+import { t as translate } from '@/i18n'
+
 export type Outcome = {
   level: 'success' | 'warning' | 'info' | 'error'
   text: string
@@ -23,7 +25,9 @@ export function bindOutcome(done: string, worker: SlotResult): Outcome {
     const reason = reasonOf(worker.error)
     return {
       level: 'warning',
-      text: `${done}，但槽位重载失败${reason ? `（${reason}）` : ''}，该槽已停止调度，修好后需手动恢复调度`,
+      text: reason
+        ? translate('proxies:bindReloadFailedReason', { done, reason })
+        : translate('proxies:bindReloadFailed', { done }),
     }
   }
   return { level: 'success', text: done }
@@ -39,15 +43,28 @@ export function editOutcome(data: ProxyEditResult): Outcome {
   const failed = (data.workers || []).filter((w) => !w.ok)
   if (failed.length) {
     problems.push(
-      `${failed.length} 台槽位重载失败：${failed.map((w) => w.vm_id).join('、')}`
+      translate('proxies:slotReloadFailures', {
+        count: failed.length,
+        p1: failed.map((w) => w.vm_id).join(translate('proxies:listSeparator')),
+      })
     )
   }
   if (data.egress && data.egress.ok === false) {
     const reason = reasonOf(data.egress.error)
-    problems.push(`出口转发重启失败${reason ? `（${reason}）` : ''}`)
+    problems.push(
+      reason
+        ? translate('proxies:exitRestartFailedReason', { reason })
+        : translate('proxies:exitRestartFailed')
+    )
   }
-  if (!problems.length) return { level: 'success', text: '已保存' }
-  return { level: 'warning', text: `已保存，但${problems.join('；')}` }
+  if (!problems.length)
+    return { level: 'success', text: translate('proxies:saved') }
+  return {
+    level: 'warning',
+    text: translate('proxies:savedWithWarnings', {
+      problems: problems.join(translate('proxies:problemSeparator')),
+    }),
+  }
 }
 
 export type ProbeAllResult = {
@@ -57,29 +74,69 @@ export type ProbeAllResult = {
   results?: { ok?: boolean }[]
 }
 
+export type ProbeOneResult = {
+  probe?: {
+    ok?: boolean
+    scope?: string
+    latency_ms?: number | null
+    error?: string
+  }
+}
+
+export function probeOneOutcome(data: ProbeOneResult): Outcome {
+  const probe = data.probe
+  if (probe?.scope === 'pending')
+    return { level: 'info', text: translate('proxies:nodeConnecting') }
+  if (!probe?.ok)
+    return {
+      level: 'error',
+      text: probe?.error
+        ? translate('proxies:connectionFailedReason', { reason: probe.error })
+        : translate('proxies:connectionFailed'),
+    }
+  if (probe.scope === 'local')
+    return {
+      level: 'success',
+      text: translate('proxies:localExitReady'),
+    }
+  return {
+    level: 'success',
+    text:
+      probe.latency_ms == null
+        ? translate('proxies:connectionHealthy')
+        : translate('proxies:connectionLatency', { latency: probe.latency_ms }),
+  }
+}
+
 export function probeAllOutcome(data: ProbeAllResult): Outcome {
   if (data.ok === false) {
     if (data.error === 'probe_in_progress') {
-      return { level: 'info', text: '上一轮探测还没结束，稍后刷新看结果' }
+      return { level: 'info', text: translate('proxies:probeInProgress') }
     }
-    return { level: 'error', text: data.error || '探测失败' }
+    return {
+      level: 'error',
+      text: data.error || translate('proxies:probeFailed'),
+    }
   }
   const rows = data.results || []
   const ok = rows.filter((r) => r.ok).length
   return {
     level: 'success',
-    text: `代理探测完成 ${ok}/${data.total ?? rows.length}`,
+    text: translate('proxies:probeCompleted', {
+      p0: ok,
+      p1: data.total ?? rows.length,
+    }),
   }
 }
 
 export function disableConfirmText(bound: number): string {
   return bound
-    ? `禁用后，绑在这条代理上的 ${bound} 台槽位会全部停止调度，重新启用代理后才恢复。确认禁用？`
-    : '禁用后这条代理不再接新槽位。确认禁用？'
+    ? translate('proxies:disableBoundConfirm', { count: bound })
+    : translate('proxies:disableUnboundConfirm')
 }
 
 export function deleteConfirmText(bound: number): string {
   return bound
-    ? `删除后，绑在这条代理上的 ${bound} 台槽位会解绑并停止调度，要重新绑定代理才能恢复。确认删除？`
-    : '删除这条 SOCKS5？'
+    ? translate('proxies:deleteBoundConfirm', { count: bound })
+    : translate('proxies:deleteUnboundConfirm')
 }

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
-import { VIEW_TITLES } from '@/config/nav'
+import { t as translate } from '@/i18n'
 import type { Dashboard } from '@/types/panel-overview'
 import type { NotifyConfig } from '@/types/panel-routing'
 import type { QuotaTierPolicy } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api, patchVm } from '@/lib/api'
 import {
@@ -53,9 +54,12 @@ import { Socks5Pane } from '@/features/settings/socks5-pane'
 import { StickyPane } from '@/features/settings/sticky-pane'
 import { uploadIntervalOf } from '@/features/settings/telemetry-interval'
 import { TelemetryPane } from '@/features/settings/telemetry-pane'
+import { BrandingPane } from './branding-pane'
 import { ProtocolPane } from './protocol-pane'
 
 export function SettingsPage() {
+  const { t } = useTranslation('settings')
+
   const { tab: raw } = useParams({ from: '/_authenticated/settings/$tab' })
   const tab = settingsTabId(raw)
   const routing = useQuery(routingQueryOptions())
@@ -144,33 +148,35 @@ export function SettingsPage() {
           inherited = follow.changed
           if (follow.errors.length) {
             toast.error(
-              `协议已保存，${follow.errors.length} 个槽位未跟随：${follow.errors
-                .slice(0, 3)
-                .map(
-                  (item) => `${item.id} ${protocolFollowError(item.message)}`
-                )
-                .join('；')}`
+              t('saveProtocolFailedSlots', {
+                count: Number(follow.errors.length),
+                value2: follow.errors
+                  .slice(0, 3)
+                  .map(
+                    (item) => `${item.id} ${protocolFollowError(item.message)}`
+                  )
+                  .join('；'),
+              })
             )
           }
         } catch (error) {
           toast.error(
-            `协议已保存，槽位未跟随全局：${protocolFollowError(
-              error instanceof Error ? error.message : String(error)
-            )}`
+            t('saveProtocolFollowFailed', {
+              value1: protocolFollowError(
+                error instanceof Error ? error.message : String(error)
+              ),
+            })
           )
         }
       }
-      const message = settingsSaveToast(
-        tab,
-        inherited,
-        saved?.kernel_persona,
-        saved?.telemetry_sync
+      toast.success(
+        settingsSaveToast(
+          tab,
+          inherited,
+          saved?.kernel_persona,
+          saved?.telemetry_sync
+        )
       )
-      if (tab === 'telemetry' && saved?.telemetry_sync?.failed?.length) {
-        toast.warning(message)
-      } else {
-        toast.success(message)
-      }
       acceptNextServer.current = true
       await Promise.all([
         qc.invalidateQueries({ queryKey: routingQueryOptions().queryKey }),
@@ -197,7 +203,11 @@ export function SettingsPage() {
     serverJson !== null &&
     Object.keys(draft).length > 0 &&
     JSON.stringify(draft) !== serverJson
-  const hideSave = tab === 'socks5' || tab === 'backup' || tab === 'about'
+  const hideSave =
+    tab === 'branding' ||
+    tab === 'socks5' ||
+    tab === 'backup' ||
+    tab === 'about'
   const showSaveBar = dirty && !hideSave
 
   const discard = () => {
@@ -222,12 +232,12 @@ export function SettingsPage() {
 
   return (
     <PageHeader
-      title={VIEW_TITLES.settings}
+      title={t('pageTitle')}
       description={
         tab === 'quota'
-          ? 'Claude 配额闸线、并发和 RPM。GPT 配额在 OpenAI 页。个人自用引导会把闸关掉并拉到上限；这里仍可再改。'
+          ? t('quotaDescription')
           : tab === 'openai'
-            ? 'GPT 传输、准入、配额与客户端画像。全局 WebSocket 只作用于推理，不影响终端或集群。'
+            ? t('openaiDescription')
             : undefined
       }
     >
@@ -264,6 +274,7 @@ export function SettingsPage() {
                   }
                 />
               ) : null}
+              {tab === 'branding' && <BrandingPane />}
               {tab === 'pool' ? (
                 <div className='space-y-4'>
                   <PoolPane
@@ -417,7 +428,7 @@ export function SettingsPage() {
               ) : null}
               {tab === 'health' ? (
                 <HealthPane
-                  title={SETTINGS_TAB_LABELS[tab]}
+                  title={t(SETTINGS_TAB_LABELS[tab])}
                   failover={failover}
                   healthProbe={
                     draft.health_probe as Record<string, unknown> | undefined
@@ -489,25 +500,37 @@ function settingsSaveToast(
     const hot =
       kernel && typeof kernel.updated === 'number'
         ? kernel.updated > 0
-          ? `kernel 配置已热更新 ${kernel.updated} 个槽`
-          : 'kernel 配置已一致'
-        : '已写入'
-    if (!inherited) return `已保存 · ${hot}`
-    return `已保存 · ${inherited} 个槽位改为跟随全局 · ${hot}`
+          ? translate('settings:kernelUpdated', {
+              count: Number(kernel.updated),
+            })
+          : translate('settings:kernelConsistent')
+        : translate('settings:written')
+    if (!inherited) return translate('settings:savedDetails', { value1: hot })
+    return translate('settings:savedInherited', {
+      count: Number(inherited),
+      value2: hot,
+    })
   }
-  if (tab === 'openai') return '已保存 · GPT 配置'
+  if (tab === 'openai') return translate('settings:savedGpt')
   if (tab === 'telemetry' && telemetry) {
-    const failed = telemetry.failed?.length
-      ? ` · ${telemetry.failed.length} 个未生效：${telemetry.failed.slice(0, 3).join('、')}`
-      : ''
-    return `已保存 · ${telemetry.updated ?? 0} 个 VM 配置已确认发布${failed}`
+    return translate(
+      telemetry.failed?.length
+        ? 'settings:saveTelemetryErrors'
+        : 'settings:saveTelemetrySummary',
+      {
+        updated: telemetry.updated ?? 0,
+        queued: telemetry.queued ?? 0,
+        count: telemetry.failed?.length ?? 0,
+        errors: telemetry.failed?.slice(0, 3).join(', ') ?? '',
+      }
+    )
   }
-  return '已保存'
+  return translate('settings:saved')
 }
 
 function protocolFollowError(message: string) {
   if (/config_missing|kernel_start_failed|wrap_cli_missing/i.test(message)) {
-    return '内核文件缺失，先到内核页拉取 wrap/crag 二进制再同步'
+    return translate('settings:kernelMissing')
   }
   return message
 }
@@ -516,6 +539,7 @@ type RoutingSaveResult = {
   kernel_persona?: { updated?: number; skipped?: number } | null
   telemetry_sync?: {
     updated?: number
+    queued?: number
     skipped?: number
     failed?: string[]
   } | null

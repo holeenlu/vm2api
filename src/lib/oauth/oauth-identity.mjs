@@ -74,7 +74,7 @@ export function flattenOauthIdentity(raw = {}) {
   const account = asObject(raw.account)
   const organization = asObject(raw.organization)
   const oauthAccount = asObject(raw.oauth_account)
-  const profile = asObject(raw.profile)
+  const profile = asObject(raw.profile || raw.oauth_profile)
   return {
     email: firstText(
       raw.email,
@@ -105,6 +105,37 @@ export function flattenOauthIdentity(raw = {}) {
       profile.organization_uuid,
     ),
     subscription_type: subscriptionTypeFromOauthRaw(raw),
+    ...(firstText(
+      raw.rate_limit_tier,
+      raw.rateLimitTier,
+      organization.rate_limit_tier,
+      profile.organization?.rate_limit_tier,
+    )
+      ? {
+          rate_limit_tier: firstText(
+            raw.rate_limit_tier,
+            organization.rate_limit_tier,
+            profile.organization?.rate_limit_tier,
+          ),
+        }
+      : {}),
+    ...(firstText(
+      raw.billing_type,
+      raw.billingType,
+      account.billing_type,
+      oauthAccount.billing_type,
+      oauthAccount.billingType,
+      profile.account?.billing_type,
+    )
+      ? {
+          billing_type: firstText(
+            raw.billing_type,
+            account.billing_type,
+            oauthAccount.billingType,
+            profile.account?.billing_type,
+          ),
+        }
+      : {}),
   }
 }
 
@@ -121,6 +152,7 @@ export function applyOauthIdentity(cred = {}, identity = {}) {
   if (identity.account_uuid) next.account_uuid = identity.account_uuid
   if (identity.org_uuid) next.org_uuid = identity.org_uuid
   if (identity.subscription_type) next.subscription_type = identity.subscription_type
+  for (const key of ['rate_limit_tier', 'billing_type']) if (identity[key]) next[key] = identity[key]
   return next
 }
 

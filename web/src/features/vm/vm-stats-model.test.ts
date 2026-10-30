@@ -1,10 +1,16 @@
+import { i18n } from '@/i18n'
 import type { VmUsageStats, VmUsageStatsDay } from '@/types/panel-vm'
+import { beforeEach } from 'vitest'
 import { describe, expect, it } from 'vitest'
 import {
   projectionView,
   shanghaiDay,
   summarizeUsageStats,
 } from './vm-stats-model'
+
+beforeEach(() => {
+  void i18n.changeLanguage('zh-CN')
+})
 
 // 2026-09-29 20:00 UTC 已是上海 09-30 04:00：日界必须按 +8h 算。
 const NOW = Date.parse('2026-09-29T20:00:00Z')
@@ -111,13 +117,13 @@ describe('projectionView', () => {
       total_usd: null,
       remaining_usd: null,
       total_tokens: null,
-      used_ratio: 0.02,
+      used_ratio: 0,
     }
     const none = { source: null, total_usd: null, remaining_usd: null }
     expect(projectionView(none, live, false)).toEqual({
       remaining: null,
       total: null,
-      basis: '用量<5%；上个窗口暂无记录',
+      basis: '用量为 0；上个窗口暂无记录',
     })
     expect(projectionView(null, null, true).basis).toBe(
       '本窗口暂无估算；上个窗口数据不足以推算'

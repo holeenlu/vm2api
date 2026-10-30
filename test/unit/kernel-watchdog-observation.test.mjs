@@ -166,6 +166,7 @@ test('overlapping ticks do not duplicate observations or recovery', async () => 
   const f = fixture({
     observe: () => {
       calls++
+      if (calls > 1) return Promise.resolve({ state: 'running' })
       return new Promise((r) => {
         finish = r
       })

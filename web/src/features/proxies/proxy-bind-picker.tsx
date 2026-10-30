@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import { Plus } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   Command,
@@ -44,6 +45,8 @@ export function ProxyBindPicker({
   compact?: boolean
   onBind: (vmId: string) => void
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const [open, setOpen] = useState(false)
   const candidates = vms.filter((v) => !boundHere.includes(v.id))
   const loose = candidates.filter((v) => !ownerOf.has(v.id))
@@ -51,7 +54,9 @@ export function ProxyBindPicker({
 
   if (!candidates.length) {
     return compact ? null : (
-      <span className='text-xs text-muted-foreground'>无可绑槽位</span>
+      <span className='text-xs text-muted-foreground'>
+        {translate('proxies:noBindableSlots')}
+      </span>
     )
   }
 
@@ -66,8 +71,8 @@ export function ProxyBindPicker({
         <button
           type='button'
           disabled={disabled}
-          aria-label={`绑定槽位，空 ${free}`}
-          title='绑定槽位'
+          aria-label={translate('proxies:bindSlotsWithCapacity', { p0: free })}
+          title={translate('proxies:bindSlots')}
           className={cn(
             'inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-dashed border-foreground/25 text-xs text-muted-foreground transition-colors',
             compact ? 'px-1.5' : 'px-2',
@@ -76,19 +81,21 @@ export function ProxyBindPicker({
           )}
         >
           <Plus className='size-3.5' aria-hidden='true' />
-          {compact ? null : '绑定槽位'}
+          {compact ? null : translate('proxies:bindSlots')}
           <span className='text-muted-foreground/80 tabular-nums'>
-            {compact ? `空 ${free}` : `· 空 ${free}`}
+            {compact
+              ? translate('proxies:freeCount', { p0: free })
+              : translate('proxies:freeCountSuffix', { p0: free })}
           </span>
         </button>
       </PopoverTrigger>
       <PopoverContent align='start' className='w-72 p-0'>
         <Command>
-          <CommandInput placeholder='搜槽位名或 ID' />
+          <CommandInput placeholder={translate('proxies:searchSlots')} />
           <CommandList>
-            <CommandEmpty>没有匹配的槽位</CommandEmpty>
+            <CommandEmpty>{translate('proxies:noMatchingSlots')}</CommandEmpty>
             {loose.length ? (
-              <CommandGroup heading='无代理'>
+              <CommandGroup heading={translate('proxies:noProxy')}>
                 {loose.map((v) => (
                   <CommandItem
                     key={v.id}
@@ -99,7 +106,7 @@ export function ProxyBindPicker({
                     <span className='truncate'>{v.name || v.id}</span>
                     {v.has_token ? (
                       <span className='ms-auto shrink-0 text-[11px] text-[color:var(--status-bad)]'>
-                        出站被拒
+                        {translate('proxies:outboundRejected')}
                       </span>
                     ) : null}
                   </CommandItem>
@@ -107,7 +114,7 @@ export function ProxyBindPicker({
               </CommandGroup>
             ) : null}
             {moving.length ? (
-              <CommandGroup heading='从其它代理换绑'>
+              <CommandGroup heading={translate('proxies:rebindFromOther')}>
                 {moving.map((v) => {
                   const from = ownerOf.get(v.id)
                   return (

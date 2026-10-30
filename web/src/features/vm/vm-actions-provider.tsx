@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t as tr } from '@/i18n'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
-import { ConfirmDialog } from '@/components/confirm-dialog'
 import { meQueryOptions } from '@/features/auth/queries'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { clearVmRestriction } from '@/features/vm/clear-restriction'
@@ -13,13 +14,13 @@ import {
   VmActionsContext,
   type VmActions,
 } from '@/features/vm/vm-actions-context'
-import { VmAssignOwnerDialog } from '@/features/vm/vm-assign-owner-dialog'
 import { VmDetailCard } from '@/features/vm/vm-detail-card'
-import { canReclaimVm, patchVmOwner } from '@/features/vm/vm-owner'
+import { VmAssignGroupsDialog } from '@/features/vm/vm-groups'
 import { VmReauthDialog } from '@/features/vm/vm-reauth-dialog'
 import { VmRecoveryDialog } from '@/features/vm/vm-recovery-dialog'
 import { VmStatsDialog } from '@/features/vm/vm-stats-dialog'
 import { VmTestDialog } from '@/features/vm/vm-test-dialog'
+import { patchVmGroups } from './vm-group-actions'
 
 /**
  * 持有详情卡与测试 / 统计 / 重新授权 / 恢复服务弹窗的开关，行与卡片只发「打开哪台」。
@@ -36,9 +37,11 @@ export function VmActionsProvider({
   onDelete?: (vm: Vm) => void
   children: React.ReactNode
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const me = useQuery(meQueryOptions())
-  const isAdmin = me.data?.role === 'admin'
+  const isAdmin = me.data?.role === 'super_admin'
   const list = useQuery(vmsListQueryOptions())
   const [detailId, setDetailId] = useState<string | null>(null)
   const [testId, setTestId] = useState<string | null>(null)
@@ -46,7 +49,6 @@ export function VmActionsProvider({
   const [reauthId, setReauthId] = useState<string | null>(null)
   const [recoveryId, setRecoveryId] = useState<string | null>(null)
   const [assignId, setAssignId] = useState<string | null>(null)
-  const [reclaimTarget, setReclaimTarget] = useState<Vm | null>(null)
   const items = list.data?.items
   const byId = (id: string | null) =>
     (id && items?.find((vm) => vm.id === id)) || null
@@ -69,7 +71,9 @@ export function VmActionsProvider({
         body: JSON.stringify({}),
       }),
     onSuccess: async (_data, vm) => {
-      toast.success(`已刷新令牌 ${vm.id}`)
+      toast.success(
+        tVm('vm:vmActionsProvider.tokenRefreshedFor', { id: vm.id })
+      )
       await invalidate(vm)
     },
     onError: (error: Error) => toast.error(error.message),
@@ -81,7 +85,11 @@ export function VmActionsProvider({
   } = useMutation({
     mutationFn: (vm: Vm) => clearVmRestriction(vm),
     onSuccess: async (_data, vm) => {
-      toast.success('已清除冷却 / 熔断并刷新状态')
+      toast.success(
+        tVm(
+          'vm:vmActionsProvider.cooldownAndCircuitBreakerClearedStatusRefreshed'
+        )
+      )
       await invalidate(vm)
     },
     onError: (error: Error) => toast.error(error.message),
@@ -96,28 +104,34 @@ export function VmActionsProvider({
         method: 'POST',
       }),
     onSuccess: async (_data, vm) => {
-      toast.success(`已设为活跃槽 ${vm.id}`)
+      toast.success(tr('vm:sync14008ActiveSlotSetId', { value1: vm.id }))
       await invalidate(vm)
     },
     onError: (error: Error) => toast.error(error.message),
   })
   const {
-    mutate: setOwner,
-    isPending: ownerPending,
-    variables: ownerVars,
+    mutate: setGroups,
+    isPending: groupsPending,
+    variables: groupsVars,
   } = useMutation({
-    mutationFn: ({ vm, user_id }: { vm: Vm; user_id: string | null }) =>
-      patchVmOwner(vm.id, user_id),
-    onSuccess: async (_data, { vm, user_id }) => {
-      toast.success(user_id ? '已分配给租户' : '已收回进平台池')
+    mutationFn: ({
+      vm,
+      group_ids,
+      version,
+    }: {
+      vm: Vm
+      group_ids: number[]
+      version: number
+    }) => patchVmGroups(vm, group_ids, version),
+    onSuccess: async (_data, { vm }) => {
+      toast.success(tVm('vm:vmActionsProvider.groupAssignmentsUpdated'))
       setAssignId(null)
-      setReclaimTarget(null)
       await invalidate(vm)
     },
     onError: (error: Error) => toast.error(error.message),
   })
 
-  const ownerBusyId = ownerPending ? (ownerVars?.vm.id ?? null) : null
+  const groupsBusyId = groupsPending ? (groupsVars?.vm.id ?? null) : null
 
   const actions = useMemo<VmActions>(
     () => ({
@@ -136,9 +150,8 @@ export function VmActionsProvider({
       activatingId: activatePending ? (activateVars?.id ?? null) : null,
       ...(isAdmin
         ? {
-            openAssignOwner: (vm: Vm) => setAssignId(vm.id),
-            reclaimOwner: (vm: Vm) => setReclaimTarget(vm),
-            ownerBusyId,
+            openAssignGroups: (vm: Vm) => setAssignId(vm.id),
+            groupsBusyId,
           }
         : {}),
     }),
@@ -155,7 +168,7 @@ export function VmActionsProvider({
       activatePending,
       activateVars,
       isAdmin,
-      ownerBusyId,
+      groupsBusyId,
     ]
   )
 
@@ -186,44 +199,17 @@ export function VmActionsProvider({
         onOpenChange={(open) => !open && setRecoveryId(null)}
       />
       {isAdmin ? (
-        <>
-          <VmAssignOwnerDialog
-            vm={byId(assignId)}
-            open={assignId != null}
-            pending={ownerPending && ownerVars?.user_id != null}
-            onOpenChange={(open) => !open && setAssignId(null)}
-            onConfirm={(userId) => {
-              const vm = byId(assignId)
-              if (vm) setOwner({ vm, user_id: userId })
-            }}
-          />
-          <ConfirmDialog
-            open={reclaimTarget != null}
-            onOpenChange={(open) => !open && setReclaimTarget(null)}
-            title='收回槽位'
-            desc={
-              reclaimTarget ? (
-                <>
-                  将把 <span className='font-mono'>{reclaimTarget.id}</span>{' '}
-                  收回平台池，当前租户将不再看到该槽。自建 VM
-                  不能收回，请使用删除。
-                </>
-              ) : (
-                ''
-              )
-            }
-            cancelBtnText='取消'
-            confirmText='确认收回'
-            destructive
-            isLoading={ownerPending && ownerVars?.user_id === null}
-            disabled={reclaimTarget != null && !canReclaimVm(reclaimTarget)}
-            handleConfirm={() => {
-              if (reclaimTarget && canReclaimVm(reclaimTarget)) {
-                setOwner({ vm: reclaimTarget, user_id: null })
-              }
-            }}
-          />
-        </>
+        <VmAssignGroupsDialog
+          key={assignId || 'closed'}
+          vm={byId(assignId)}
+          open={assignId != null}
+          pending={groupsPending}
+          onOpenChange={(open) => !open && setAssignId(null)}
+          onConfirm={(group_ids, version) => {
+            const vm = byId(assignId)
+            if (vm) setGroups({ vm, group_ids, version })
+          }}
+        />
       ) : null}
     </VmActionsContext.Provider>
   )

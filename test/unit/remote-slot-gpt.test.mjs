@@ -12,7 +12,7 @@ const claude = { id: 'vm-03', platform: 'anthropic', node_id: 'node-a', kernel: 
 
 function body(vm) {
   return slotContainerBody(vm, {
-    image: 'vm2api/kin-slot-ubuntu-24.04:abc',
+    image: 'tapmodels/kin-slot-ubuntu-24.04:abc',
     network: 'kin-codex-01-net',
     remoteDir: '/home/node/vms/vm-codex-01',
     user: '1000:1000',
@@ -88,7 +88,7 @@ test('a freshly built GPT KVM container matches on the next start', () => {
 test('a failed remote GPT boot is returned and does not start the Codex kernel', async () => {
   let kernelStarts = 0
   const boot = { ok: false, code: 'slot_image_build_failed', error: 'node image build failed' }
-  const result = await startSlotReady(gpt, '/tmp/vm2api-unused', {
+  const result = await startSlotReady(gpt, '/tmp/tapmodels-unused', {
     ops: {
       startSlot: async () => boot,
       ensureCodexKernel: async () => {
