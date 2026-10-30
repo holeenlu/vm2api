@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import type { ActiveSession } from '@/types/panel-usage-logs'
 import {
   Activity,
@@ -10,16 +11,31 @@ import {
   User,
   XCircle,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { formatCurrency, formatTokenAmount } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
-import { activeSessionsQueryOptions } from './queries'
+import {
+  activeSessionsQueryOptions,
+  normalizeActiveSessionsData,
+} from './queries'
 
 /** 会话时长：首末次请求完成的间隔（hub 的 `Xm Ys` 口径）。 */
 function formatSpan(ms: number): string {
   if (!(ms > 0)) return '-'
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`
+  const unit = (value: number, name: string, digits = 0) =>
+    new Intl.NumberFormat(i18n.language, {
+      style: 'unit',
+      unit: name,
+      unitDisplay: 'narrow',
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(value)
+  if (ms < 1000) return unit(ms, 'millisecond')
+  if (ms < 60_000) return unit(ms / 1000, 'second', 1)
+  return [
+    unit(Math.floor(ms / 60_000), 'minute'),
+    unit(Math.floor((ms % 60_000) / 1000), 'second'),
+  ].join(' ')
 }
 
 function SessionListItem({
@@ -29,6 +45,8 @@ function SessionListItem({
   session: ActiveSession
   onSelect: (sessionId: string) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const failed = session.lastStatus != null && session.lastStatus >= 400
   const StatusIcon = failed ? XCircle : CheckCircle
   const provider = session.vmName || session.providerName
@@ -38,8 +56,11 @@ function SessionListItem({
       onClick={() => onSelect(session.sessionId)}
       title={
         session.clientSessionId && session.clientSessionId !== session.sessionId
-          ? `出站 ${session.sessionId}\n客户端 ${session.clientSessionId}\n点击按此 Session 筛选日志`
-          : `出站 ${session.sessionId}\n点击按此 Session 筛选日志`
+          ? translate('logs:sessionFilterWithClient', {
+              p0: session.sessionId,
+              p1: session.clientSessionId,
+            })
+          : translate('logs:sessionFilter', { p0: session.sessionId })
       }
       className='group block w-full rounded-md px-3 py-2 text-left transition-colors hover:bg-muted/50'
     >
@@ -56,7 +77,7 @@ function SessionListItem({
             className='max-w-[100px] truncate font-medium'
             title={session.userName ?? undefined}
           >
-            {session.userName || '未知'}
+            {session.userName || translate('logs:unknown')}
           </span>
         </div>
         <div className='flex min-w-0 items-center gap-1'>
@@ -90,7 +111,10 @@ function SessionListItem({
         </div>
         <div className='flex flex-shrink-0 items-center gap-2 font-mono text-xs'>
           <span className='text-muted-foreground'>
-            {session.requests} 次 · {formatTokenAmount(session.totalTokens)}
+            {translate('logs:sessionRequests', {
+              count: session.requests,
+              tokens: formatTokenAmount(session.totalTokens),
+            })}
           </span>
           {session.totalCost > 0 ? (
             <span className='font-medium'>
@@ -104,7 +128,7 @@ function SessionListItem({
 }
 
 /**
- * 近 5 分钟有请求的会话（hub `ActiveSessionsList`）。vm2api 请求完成才落库，
+ * 近 5 分钟有请求的会话（hub `ActiveSessionsList`）。tapmodels 请求完成才落库，
  * 没有「进行中」态，所以状态图标只区分末次成功 / 失败；点击改为按会话筛选日志。
  */
 export function ActiveSessionsList({
@@ -114,16 +138,28 @@ export function ActiveSessionsList({
   maxHeight?: string
   onSelectSession: (sessionId: string) => void
 }) {
-  const { data, isLoading } = useQuery(activeSessionsQueryOptions())
-  const sessions = data?.sessions ?? []
+  const { t: translate } = useTranslation('logs')
+
+  const { data: rawData, isLoading } = useQuery(activeSessionsQueryOptions())
+  const data = normalizeActiveSessionsData(rawData)
+  const sessions = data.sessions
   return (
     <div className='rounded-lg border bg-card'>
       <div className='flex items-center justify-between border-b px-4 py-3'>
         <div className='flex items-center gap-2'>
           <Activity className='h-4 w-4 text-primary' />
-          <h3 className='text-sm font-semibold'>活跃 Session</h3>
+          <h3 className='text-sm font-semibold'>
+            {translate('logs:activeSessions')}
+          </h3>
           <span className='text-xs text-muted-foreground'>
-            {data?.total ?? 0} 个 Session，{data?.minutes ?? 5} 分钟内
+            {translate('logs:activeSessionWindow', {
+              count: data?.total ?? 0,
+              window: new Intl.NumberFormat(i18n.language, {
+                style: 'unit',
+                unit: 'minute',
+                unitDisplay: 'long',
+              }).format(data?.minutes ?? 5),
+            })}
           </span>
         </div>
       </div>
@@ -134,14 +170,14 @@ export function ActiveSessionsList({
             style={{ height: maxHeight }}
           >
             <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-            加载中...
+            {translate('logs:loading')}
           </div>
         ) : !sessions.length ? (
           <div
             className='flex items-center justify-center text-sm text-muted-foreground'
             style={{ height: maxHeight }}
           >
-            暂无活跃 Session
+            {translate('logs:noActiveSessions')}
           </div>
         ) : (
           <div className='divide-y'>

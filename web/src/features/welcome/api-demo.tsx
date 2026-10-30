@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { CopyButton } from '@/components/copy-chip'
 
@@ -88,6 +89,8 @@ const STRING_RE = /"[^"]*"/g
 
 /** Colors JSON-ish lines: keys sky, string values amber, punctuation muted. */
 function Json({ line }: { line: string }) {
+  useTranslation('welcome')
+
   const parts: React.ReactNode[] = []
   let cursor = 0
   for (const m of line.matchAll(STRING_RE)) {
@@ -127,6 +130,8 @@ function Json({ line }: { line: string }) {
 
 /** Static request/response card: switching tabs is the only interaction. */
 export function ApiDemo({ baseUrl }: { baseUrl: string }) {
+  const { t } = useTranslation('welcome')
+
   const [active, setActive] = useState(0)
   const demo = DEMOS[active]
   const curl = [
@@ -142,7 +147,7 @@ export function ApiDemo({ baseUrl }: { baseUrl: string }) {
     <div className='mx-auto w-full max-w-2xl overflow-hidden rounded-2xl border border-border/60 bg-white/95 shadow-[0_20px_50px_-25px_rgba(15,23,42,0.18)] backdrop-blur-sm dark:border-white/[0.06] dark:bg-[#0b0f17]/95 dark:shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)]'>
       <div
         role='tablist'
-        aria-label='接口示例'
+        aria-label={t('welcome:apiExample')}
         className='flex items-center gap-1 border-b border-border/50 px-2 sm:px-3 dark:border-white/[0.05]'
       >
         {DEMOS.map((d, i) => (
@@ -167,7 +172,10 @@ export function ApiDemo({ baseUrl }: { baseUrl: string }) {
           <span className='pr-1 font-mono text-[10px] tracking-wider text-foreground/40 uppercase'>
             200 ok
           </span>
-          <CopyButton text={curl} label={`复制 ${demo.label} curl`} />
+          <CopyButton
+            text={curl}
+            label={t('welcome:copyCurl', { client: demo.label })}
+          />
         </div>
       </div>
 
@@ -188,7 +196,7 @@ export function ApiDemo({ baseUrl }: { baseUrl: string }) {
       <div className='font-mono text-[12.5px] leading-[1.6]'>
         <div className='min-h-[200px] px-5 py-4'>
           <span className='text-[10px] font-semibold tracking-[0.18em] text-foreground/30 uppercase'>
-            Request
+            {t('welcome:request')}
           </span>
           <div className='mt-2'>
             <div>
@@ -225,7 +233,7 @@ export function ApiDemo({ baseUrl }: { baseUrl: string }) {
         </div>
         <div className='min-h-[150px] border-t border-border/40 bg-muted/20 px-5 py-4 dark:border-white/[0.05] dark:bg-white/[0.015]'>
           <span className='text-[10px] font-semibold tracking-[0.18em] text-foreground/30 uppercase'>
-            Response
+            {t('welcome:response')}
           </span>
           <div className='mt-2'>
             {demo.response.map((line, i) => (
@@ -237,7 +245,7 @@ export function ApiDemo({ baseUrl }: { baseUrl: string }) {
 
       <div className='flex items-center justify-between border-t border-border/40 bg-muted/30 px-5 py-2.5 dark:border-white/[0.05] dark:bg-white/[0.02]'>
         <span className='text-[10px] tracking-wider text-foreground/40 uppercase'>
-          sk-vm-xxxx 为占位符
+          {t('welcome:placeholderKey')}
         </span>
         <span className='font-mono text-[10px] tracking-wider text-foreground/30 uppercase'>
           stream · sse

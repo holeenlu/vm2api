@@ -304,10 +304,26 @@ function messageIdentity(message) {
   return identityOf(withoutCacheControl(message))
 }
 
-function messageRecord(message) {
+/**
+ * `cached` is the record this index held in the previous turn's snapshot.
+ *
+ * A conversation is append-only below the first change, so most messages are
+ * byte-identical turn after turn and `parts` — a stamp tree with its own clone
+ * and digests per block, by far the most expensive half of this record — is
+ * only ever read at the one index that diverges. Reusing the stored record
+ * turns a long history into one hash per message instead of a full rebuild.
+ *
+ * `hash` is the digest of the whole cache_control-free message, and every other
+ * field is a pure function of that same value (`parts` reads content, `id`
+ * strips images from it, `images` counts them, `keys` lists its keys, and
+ * cache_control reaches none of them). So an equal hash means an equal record;
+ * there is nothing left to compare.
+ */
+function messageRecord(message, cached = null) {
   const clean = withoutCacheControl(message)
-  const images = messageImageCount(message)
   const hash = digest(clean)
+  if (cached && cached.hash === hash) return cached
+  const images = messageImageCount(message)
   const record = {
     hash,
     role: message?.role || null,
@@ -371,14 +387,16 @@ function messageDiff(previous, current) {
   return keyDelta(previous.keys, current.keys) || { reason: 'digest' }
 }
 
-function snapshotBody(body) {
+/** `previous` is the stored snapshot of the same session; see messageRecord. */
+function snapshotBody(body, previous = null) {
   const messages = Array.isArray(body?.messages) ? body.messages : []
   const tools = Array.isArray(body?.tools) ? body.tools : []
+  const prior = previous?.messages
   return {
     tools: digest(withoutCacheControl(body?.tools)),
     tool_names: tools.map((tool) => tool?.name || null),
     system: digest(withoutCacheControl(body?.system)),
-    messages: messages.map(messageRecord),
+    messages: messages.map((message, index) => messageRecord(message, prior?.[index] || null)),
   }
 }
 
@@ -518,7 +536,7 @@ export function peekCachePrefix(sessionKey, body, now = Date.now(), { preserveMe
   // Compare what prepareCachePrefix would send, not the client's raw images.
   const images = liveImageState(previous?.image_key || key, now)
   const preserve = preserveMessageCache ?? previous?.preserve_message_cache ?? false
-  const current = snapshotBody(preserve ? body : retainImages(images, body).body)
+  const current = snapshotBody(preserve ? body : retainImages(images, body).body, previous)
   const compared = comparePrefix(previous, current)
   return { ...compared, confirmed: !!previous?.confirmed }
 }
@@ -761,7 +779,7 @@ export function prepareCachePrefix(
   const retained = preserveMessageCache
     ? { body, floor: 0, active: false, moved: false }
     : retainImages(liveImageState(imagesAt, now), body)
-  const current = snapshotBody(retained.body)
+  const current = snapshotBody(retained.body, previous)
   const compared = comparePrefix(previous, current)
   const br = compared.break
   const writes = liveWrites(previous, br, now)

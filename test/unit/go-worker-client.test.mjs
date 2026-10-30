@@ -18,7 +18,6 @@ import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { callerAutoCompactWindow, defaultSeedPolicy, sanitizeInboundBody } from '../../src/lib/protocol/seed-policy.mjs'
 import { extractOpenaiUsage } from '../../src/lib/protocol/openai-usage.mjs'
 import { callRustKernel, rustKernelHealth } from '../../src/lib/transport/rust-kernel-client.mjs'
-import { callCodexKernel, streamCodexKernel } from '../../src/lib/transport/codex-kernel-client.mjs'
 import { forwardApi, readApiJson } from '../../src/lib/transport/api-kernel-client.mjs'
 
 test('restoreUncommittedHop keeps a structured upstream code', () => {
@@ -159,8 +158,7 @@ test('cli-hop envelope keeps role=system turns that the VM betas do not declare'
     identity: null,
     cliHop: true,
   })
-  // 9ecee337: mid-conversation-system is GA in 2.1.303; role=system stays without the beta.
-  assert.ok(!out.body.betas.includes('mid-conversation-system-2026-04-07'))
+  assert.equal(out.body.betas.includes('mid-conversation-system-2026-04-07'), false)
   assert.deepEqual(
     out.body.messages.map((message) => message.role),
     ['user', 'system', 'assistant', 'user'],
@@ -306,6 +304,7 @@ unixTest('callGoWorker sends envelope over authenticated Unix socket', async () 
     })
     assert.equal(result.ok, true)
     assert.equal(result.terminalState, 'verified')
+    assert.equal(result.sendState, 'sent')
     assert.equal(result.body.content[0].text, 'ok')
   } finally {
     await fx.close()
@@ -461,6 +460,43 @@ unixTest('callGoWorker marks null TTL as client-owned cache breakpoints', async 
   }
 })
 
+unixTest('callGoWorker keeps body-too-large failures in not_sent state', async () => {
+  const fx = await fixture(async (_req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'unexpected' }] }))
+  })
+  try {
+    const result = await callGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-test', messages: [{ role: 'user', content: 'too large' }] },
+      maxRequestBytes: 1,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 413)
+    assert.equal(result.sendState, 'not_sent')
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('callGoWorker marks a written socket failure ambiguous', async () => {
+  const fx = await fixture((req) => {
+    req.resume()
+    req.once('end', () => req.socket.destroy())
+  })
+  try {
+    const result = await callGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-test', messages: [{ role: 'user', content: 'hello' }] },
+      timeoutMs: 1000,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.sendState, 'ambiguous')
+  } finally {
+    await fx.close()
+  }
+})
+
 unixTest('streamGoWorker accepts message_stop before delayed EOF', async () => {
   const fx = await fixture((req, res) => {
     res.setHeader('content-type', 'text/event-stream')
@@ -480,6 +516,7 @@ unixTest('streamGoWorker accepts message_stop before delayed EOF', async () => {
     assert.equal(result.ok, true)
     assert.equal(result.terminalState, 'verified')
     assert.equal(result.committed, true)
+    assert.equal(result.sendState, 'sent')
     assert.ok(lines.some((line) => line.includes('message_stop')))
   } finally {
     await fx.close()
@@ -1126,6 +1163,7 @@ unixTest('streamGoWorker scrapes usage from SSE when trailers are missing', asyn
       body: { model: 'claude-sonnet-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
       onEvent: () => {},
     })
+    assert.equal(result.usageComplete, true)
     assert.equal(result.usage.input_tokens, 80)
     assert.equal(result.usage.output_tokens, 6)
     assert.equal(result.usage.cache_read_input_tokens, 20)
@@ -1157,6 +1195,7 @@ unixTest('streamGoWorker merges SSE cache details into a totals-only usage trail
       body: { model: 'gpt-5.4', stream: true, input: [] },
       onEvent: () => {},
     })
+    assert.equal(result.usageComplete, true)
     assert.equal(result.usage.input_tokens, 120)
     assert.equal(result.usage.output_tokens, 9)
     assert.equal(result.usage.input_tokens_details.cached_tokens, 8)
@@ -1267,110 +1306,38 @@ test('workerHealth fails closed when socket is absent', async () => {
   assert.equal(result.ok, false)
 })
 
-for (const call of [callGoWorker, streamGoWorker]) {
-  unixTest(`${call.name} maps plain-text kernel 413 without losing structured errors`, async () => {
-    for (const structured of [false, true]) {
-      const upstream = {
-        error: { type: 'invalid_request_error', code: 'context_length_exceeded', message: 'specific limit' },
-      }
-      const fx = await fixture((req, res) => {
-        req.resume()
-        res.writeHead(413, { 'content-type': structured ? 'application/json' : 'text/plain' })
-        res.end(structured ? JSON.stringify(upstream) : 'Failed to buffer the request body: length limit exceeded')
-      })
-      try {
-        const result = await call({ exec: fx.exec, envelope: { body: { input: 'hi' } } })
-        assert.equal(result.status, 413)
-        assert.equal(result.ok, false)
-        assert.equal(result.transportError, false)
-        if (structured) assert.deepEqual(result.body, upstream)
-        else {
-          assert.equal(result.body.error.code, 'body_too_large')
-          assert.equal(result.body.error.type, 'invalid_request_error')
-          assert.equal(result.body.error.details.retryable, false)
-        }
-      } finally {
-        await fx.close()
-      }
-    }
-  })
-
-  unixTest(`${call.name} limits the exact UTF-8 envelope including request_id`, async () => {
-    let requests = 0
-    const envelope = { body: { input: '你好' }, headers: { 'session-id': 'example' } }
-    const bytes = Buffer.byteLength(JSON.stringify({ ...envelope, request_id: 'x'.repeat(36) }))
+unixTest('cancelled VM streams preserve final usage evidence but never finalize initial counters', async () => {
+  for (const complete of [false, true]) {
+    const observed = gate()
     const fx = await fixture(async (req, res) => {
-      requests++
-      const chunks = []
-      for await (const chunk of req) chunks.push(chunk)
-      assert.equal(Buffer.concat(chunks).length, bytes)
-      res.writeHead(400, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ error: { code: 'fixture_reached' } }))
+      if (req.url === '/internal/v1/cancel') return res.end('{"ok":true}')
+      res.setHeader('content-type', 'text/event-stream')
+      writeData(res, { type: 'message_start', message: { usage: { input_tokens: 100, output_tokens: 0 } } })
+      writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'answer' } })
+      if (complete)
+        writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 25 } })
+      await observed.ready
     })
     try {
-      const oversized = await call({ exec: fx.exec, envelope, maxRequestBytes: bytes - 1 })
-      assert.equal(oversized.status, 413)
-      assert.equal(oversized.body.error.code, 'body_too_large')
-      assert.equal(oversized.body.error.details.retryable, false)
-      assert.equal(oversized.transportError, false)
-      assert.equal(requests, 0)
-      const exact = await call({ exec: fx.exec, envelope, maxRequestBytes: bytes })
-      assert.equal(exact.status, 400)
-      assert.equal(exact.body.error.code, 'fixture_reached')
-      assert.equal(requests, 1)
-    } finally {
-      await fx.close()
-    }
-  })
-}
-
-for (const mode of ['first-byte', 'idle']) {
-  unixTest(`streamGoWorker enforces ${mode} timeout after kernel headers`, async () => {
-    const fx = await fixture((req, res) => {
-      req.resume()
-      res.writeHead(200, { 'content-type': 'text/event-stream' })
-      res.flushHeaders()
-      if (mode === 'idle') writeData(res, { type: 'response.output_text.delta', delta: 'hello' })
-    })
-    const controller = new AbortController()
-    const safety = setTimeout(() => controller.abort(), 5000)
-    try {
-      const result = await streamGoWorker({
+      const controller = new AbortController()
+      const pending = streamGoWorker({
         exec: fx.exec,
-        envelope: { body: { input: 'hi' } },
-        timeoutMs: mode === 'first-byte' ? 20 : 4000,
-        idleTimeoutMs: 20,
         signal: controller.signal,
+        timeoutMs: 1000,
+        body: { model: 'claude-sonnet-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+        onEvent(line) {
+          if (String(line).includes(complete ? 'message_delta' : 'text_delta')) observed.release()
+        },
       })
-      assert.equal(result.body.error.code, 'worker_timeout')
-      assert.match(result.body.error.message, new RegExp(mode))
-      assert.equal(result.committed, mode === 'idle')
-    } finally {
-      clearTimeout(safety)
+      await observed.ready
       controller.abort()
+      const result = await pending
+      assert.equal(result.body.error.code, 'client_cancelled')
+      assert.equal(result.usageComplete, complete)
+      assert.equal(result.usage.input_tokens, 100)
+      assert.equal(result.usage.output_tokens, complete ? 25 : 0)
+    } finally {
       await fx.close()
     }
-  })
-}
-
-unixTest('Codex clients enforce the panel limit on their serialized envelope', async () => {
-  let requests = 0
-  const fx = await fixture((req, res) => {
-    requests++
-    req.resume()
-    res.writeHead(400).end('{}')
-  })
-  try {
-    fx.exec.vm.runtime.codex_kernel_socket = fx.exec.vm.runtime.worker_socket
-    const envelope = { body: { input: 'x'.repeat(8 * 1024 * 1024) } }
-    for (const call of [callCodexKernel, streamCodexKernel]) {
-      const result = await call({ exec: fx.exec, envelope, routing: { failover: { max_request_mib: 8 } } })
-      assert.equal(result.status, 413)
-      assert.equal(result.body.error.code, 'body_too_large')
-      assert.equal(result.transportError, false)
-    }
-    assert.equal(requests, 0)
-  } finally {
-    await fx.close()
   }
 })

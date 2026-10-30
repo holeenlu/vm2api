@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { VIEW_TITLES } from '@/config/nav'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtNum, fmtUsd } from '@/lib/format'
@@ -35,13 +35,15 @@ import {
 } from '@/features/overview/queries'
 
 export function ClusterPage() {
+  const { t } = useTranslation('cluster')
+
   const qc = useQueryClient()
   const dash = useQuery(dashboardQueryOptions(5000))
   const usage = useQuery(usageQueryOptions(15000))
   const me = useQuery(meQueryOptions())
   const cluster = useQuery(clusterNodesQueryOptions())
   const localLink = useQuery(clusterLocalQueryOptions())
-  const canManage = me.data?.role === 'admin'
+  const canManage = me.data?.role === 'super_admin'
   const apiNodes = useMemo(() => cluster.data || [], [cluster.data])
   const dashVms = useMemo(() => (dash.data?.vms || []) as Vm[], [dash.data])
   const remotes = useMemo(
@@ -57,7 +59,7 @@ export function ClusterPage() {
     mutationFn: (id: string) =>
       api(`/api/panel/cluster/nodes/${id}`, { method: 'DELETE' }),
     onSuccess: (_data, id) => {
-      toast.success('已移除节点')
+      toast.success(t('removed'))
       if (panelId === id) setPanelId(null)
       qc.invalidateQueries({ queryKey: CLUSTER_NODES_KEY })
     },
@@ -68,14 +70,16 @@ export function ClusterPage() {
     typeof window === 'undefined' ? 'local' : window.location.hostname
   const dashReady = !!dash.data && !dash.data.error && !dash.error
   const local = useMemo(
-    () =>
-      buildLocalNode({
+    () => ({
+      ...buildLocalNode({
         host: hostName,
         vms: dashVms,
         spendUsd: localSpendUsd(dash.data, usage.data),
         available: dashReady,
       }),
-    [dash.data, dashVms, dashReady, hostName, usage.data]
+      label: t('local'),
+    }),
+    [dash.data, dashVms, dashReady, hostName, usage.data, t]
   )
   const nodes = useMemo(() => [local, ...remotes], [local, remotes])
   const totals = clusterTotals(nodes)
@@ -88,10 +92,10 @@ export function ClusterPage() {
 
   return (
     <PageHeader
-      title={VIEW_TITLES.cluster}
+      title={t('pageTitle')}
       extra={
         canManage ? (
-          <Button onClick={() => setJoinOpen(true)}>接入 VPS</Button>
+          <Button onClick={() => setJoinOpen(true)}>{t('join')}</Button>
         ) : undefined
       }
     >
@@ -116,7 +120,7 @@ ANTI-PATTERN: Equal SaaS server cards, VM fleet filters, nested cards, decorativ
         <div className='space-y-3'>
           {dash.error || dash.data?.error ? (
             <Alert variant='destructive'>
-              <AlertTitle>本机指标加载失败</AlertTitle>
+              <AlertTitle>{t('localLoadFailed')}</AlertTitle>
               <AlertDescription>
                 {errorMessage(
                   dash.error || new Error(String(dash.data?.error))
@@ -126,22 +130,28 @@ ANTI-PATTERN: Equal SaaS server cards, VM fleet filters, nested cards, decorativ
           ) : null}
           {cluster.error ? (
             <Alert variant='destructive'>
-              <AlertTitle>节点列表加载失败</AlertTitle>
+              <AlertTitle>{t('nodeLoadFailed')}</AlertTitle>
               <AlertDescription>{errorMessage(cluster.error)}</AlertDescription>
             </Alert>
           ) : null}
 
           <div className='grid grid-cols-2 gap-3 xl:grid-cols-5'>
-            <StatCard label='节点' value={fmtNum(totals.nodes)} />
+            <StatCard label={t('nodes')} value={fmtNum(totals.nodes)} />
             <StatCard
-              label='可达'
+              label={t('reachable')}
               value={`${fmtNum(totals.reachable)} / ${fmtNum(totals.nodes)}`}
               tone={reachableTone}
             />
-            <StatCard label='槽位' value={fmtNum(totals.vms)} />
-            <StatCard label='在线凭证' value={fmtNum(totals.online)} />
+            <StatCard label={t('slots')} value={fmtNum(totals.vms)} />
+            <StatCard
+              label={t('onlineCredentials')}
+              value={fmtNum(totals.online)}
+            />
             <div className='col-span-2 xl:col-span-1'>
-              <StatCard label='总花费' value={fmtUsd(totals.spend, 2)} />
+              <StatCard
+                label={t('totalSpend')}
+                value={fmtUsd(totals.spend, 2)}
+              />
             </div>
           </div>
 
@@ -192,14 +202,17 @@ ANTI-PATTERN: Equal SaaS server cards, VM fleet filters, nested cards, decorativ
         onOpenChange={(open) => {
           if (!open) setDropTarget(null)
         }}
-        title='移除节点'
+        title={t('removeTitle')}
         desc={
           dropTarget
-            ? `${dropTarget.label} · ${dropTarget.host}。断开 SSH、删除本地凭证与 Docker 桥；远端容器保持运行。`
+            ? t('removeDescription', {
+                value1: dropTarget.label,
+                value2: dropTarget.host,
+              })
             : ''
         }
-        confirmText='移除'
-        cancelBtnText='取消'
+        confirmText={t('remove')}
+        cancelBtnText={t('cancel')}
         destructive
         handleConfirm={() => {
           if (!dropTarget) return

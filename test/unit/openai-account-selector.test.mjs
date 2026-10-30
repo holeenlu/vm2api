@@ -51,6 +51,29 @@ test('session affinity hits even when another account scores higher', () => {
   assert.equal(selected.preferred, 'hit')
 })
 
+test('group priority orders inside the weight band, weight still comes first', () => {
+  const urgent = account('urgent', { groupPriority: 10, quotaRemainingRank: 1_000 })
+  const spare = account('spare', { groupPriority: 50, quotaRemainingRank: 10_000 })
+  const heavy = account('heavy', { weight: 5, groupPriority: 90, quotaRemainingRank: 1_000 })
+  const ordered = orderOpenAIAccounts([spare, heavy, urgent], { strategy: 'smart', roundRobinCursor: 0 })
+  assert.deepEqual(ordered.ids, ['heavy', 'urgent', 'spare'])
+})
+
+test('session affinity keeps its home over a lower group priority number', () => {
+  const bound = account('bound', { groupPriority: 90 })
+  const first = account('first', { groupPriority: 10 })
+  const kept = selectOpenAIAccount([bound, first], {
+    strategy: 'smart',
+    preferredAccountId: 'bound',
+    preferredOverridesWeight: true,
+  })
+  assert.equal(kept.candidate.id, 'bound')
+  assert.equal(kept.preferred, 'hit')
+  const strict = selectOpenAIAccount([bound, first], { strategy: 'smart', preferredAccountId: 'bound' })
+  assert.equal(strict.candidate.id, 'first')
+  assert.equal(strict.blocker, 'lower_group_priority')
+})
+
 test('quota exhausted affinity escapes and the next normal account is used', () => {
   const ordered = orderOpenAIAccounts(
     [account('bound', { status: 'quota_exhausted' }), account('other', { quotaRemainingRank: 8_000 })],
