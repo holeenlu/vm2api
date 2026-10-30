@@ -91,7 +91,7 @@ test('Sonnet 5.5 does not add strict to server tools or migrate Opus computer to
   assert.equal(out.tools[1].type, 'computer_20251124')
 })
 
-test('Sonnet 5.5 API path normalizes rejected legacy thinking; repaired cli-hop leaves it to cli-node', () => {
+test('Sonnet 5.5 API path normalizes legacy thinking while preserving caller tools; repaired CLI leaves thinking to cli-node', () => {
   for (const type of ['disabled', 'enabled', 'adaptive']) {
     const body = {
       model,
@@ -138,4 +138,20 @@ test('an explicit Anthropic output format wins over compatibility response_forma
     response_format: { type: 'json_object' },
   })
   assert.deepEqual(prepareCliHopBody(claude).output_config, { effort: 'low', format })
+})
+
+test('native cli-hop leaves explicit effort, thinking and forced tools to cli-node', () => {
+  const input = {
+    model,
+    messages,
+    tools,
+    thinking: { type: 'enabled', budget_tokens: 2048 },
+    output_config: { effort: 'low' },
+    tool_choice: { type: 'tool', name: '_todo' },
+  }
+  const out = prepareCliHopBody(structuredClone(input))
+  assert.deepEqual(out.thinking, { ...input.thinking, display: 'summarized' })
+  assert.deepEqual(out.output_config, input.output_config)
+  assert.deepEqual(out.tool_choice, input.tool_choice)
+  assert.equal(out.tools[0].strict, undefined)
 })

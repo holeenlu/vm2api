@@ -1,5 +1,6 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { fableState } from '@/lib/fable-status'
+import { fableState, weeklySplitInfo } from '@/lib/fable-status'
 import { cn } from '@/lib/utils'
 import { claudeTier } from '@/lib/vm-status'
 
@@ -113,6 +114,14 @@ export type FableRow =
 export function fableRow(vm: Vm): FableRow | null {
   const tier = claudeTier(vm)
   if (tier.key !== 'max') return null
+  const limit = weeklySplitInfo(vm)
+  if (limit?.blocked)
+    return {
+      kind: 'note',
+      text: t('lib:fable.usageLimitReached', {
+        limit: Math.round(limit.share * 1000) / 10,
+      }),
+    }
   const st = fableState(vm, tier.key)
   if (st.usedPct != null) return { kind: 'bar', pct: st.usedPct }
   if (st.tone.key === 'none') return null

@@ -1,0 +1,39 @@
+Codex model metadata schema and reference data — 2026-10-21
+
+Official deployment guidance:
+https://learn.chatgpt.com/docs/enterprise/roll-out-a-gateway
+Use complete, version-matched Codex metadata in a top-level models array.
+
+Source version: OpenAI Codex rust-v0.160.0
+Commit: a956835d020762cb2b570053af06f643a11c0ecc
+This matches this gateway's embedded CODEX_APP_VERSION and catalog default version.
+Read from the clean local OpenAI Codex checkout; no changes made to that repository.
+
+ModelInfo and ModelMessages contract:
+https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/openai_models.rs
+Published reference metadata:
+https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/models-manager/models.json
+Full source models.json SHA256: fd219bd9f061278275f528939f82f54d2eb97df4b25c23b022adbe48813d920b
+
+models.json contains the seven GPT model IDs already used by this project's seed policy.
+It is normalized to 52 ordered top-level fields and 13 ordered model_messages fields,
+covering the official serialized contract and published catalog extension fields.
+Missing optional fields use null, collections use arrays, and booleans use the
+contract defaults. Legacy shell_command/default/local spellings serialize as unified_exec.
+Model-specific instructions, reasoning choices and tool capabilities are retained.
+The older three-model Sub2API export has been replaced, not kept as a second source.
+
+Deployment override requested by the user: Astra and Sol family context_window = 500000.
+This is a local policy, not a claim that the official tag's default is 500k.
+The official max_context_window = 872000 is retained for these models.
+The override applies on seed, policy reads, save, sync and catalog export.
+These metadata references never add models to a Key's authorized catalog.
+Gateway visibility/identity rules and use_responses_lite=false remain enforced on export.
+
+instructions.txt is the fallback prompt (trailing whitespace removed) from:
+https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/models-manager/prompt.md
+Normalized instructions.txt SHA256: 294602e3502bb0ff840a82cd1d08ac526125a6cdf763e1f883e8d74f47cc2a8d
+Used only when neither synchronized metadata nor a matching native descriptor supplies a template.
+
+Native model_messages are client templates, not gateway credentials or permission settings.
+Licensed under Apache-2.0; see LICENSE and NOTICE in this directory.

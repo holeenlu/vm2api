@@ -11,10 +11,10 @@ import {
 import { resolvePrice } from '../../src/lib/admin/price-catalog.mjs'
 
 test('official family aliases resolve to current list prices', () => {
-  assert.equal(resolvePrice('fable').id, 'claude-fable-5')
-  assert.equal(resolvePrice('opus').id, 'claude-opus-5')
+  assert.equal(resolvePrice('fable').id, 'claude-fable-5-1')
+  assert.equal(resolvePrice('opus').id, 'claude-opus-5-5')
   assert.equal(resolvePrice('sonnet').id, 'claude-sonnet-5-5')
-  assert.equal(resolvePrice('haiku').id, 'claude-haiku-4-5')
+  assert.equal(resolvePrice('haiku').id, 'claude-haiku-5-5')
   assert.equal(resolvePrice('mythos').id, 'claude-mythos-5')
 })
 

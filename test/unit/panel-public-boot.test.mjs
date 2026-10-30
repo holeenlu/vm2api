@@ -59,8 +59,8 @@ test('publicSlotBoot and publicRuntimeView drop host infrastructure', () => {
       container_id: 'abc123deadbeef',
       ip: '166.88.96.199',
       pid: 4242,
-      worker_run_dir: '/opt/vm2api/vms/vm-01/run',
-      worker_token_file: '/opt/vm2api/vms/vm-01/run/internal.token',
+      worker_run_dir: '/opt/tapmodels/vms/vm-01/run',
+      worker_token_file: '/opt/tapmodels/vms/vm-01/run/internal.token',
     },
     rust: { ok: true, skipped: false, health: { ok: true }, error: null },
   })
@@ -68,7 +68,7 @@ test('publicSlotBoot and publicRuntimeView drop host infrastructure', () => {
   assert.equal(boot.ok, true)
   assert.equal(boot.action, 'started')
   assert.equal(boot.runtime, undefined)
-  assert.doesNotMatch(raw, /abc123deadbeef|166\.88\.96\.199|internal\.token|\/opt\/vm2api/)
+  assert.doesNotMatch(raw, /abc123deadbeef|166\.88\.96\.199|internal\.token|\/opt\/tapmodels/)
 
   const runtime = publicRuntimeView({
     type: 'docker',
@@ -76,7 +76,7 @@ test('publicSlotBoot and publicRuntimeView drop host infrastructure', () => {
     container_id: 'abc123deadbeef',
     ip: '1.1.1.1',
     pid: 9,
-    worker_run_dir: '/opt/vm2api/vms/vm-01/run',
+    worker_run_dir: '/opt/tapmodels/vms/vm-01/run',
     worker_token_file: '/secret',
     worker: 'rust',
     egress: 'explicit-socks5',

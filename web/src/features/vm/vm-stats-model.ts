@@ -1,6 +1,6 @@
 import type { WindowEstimate } from '@/types/panel-pricing'
 import type { VmUsageStatsDay, VmWindowProjection } from '@/types/panel-vm'
-import { ESTIMATE_STATUS_ZH } from '@/lib/vm-usage'
+import { ESTIMATE_STATUS_LABELS } from '@/lib/vm-usage'
 
 const DAY_MS = 86_400_000
 
@@ -120,7 +120,7 @@ export function projectionView(
           : '本窗口用量太少，按上个窗口容量推算',
     }
   }
-  const why = live ? ESTIMATE_STATUS_ZH[live.status] : '本窗口暂无估算'
+  const why = live ? ESTIMATE_STATUS_LABELS[live.status] : '本窗口暂无估算'
   return {
     remaining: null,
     total: null,

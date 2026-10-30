@@ -612,6 +612,12 @@ export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operat
   if (n.email) vm.claude.email = n.email
   if (n.account_uuid) vm.claude.account_uuid = n.account_uuid
   if (n.org_uuid) vm.claude.org_uuid = n.org_uuid
+  // Display metadata follows the observed identity; never keep another account's plan.
+  const identityChanged = !!(n.account_uuid && prev.account_uuid && n.account_uuid !== prev.account_uuid)
+  for (const key of ['subscription_type', 'rate_limit_tier', 'billing_type']) {
+    if (mode === 'apikey' || identityChanged || Object.hasOwn(cred, key)) delete vm.claude[key]
+    if (mode !== 'apikey' && typeof cred[key] === 'string' && cred[key].trim()) vm.claude[key] = cred[key].trim()
+  }
   if (isOfficialSetupTokenMode(mode)) {
     vm.claude.scope = 'user:inference'
   } else if (n.scope) {

@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { fmtNum, fmtUsd, usedPctOf } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { vmTodayStats, vmWeekOutcome } from '@/lib/vm-usage'
@@ -119,6 +120,8 @@ function Cell({
   className?: string
   children: React.ReactNode
 }) {
+  useTranslation('vm')
+
   return (
     <div
       className={cn('flex min-w-0 flex-col gap-2.5 bg-card p-3.5', className)}
@@ -156,6 +159,8 @@ export function FleetPulse({
   onFilter: (next: VmZoneFilter) => void
   className?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const pulse = useMemo(() => computePulse(vms, accounts), [vms, accounts])
   const segments = ZONES.filter((z) => pulse.counts[z.key] > 0)
   const focused = filter !== 'all'
@@ -171,7 +176,7 @@ export function FleetPulse({
       )}
     >
       <Cell
-        title='状态分区'
+        title={tVm('vm:fleetPulse.statusZones')}
         className='sm:col-span-2 xl:col-span-4'
         meta={
           <button
@@ -183,13 +188,18 @@ export function FleetPulse({
               focused ? 'text-muted-foreground' : 'font-medium text-foreground'
             )}
           >
-            全部 <span className='tabular-nums'>{pulse.total}</span>
+            <Trans
+              ns='vm'
+              i18nKey='fleetPulse.all'
+              values={{ total: pulse.total }}
+              components={{ part0: <span className='tabular-nums' /> }}
+            />
           </button>
         }
       >
         <div
           role='group'
-          aria-label='按状态分区筛选'
+          aria-label={tVm('vm:fleetPulse.filterByStatusZone')}
           className='flex min-h-8 flex-wrap gap-[3px]'
         >
           {segments.map((z) => (
@@ -225,7 +235,7 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title='7d 余量分布'
+        title={tVm('vm:fleetPulse.7DayRemainingQuotaDistribution')}
         className='xl:col-span-2'
         meta={
           <span className='text-[13px] leading-none font-[590] tracking-[-0.01em] tabular-nums'>
@@ -234,7 +244,9 @@ export function FleetPulse({
             ) : (
               <>
                 {pulse.headroomMedian.toFixed(0)}%
-                <span className='text-muted-foreground'> 中位</span>
+                <span className='text-muted-foreground'>
+                  <Trans ns='vm' i18nKey='fleetPulse.median' />
+                </span>
               </>
             )}
           </span>
@@ -246,7 +258,12 @@ export function FleetPulse({
               <TooltipTrigger asChild>
                 <button
                   type='button'
-                  aria-label={`余量 ${bucket.label}–${Number(bucket.label) + 20}% ${pulse.headroom[i]} 台`}
+                  aria-label={tVm('vm:fleetPulse.slotsWithRemaining', {
+                    label: bucket.label,
+                    value1: Number(bucket.label) + 20,
+                    value2: pulse.headroom[i],
+                    count: pulse.headroom[i],
+                  })}
                   className='flex h-full flex-1 cursor-default flex-col justify-end gap-1'
                 >
                   <span className='text-center text-[10px] leading-none text-muted-foreground tabular-nums'>
@@ -266,8 +283,16 @@ export function FleetPulse({
                 </button>
               </TooltipTrigger>
               <TooltipContent>
-                余量 {bucket.label}–{Number(bucket.label) + 20}% ·{' '}
-                {pulse.headroom[i]} 台
+                <Trans
+                  ns='vm'
+                  i18nKey='fleetPulse.remainingSlots'
+                  values={{
+                    label: bucket.label,
+                    value: Number(bucket.label) + 20,
+                    value1: pulse.headroom[i],
+                  }}
+                  count={pulse.headroom[i]}
+                />
               </TooltipContent>
             </Tooltip>
           ))}
@@ -282,11 +307,12 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title='今日消耗'
+        title={tVm('vm:fleetPulse.todaySUsage')}
         className='xl:col-span-2'
         meta={
           <span className='text-[11px] text-muted-foreground tabular-nums'>
-            7d {fmtUsd(pulse.weekCost, 2)}
+            <Trans ns='vm' i18nKey='units.sevenDays' />{' '}
+            {fmtUsd(pulse.weekCost, 2)}
           </span>
         }
       >
@@ -295,26 +321,41 @@ export function FleetPulse({
         </div>
         <div className='flex flex-col gap-1'>
           <div className='font-mono text-[11px] text-muted-foreground tabular-nums'>
-            {fmtNum(pulse.todayReq)} req · {fmtNum(pulse.todayTok)} tok
+            {fmtNum(pulse.todayReq)}{' '}
+            <Trans ns='vm' i18nKey='units.requestsShort' /> ·{' '}
+            {fmtNum(pulse.todayTok)}{' '}
+            <Trans ns='vm' i18nKey='units.tokensShort' />
           </div>
           {pulse.topBurner ? (
             <div className='truncate text-[11px] text-muted-foreground'>
-              最高{' '}
-              <span className='text-foreground'>{pulse.topBurner.name}</span>{' '}
-              <span className='tabular-nums'>
-                {fmtUsd(pulse.topBurner.cost, 2)}
-              </span>
+              <Trans
+                ns='vm'
+                i18nKey='fleetPulse.highest'
+                values={{
+                  name: pulse.topBurner.name,
+                  formattedUsd: fmtUsd(pulse.topBurner.cost, 2),
+                }}
+                components={{
+                  part0: <span className='text-foreground' />,
+                  part1: <span className='tabular-nums' />,
+                }}
+              />
             </div>
           ) : null}
         </div>
       </Cell>
 
       <Cell
-        title='7D 成败'
+        title={tVm('vm:fleetPulse.7DayResults')}
         className='sm:col-span-2 xl:col-span-2'
         meta={
           <span className='text-[11px] text-muted-foreground tabular-nums'>
-            {weekTotal > 0 ? `${fmtNum(weekTotal)} 次` : ''}
+            {weekTotal > 0
+              ? tVm('vm:fleetPulse.requests', {
+                  value1: fmtNum(weekTotal),
+                  count: weekTotal,
+                })
+              : ''}
           </span>
         }
       >
@@ -359,8 +400,11 @@ export function FleetPulse({
           </div>
           <div className='font-mono text-[11px] text-muted-foreground tabular-nums'>
             {pulse.weekKnown
-              ? `${fmtNum(pulse.weekSuccess)} 成 · ${fmtNum(pulse.weekFail)} 败`
-              : '网关未上报成败'}
+              ? tVm('vm:fleetPulse.succeededFailed', {
+                  value1: fmtNum(pulse.weekSuccess),
+                  value2: fmtNum(pulse.weekFail),
+                })
+              : tVm('vm:fleetPulse.gatewayHasNotReportedOutcomes')}
           </div>
         </div>
       </Cell>

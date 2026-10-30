@@ -1,6 +1,6 @@
 /**
  * Distill harvest detector.
- * Runs in handleProtocol and count_tokens before any credential / slot hop.
+ * Runs in handleProtocol before any credential / slot hop.
  * OpenAI platform models (detectInboundPlatform === openai) always pass.
  * Match layers: hard harvest needles, hard distill/CoT regex, fingerprint, prompt needles, contest structure.
  */

@@ -17,7 +17,7 @@ export type VmPerms = {
   testModels: boolean
   /** oauth/*、导入凭证、额度刷新、重置券、诊断与恢复服务。 */
   credential: boolean
-  /** DELETE /vms/:id（仅管理员）。 */
+  /** DELETE /vms/:id（仅站长和运维）。 */
   remove: boolean
 }
 
@@ -36,7 +36,7 @@ const NONE: VmPerms = {
 export function vmPermsFor(
   role: PanelRole | string | null | undefined
 ): VmPerms {
-  if (role === 'admin') {
+  if (role === 'super_admin') {
     return {
       known: true,
       admin: true,
@@ -48,17 +48,7 @@ export function vmPermsFor(
       remove: true,
     }
   }
-  if (role === 'user') {
-    return {
-      ...NONE,
-      known: true,
-      power: true,
-      test: true,
-      credential: true,
-      remove: false,
-    }
-  }
-  if (role === 'super') return { ...NONE, known: true, dashboard: true }
+  if (role === 'user' || role === 'admin') return { ...NONE, known: true }
   return NONE
 }
 
@@ -71,6 +61,7 @@ export type VmDetailTab =
   'overview' | 'account' | 'proxy' | 'test' | 'ops' | 'seed'
 
 export function vmDetailTabs(perms: VmPerms): VmDetailTab[] {
+  if (!perms.power) return []
   const tabs: VmDetailTab[] = ['overview', 'account', 'proxy']
   if (perms.test) tabs.push('test')
   if (perms.admin) tabs.push('ops', 'seed')

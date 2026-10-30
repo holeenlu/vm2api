@@ -201,6 +201,18 @@ function emptySnapshot() {
 }
 
 export function normalizeCodexLimits(snapshot = {}) {
+  // A zero-length window is explicitly disabled, not an empty active 5h quota.
+  for (const role of ['primary', 'secondary']) {
+    const minutes = num(snapshot[`${role}_window_minutes`])
+    if (minutes == null || minutes > 0) continue
+    snapshot = {
+      ...snapshot,
+      [`${role}_used_percent`]: null,
+      [`${role}_reset_after_seconds`]: null,
+      [`${role}_window_minutes`]: null,
+      [`${role}_reset_at`]: null,
+    }
+  }
   const primaryMins = num(snapshot.primary_window_minutes)
   const secondaryMins = num(snapshot.secondary_window_minutes)
   const hasPrimary = primaryMins != null

@@ -1,4 +1,5 @@
 import { useNavigate } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 
@@ -9,16 +10,17 @@ interface SignOutDialogProps {
 
 export function SignOutDialog({ open, onOpenChange }: SignOutDialogProps) {
   const navigate = useNavigate()
+  const { t } = useTranslation('common')
   const signOut = useAuthStore((s) => s.signOut)
 
   return (
     <ConfirmDialog
       open={open}
       onOpenChange={onOpenChange}
-      title='退出登录'
-      desc='退出后需要重新登录才能管理号池。'
-      confirmText='退出'
-      cancelBtnText='取消'
+      title={t('common:signOut')}
+      desc={t('common:youWillNeedToSignInAgain')}
+      confirmText={t('common:signOut')}
+      cancelBtnText={t('common:cancel')}
       destructive
       handleConfirm={() => {
         signOut()
