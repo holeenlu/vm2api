@@ -1,0 +1,17 @@
+{
+  "passwordMismatch": "The new passwords do not match",
+  "saved": "Profile saved",
+  "passwordChanged": "Password changed. Other sessions have been signed out.",
+  "title": "Profile",
+  "description": "Manage your profile and sign-in password.",
+  "username": "Username",
+  "displayName": "Display name",
+  "email": "Email",
+  "identityHelp": "Your sign-in username cannot be changed. Your display name and contact email do not affect permissions.",
+  "emailHelp": "Email is for contact purposes only, not for sign-in or password recovery.",
+  "save": "Save profile",
+  "changePassword": "Change password",
+  "currentPassword": "Current password",
+  "newPassword": "New password",
+  "confirmPassword": "Confirm new password"
+}

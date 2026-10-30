@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { DistillRules } from '@/types/panel-routing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Input } from '@/components/ui/input'
@@ -30,6 +31,8 @@ export function DistillSettings({
 }: {
   onDirtyChange: (dirty: boolean) => void
 }) {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const q = useQuery(distillQueryOptions())
   const [draft, setDraft] = useState<DistillRules | null>(null)
@@ -81,7 +84,7 @@ export function DistillSettings({
         }),
       }),
     onSuccess: (data) => {
-      toast.success('已保存蒸馏关')
+      toast.success(translate('risk:distillSaved'))
       qc.setQueryData(distillQueryOptions().queryKey, data)
     },
     onError: (error: Error) => toast.error(error.message),
@@ -109,33 +112,51 @@ export function DistillSettings({
 
   return (
     <div className='space-y-8 p-4'>
-      <Group title='何时拦截' hint='OpenAI 平台模型不过这一关。'>
+      <Group
+        title={translate('risk:whenToBlock')}
+        hint={translate('risk:distillOpenaiBypass')}
+      >
         <ToggleList>
-          <ToggleItem label='拦截蒸馏请求' desc='关掉后内置蒸馏正则也停'>
+          <ToggleItem
+            label={translate('risk:blockDistillation')}
+            desc={translate('risk:distillDisableHint')}
+          >
             <Switch
               checked={draft.enabled}
               onCheckedChange={(v) => patch({ enabled: v })}
             />
           </ToggleItem>
-          <ToggleItem label='官方客户端放行' desc='收割包装和正则仍拦'>
+          <ToggleItem
+            label={translate('risk:allowOfficialClients')}
+            desc={translate('risk:harvestStillBlocked')}
+          >
             <Switch
               checked={draft.skip_official}
               onCheckedChange={(v) => patch({ skip_official: v })}
             />
           </ToggleItem>
-          <ToggleItem label='0 注入放行' desc='拒答缓存仍生效'>
+          <ToggleItem
+            label={translate('risk:allowZeroInjection')}
+            desc={translate('risk:refusalCacheStillApplies')}
+          >
             <Switch
               checked={draft.skip_zero !== false}
               onCheckedChange={(v) => patch({ skip_zero: v })}
             />
           </ToggleItem>
-          <ToggleItem label='无工具才看结构' desc='带 tools 不当收割'>
+          <ToggleItem
+            label={translate('risk:structureWithoutTools')}
+            desc={translate('risk:toolsNotHarvesting')}
+          >
             <Switch
               checked={draft.structure.require_no_tools}
               onCheckedChange={(v) => patchStructure({ require_no_tools: v })}
             />
           </ToggleItem>
-          <ToggleItem label='单轮才看结构' desc='多轮对话不当收割'>
+          <ToggleItem
+            label={translate('risk:singleTurnStructure')}
+            desc={translate('risk:multiTurnNotHarvesting')}
+          >
             <Switch
               checked={draft.structure.require_single_turn}
               onCheckedChange={(v) =>
@@ -143,9 +164,12 @@ export function DistillSettings({
               }
             />
           </ToggleItem>
-          <ToggleItem label='结构特征 max_tokens 下限' desc='低于它不看结构'>
+          <ToggleItem
+            label={translate('risk:structureTokenMinimum')}
+            desc={translate('risk:structureMinimumHint')}
+          >
             <Input
-              aria-label='结构特征 max_tokens 下限'
+              aria-label={translate('risk:structureTokenMinimum')}
               className='w-24 text-right tabular-nums'
               type='number'
               min={1}
@@ -157,9 +181,12 @@ export function DistillSettings({
               }}
             />
           </ToggleItem>
-          <ToggleItem label='赛题结构正则' desc='空着就不看结构赛题'>
+          <ToggleItem
+            label={translate('risk:contestStructureRegex')}
+            desc={translate('risk:contestRegexEmptyHint')}
+          >
             <Input
-              aria-label='赛题结构正则'
+              aria-label={translate('risk:contestStructureRegex')}
               className='w-72 font-mono text-xs'
               value={draft.structure.contest_pattern}
               onChange={(e) =>
@@ -171,20 +198,24 @@ export function DistillSettings({
       </Group>
 
       <Group
-        title='规则'
-        hint='不要写单独的 distill，会误伤化学题；也不要写「请分步解答」。'
+        title={translate('risk:rules')}
+        hint={translate('risk:regexFalsePositiveHint')}
       >
         <FoldStack>
           <Fold
             flush
-            title='收割包装'
-            meta={hardCount ? `${hardCount} 条` : '还没有'}
+            title={translate('risk:harvestingWrappers')}
+            meta={
+              hardCount
+                ? translate('risk:itemCount', { count: hardCount })
+                : translate('risk:noneYet')
+            }
           >
             <p className='mb-2 text-xs text-muted-foreground'>
-              一行一条。官方客户端和 0 注入也拦。删掉即停，不会补回。
+              {translate('risk:wrapperHint')}
             </p>
             <Textarea
-              aria-label='收割包装'
+              aria-label={translate('risk:harvestingWrappers')}
               className='min-h-36 font-mono text-xs'
               value={hardText}
               onChange={(e) => setHardText(e.target.value)}
@@ -192,12 +223,18 @@ export function DistillSettings({
           </Fold>
           <Fold
             flush
-            title='拦截模板'
-            meta={needleCount ? `${needleCount} 条` : '还没有'}
+            title={translate('risk:blockingTemplates')}
+            meta={
+              needleCount
+                ? translate('risk:itemCount', { count: needleCount })
+                : translate('risk:noneYet')
+            }
           >
-            <p className='mb-2 text-xs text-muted-foreground'>一行一条。</p>
+            <p className='mb-2 text-xs text-muted-foreground'>
+              {translate('risk:onePerLineSentence')}
+            </p>
             <Textarea
-              aria-label='拦截模板'
+              aria-label={translate('risk:blockingTemplates')}
               className='min-h-36 font-mono text-xs'
               value={needlesText}
               onChange={(e) => setNeedlesText(e.target.value)}
@@ -205,15 +242,18 @@ export function DistillSettings({
           </Fold>
           <Fold
             flush
-            title='附加正则'
-            meta={patternCount ? `${patternCount} 条` : '还没有'}
+            title={translate('risk:extraRegex')}
+            meta={
+              patternCount
+                ? translate('risk:itemCount', { count: patternCount })
+                : translate('risk:noneYet')
+            }
           >
             <p className='mb-2 text-xs text-muted-foreground'>
-              一行一条。官方客户端和 0 注入也拦。内置蒸馏正则在「硬正则」关的
-              distill 类别里。
+              {translate('risk:extraRegexHint')}
             </p>
             <Textarea
-              aria-label='附加正则'
+              aria-label={translate('risk:extraRegex')}
               className='min-h-36 font-mono text-xs'
               value={patternsText}
               onChange={(e) => setPatternsText(e.target.value)}
@@ -221,14 +261,18 @@ export function DistillSettings({
           </Fold>
           <Fold
             flush
-            title='题目指纹'
-            meta={fpCount ? `${fpCount} 题` : '还没有'}
+            title={translate('risk:questionFingerprints')}
+            meta={
+              fpCount
+                ? translate('risk:questionCount', { count: fpCount })
+                : translate('risk:noneYet')
+            }
           >
             <p className='mb-2 text-xs text-muted-foreground'>
-              每题用 --- 分隔。题面包含这段就拦。
+              {translate('risk:fingerprintHint')}
             </p>
             <Textarea
-              aria-label='题目指纹'
+              aria-label={translate('risk:questionFingerprints')}
               className='min-h-36 font-mono text-xs'
               value={fpText}
               onChange={(e) => setFpText(e.target.value)}
@@ -237,10 +281,12 @@ export function DistillSettings({
         </FoldStack>
       </Group>
 
-      <Group title='返回给客户端'>
+      <Group title={translate('risk:clientResponse')}>
         <div className='grid gap-3 sm:grid-cols-[8rem_minmax(0,1fr)_minmax(0,1fr)]'>
           <div className='space-y-1.5'>
-            <Label htmlFor='distill-status'>HTTP 状态</Label>
+            <Label htmlFor='distill-status'>
+              {translate('risk:httpStatus')}
+            </Label>
             <Input
               id='distill-status'
               type='number'
@@ -255,7 +301,7 @@ export function DistillSettings({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='distill-code'>错误 code</Label>
+            <Label htmlFor='distill-code'>{translate('risk:errorCode')}</Label>
             <Input
               id='distill-code'
               className='font-mono'
@@ -264,7 +310,7 @@ export function DistillSettings({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='distill-type'>错误 type</Label>
+            <Label htmlFor='distill-type'>{translate('risk:errorType')}</Label>
             <Input
               id='distill-type'
               className='font-mono'
@@ -273,7 +319,9 @@ export function DistillSettings({
             />
           </div>
           <div className='space-y-1.5 sm:col-span-3'>
-            <Label htmlFor='distill-message'>返回文案</Label>
+            <Label htmlFor='distill-message'>
+              {translate('risk:responseMessage')}
+            </Label>
             <Input
               id='distill-message'
               value={draft.error.message}
