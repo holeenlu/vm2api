@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ApiEndpointsRepo } from '../db/repos/api-endpoints-repo.mjs'
@@ -55,7 +56,43 @@ function headersWithAuthScheme(headers = {}, scheme) {
   return next
 }
 
-export function publicEndpointView(ep, { reveal = false } = {}) {
+function safeEndpointUrl(value) {
+  try {
+    const url = new URL(value)
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+export function assertEndpointConnectionAccess(ep, patch, role, key = null, resolvedProxyUrl) {
+  if (role === 'super_admin') return
+  const view = publicEndpointView(ep)
+  const protectedValues = {
+    kind: view.kind,
+    protocol: view.protocol,
+    base_url: view.base_url,
+    headers: ep.headers || {},
+    auth_scheme: view.auth_scheme,
+    authScheme: view.auth_scheme,
+    proxy_id: key?.proxy_id || '',
+    proxy_url: key?.proxy_url || '',
+  }
+  const changed = Object.entries(protectedValues).some(
+    ([field, value]) => Object.hasOwn(patch, field) && !isDeepStrictEqual(patch[field], value),
+  )
+  if (changed || (resolvedProxyUrl !== undefined && resolvedProxyUrl !== (key?.proxy_url || '')))
+    throw Object.assign(new Error('只有管理员可以变更已保存凭据的连接地址、代理或认证配置'), {
+      status: 403,
+      code: 'endpoint_connection_forbidden',
+    })
+}
+
+export function publicEndpointView(ep, { reveal = false, role = 'super_admin' } = {}) {
   if (!ep) return null
   return {
     id: ep.id,
@@ -64,8 +101,14 @@ export function publicEndpointView(ep, { reveal = false } = {}) {
     prefix: ep.prefix || '',
     kind: resolvePreset(ep.kind, ep).kind,
     protocol: resolvePreset(ep.kind, ep).protocol,
-    base_url: resolvePreset(ep.kind, ep).base_url || ep.base_url,
-    headers: stripAuthSchemeHeader(ep.headers),
+    base_url:
+      role === 'super_admin'
+        ? resolvePreset(ep.kind, ep).base_url || ep.base_url
+        : safeEndpointUrl(resolvePreset(ep.kind, ep).base_url || ep.base_url),
+    headers: role === 'super_admin' ? stripAuthSchemeHeader(ep.headers) : {},
+    headers_configured: Object.keys(stripAuthSchemeHeader(ep.headers)).length > 0,
+    connection_editable:
+      role === 'super_admin' || !(ep.api_key_entries?.length || Object.keys(ep.headers || {}).length),
     auth_scheme: endpointAuthScheme(ep),
     disable_cooling: !!ep.disable_cooling,
     priority: Number(ep.priority) || 0,
@@ -73,11 +116,12 @@ export function publicEndpointView(ep, { reveal = false } = {}) {
     updated_at: ep.updated_at,
     api_key_entries: (ep.api_key_entries || []).map((k) => ({
       id: k.id,
-      proxy_url: k.proxy_url || '',
+      ...(role === 'super_admin' ? { proxy_url: k.proxy_url || '' } : {}),
+      has_proxy: !!(k.proxy_url || k.proxy_id),
       proxy_id: k.proxy_id || '',
       disabled: !!k.disabled,
       cooldown_until: k.cooldown_until || null,
-      api_key: reveal ? k.api_key : maskUpstreamKey(k.api_key),
+      api_key: reveal && role === 'super_admin' ? k.api_key : maskUpstreamKey(k.api_key),
       key_suffix: String(k.api_key || '').slice(-4),
     })),
     models: (ep.models || []).map((m) => ({
@@ -101,8 +145,8 @@ export class ApiEndpointStore {
     this.repo = new ApiEndpointsRepo(db)
   }
 
-  list({ reveal = false } = {}) {
-    return this.repo.listHydrated().map((ep) => publicEndpointView(ep, { reveal }))
+  list({ reveal = false, role = 'super_admin' } = {}) {
+    return this.repo.listHydrated().map((ep) => publicEndpointView(ep, { reveal, role }))
   }
 
   listRaw() {

@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { expiresAtToMs } from '@/lib/fable-status'
 import { isCodexVm } from '@/lib/vm-kind'
@@ -12,10 +13,10 @@ export function subscriptionListLabel(
   now: number
 ): { text: string; title: string; tone: SubscriptionTone } {
   const unknown = {
-    text: '订阅 未知',
+    text: t('vm:subscriptionList.unknown'),
     title: isCodexVm(vm)
-      ? '凭证没有 chatgpt_subscription_active_until，不用 access token 或额度重置推算'
-      : 'Claude 没有上游订阅到期字段',
+      ? t('vm:subscriptionList.missingCredential')
+      : t('vm:subscriptionList.claudeUnknown'),
     tone: 'muted' as const,
   }
   if (!isCodexVm(vm)) return unknown
@@ -26,15 +27,15 @@ export function subscriptionListLabel(
   const stamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
   if (ms <= now) {
     return {
-      text: `订阅 ${stamp} 已过期`,
-      title: '以凭证为准，不是额度窗口重置',
+      text: t('vm:subscriptionList.expired', { date: stamp }),
+      title: t('vm:subscriptionList.credentialOnly'),
       tone: 'bad',
     }
   }
   const days = Math.ceil((ms - now) / 86_400_000)
   return {
-    text: `订阅 ${stamp} · ${days}d`,
-    title: '以凭证为准，不是 access token 到期或额度窗口重置',
+    text: t('vm:subscriptionList.remaining', { date: stamp, days }),
+    title: t('vm:subscriptionList.credentialOnly'),
     tone: days <= NEAR_DAYS ? 'warn' : 'muted',
   }
 }

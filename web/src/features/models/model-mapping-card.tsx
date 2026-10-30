@@ -7,6 +7,7 @@ import {
   RotateCcw,
   Trash2,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -22,7 +23,7 @@ import {
 } from '@/components/ui/select'
 import { routingQueryOptions } from '@/features/settings/queries'
 import {
-  ALIAS_PROBLEM_TEXT,
+  ALIAS_PROBLEM_KEYS,
   AUTO_REVIEW_DEFAULT,
   type MappingRow,
   aliasProblem,
@@ -44,6 +45,7 @@ function storedMappings(data: Record<string, unknown> | undefined) {
 }
 
 export function ModelMappingCard({ targets, imageIds }: Props) {
+  const { t } = useTranslation('models')
   const qc = useQueryClient()
   const q = useQuery(routingQueryOptions())
   const serverMap = storedMappings(q.data)
@@ -70,7 +72,7 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
         body: JSON.stringify({ codex: { model_mappings: rowsToMap(rows) } }),
       }),
     onSuccess: async () => {
-      toast.success('模型映射已保存')
+      toast.success(t('models:mappingSaved'))
       await qc.invalidateQueries({ queryKey: routingQueryOptions().queryKey })
     },
     onError: (error: Error) => toast.error(error.message),
@@ -86,11 +88,9 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
     <section className='rounded-2xl border border-border/70 bg-card p-4 shadow-sm'>
       <div className='flex flex-wrap items-start justify-between gap-3'>
         <div className='max-w-2xl space-y-1'>
-          <h3 className='font-semibold'>模型映射</h3>
+          <h3 className='font-semibold'>{t('models:mappingTitle')}</h3>
           <p className='text-sm leading-6 text-muted-foreground'>
-            请求里的模型名命中别名时，网关把它改写成右侧的 GPT 模型再转发。
-            <span className='font-mono'>codex-auto-review</span> 是 Codex
-            自动审批审查（guardian）调用的隐藏模型。
+            {t('models:mappingHelp')}
           </p>
         </div>
         <div className='flex flex-wrap gap-2'>
@@ -106,7 +106,7 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
             }
           >
             <Plus className='size-3.5' />
-            添加映射
+            {t('models:mappingAdd')}
           </Button>
           <Button
             size='sm'
@@ -115,12 +115,16 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
             disabled={!dirty || blocked || save.isPending}
             onClick={() => save.mutate()}
           >
-            {save.isPending ? '保存中…' : dirty ? '保存映射' : '已保存'}
+            {save.isPending
+              ? t('models:saving')
+              : dirty
+                ? t('models:mappingSave')
+                : t('models:saved')}
           </Button>
         </div>
       </div>
 
-      <ul className='mt-4 space-y-2' aria-label='模型映射列表'>
+      <ul className='mt-4 space-y-2' aria-label={t('models:mappingList')}>
         {rows.map((row, i) => {
           const aliasError = problems[i]
           const targetDisabled = row.target
@@ -142,7 +146,9 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
                       {row.alias}
                     </span>
                     {row.target === AUTO_REVIEW_DEFAULT ? (
-                      <Badge variant='secondary'>默认</Badge>
+                      <Badge variant='secondary'>
+                        {t('models:mappingDefault')}
+                      </Badge>
                     ) : null}
                   </div>
                 ) : (
@@ -152,15 +158,15 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
                       aliasError && 'border-destructive'
                     )}
                     value={row.alias}
-                    placeholder='别名，例如 my-review'
-                    aria-label={`第 ${i + 1} 条映射的别名`}
+                    placeholder={t('models:mappingPlaceholder')}
+                    aria-label={t('models:mappingAliasLabel', { index: i + 1 })}
                     aria-invalid={Boolean(aliasError)}
                     onChange={(e) => patch(i, { alias: e.target.value })}
                   />
                 )}
                 {aliasError ? (
                   <p className='text-xs text-destructive' role='alert'>
-                    {ALIAS_PROBLEM_TEXT[aliasError]}
+                    {t(ALIAS_PROBLEM_KEYS[aliasError])}
                   </p>
                 ) : null}
               </div>
@@ -175,15 +181,20 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
                 >
                   <SelectTrigger
                     className='h-9 w-full font-mono'
-                    aria-label={`${row.alias || `第 ${i + 1} 条映射`} 的目标模型`}
+                    aria-label={t('models:mappingTargetLabel', {
+                      index: i + 1,
+                      alias: row.alias,
+                    })}
                   >
-                    <SelectValue placeholder='选择 GPT 模型' />
+                    <SelectValue placeholder={t('models:mappingChoose')} />
                   </SelectTrigger>
                   <SelectContent>
                     {options.map((id) => (
                       <SelectItem key={id} value={id} className='font-mono'>
                         {id}
-                        {targets.includes(id) ? '' : '（已停用）'}
+                        {targets.includes(id)
+                          ? ''
+                          : t('models:mappingDisabled')}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -194,7 +205,7 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
                     role='alert'
                   >
                     <AlertTriangle className='size-3.5 shrink-0' />
-                    目标已停用，请求会被拒绝（model_disabled）
+                    {t('models:mappingDisabledHelp')}
                   </p>
                 ) : null}
               </div>
@@ -208,20 +219,22 @@ export function ModelMappingCard({ targets, imageIds }: Props) {
                     onClick={() => patch(i, { target: AUTO_REVIEW_DEFAULT })}
                   >
                     <RotateCcw className='size-3.5' />
-                    恢复默认
+                    {t('models:restoreDefaults')}
                   </Button>
                 ) : (
                   <Button
                     size='sm'
                     variant='ghost'
                     className='cursor-pointer gap-1.5'
-                    aria-label={`删除映射 ${row.alias}`}
+                    aria-label={t('models:mappingDeleteLabel', {
+                      alias: row.alias,
+                    })}
                     onClick={() =>
                       setRows((prev) => prev.filter((_, j) => j !== i))
                     }
                   >
                     <Trash2 className='size-3.5' />
-                    删除
+                    {t('models:delete')}
                   </Button>
                 )}
               </div>

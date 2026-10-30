@@ -118,7 +118,7 @@ test('launchd kernel plist escapes slot paths and environment values', () => {
   assert.equal(p.claude, '/Users/o&b/.vm2api/vms/vm-07/claude')
   const vm = { id: 'vm-07', timezone: 'Asia/Tokyo', locale: 'ja_JP.UTF-8' }
   const plists = nativeServicePlists(vm, p)
-  assert.equal(plists.kernel.path, '/Users/o&b/.vm2api/vms/vm-07/launchd/com.vm2api.slot.vm-07.kernel.plist')
+  assert.equal(plists.kernel.path, '/Users/o&b/.vm2api/vms/vm-07/launchd/com.tapmodels.slot.vm-07.kernel.plist')
   const kernel = plists.kernel.body
   assert.match(kernel, /<string>\/Users\/o&amp;b\/\.vm2api\/native\/d1g3st\/kin-kernel<\/string>/)
   assert.match(kernel, /<string>--gateway-worker<\/string>/)
@@ -178,7 +178,7 @@ test('node platform comes from uname -s and the darwin host stats parse like /pr
 
 test('platform is stored per node without touching the edit version', () => {
   const db = new DatabaseSync(':memory:')
-  for (const name of ['026_cluster_nodes.sql', '040_cluster_node_platform.sql']) {
+  for (const name of ['026_cluster_nodes.sql', '046_cluster_node_platform.sql']) {
     db.exec(fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   }
   const repo = new ClusterNodesRepo(db)

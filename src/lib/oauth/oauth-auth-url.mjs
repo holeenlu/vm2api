@@ -252,6 +252,8 @@ export async function exchangeAuthCode({
         account_uuid: identity.account_uuid,
         org_uuid: identity.org_uuid,
         subscription_type: identity.subscription_type,
+        ...(identity.rate_limit_tier ? { rate_limit_tier: identity.rate_limit_tier } : {}),
+        ...(identity.billing_type ? { billing_type: identity.billing_type } : {}),
         source: session.source || 'oauth-auth-url',
         flavor: session.flavor || 'cai',
       },
