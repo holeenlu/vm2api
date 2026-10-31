@@ -94,7 +94,7 @@ test('connectSsh pins the host key and classifies auth failures', async () => {
     )
     await assert.rejects(
       connectSsh({ host: '127.0.0.1', port, username: 'u', authType: 'password', password: 'nope' }),
-      (err) => err.code === 'auth_failed',
+      (err) => err.code === 'auth_failed' && err.status === 403,
     )
   } finally {
     server.close()

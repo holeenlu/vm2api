@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { statusColorForPct } from '@/lib/fable-status'
-import { fmtCountdown } from '@/lib/format'
 import { poolQuota, type PoolWindow } from '@/lib/pool-quota'
 import { useNow } from '@/hooks/use-now'
+import { formatCountdown as fmtCountdown } from '@/features/logs/display-time'
 import { PanelCard } from '@/features/overview/panel-card'
 
 /**
@@ -24,10 +26,12 @@ function SegBar({
   live: boolean
   delayMs: number
 }) {
+  const { t: translate } = useTranslation('overview')
+
   if (!probed) {
     return (
       <i
-        title={`${name} · 未探测`}
+        title={translate('overview:accountUnprobed', { p0: name })}
         className='h-full min-w-1 flex-1 rounded-[2px] border border-dashed border-[color:var(--status-none)] opacity-60'
         style={{ maxWidth: 18 }}
       />
@@ -35,7 +39,10 @@ function SegBar({
   }
   return (
     <i
-      title={`${name} · 已用 ${usedPct.toFixed(0)}%`}
+      title={translate('overview:accountUsedPercent', {
+        p0: name,
+        p1: usedPct.toFixed(0),
+      })}
       className='relative h-full min-w-1 flex-1 overflow-hidden rounded-[2px] bg-muted'
       style={{ maxWidth: 18 }}
     >
@@ -60,6 +67,8 @@ function WindowCell({
   live: boolean
   now: number
 }) {
+  const { t: translate } = useTranslation('overview')
+
   const usedPoolPct = 100 - win.remainPct
   // 最早的未来重置 = 池容量下一次回血的时刻。已到点未刷新的不选，
   // 免得倒计时钉死在 0；后端刷新窗口后自然跳到下一张。
@@ -81,7 +90,9 @@ function WindowCell({
         <span className='text-[11.5px] text-muted-foreground'>{win.label}</span>
         {win.capacity ? (
           <span className='text-[11px] text-muted-foreground tabular-nums'>
-            余 {win.remainPct.toFixed(0)}%
+            {translate('overview:remainingPercent', {
+              percent: win.remainPct.toFixed(0),
+            })}
           </span>
         ) : null}
       </div>
@@ -93,7 +104,7 @@ function WindowCell({
           <>
             {win.remainAccounts.toFixed(1)}
             <small className='ml-1 text-[13px] font-medium text-muted-foreground'>
-              / {win.capacity} 账号
+              {translate('overview:capacityAccounts', { count: win.capacity })}
             </small>
           </>
         ) : (
@@ -103,18 +114,29 @@ function WindowCell({
       {win.capacity ? (
         <>
           <div className='mt-0.5 flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground tabular-nums'>
-            <span>已耗 {win.usedAccounts.toFixed(1)} 账号当量</span>
+            <span>
+              {translate('overview:usedAccountEquivalents', {
+                amount: win.usedAccounts.toFixed(1),
+              })}
+            </span>
             {next ? (
               <span
-                title={`${next.name} · ${new Date(next.at).toLocaleString()}`}
+                title={`${next.name} · ${new Date(next.at).toLocaleString(i18n.language)}`}
               >
-                最早重置 {fmtCountdown(next.at - now)}
+                {translate('overview:nextResetIn', {
+                  duration: fmtCountdown(next.at - now),
+                })}
               </span>
             ) : null}
           </div>
           <div
             role='img'
-            aria-label={`${win.label} 剩余 ${win.remainPct.toFixed(0)}%，已耗 ${win.usedAccounts.toFixed(1)} / ${win.capacity} 账号`}
+            aria-label={translate('overview:poolUsageSummary', {
+              p0: win.label,
+              p1: win.remainPct.toFixed(0),
+              p2: win.usedAccounts.toFixed(1),
+              p3: win.capacity,
+            })}
             className='mt-2 flex h-9 items-stretch gap-[2px]'
           >
             {win.segs.map((s, i) => (
@@ -124,7 +146,10 @@ function WindowCell({
                 probed={s.probed}
                 name={
                   s.resetAt > now
-                    ? `${s.name} · 重置 ${fmtCountdown(s.resetAt - now)}`
+                    ? translate('overview:accountResetIn', {
+                        p0: s.name,
+                        p1: fmtCountdown(s.resetAt - now),
+                      })
                     : s.name
                 }
                 live={live}
@@ -135,7 +160,7 @@ function WindowCell({
         </>
       ) : (
         <div className='mt-0.5 text-[11px] text-muted-foreground'>
-          无 Fable 凭证（仅 Max 档计入）
+          {translate('overview:noFableCredentials')}
         </div>
       )}
     </div>
@@ -150,6 +175,8 @@ function WindowCell({
  * 竖条一凭证一段、按已用降序——风险集中在最左侧，值班扫一眼即得。
  */
 export function PoolQuota({ vms }: { vms: Vm[] }) {
+  const { t: translate } = useTranslation('overview')
+
   const { windows, eligible, withToken } = poolQuota(vms)
   const now = useNow()
   // 首帧后再放开高度，让分段条从 0 涨到实际用量；数据刷新时同一 transition 平滑跟随。
@@ -160,8 +187,11 @@ export function PoolQuota({ vms }: { vms: Vm[] }) {
   }, [])
   return (
     <PanelCard
-      title='号池额度'
-      meta={`${eligible} 张有效凭证 / 共 ${withToken} · 无效与 revoke 不计`}
+      title={translate('overview:poolQuota')}
+      meta={translate('overview:validCredentials', {
+        p0: eligible,
+        p1: withToken,
+      })}
     >
       <div className='grid gap-px bg-border/60 sm:grid-cols-3'>
         {windows.map((w) => (

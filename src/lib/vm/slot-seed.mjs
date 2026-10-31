@@ -14,6 +14,25 @@ import { runtimeFileOwner } from '../oauth/oauth-credentials.mjs'
 const SEED_FILES = ['settings.json', 'claude.setting', 'kin-seed.json']
 
 function withSeedDirectory(slotDir, create, fn) {
+  // The production path uses Linux O_NOFOLLOW directory handles. Local macOS
+  // development and unit tests do not expose /proc/self/fd, so use the same
+  // directory layout through ordinary paths there.
+  if (process.platform !== 'linux') {
+    let dir = slotDir
+    if (create) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    for (const name of ['', 'cli-home', '.claude']) {
+      if (name) dir = path.join(dir, name)
+      if (create && name) {
+        try {
+          fs.mkdirSync(dir, { mode: 0o700 })
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error
+        }
+      }
+      if (!fs.lstatSync(dir).isDirectory()) throw new Error('seed_directory_invalid')
+    }
+    return fn(dir)
+  }
   if (create) fs.mkdirSync(slotDir, { recursive: true, mode: 0o700 })
   const handles = []
   try {

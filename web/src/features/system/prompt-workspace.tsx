@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
+import { t as tr } from '@/i18n'
 import type { PersonaPreset } from '@/types/panel-routing'
 import { Check, RotateCcw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import {
   DEFAULT_PERSONA_TEMPLATES,
-  PERSONA_PRESET_OPTIONS,
   PERSONA_PRESETS,
   PERSONA_TEMPLATE_VARS,
   formatLineError,
   parsePersonaTemplateLines,
   personaPresetFromCompat,
-  personaPresetLabel,
   presetSeed,
   stringifyPersonaTemplate,
   validatePersonaTemplate,
@@ -30,6 +30,7 @@ import {
   PersonaTemplateEditor,
   Problems,
 } from '@/features/settings/persona-editors'
+import { systemPresetLabel } from './preset-label'
 import { PromptFields } from './prompt-fields'
 import {
   promptDisplayText,
@@ -59,13 +60,16 @@ function PresetBar({
   summaries: Record<PersonaPreset, string>
   onView: (preset: PersonaPreset) => void
 }) {
+  const { t } = useTranslation('system')
+
   return (
     <div
       role='tablist'
-      aria-label='system 提示词档位'
+      aria-label={t('system:presetSelector')}
       className='grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5'
     >
-      {PERSONA_PRESET_OPTIONS.map(([key, label]) => {
+      {PERSONA_PRESETS.map((key) => {
+        const label = systemPresetLabel(key)
         const selected = key === viewing
         return (
           <button
@@ -89,7 +93,7 @@ function PresetBar({
               {key === active ? (
                 <span className='ml-auto flex shrink-0 items-center gap-1 text-[10px] font-medium whitespace-nowrap text-emerald-600 dark:text-emerald-400'>
                   <Check className='size-3' aria-hidden />
-                  生效
+                  {t('system:active')}
                 </span>
               ) : null}
             </span>
@@ -110,6 +114,8 @@ export function SystemPromptWorkspace({
   onChange: (next: Compat) => void
   onProblemsChange: (problems: string[]) => void
 }) {
+  const { t } = useTranslation('system')
+
   const [drafts, setDrafts] = useState<PersonaDrafts | null>(null)
   const active = personaPresetFromCompat(compat)
   const [viewing, setViewing] = useState<PersonaPreset>(active)
@@ -124,22 +130,30 @@ export function SystemPromptWorkspace({
     if (!drafts) return []
     const out: string[] = []
     for (const key of PERSONA_PRESETS) {
-      const at = key === active ? '' : `「${personaPresetLabel(key)}」`
+      const messageKey =
+        key === active ? 'system:templateError' : 'system:presetTemplateError'
       const parsed = parsePersonaTemplateLines(drafts[key])
       for (const err of parsed.errors)
-        out.push(`模板${at}${formatLineError(err)}`)
+        out.push(
+          t(messageKey, {
+            preset: systemPresetLabel(key),
+            error: formatLineError(err),
+          })
+        )
       for (const msg of validatePersonaTemplate(parsed.blocks))
-        out.push(`模板${at}${msg}`)
+        out.push(t(messageKey, { preset: systemPresetLabel(key), error: msg }))
     }
     return out
-  }, [drafts, active])
+  }, [drafts, active, t])
 
   useEffect(() => {
     onProblemsChange(problems)
   }, [problems, onProblemsChange])
 
   if (!drafts) {
-    return <p className='text-sm text-muted-foreground'>读取中…</p>
+    return (
+      <p className='text-sm text-muted-foreground'>{t('system:loading')}</p>
+    )
   }
 
   const setDraft = (text: string) => {
@@ -166,15 +180,23 @@ export function SystemPromptWorkspace({
       />
 
       <div className='grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'>
-        <section aria-label='出站预览' className='min-w-0 xl:sticky xl:top-20'>
+        <section
+          aria-label={tr('system:sync14008OutboundPreview')}
+          className='min-w-0 xl:sticky xl:top-20'
+        >
           <SystemPreview preset={viewing} blocks={blocks} compat={compat} />
         </section>
-        <aside aria-label='注入控制' className='min-w-0 space-y-4'>
+        <aside
+          aria-label={tr('system:sync14008InjectionControls')}
+          className='min-w-0 space-y-4'
+        >
           {viewing !== active ? (
             <div className='flex items-center justify-between gap-3 rounded-xl border border-dashed px-4 py-2.5'>
               <span className='text-sm text-muted-foreground'>
-                正在查看「{personaPresetLabel(viewing)}」，当前生效「
-                {personaPresetLabel(active)}」
+                {t('system:viewingPreset', {
+                  viewing: systemPresetLabel(viewing),
+                  active: systemPresetLabel(active),
+                })}
               </span>
               <Button
                 type='button'
@@ -188,14 +210,16 @@ export function SystemPromptWorkspace({
                   })
                 }
               >
-                设为生效
+                {t('system:activate')}
               </Button>
             </div>
           ) : null}
 
           <Card className='gap-0 py-0'>
             <div className='flex items-center justify-between gap-2 px-5 py-4 sm:px-6'>
-              <span className='text-base font-semibold'>注入控制</span>
+              <span className='text-base font-semibold'>
+                {tr('system:sync14008InjectionControls')}
+              </span>
               <Button
                 type='button'
                 size='sm'
@@ -210,18 +234,18 @@ export function SystemPromptWorkspace({
                 }
               >
                 <RotateCcw />
-                恢复预设
+                {tr('system:restorePreset')}
               </Button>
             </div>
             <div className='space-y-3 border-t border-border/60 px-5 py-4 sm:px-6'>
               {viewing === 'custom' &&
               personaDraftStoresEmpty(text, 'custom') ? (
-                <Notice tone='caution'>空模板会回落官方提示词。</Notice>
+                <Notice tone='caution'>{tr('system:emptyTemplateHint')}</Notice>
               ) : null}
               {viewing === 'custom' || hasErrors ? (
                 <details className='group'>
                   <summary className='cursor-pointer py-2 text-sm font-medium focus-visible:rounded-md'>
-                    详情编辑
+                    {tr('system:sync14008DetailedEditor')}
                   </summary>
                   <div className='pt-3'>
                     <PersonaTemplateEditor

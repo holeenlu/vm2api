@@ -73,9 +73,9 @@ test('402 and failed transport are visible with unknown usage', async (t) => {
   assert.equal(events[1].http_status, null)
 })
 test('the provider usage endpoint is not exposed to non-admin panel roles', () => {
-  assert.equal(authorizePanelRoute('GET', '/api/panel/jev-usage', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/jev-usage', 'super_admin').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/jev-usage', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/jev-usage', 'super').ok, false)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/jev-usage', 'admin').ok, false)
 })
 
 test('usage persistence failure cannot turn a valid model decision into a request failure', async (t) => {

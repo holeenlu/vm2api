@@ -123,7 +123,7 @@ function fakeNode(files = new Map()) {
       })
     },
   }
-  const host = { uid: 1000, gid: 1000, home: '/home/ubuntu', root: '/home/ubuntu/.vm2api', sudo: true }
+  const host = { uid: 1000, gid: 1000, home: '/home/ubuntu', root: '/home/ubuntu/.tapmodels', sudo: true }
   return {
     files,
     modes,
@@ -447,9 +447,9 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
   assert.ok(entry, 'the remote Claude command must name a file baked into its slot image')
   assert.equal(entry.mode, 0o755)
   assert.match(entry.body.toString(), /^#!\/bin\/sh/)
-  assert.match(a.ref, /^vm2api\/kin-slot-ubuntu-24\.04:[0-9a-f]{12}$/)
+  assert.match(a.ref, /^tapmodels\/kin-slot-ubuntu-24\.04:[0-9a-f]{12}$/)
   const kvm = slotImageSpec(root, 'ubuntu-24.04', { runtime: 'kvm' })
-  assert.match(kvm.ref, /^vm2api\/kin-slot-kvm-ubuntu-24\.04:[0-9a-f]{12}$/)
+  assert.match(kvm.ref, /^tapmodels\/kin-slot-kvm-ubuntu-24\.04:[0-9a-f]{12}$/)
   assert.notEqual(kvm.ref, a.ref)
   fs.writeFileSync(path.join(root, 'VERSION'), '9.9.10\n')
   assert.equal(
@@ -799,7 +799,7 @@ test('startSlotImageBuild returns a job awaitSlotImageBuild can finish', async (
   assert.equal(job.status, 'running')
   assert.equal(nodeImageBuildRunning('n1'), true)
   assert.equal(nodeImageBuildRunning('n10'), false)
-  assert.match(job.ref, /^vm2api\/kin-slot-ubuntu-24\.04:/)
+  assert.match(job.ref, /^tapmodels\/kin-slot-ubuntu-24\.04:/)
   const done = await awaitSlotImageBuild(job)
   assert.equal(done, job)
   assert.equal(done.status, 'done')

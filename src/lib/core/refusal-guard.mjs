@@ -22,7 +22,7 @@ export const REFUSAL_DEVICE_BLOCK_SETTING = 'refusal_device_block_enabled'
 export const REFUSAL_SIMILARITY_CHOICES = Object.freeze([80, 85, 90, 95])
 
 export function isRefusalGuardEnabled(readSetting) {
-  const flag = process.env.VM2API_REFUSAL_GUARD || process.env.REFUSAL_GUARD || process.env.KIN_REFUSAL_GUARD
+  const flag = process.env.TAPMODELS_REFUSAL_GUARD || process.env.REFUSAL_GUARD || process.env.KIN_REFUSAL_GUARD
   if (flag === '0' || flag === 'false') return false
   if (typeof readSetting === 'function') {
     try {
