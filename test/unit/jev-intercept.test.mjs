@@ -686,6 +686,26 @@ test('stored builtin questions collapse to the three types; a panel edit stays',
   )
 })
 
+test('retired questions do not overwrite a panel-edited NSFW question', () => {
+  const legacy = '这段话是否可以提交给llm进行深度推理，不会涉及到风险，比如：色情、暴力、破解、诱导?'
+  for (const enabled of [true, false]) {
+    const nsfw = {
+      id: 'nsfw',
+      label: 'Custom label',
+      summary: 'Custom summary',
+      instructions: 'panel-specific NSFW instruction',
+      enabled,
+    }
+    const config = normalizeJevConfig({ questions: [{ id: 'safety', instructions: legacy, enabled: false }, nsfw] })
+    assert.deepEqual(
+      config.questions.map((item) => item.id),
+      ['safety', 'nsfw'],
+    )
+    assert.equal(config.questions[0].enabled, false)
+    for (const key of ['label', 'summary', 'instructions', 'enabled']) assert.equal(config.questions[1][key], nsfw[key])
+  }
+})
+
 test('ordinary repair carve-outs live in the single abuse question', () => {
   const asked = questionsFor(normalizeJevConfig({}))
   assert.match(asked.usage_policy.instructions, /轴承/)

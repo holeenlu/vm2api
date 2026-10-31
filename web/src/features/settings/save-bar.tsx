@@ -1,4 +1,5 @@
 import { CircleAlert } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 
 /**
@@ -20,6 +21,8 @@ export function SaveBar({
   onSave: () => void
   onDiscard: () => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <div className='pointer-events-none fixed inset-x-0 bottom-4 z-40 flex justify-center px-4'>
       <div
@@ -32,7 +35,9 @@ export function SaveBar({
             <span className='truncate'>{blockedReason}</span>
           </span>
         ) : (
-          <span className='text-sm text-muted-foreground'>有未保存的更改</span>
+          <span className='text-sm text-muted-foreground'>
+            {t('unsavedChanges')}
+          </span>
         )}
         <div className='flex shrink-0 items-center gap-2'>
           <Button
@@ -41,7 +46,7 @@ export function SaveBar({
             onClick={onDiscard}
             disabled={saving}
           >
-            放弃
+            {t('discard')}
           </Button>
           <Button
             size='sm'
@@ -49,7 +54,7 @@ export function SaveBar({
             disabled={saving || !!blockedReason}
             loading={saving}
           >
-            保存
+            {t('save')}
           </Button>
         </div>
       </div>

@@ -1,8 +1,10 @@
+import { t } from '@/i18n'
 import type { BillingAccountRow } from '@/types/panel-overview'
 import type { WindowEstimate } from '@/types/panel-pricing'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm, VmClosedWindow } from '@/types/panel-vm'
 import { fmtNum, fmtUsd } from '@/lib/format'
+import { fixedNumber } from '@/lib/locale-format'
 
 function num(v: unknown): number {
   const n = Number(v)
@@ -169,7 +171,7 @@ export function vmCacheHitPct(
 
 export function fmtHitPct(p: number | null): string {
   if (p == null || !Number.isFinite(p)) return '—'
-  return `${p.toFixed(p >= 10 ? 1 : 2)}%`
+  return `${fixedNumber(p, p >= 10 ? 1 : 2)}%`
 }
 
 export function vmTodayStats(vm: Vm, accounts?: UsageAccountRow[]) {
@@ -267,51 +269,93 @@ export function vmTotalTokens(vm: Vm, accounts?: UsageAccountRow[]): number {
   )
 }
 
+/** 7D 官方窗口按已用比例反推的预计总用量；没有有效估算时返回 null。 */
+export function vmProjected7d(
+  vm: Vm,
+  accounts?: UsageAccountRow[]
+): { cost: number; tokens: number | null } | null {
+  const estimate =
+    usageAccountForVm(vm, accounts)?.estimate_7d ?? vm.estimate_7d
+  if (
+    estimate?.status !== 'ok' ||
+    estimate.total_usd == null ||
+    !Number.isFinite(Number(estimate.total_usd)) ||
+    estimate.total_usd <= 0
+  ) {
+    return null
+  }
+  return {
+    cost: num(estimate.total_usd),
+    tokens:
+      estimate.total_tokens != null && Number.isFinite(estimate.total_tokens)
+        ? estimate.total_tokens
+        : null,
+  }
+}
+
 export type VmLedgerRow = {
   key: '5h' | '7d' | 'total'
   label: string
-  cost: number
-  tokens: number
+  cost: number | null
+  tokens: number | null
+  estimated?: boolean
 }
 
-/** 一台槽位的费用与 token 只走这一份：5H / 7D 窗口 + 账号总计。 */
+/** 5H / 7D 实际窗口消耗与 7D 预计容量；不可估算时保持未知。 */
 export function vmCostLedger(
   vm: Vm,
   accounts?: UsageAccountRow[]
 ): VmLedgerRow[] {
   const cost = vmWindowCosts(vm, accounts)
   const tok = vmWindowTokens(vm, accounts)
+  const projected7d = vmProjected7d(vm, accounts)
   return [
     { key: '5h', label: '5H', cost: cost.h5, tokens: tok.h5 },
     { key: '7d', label: '7D', cost: cost.d7, tokens: tok.d7 },
     {
       key: 'total',
-      label: '总计',
-      cost: vmTotalCost(vm, accounts),
-      tokens: vmTotalTokens(vm, accounts),
+      label: t('lib:usage.total'),
+      cost: projected7d?.cost ?? null,
+      tokens: projected7d?.tokens ?? null,
+      estimated: Boolean(projected7d),
     },
   ]
 }
 
-export const ESTIMATE_STATUS_ZH: Record<WindowEstimate['status'], string> = {
-  ok: '估算有效',
-  no_data: '无用量读数',
-  no_reset: '无重置时间',
-  log_gap: '日志未覆盖窗口',
-  low_usage: '用量<5%',
-  unpriced: '窗口内有未定价请求',
-}
-
-const ESTIMATE_CAVEAT = '按官方价估算；账号在网关外使用会偏低'
+export const ESTIMATE_STATUS_LABELS: Record<WindowEstimate['status'], string> =
+  {
+    get ok() {
+      return t('lib:usage.estimateValid')
+    },
+    get no_data() {
+      return t('lib:usage.noReadings')
+    },
+    get no_reset() {
+      return t('lib:usage.noReset')
+    },
+    get log_gap() {
+      return t('lib:usage.logGap')
+    },
+    get low_usage() {
+      return t('lib:usage.lowUsage')
+    },
+    get unpriced() {
+      return t('lib:usage.unpriced')
+    },
+  }
 
 export function estimateTooltip(
   est: WindowEstimate | null | undefined
 ): string {
-  const bits = [est ? ESTIMATE_STATUS_ZH[est.status] : '暂无估算']
+  const bits = [
+    est ? ESTIMATE_STATUS_LABELS[est.status] : t('lib:usage.noEstimate'),
+  ]
   if (est?.total_tokens != null && Number.isFinite(est.total_tokens)) {
-    bits.push(`约 ${fmtNum(est.total_tokens)} tok`)
+    bits.push(
+      t('lib:usage.estimatedTokens', { tokens: fmtNum(est.total_tokens) })
+    )
   }
-  bits.push(ESTIMATE_CAVEAT)
+  bits.push(t('lib:usage.estimateCaveat'))
   return bits.join('\n')
 }
 
@@ -342,7 +386,7 @@ export function formatWindowSpend(
   const remain =
     est.remaining_usd == null || !Number.isFinite(est.remaining_usd)
       ? '—'
-      : `余 ${fmtUsd(est.remaining_usd, 2)}`
+      : t('lib:usage.remaining', { amount: fmtUsd(est.remaining_usd, 2) })
   return {
     costText: `${spentUsd} / ≈${total}`,
     remainText: remain,

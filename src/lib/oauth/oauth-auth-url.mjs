@@ -120,12 +120,12 @@ export function buildAuthorizationURL(state, codeChallenge, scope = SCOPE_OAUTH,
   return `${spec.authorizeUrl}?code=true&client_id=${CLIENT_ID}&response_type=code&redirect_uri=${encodedRedirectURI}&scope=${encodedScope}&code_challenge=${codeChallenge}&code_challenge_method=S256&state=${state}`
 }
 
-export function generateAuthUrl({ vmId, proxyUrl, flavor } = {}) {
+export function generateAuthUrl({ vmId, draftId, proxyUrl, flavor } = {}) {
   sweepExpired()
   if (normalizeOauthFlavor(flavor) === 'claude_code') {
     throw fail('claude_code_in_slot', '官方 Claude Code 登录必须由槽内 cli-node 执行，不能由宿主机生成授权链接')
   }
-  if (!vmId) throw fail('vm_required', 'vm_id required (先创建虚拟机)')
+  if (!vmId && !draftId) throw fail('vm_required', 'vm_id required (先创建虚拟机或授权草稿)')
   if (normalizeSocks(proxyUrl) == null) {
     throw fail('proxy_required', '虚拟机未绑定 SOCKS5，请先分配代理再生成授权链接')
   }
@@ -144,14 +144,16 @@ export function generateAuthUrl({ vmId, proxyUrl, flavor } = {}) {
     tokenUrls: spec.tokenUrls.slice(),
     source: spec.source,
     proxyUrl: proxyUrl === '' ? '' : String(proxyUrl),
-    vmId: String(vmId),
+    vmId: vmId ? String(vmId) : null,
+    draftId: draftId ? String(draftId) : null,
     createdAt,
   })
   return {
     auth_url: buildAuthorizationURL(state, codeChallenge, spec.scope, spec.flavor),
     session_id: sessionId,
     expires_at: createdAt + SESSION_TTL_MS,
-    vm_id: String(vmId),
+    ...(vmId ? { vm_id: String(vmId) } : {}),
+    ...(draftId ? { draft_id: String(draftId) } : {}),
     flavor: spec.flavor,
   }
 }
@@ -182,6 +184,7 @@ export async function exchangeAuthCode({
   code,
   proxyUrl,
   vmId,
+  draftId,
   fetchImpl = null,
   exec,
   projectRoot,
@@ -195,6 +198,9 @@ export async function exchangeAuthCode({
   }
   if (vmId && session.vmId && session.vmId !== String(vmId)) {
     throw fail('session_vm_mismatch', '授权会话与当前虚拟机不匹配')
+  }
+  if (draftId && session.draftId && session.draftId !== String(draftId)) {
+    throw fail('session_draft_mismatch', '授权会话与当前授权草稿不匹配')
   }
   if (exec && exec.vmId !== session.vmId) {
     throw fail('session_vm_mismatch', '授权会话与目标执行虚拟机不匹配')
@@ -252,6 +258,8 @@ export async function exchangeAuthCode({
         account_uuid: identity.account_uuid,
         org_uuid: identity.org_uuid,
         subscription_type: identity.subscription_type,
+        ...(identity.rate_limit_tier ? { rate_limit_tier: identity.rate_limit_tier } : {}),
+        ...(identity.billing_type ? { billing_type: identity.billing_type } : {}),
         source: session.source || 'oauth-auth-url',
         flavor: session.flavor || 'cai',
       },

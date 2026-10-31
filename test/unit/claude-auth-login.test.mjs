@@ -276,16 +276,35 @@ test('prepareSlotOAuth reads the nested kernel health that startSlotReady actual
         }),
       notReady,
     )
-    // startReady is injectable: a flat boot.rust.health must still pass.
-    const flat = await prepareSlotOAuth({
-      exec: seed('vm-15'),
-      startReady: async () => ({
-        ok: true,
-        rust_ok: true,
-        rust: { ok: true, health: { vm_telemetry: true, telemetry_ready: true } },
-      }),
-    })
-    assert.equal(flat.configDir, '/home/kincli/.claude')
+    // Production wrappers are nested; an obsolete flat mock must not bypass readiness.
+    await assert.rejects(
+      () =>
+        prepareSlotOAuth({
+          exec: seed('vm-15'),
+          startReady: async () => ({
+            ok: true,
+            rust_ok: true,
+            rust: { ok: true, health: { vm_telemetry: true, telemetry_ready: true } },
+          }),
+        }),
+      notReady,
+    )
+    await assert.rejects(
+      () =>
+        prepareSlotOAuth({
+          exec: seed('vm-16'),
+          startReady: async () => ({
+            ok: true,
+            rust_ok: true,
+            rust: {
+              ok: true,
+              engine: 'rust',
+              rust: { ok: false, health: { vm_telemetry: true, telemetry_ready: true } },
+            },
+          }),
+        }),
+      notReady,
+    )
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
