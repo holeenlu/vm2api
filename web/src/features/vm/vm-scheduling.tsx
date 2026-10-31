@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { t as tr } from '@/i18n'
+import { t as tVm } from '@/i18n'
 import type { Vm, VmQuotaOverride, VmQuotaView } from '@/types/panel-vm'
 import { SlidersHorizontal } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { patchVm, type VmPatch } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -53,10 +56,10 @@ function SeatSessionList({ sessions }: { sessions: Vm['seat_sessions'] }) {
           {shortSession(String(seat.session_id || '')) || '—'}
           <span className='ms-1 font-sans'>
             {seat.state === 'active'
-              ? '进行中'
+              ? tr('common:inProgress')
               : seat.state === 'held'
-                ? '粘性'
-                : '占用'}
+                ? tr('common:graceReserved')
+                : tr('vm:sync14008Occupied')}
             {Number(seat.inflight) > 1 ? ` ×${seat.inflight}` : ''}
           </span>
         </li>
@@ -87,17 +90,67 @@ type Draft = {
 
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
-const DAY_LABELS = ['日', '一', '二', '三', '四', '五', '六']
+function dayLabels() {
+  return [
+    tVm('vm:vmScheduling.sun'),
+    tVm('vm:vmScheduling.mon'),
+    tVm('vm:vmScheduling.tue'),
+    tVm('vm:vmScheduling.wed'),
+    tVm('vm:vmScheduling.thu'),
+    tVm('vm:vmScheduling.fri'),
+    tVm('vm:vmScheduling.sat'),
+  ]
+}
 
 const QUOTA_FIELDS: { key: QuotaKey; label: string; desc: string }[] = [
-  { key: 'limit_5h', label: '5h 闸线', desc: '5h 用量到这里写成受限并切号' },
-  { key: 'limit_7d', label: '7d 闸线', desc: '7d 用量到这里写成受限并切号' },
-  { key: 'block_on_5h', label: '5h 闸生效', desc: '关掉后不按 5h 拦截' },
-  { key: 'block_on_7d', label: '7d 闸生效', desc: '关掉后不按 7d 拦截' },
+  {
+    key: 'limit_5h',
+    get label() {
+      return tVm('vm:vmScheduling.5HourGate')
+    },
+    get desc() {
+      return tVm(
+        'vm:vmScheduling.restrictAndSwitchAccountsWhen5HourUsageReaches'
+      )
+    },
+  },
+  {
+    key: 'limit_7d',
+    get label() {
+      return tVm('vm:vmScheduling.7DayGate')
+    },
+    get desc() {
+      return tVm(
+        'vm:vmScheduling.restrictAndSwitchAccountsWhen7DayUsageReaches'
+      )
+    },
+  },
+  {
+    key: 'block_on_5h',
+    get label() {
+      return tVm('vm:vmScheduling.enable5HourGate')
+    },
+    get desc() {
+      return tVm('vm:vmScheduling.whenDisabled5HourUsageDoesNotBlockRequests')
+    },
+  },
+  {
+    key: 'block_on_7d',
+    get label() {
+      return tVm('vm:vmScheduling.enable7DayGate')
+    },
+    get desc() {
+      return tVm('vm:vmScheduling.whenDisabled7DayUsageDoesNotBlockRequests')
+    },
+  },
   {
     key: 'weekly_split',
-    label: '周仓拆分',
-    desc: '7d 一半留给 Fable（实验）',
+    get label() {
+      return tVm('vm:vmScheduling.splitWeeklyQuota')
+    },
+    get desc() {
+      return tVm('vm:vmScheduling.fableUsageLimitHelp')
+    },
   },
 ]
 
@@ -109,7 +162,9 @@ function isRatio(key: QuotaKey) {
 
 function fmtQuota(key: QuotaKey, value: unknown): string {
   if (isRatio(key)) return `${Math.round(Number(value) * 100)}%`
-  return value ? '开' : '关'
+  return value
+    ? tVm('vm:seedPolicyCard.on')
+    : tVm('vm:seedPolicyCard.offSwitch')
 }
 
 function draftOf(vm: Vm): Draft {
@@ -270,6 +325,8 @@ function Tile({
   own?: boolean
   title?: string
 }) {
+  useTranslation('vm')
+
   return (
     <div
       title={title}
@@ -306,6 +363,8 @@ export function VmSchedulingBlock({
   conc?: { inf: number; max: number }
   rpm?: { n: number; max: number } | null
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const codex = isCodexVm(vm)
   const inherited = vm.scheduling_inherited
   const inf = conc?.inf ?? (Number(vm.inflight) || 0)
@@ -325,14 +384,21 @@ export function VmSchedulingBlock({
     <div className='space-y-2 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-2'>
       <div className='flex items-center justify-between gap-2'>
         <div className='min-w-0'>
-          <div className='text-xs font-medium'>调度</div>
+          <div className='text-xs font-medium'>
+            <Trans ns='vm' i18nKey='vmListTable.scheduling' />
+          </div>
           <div
             className={cn(
               'text-[11px]',
               custom ? 'text-primary' : 'text-muted-foreground'
             )}
           >
-            {custom ? `本槽覆盖 ${custom} 项` : '全部跟随全局'}
+            {custom
+              ? tVm('vm:vmScheduling.slotOverrides', {
+                  custom: custom,
+                  count: custom,
+                })
+              : tVm('vm:vmScheduling.allSettingsFollowGlobalDefaults')}
           </div>
         </div>
         {canEdit ? <VmSchedulingEditor vm={vm} /> : null}
@@ -341,15 +407,28 @@ export function VmSchedulingBlock({
       {codex ? null : (
         <div className='space-y-1' title={seatTitle(vm)}>
           <div className='flex items-baseline justify-between gap-2 text-xs'>
-            <span className='text-muted-foreground'>席位</span>
+            <span className='text-muted-foreground'>
+              <Trans ns='vm' i18nKey='vmRackBlade.seats' />
+            </span>
             <span className='tabular-nums'>
               {seatsUsed}/{seatsMax}
-              {vm.seats_grace ? ` · 交接 ${vm.seats_grace}` : ''}
+              {vm.seats_grace
+                ? tVm('vm:vmScheduling.grace', { seats_grace: vm.seats_grace })
+                : ''}
               {queued ? (
                 <span className='text-[color:var(--status-warn)]'>
-                  {' '}
-                  · 排队 {queued}
-                  {vm.conc_waiting ? `（等并发 ${vm.conc_waiting}）` : ''}
+                  <Trans
+                    ns='vm'
+                    i18nKey='vmScheduling.queued'
+                    values={{
+                      queued: queued,
+                      value: vm.conc_waiting
+                        ? tVm('vm:vmScheduling.waitingForConcurrency', {
+                            conc_waiting: vm.conc_waiting,
+                          })
+                        : '',
+                    }}
+                  />
                 </span>
               ) : null}
             </span>
@@ -366,85 +445,125 @@ export function VmSchedulingBlock({
 
       <div className='grid grid-cols-2 gap-1.5'>
         <Tile
-          label='并发'
-          value={`${inf}/${concMax || '不限'}`}
+          label={tVm('vm:vmScheduling.concurrency')}
+          value={tVm('vm:vmScheduling.summary', {
+            inf: inf,
+            value1: concMax || tVm('vm:schedulingSteps.unlimited'),
+          })}
           own={vm.concurrency_override}
           title={
             vm.concurrency_override
-              ? `本槽钉住；${codex ? 'OpenAI 全局' : '分档'}值 ${inherited?.max_concurrency ?? '—'}`
+              ? tVm('vm:vmScheduling.slotOverrideValue', {
+                  value1: codex
+                    ? tVm('vm:vmScheduling.openAIGlobal')
+                    : tVm('vm:vmScheduling.tierDefaults'),
+                  value2: inherited?.max_concurrency ?? '—',
+                })
               : codex
-                ? '跟随 OpenAI 全局默认'
-                : '跟随分档'
+                ? tVm('vm:vmScheduling.followOpenAIGlobalDefaults')
+                : tVm('vm:vmScheduling.followTierDefaults')
           }
         />
         <Tile
           label='RPM'
-          value={rpmMax ? `${rpmNow}/${rpmMax}` : '不限'}
+          value={
+            rpmMax ? `${rpmNow}/${rpmMax}` : tVm('vm:schedulingSteps.unlimited')
+          }
           own={vm.rpm_override}
           title={
             vm.rpm_override
-              ? `本槽钉住；${codex ? 'OpenAI 全局' : '分档'}值 ${inherited?.max_rpm || '不限'}`
+              ? tVm('vm:vmScheduling.slotOverrideValue', {
+                  value1: codex
+                    ? tVm('vm:vmScheduling.openAIGlobal')
+                    : tVm('vm:vmScheduling.tierDefaults'),
+                  value2:
+                    inherited?.max_rpm || tVm('vm:schedulingSteps.unlimited'),
+                })
               : codex
-                ? '跟随 OpenAI 全局默认'
-                : '跟随分档'
+                ? tVm('vm:vmScheduling.followOpenAIGlobalDefaults')
+                : tVm('vm:vmScheduling.followTierDefaults')
           }
         />
         {codex ? null : (
           <Tile
-            label='席位上限'
+            label={tVm('vm:vmScheduling.seatLimit')}
             value={vm.session_slots ?? '—'}
             own={vm.session_slots_override}
             title={
               vm.session_slots_override
-                ? `本槽钉住；全局 ${inherited?.session_slots ?? '—'}`
-                : '跟随全局'
+                ? tVm('vm:vmScheduling.slotOverrideGlobalValue', {
+                    value1: inherited?.session_slots ?? '—',
+                  })
+                : tVm('vm:personaContract.followGlobal')
             }
           />
         )}
         {codex ? (
           <Tile
-            label='会话容量'
-            value={vm.max_sessions ? vm.max_sessions : '不限'}
+            label={tVm('vm:vmScheduling.sessionCapacity')}
+            value={
+              vm.max_sessions
+                ? vm.max_sessions
+                : tVm('vm:schedulingSteps.unlimited')
+            }
             own={vm.max_sessions_override}
             title={
               vm.max_sessions_override
-                ? `本槽钉住；全局 ${inherited?.max_sessions ?? '不限'}`
-                : '跟随 OpenAI 全局默认'
+                ? tVm('vm:vmScheduling.slotOverrideGlobalValue', {
+                    value1:
+                      inherited?.max_sessions ??
+                      tVm('vm:schedulingSteps.unlimited'),
+                  })
+                : tVm('vm:vmScheduling.followOpenAIGlobalDefaults')
             }
           />
         ) : null}
         {!codex ? (
           <Tile
-            label='调度等级'
+            label={tVm('vm:vmScheduling.schedulingLevel')}
             value={
               Number.isInteger(level)
-                ? `${level} 级 · ${vm.schedule_level_mode === 'manual' ? '手动' : '自动'}`
+                ? tVm('vm:vmScheduling.level', {
+                    level: level,
+                    value1:
+                      vm.schedule_level_mode === 'manual'
+                        ? tVm('vm:vmListTable.manual')
+                        : tVm('vm:createOptions.automatic'),
+                  })
                 : '—'
             }
             own={vm.schedule_level_mode === 'manual'}
-            title='等级高的 VM 先开席位；自动模式按 7D 重置倒计时算'
+            title={tVm(
+              'vm:vmScheduling.higherLevelVMsOpenSeatsFirstAutomaticModeUses'
+            )}
           />
         ) : null}
         <Tile
-          label='工作时段'
+          label={tVm('vm:vmScheduling.workingHours')}
           value={
             vm.active_hours_active === false
-              ? '休息中'
+              ? tVm('vm:vmScheduling.resting')
               : vm.active_hours
                 ? `${vm.active_hours.start}–${vm.active_hours.end}`
-                : '全天'
+                : tVm('vm:vmScheduling.allDay')
           }
           own={!!vm.active_hours}
           title={
             vm.active_hours
-              ? `${vm.active_hours_timezone || vm.timezone || 'UTC'}` +
-                (vm.active_hours.days?.length
-                  ? ` · 星期${vm.active_hours.days.map((d) => DAY_LABELS[d]).join('')}`
-                  : ' · 每天') +
-                (vm.active_hours_active === false
-                  ? ' · 当前在窗口外，不接单'
-                  : ' · 当前在窗口内')
-              : '跟随全局：24h 接单'
+              ? tVm(
+                  vm.active_hours_active === false
+                    ? 'vm:messages.workingHoursOutside'
+                    : 'vm:messages.workingHoursInside',
+                  {
+                    timezone: vm.active_hours_timezone || vm.timezone || 'UTC',
+                    days: vm.active_hours.days?.length
+                      ? vm.active_hours.days
+                          .map((day) => dayLabels()[day])
+                          .join(', ')
+                      : tVm('vm:vmScheduling.everyDayAlternative'),
+                  }
+                )
+              : tVm('vm:vmScheduling.followGlobalAcceptRequests24HoursADay')
           }
         />
         {codex || !policy
@@ -457,8 +576,10 @@ export function VmSchedulingBlock({
                 own={quotaOverride[key] != null}
                 title={
                   quotaOverride[key] != null
-                    ? `全局 ${fmtQuota(key, vm.quota_inherited?.[key])}`
-                    : '跟随全局'
+                    ? tVm('vm:vmScheduling.global', {
+                        value1: fmtQuota(key, vm.quota_inherited?.[key]),
+                      })
+                    : tVm('vm:personaContract.followGlobal')
                 }
               />
             ))}
@@ -484,6 +605,8 @@ function KnobRow({
   children: React.ReactNode
   disabled?: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <div
       className={cn(
@@ -501,11 +624,14 @@ function KnobRow({
           ) : null}
         </div>
         <ChipGroup
-          label={`${label}来源`}
+          label={tVm('vm:vmScheduling.source', { label: label })}
           value={own ? 'own' : 'inherit'}
           options={[
-            ['inherit', `跟随 · ${inheritedText}`],
-            ['own', '本槽'],
+            [
+              'inherit',
+              tVm('vm:vmScheduling.inherit', { inheritedText: inheritedText }),
+            ],
+            ['own', tVm('vm:vmScheduling.thisSlot')],
           ]}
           onChange={(v) => onOwnChange(v === 'own')}
           disabled={disabled}
@@ -517,6 +643,8 @@ function KnobRow({
 }
 
 export function VmSchedulingEditor({ vm }: { vm: Vm }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState(() => draftOf(vm))
@@ -527,7 +655,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
   const save = useMutation({
     mutationFn: (body: VmPatch) => patchVm(vm.id, body),
     onSuccess: async () => {
-      toast.success('调度配置已热更新')
+      toast.success(tVm('vm:vmScheduling.schedulingConfigurationReloaded'))
       await Promise.all([
         qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
         qc.invalidateQueries({ queryKey: vmQueryOptions(vm.id).queryKey }),
@@ -535,7 +663,8 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
       ])
       setOpen(false)
     },
-    onError: (error: Error) => toast.error(error.message || '更新失败'),
+    onError: (error: Error) =>
+      toast.error(error.message || tVm('vm:authSchemeEditor.updateFailed')),
   })
 
   const submit = () => {
@@ -544,15 +673,15 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
       draft.hours.own &&
       !(HHMM.test(draft.hours.start) && HHMM.test(draft.hours.end))
     ) {
-      toast.error('请填写完整的开工与收工时间')
+      toast.error(tVm('vm:vmScheduling.enterBothStartAndEndTimes'))
       return
     }
     if (draft.hours.own && draft.hours.start === draft.hours.end) {
-      toast.error('开工与收工时间不能相同')
+      toast.error(tVm('vm:vmScheduling.startAndEndTimesCannotBeTheSame'))
       return
     }
     if (draft.hours.own && !draft.hours.days.length) {
-      toast.error('至少保留一个工作日')
+      toast.error(tVm('vm:vmScheduling.keepAtLeastOneWorkingDay'))
       return
     }
     const body = patchOf(vm, draft)
@@ -598,28 +727,43 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
           setOpen(true)
         }}
       >
-        <SlidersHorizontal className='size-3.5' aria-hidden />
-        调度配置
+        <Trans
+          ns='vm'
+          i18nKey='vmScheduling.schedulingConfiguration'
+          components={{
+            part0: <SlidersHorizontal className='size-3.5' aria-hidden />,
+          }}
+        />
       </Button>
       <Dialog open={open} onOpenChange={(v) => !pending && setOpen(v)}>
         <DialogContent className='max-h-[88vh] overflow-y-auto sm:max-w-2xl'>
           <DialogHeader>
-            <DialogTitle>调度配置 · {vm.name || vm.id}</DialogTitle>
+            <DialogTitle>
+              <Trans
+                ns='vm'
+                i18nKey='vmScheduling.schedulingConfigurationAlternative'
+                values={{ value: vm.name || vm.id }}
+              />
+            </DialogTitle>
             <DialogDescription>
-              只作用于本槽，热更新不重启。选「跟随」的项随 设置 → 账号池 / 配额
-              变化；选「本槽」后全局保存不会改它。
+              <Trans
+                ns='vm'
+                i18nKey='vmScheduling.appliesOnlyToThisSlotAndReloadsWithoutRestart'
+              />
             </DialogDescription>
           </DialogHeader>
 
           <div className='space-y-4'>
             <section className='space-y-2'>
               <h4 className='text-xs font-medium text-muted-foreground'>
-                席位与流量
+                <Trans ns='vm' i18nKey='vmScheduling.seatsAndTraffic' />
               </h4>
               {codex ? null : (
                 <KnobRow
-                  label='席位上限'
-                  desc='本 VM 同时能占住的 client session 数。请求进行中占槽，对话结束即释放；粘性 TTL 只记住 VM，不占席位。同 session 的并发请求共用一个席位。'
+                  label={tVm('vm:vmScheduling.seatLimit')}
+                  desc={tVm(
+                    'vm:vmScheduling.maximumDevicesBoundToThisVMSimultaneouslyConcurrentRequests'
+                  )}
                   inheritedText={String(inherited?.session_slots ?? '—')}
                   own={draft.seats.own}
                   onOwnChange={(own) =>
@@ -628,7 +772,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                   disabled={pending}
                 >
                   <ChipGroup
-                    label='席位上限'
+                    label={tVm('vm:vmScheduling.seatLimit')}
                     value={draft.seats.value}
                     options={withCurrent(
                       SEAT_CAP_STEPS.map((n): [number, string] => [
@@ -650,14 +794,23 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 </KnobRow>
               )}
               <KnobRow
-                label='并发上限'
+                label={tVm('vm:vmScheduling.concurrencyLimit')}
                 desc={
                   codex
-                    ? '同时在飞的 OpenAI 请求数；执行满时按账号池等待或借执行，保留会话绑定。'
-                    : '同一时刻在飞的请求数；满了在本 VM 排队，不切号。'
+                    ? tVm(
+                        'vm:vmScheduling.simultaneousOpenAIRequestsWhenFullRequestsWaitOrBorrow'
+                      )
+                    : tVm(
+                        'vm:vmScheduling.simultaneousInFlightRequestsWhenFullRequestsQueueOn'
+                      )
                 }
                 inheritedText={
-                  inherited ? String(inherited.max_concurrency || '不限') : '—'
+                  inherited
+                    ? String(
+                        inherited.max_concurrency ||
+                          tVm('vm:schedulingSteps.unlimited')
+                      )
+                    : '—'
                 }
                 own={draft.conc.own}
                 onOwnChange={(own) =>
@@ -666,7 +819,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 disabled={pending}
               >
                 <ChipGroup
-                  label='并发上限'
+                  label={tVm('vm:vmScheduling.concurrencyLimit')}
                   value={draft.conc.value}
                   options={withCurrent(CONC_STEPS, draft.conc.value)}
                   onChange={(value) =>
@@ -677,10 +830,17 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
               </KnobRow>
               {codex ? (
                 <KnobRow
-                  label='会话容量'
-                  desc='每个 OpenAI 账号同时保留的活跃对话窗口；0 表示不限。'
+                  label={tVm('vm:vmScheduling.sessionCapacity')}
+                  desc={tVm(
+                    'vm:vmScheduling.activeConversationWindowsRetainedPerOpenAIAccount0Means'
+                  )}
                   inheritedText={
-                    inherited ? String(inherited.max_sessions || '不限') : '—'
+                    inherited
+                      ? String(
+                          inherited.max_sessions ||
+                            tVm('vm:schedulingSteps.unlimited')
+                        )
+                      : '—'
                   }
                   own={draft.sessions.own}
                   onOwnChange={(own) =>
@@ -689,13 +849,15 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                   disabled={pending}
                 >
                   <ChipGroup
-                    label='会话容量'
+                    label={tVm('vm:vmScheduling.sessionCapacity')}
                     value={draft.sessions.value}
                     options={withCurrent(
                       [0, 1, 2, 4, 8, 16, 32, 64, 128, 256].map(
                         (n): [number, string] => [
                           n,
-                          n === 0 ? '不限' : String(n),
+                          n === 0
+                            ? tVm('vm:schedulingSteps.unlimited')
+                            : String(n),
                         ]
                       ),
                       draft.sessions.value
@@ -711,10 +873,16 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 </KnobRow>
               ) : null}
               <KnobRow
-                label='RPM 上限'
-                desc='每分钟请求数；满了排队等窗口，不切号。'
+                label={tVm('vm:vmScheduling.rPMLimit')}
+                desc={tVm(
+                  'vm:vmScheduling.requestsPerMinuteAtTheLimitQueueUntilThe'
+                )}
                 inheritedText={
-                  inherited ? String(inherited.max_rpm || '不限') : '—'
+                  inherited
+                    ? String(
+                        inherited.max_rpm || tVm('vm:schedulingSteps.unlimited')
+                      )
+                    : '—'
                 }
                 own={draft.rpm.own}
                 onOwnChange={(own) =>
@@ -723,7 +891,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 disabled={pending}
               >
                 <ChipGroup
-                  label='RPM 上限'
+                  label={tVm('vm:vmScheduling.rPMLimit')}
                   value={draft.rpm.value}
                   options={withCurrent(RPM_STEPS, draft.rpm.value)}
                   onChange={(value) =>
@@ -735,22 +903,28 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
               {!codex ? (
                 <div className='space-y-2 rounded-lg border p-3'>
                   <div className='space-y-0.5'>
-                    <Label>调度等级</Label>
+                    <Label>
+                      <Trans ns='vm' i18nKey='vmScheduling.schedulingLevel' />
+                    </Label>
                     <p className='text-[11px] leading-4 text-muted-foreground'>
-                      等级高的 VM 先开新席位，同等级才看开席策略。自动 = 按 7D
-                      重置倒计时算（1–7）；手动 1–10。
+                      <Trans
+                        ns='vm'
+                        i18nKey='vmScheduling.higherLevelVMsOpenNewSeatsFirstSeatOpening'
+                      />
                     </p>
                   </div>
                   <ChipGroup
-                    label='调度等级'
+                    label={tVm('vm:vmScheduling.schedulingLevel')}
                     value={draft.level}
                     options={[
                       [
                         'auto',
                         vm.schedule_level_mode === 'auto' &&
                         Number.isInteger(Number(vm.schedule_level))
-                          ? `自动（当前 ${vm.schedule_level}）`
-                          : '自动',
+                          ? tVm('vm:vmScheduling.automaticCurrently', {
+                              schedule_level: vm.schedule_level,
+                            })
+                          : tVm('vm:createOptions.automatic'),
                       ] as ['auto' | number, string],
                       ...LEVELS.map((n): ['auto' | number, string] => [
                         n,
@@ -763,9 +937,11 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 </div>
               ) : null}
               <KnobRow
-                label='工作时段'
-                desc='只在此时段内接单，窗口外此号不参与调度（模拟真人作息）。开始晚于结束 = 跨夜班次；时区跟随槽位。'
-                inheritedText='全天'
+                label={tVm('vm:vmScheduling.workingHours')}
+                desc={tVm(
+                  'vm:vmScheduling.acceptsRequestsOnlyDuringTheseHoursOutsideTheWindow'
+                )}
+                inheritedText={tVm('vm:vmScheduling.allDay')}
                 own={draft.hours.own}
                 onOwnChange={(own) =>
                   setDraft({ ...draft, hours: { ...draft.hours, own } })
@@ -775,7 +951,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 <div className='flex flex-wrap items-center gap-2'>
                   <Input
                     type='time'
-                    aria-label='开工时间'
+                    aria-label={tVm('vm:vmScheduling.startTime')}
                     className='h-8 w-28'
                     value={draft.hours.start}
                     disabled={pending}
@@ -789,10 +965,12 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                       })
                     }
                   />
-                  <span className='text-xs text-muted-foreground'>至</span>
+                  <span className='text-xs text-muted-foreground'>
+                    <Trans ns='vm' i18nKey='vmScheduling.to' />
+                  </span>
                   <Input
                     type='time'
-                    aria-label='收工时间'
+                    aria-label={tVm('vm:vmScheduling.endTime')}
                     className='h-8 w-28'
                     value={draft.hours.end}
                     disabled={pending}
@@ -811,13 +989,13 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                   </span>
                 </div>
                 <ChipGroup
-                  label='工作日预设'
+                  label={tVm('vm:vmScheduling.workingDayPresets')}
                   value={dayPreset(draft.hours.days)}
                   options={[
-                    ['all', '每天'],
-                    ['weekday', '工作日'],
-                    ['weekend', '周末'],
-                    ['custom', '自定义'],
+                    ['all', tVm('vm:vmScheduling.everyDayAlternative')],
+                    ['weekday', tVm('vm:vmScheduling.weekdays')],
+                    ['weekend', tVm('vm:vmScheduling.weekends')],
+                    ['custom', tVm('vm:seedPolicyCard.custom')],
                   ]}
                   onChange={(preset) => {
                     if (preset === 'custom') return
@@ -829,7 +1007,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                   disabled={pending}
                 />
                 <div className='flex flex-wrap gap-1.5'>
-                  {DAY_LABELS.map((label, day) => {
+                  {dayLabels().map((label, day) => {
                     const on = draft.hours.days.includes(day)
                     return (
                       <button
@@ -867,7 +1045,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
             {codex || !quotaBase ? null : (
               <section className='space-y-2'>
                 <h4 className='text-xs font-medium text-muted-foreground'>
-                  配额闸
+                  <Trans ns='vm' i18nKey='vmScheduling.quotaGates' />
                 </h4>
                 <div className='grid gap-2 sm:grid-cols-2'>
                   {QUOTA_FIELDS.map(({ key, label, desc }) => {
@@ -901,8 +1079,8 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                             label={label}
                             value={k.value ? 'on' : 'off'}
                             options={[
-                              ['on', '开'],
-                              ['off', '关'],
+                              ['on', tVm('vm:seedPolicyCard.on')],
+                              ['off', tVm('vm:seedPolicyCard.offSwitch')],
                             ]}
                             onChange={(v) =>
                               setQuota(key, { value: v === 'on' })
@@ -926,7 +1104,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
               disabled={pending}
               onClick={allInherit}
             >
-              全部改回跟随
+              <Trans ns='vm' i18nKey='vmScheduling.restoreAllInheritedValues' />
             </Button>
             <div className='flex gap-2'>
               <Button
@@ -936,7 +1114,7 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 disabled={pending}
                 onClick={() => setOpen(false)}
               >
-                取消
+                <Trans ns='vm' i18nKey='authSchemeEditor.cancel' />
               </Button>
               <Button
                 size='sm'
@@ -944,7 +1122,9 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                 disabled={pending}
                 onClick={submit}
               >
-                {pending ? '保存中…' : '保存'}
+                {pending
+                  ? tVm('vm:allowedModelsCard.saving')
+                  : tVm('vm:authSchemeEditor.save')}
               </Button>
             </div>
           </DialogFooter>

@@ -48,9 +48,9 @@ function accessHostKvm({ accessSync = fs.accessSync } = {}) {
 async function selfImage(docker, { names } = {}) {
   const candidates = [
     ...(names || []),
-    String(process.env.VM2API_CONTAINER_NAME || '').trim(),
+    String(process.env.TAPMODELS_CONTAINER_NAME || '').trim(),
     os.hostname(),
-    'vm2api',
+    'tapmodels',
   ].filter(Boolean)
   const seen = new Set()
   for (const name of candidates) {

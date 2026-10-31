@@ -58,6 +58,24 @@ export function queueKeepaliveDelayMs(routing, fallbackMs) {
   return Math.min(QUEUE_KEEPALIVE_DELAY_MAX_MS, Math.round(chosen))
 }
 
+export const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 120_000
+export const REQUEST_BODY_TIMEOUT_MAX_MS = 600_000
+
+/**
+ * Maximum silence while the client uploads a request body. This is deliberately
+ * separate from the upstream first-byte and stream-idle timers: a long model
+ * response must not be mistaken for a stalled upload.
+ */
+export function requestBodyTimeoutMs(value = process.env.KIN_REQUEST_BODY_TIMEOUT_MS) {
+  if (value != null && String(value).trim() !== '') {
+    const ms = Number(value)
+    if (Number.isFinite(ms) && ms >= 0) {
+      return Math.min(REQUEST_BODY_TIMEOUT_MAX_MS, Math.round(ms))
+    }
+  }
+  return DEFAULT_REQUEST_BODY_TIMEOUT_MS
+}
+
 export const DEFAULT_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 const MAX_REQUEST_MIB_MIN = 8
 const MAX_REQUEST_MIB_MAX = 128
@@ -201,10 +219,10 @@ function snapshotVm(vm, project) {
 export function loadConfig() {
   const keyFile = path.join(ROOT, 'config', 'test.key')
   const apiKey =
-    process.env.VM2API_API_KEY ||
+    process.env.TAPMODELS_API_KEY ||
     process.env.KIN_API_KEY ||
     (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : null)
-  if (!apiKey) throw new Error('VM2API_API_KEY not set')
+  if (!apiKey) throw new Error('TAPMODELS_API_KEY not set')
 
   const vm = readActiveVmRecord(PROJECT)
 
@@ -232,6 +250,7 @@ export function loadConfig() {
     distill: loadDistillRules(path.join(ROOT, 'config', 'distill-rules.json')),
     limits: {
       max_body_bytes: Number(process.env.KIN_MAX_BODY || 128 * 1024 * 1024),
+      request_body_timeout_ms: requestBodyTimeoutMs(),
       // First-byte wait for worker HTTP headers. Matches sub2api
       // gateway.response_header_timeout (600s). Idle is stream_idle_timeout_ms.
       upstream_timeout_ms: Number(process.env.KIN_UPSTREAM_TIMEOUT || 600000),

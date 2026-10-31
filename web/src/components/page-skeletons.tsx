@@ -1,3 +1,5 @@
+import { t } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -11,12 +13,13 @@ import { Skeleton } from '@/components/ui/skeleton'
  */
 
 export function LoadingState({
-  label = '加载中',
+  label = t('common:loading'),
   className,
 }: {
   label?: string
   className?: string
 }) {
+  useTranslation('common')
   return (
     <div
       role='status'

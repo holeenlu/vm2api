@@ -138,3 +138,21 @@ test('clearVmCooldown drops the on-disk park and refreshes a rejected 5h window'
   assert.equal(accounts.get('acct-11').unified.headers['5h'].status, 'allowed')
   assert.equal(accounts.get('acct-11').unified.headers['5h'].stale_reason, 'operator_clear')
 })
+
+test('clearVmCooldown also repairs a legacy proxy cooldown saved as schedule_off', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cool-'))
+  const rec = seedVm(project)
+  rec.schedulable = false
+  rec.schedule_off = true
+  rec.schedule_manual = true
+  rec.schedule_off_reason = 'proxy_cooldown'
+  fs.writeFileSync(path.join(project, 'vms', 'vm-11.json'), JSON.stringify(rec))
+
+  const out = clearVmCooldown({ cfg: { paths: { project } }, id: 'vm-11' })
+  const saved = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-11.json'), 'utf8'))
+  assert.equal(out.ok, true)
+  assert.equal(out.data.legacy_proxy_schedule_off_cleared, true)
+  assert.equal(saved.schedule_off, undefined)
+  assert.equal(saved.schedule_off_reason, undefined)
+  assert.equal(saved.schedulable, true)
+})

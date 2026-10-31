@@ -348,6 +348,12 @@ const SYSTEM_FACTS_RC = [
  * unknown/未采集 and must not prevent the prompt.
  * @returns {{ cmd: string[], rc: string }}
  */
+export function supplierLoginLaunch(cliBin) {
+  const bin = String(cliBin || '')
+  if (!bin.startsWith('/') || /[\n\r\0]/.test(bin)) throw new Error('invalid cli-node path')
+  return { cmd: [bin, 'auth', 'login'], rc: '' }
+}
+
 export function panelShellLaunch(cliBin) {
   const bin = String(cliBin || '')
   if (!bin.startsWith('/') || /[\n\r\0]/.test(bin)) throw new Error('invalid cli-node path')
@@ -407,7 +413,9 @@ export function createSlotShell({
   let sessions = 0
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 })
 
-  async function issueTicket(vmId, { login = false } = {}) {
+  async function issueTicket(vmId, { login = false, restrictedLogin = false, authorize = null } = {}) {
+    if (restrictedLogin && !login) return refuse(403, 'login_only', '供应商终端仅用于官方登录')
+    if (authorize) authorize()
     const vm = getVm(projectRoot, vmId)
     if (!vm) return refuse(404, 'vm_not_found', 'vm not found')
     if (isCodexVm(vm)) return refuse(409, 'no_container', 'GPT 槽没有容器，无法打开终端')
@@ -423,7 +431,8 @@ export function createSlotShell({
     for (const [t, v] of tickets) if (v.exp <= now) tickets.delete(t)
     if (tickets.size >= MAX_TICKETS) return refuse(429, 'shell_limit', '终端 ticket 过多，请稍后再试')
     const ticket = crypto.randomBytes(24).toString('base64url')
-    tickets.set(ticket, { vmId: vm.id, exp: now + TICKET_TTL_MS, login })
+    if (authorize) authorize()
+    tickets.set(ticket, { vmId: vm.id, exp: now + TICKET_TTL_MS, login, restrictedLogin, authorize })
     return { ok: true, ticket, expires_in: TICKET_TTL_MS / 1000 }
   }
 
@@ -464,6 +473,12 @@ export function createSlotShell({
     }
     const login = !!entry.login
     const accept = () => {
+      try {
+        entry.authorize?.()
+      } catch {
+        rejectUpgrade(socket, 403, 'Forbidden')
+        return
+      }
       if (sessions >= MAX_SESSIONS) {
         rejectUpgrade(socket, 429, 'Too Many Requests')
         return
@@ -473,6 +488,8 @@ export function createSlotShell({
         cols: clampInt(url.searchParams.get('cols'), 10, 500, 80),
         rows: clampInt(url.searchParams.get('rows'), 5, 200, 24),
         login,
+        restrictedLogin: entry.restrictedLogin,
+        authorize: entry.authorize,
       }
       wss.handleUpgrade(req, socket, head, (ws) => attach(ws, vm, size))
     }
@@ -514,6 +531,12 @@ export function createSlotShell({
     // trip would otherwise be dropped (ws does not buffer unhandled messages).
     const pending = []
     const apply = (msg) => {
+      try {
+        size.authorize?.()
+      } catch {
+        ws.close(1008, 'Supplier access revoked')
+        return
+      }
       if (msg?.t === 'd' && typeof msg.d === 'string') session.stream.write(msg.d)
       else if (msg?.t === 'r') resize(clampInt(msg.c, 10, 500, 80), clampInt(msg.r, 5, 200, 24))
     }
@@ -535,7 +558,18 @@ export function createSlotShell({
       })
       return execDetached(connect, container, Cmd, { user: User })
     }
+    const authorizationTimer = size.authorize
+      ? setInterval(() => {
+          try {
+            size.authorize()
+          } catch {
+            ws.close(1008, 'Supplier access revoked')
+          }
+        }, 1000)
+      : null
+    authorizationTimer?.unref?.()
     ws.on('close', () => {
+      clearInterval(authorizationTimer)
       closed = true
       release()
       if (!session) return
@@ -545,13 +579,25 @@ export function createSlotShell({
       })
     })
     try {
+      size.authorize?.()
       connect = slotHost(vm).dockerApi()
       if (size.login) await preparePanelShellLogin(projectRoot, vm)
-      const launch = panelShellLaunch(slotHost(vm).bins.cli)
+      size.authorize?.()
+      const launch = size.restrictedLogin
+        ? supplierLoginLaunch(slotHost(vm).bins.cli)
+        : panelShellLaunch(slotHost(vm).bins.cli)
       const env = ['TERM=xterm-256color', `${SESSION_ENV}=${token}`, `${RC_ENV}=${launch.rc}`]
       // guest-exec 经 root SSH 降权后仍继承 /root，终端须显式切换到槽用户目录。
       if (isKvmRuntime(vm)) env.push('HOME=/home/kincli', 'CLAUDE_CONFIG_DIR=/home/kincli/.claude')
       if (size.login) env.push('KIN_PANEL_LOGIN=1')
+      if (size.restrictedLogin)
+        env.push(
+          'CLAUDE_CODE_HOST_REFRESH=1',
+          `CLAUDE_CODE_VERSION=${OFFICIAL_CLI_VERSION}`,
+          'USER_TYPE=external',
+          'HOME=/home/kincli',
+          'CLAUDE_CONFIG_DIR=/home/kincli/.claude',
+        )
       const { Cmd } = slotExecCmd(vm, launch.cmd, {
         env: isKvmRuntime(vm) ? env : undefined,
         workdir: isKvmRuntime(vm) ? '/home/kincli' : undefined,

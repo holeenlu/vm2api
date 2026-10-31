@@ -406,7 +406,7 @@ export function remoteEgressContainer({ vmId, proxyId, dir, imageRef, body, host
         'kin.egress.vm': vmId,
         'kin.egress.proxy': proxyId,
         'kin.egress.cfg': digest,
-        'vm2api.cluster': '1',
+        'tapmodels.cluster': '1',
       },
       HostConfig: {
         NetworkMode: 'host',
@@ -660,7 +660,7 @@ function kvmSlotContainerBody(vm, { image, network, remoteDir, routing, accel, s
       'kin.vm.os': vm.kernel,
       'kin.vm.layout': SLOT_LAYOUT,
       'kin.vm.runtime': 'kvm',
-      'vm2api.cluster': '1',
+      'tapmodels.cluster': '1',
     },
     HostConfig: {
       Binds: [
@@ -719,7 +719,7 @@ export function slotContainerBody(vm, { image, network, remoteDir, user, routing
       'kin.vm.layout': SLOT_LAYOUT,
       'kin.vm.runtime': 'docker',
       ...(codex ? { 'kin.vm.role': CODEX_SLOT_ROLE } : {}),
-      'vm2api.cluster': '1',
+      'tapmodels.cluster': '1',
     },
     HostConfig: {
       Binds: [
@@ -946,7 +946,12 @@ export async function inspectClusterPayloadChanges(
 export async function refreshClusterSlotPayloads(
   projectRoot,
   vms,
-  { routing, recreate = true, refreshFn = refreshNodeSlotPayload } = {},
+  {
+    routing,
+    recreate = true,
+    refreshFn = refreshNodeSlotPayload,
+    concurrency = Number(process.env.KIN_CLUSTER_REFRESH_CONCURRENCY || 2),
+  } = {},
 ) {
   const groups = new Map()
   const items = []
@@ -972,7 +977,17 @@ export async function refreshClusterSlotPayloads(
     groups.set(key, group)
   }
   for (const group of groups.values()) {
-    for (const vm of group) items.push(await refreshFn(vm, projectRoot, { routing, recreate }))
+    const out = new Array(group.length)
+    let cursor = 0
+    const workers = Math.min(Math.max(1, Number(concurrency) || 1), group.length)
+    async function worker() {
+      while (cursor < group.length) {
+        const index = cursor++
+        out[index] = await refreshFn(group[index], projectRoot, { routing, recreate })
+      }
+    }
+    await Promise.all(Array.from({ length: workers }, worker))
+    items.push(...out)
   }
   const failed = items.filter((item) => !item.ok)
   const changed = items.filter((item) => item.kernel_changed === true)

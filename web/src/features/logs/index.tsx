@@ -4,11 +4,11 @@ import { getRouteApi } from '@tanstack/react-router'
 import { VIEW_DESCRIPTIONS, VIEW_TITLES } from '@/config/nav'
 import type { ErrorCollection } from '@/types/panel-logs'
 import { ChevronDown, Download, Expand, Filter, RefreshCw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { ApiError, api, panelFetch } from '@/lib/api'
 import {
   ERROR_CLASS_IDS,
-  ERROR_CLASS_META,
   resolveMutedClasses,
   writeMutedClasses,
 } from '@/lib/log-mute'
@@ -23,7 +23,10 @@ import {
 } from '@/components/ui/collapsible'
 import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
+import { SearchSelect } from '@/components/search-select'
 import { meQueryOptions } from '@/features/auth/queries'
+import { groupsQueryOptions } from '@/features/groups/queries'
+import { errorClassLabel } from '@/features/logs/log-display'
 import { routingQueryOptions } from '@/features/settings/queries'
 import { ActiveSessionsList } from './active-sessions-list'
 import {
@@ -54,17 +57,36 @@ import {
   type LogsFilterState,
 } from './search'
 import { UsageLogsStatsPanel } from './usage-logs-stats-panel'
+import { UsageRankings } from './usage-rankings'
 import { VirtualizedLogsTable, type OpenDetail } from './virtualized-logs-table'
 
 const route = getRouteApi('/_authenticated/logs')
 
+function normalizedErrorCollection(value: unknown): ErrorCollection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const raw = value as Record<string, unknown>
+  return {
+    total: Number.isFinite(Number(raw.total)) ? Number(raw.total) : undefined,
+    by_class: Array.isArray(raw.by_class) ? raw.by_class : [],
+    by_code: Array.isArray(raw.by_code) ? raw.by_code : [],
+    recent: Array.isArray(raw.recent) ? raw.recent : [],
+    ingress_hits: Array.isArray(raw.ingress_hits) ? raw.ingress_hits : [],
+  }
+}
+
 export function LogsPage() {
+  const { t: translate } = useTranslation('logs')
+
   const qc = useQueryClient()
   const navigate = route.useNavigate()
   const search = route.useSearch()
   const me = useQuery(meQueryOptions())
+  const groups = useQuery({
+    ...groupsQueryOptions(),
+    enabled: me.data?.role !== 'admin',
+  })
   const role = me.data?.role
-  const isAdmin = role === 'admin' || role === 'super'
+  const isAdmin = role === 'super_admin' || role === 'admin'
   const user = me.data?.user ?? ''
 
   const filters = useMemo(() => searchToFilters(search), [search])
@@ -73,6 +95,7 @@ export function LogsPage() {
       ? filters.errorClass
       : ''
 
+  const [tab, setTab] = useState<'detail' | 'errors' | 'user' | 'key'>('detail')
   const [isFilterOpen, setIsFilterOpen] = useState(
     () => activeFilterCount(filters) > 0
   )
@@ -92,12 +115,17 @@ export function LogsPage() {
   const stats = useQuery(logStatsQueryOptions(since))
   const muted =
     mutedOverride ?? resolveMutedClasses(stats.data?.muted_error_classes)
-  const errorCollection = (stats.data?.window?.error_collection ||
-    {}) as ErrorCollection
+  const errorCollection = normalizedErrorCollection(
+    stats.data?.window?.error_collection
+  )
 
   const apiFilters = useMemo(
-    () => filtersToApi(filters, muted),
-    [filters, muted]
+    () => ({
+      ...filtersToApi(filters, muted),
+      ...(search.scope === 'mine' ? { scope: 'mine' as const } : {}),
+      ...(tab === 'errors' ? { errorsOnly: true } : {}),
+    }),
+    [filters, muted, search.scope, tab]
   )
   const filterCount = activeFilterCount(filters)
 
@@ -115,10 +143,11 @@ export function LogsPage() {
         body: JSON.stringify({ logging: { muted_error_classes: next } }),
       }),
     onSuccess: () => {
-      toast.success('屏蔽设置已保存')
+      toast.success(translate('logs:muteSettingsSaved'))
       void qc.invalidateQueries({ queryKey: routingQueryOptions().queryKey })
     },
-    onError: (error: Error) => toast.error(error.message || '保存失败'),
+    onError: (error: Error) =>
+      toast.error(error.message || translate('logs:saveFailed')),
   })
 
   function handleToggleMute(id: string) {
@@ -130,7 +159,7 @@ export function LogsPage() {
     if (willMute && errorClass === id)
       applyFilters({ ...filters, errorClass: undefined })
     // 非 admin 只存本地，不触发 PUT（后端 ACL 只放行 GET）。
-    if (role === 'admin') saveMuted.mutate(next)
+    if (role === 'super_admin') saveMuted.mutate(next)
     void qc.invalidateQueries({ queryKey: USAGE_LOGS_QUERY_KEY })
     void qc.invalidateQueries({ queryKey: LOGS_QUERY_KEY })
   }
@@ -180,11 +209,14 @@ export function LogsPage() {
     })
   }, [])
 
-  async function handleExport(opts: ExportOptions) {
+  async function handleExport(opts: ExportOptions, signal?: AbortSignal) {
     try {
       const qs = exportQuery(opts, filters, muted)
-      const res = await panelFetch(`/api/panel/request-logs/export?${qs}`)
-      if (!res.ok) throw new ApiError('导出失败', res.status)
+      const res = await panelFetch(`/api/panel/request-logs/export?${qs}`, {
+        signal,
+      })
+      if (!res.ok)
+        throw new ApiError(translate('logs:exportFailed'), res.status)
       // 只有受信 Origin 能读到这三个头；其余跨域场景为 null，下方按缺失处理。
       const count = Number(res.headers.get('x-kin-export-count') ?? NaN)
       const total = Number(res.headers.get('x-kin-export-total') ?? NaN)
@@ -193,38 +225,55 @@ export function LogsPage() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `vm2api-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.${opts.format}`
+      a.download = `tapmodels-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.${opts.format}`
       a.click()
       URL.revokeObjectURL(url)
       if (truncated && Number.isFinite(count) && Number.isFinite(total)) {
         toast.success(
-          `已下载 ${count} 条，共匹配 ${total} 条，超过 ${opts.limit} 已截断`
+          translate('logs:downloadTruncated', {
+            p0: count,
+            p1: total,
+            p2: opts.limit,
+          })
         )
       } else if (Number.isFinite(count)) {
-        toast.success(`已下载 ${count} 条`)
+        toast.success(translate('logs:downloadCount', { count: count }))
       } else {
-        toast.success('已下载')
+        toast.success(translate('logs:downloaded'))
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '导出失败')
+      if (signal?.aborted) return
+      toast.error(
+        error instanceof Error ? error.message : translate('logs:exportFailed')
+      )
       throw error
     }
   }
 
   const currentSummary = [
     filters.statusCode != null
-      ? `状态码 ${filters.statusCode}`
+      ? translate('logs:statusFilter', { p0: filters.statusCode })
       : filters.excludeStatus200
-        ? '仅非 2xx'
-        : '全部状态',
+        ? translate('logs:non2xx')
+        : translate('logs:allStatuses'),
     errorClass
-      ? `错误类 ${ERROR_CLASS_META[errorClass]?.label || errorClass}`
+      ? translate('logs:errorClassFilter', {
+          p0: errorClassLabel(errorClass),
+        })
       : null,
-    !errorClass && muted.length ? `不含 ${muted.length} 个已屏蔽类` : null,
-    filters.model ? `模型 ${filters.model}` : null,
-    filters.sessionId ? `会话 ${filters.sessionId}` : null,
-    filters.endpoint ? `端点 ${filters.endpoint}` : null,
-    filterCount > 0 ? `共 ${filterCount} 项筛选` : null,
+    !errorClass && muted.length
+      ? translate('logs:excludedMutedClasses', { count: muted.length })
+      : null,
+    filters.model ? translate('logs:modelFilter', { p0: filters.model }) : null,
+    filters.sessionId
+      ? translate('logs:sessionFilterLabel', { p0: filters.sessionId })
+      : null,
+    filters.endpoint
+      ? translate('logs:endpointFilter', { p0: filters.endpoint })
+      : null,
+    filterCount > 0
+      ? translate('logs:filterCount', { count: filterCount })
+      : null,
   ]
     .filter(Boolean)
     .join(' · ')
@@ -235,6 +284,25 @@ export function LogsPage() {
       description={VIEW_DESCRIPTIONS.logs}
       fluid
     >
+      <div className='mb-4 flex gap-2'>
+        {(
+          ['detail', 'errors', ...(isAdmin ? ['user'] : []), 'key'] as const
+        ).map((t) => (
+          <Button
+            key={t}
+            variant={tab === t ? 'default' : 'outline'}
+            onClick={() => setTab(t as typeof tab)}
+          >
+            {t === 'detail'
+              ? translate('logs:details')
+              : t === 'errors'
+                ? translate('logs:error')
+                : t === 'user'
+                  ? translate('logs:userRankings')
+                  : translate('logs:keyRankings')}
+          </Button>
+        ))}
+      </div>
       <div className='space-y-3'>
         <ActiveSessionsList
           maxHeight='200px'
@@ -264,7 +332,7 @@ export function LogsPage() {
                 className='inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border/60 bg-card px-3 py-1.5 text-sm text-muted-foreground transition-colors select-none hover:border-border hover:text-foreground'
               >
                 <Filter className='h-3.5 w-3.5' />
-                <span>筛选条件</span>
+                <span>{translate('logs:filters')}</span>
                 {filterCount > 0 ? (
                   <Badge
                     variant='secondary'
@@ -282,15 +350,17 @@ export function LogsPage() {
               </button>
             </CollapsibleTrigger>
             <div className='flex items-center gap-1'>
-              <Button
-                variant='outline'
-                size='sm'
-                className='h-8 gap-1.5 text-xs'
-                onClick={() => setExportOpen(true)}
-              >
-                <Download className='h-3.5 w-3.5' />
-                导出
-              </Button>
+              {Boolean(role) && (
+                <Button
+                  variant='outline'
+                  size='sm'
+                  className='h-8 gap-1.5 text-xs'
+                  onClick={() => setExportOpen(true)}
+                >
+                  <Download className='h-3.5 w-3.5' />
+                  {translate('logs:export')}
+                </Button>
+              )}
               <ColumnVisibilityDropdown
                 hidden={hiddenColumns}
                 onChange={(next) => {
@@ -303,7 +373,7 @@ export function LogsPage() {
                 size='icon'
                 onClick={() => void enterFullscreen()}
                 className='h-8 w-8'
-                aria-label='全屏显示'
+                aria-label={translate('logs:fullscreen')}
               >
                 <Expand className='h-3.5 w-3.5' />
               </Button>
@@ -313,7 +383,7 @@ export function LogsPage() {
                 onClick={() => void handleRefresh()}
                 className='h-8 w-8'
                 disabled={isFullscreen}
-                aria-label='刷新'
+                aria-label={translate('logs:refresh')}
               >
                 <RefreshCw
                   className={cn('h-3.5 w-3.5', isRefreshing && 'animate-spin')}
@@ -330,7 +400,11 @@ export function LogsPage() {
                   checked={isAutoRefresh}
                   onCheckedChange={setIsAutoRefresh}
                   disabled={isFullscreen}
-                  aria-label={isAutoRefresh ? '停止自动刷新' : '开启自动刷新'}
+                  aria-label={
+                    isAutoRefresh
+                      ? translate('logs:stopAutoRefresh')
+                      : translate('logs:startAutoRefresh')
+                  }
                 />
               </div>
             </div>
@@ -340,6 +414,23 @@ export function LogsPage() {
             className={cn(!isFilterOpen && 'hidden')}
           >
             <div className='mt-3 rounded-lg border border-border/60 bg-card p-4'>
+              <SearchSelect
+                className='mb-3 min-w-56'
+                label={translate('logs:usageGroup')}
+                searchPlaceholder={translate('logs:searchUsageGroup')}
+                value={filters.groupId}
+                options={(Array.isArray(groups.data?.items)
+                  ? groups.data.items
+                  : []
+                ).map((g) => ({
+                  id: String(g.id),
+                  name: g.name,
+                }))}
+                onChange={(value) => {
+                  applyFilters({ ...filters, groupId: value })
+                }}
+                allLabel={translate('logs:allGroups')}
+              />
               <UsageLogsFilters
                 isAdmin={isAdmin}
                 filters={filters}
@@ -350,12 +441,35 @@ export function LogsPage() {
           </CollapsibleContent>
         </Collapsible>
         <div className='overflow-hidden rounded-lg border border-border/60'>
-          <VirtualizedLogsTable
-            filters={apiFilters}
-            autoRefreshEnabled={!isFullscreen && isAutoRefresh}
-            hiddenColumns={hiddenColumns}
-            onOpenDetail={openDetail}
-          />
+          {tab === 'user' || tab === 'key' ? (
+            <UsageRankings
+              filters={apiFilters}
+              scope={tab}
+              canSeeMoney={Boolean(role)}
+              showOwner={role !== 'user'}
+              onSelect={(id) => {
+                applyFilters({
+                  ...filters,
+                  ...(tab === 'user' ? { userId: id } : { keyId: id }),
+                })
+                setTab('detail')
+              }}
+            />
+          ) : (
+            <VirtualizedLogsTable
+              filters={apiFilters}
+              autoRefreshEnabled={!isFullscreen && isAutoRefresh}
+              hiddenColumns={[
+                ...new Set([
+                  ...hiddenColumns,
+                  ...(role === 'user'
+                    ? (['user', 'ip'] as LogsTableColumn[])
+                    : []),
+                ]),
+              ]}
+              onOpenDetail={openDetail}
+            />
+          )}
         </div>
       </div>
       <LogDetailDialog state={detail} onClose={() => setDetail(null)} />

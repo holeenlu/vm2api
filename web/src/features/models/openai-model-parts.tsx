@@ -1,4 +1,5 @@
 import type { Price, PriceSource } from '@/types/panel-pricing'
+import { useTranslation } from 'react-i18next'
 import { fmtAgo } from '@/lib/format'
 import { Fact, Metric } from './model-parts'
 import type { CatalogFacts } from './policy'
@@ -12,11 +13,12 @@ import {
 
 /** Card metrics for a GPT model: upstream catalog facts, not Claude thinking / max_tokens knobs. */
 export function OpenaiCardMetrics({ facts }: { facts: CatalogFacts }) {
+  const { t } = useTranslation('models')
   return (
     <div className='grid gap-2 text-xs sm:grid-cols-3'>
-      <Metric label='上下文' value={facts.context} strong />
-      <Metric label='推理' value={facts.defaultEffort} />
-      <Metric label='档位' value={facts.tierNames} />
+      <Metric label={t('models:context')} value={facts.context} strong />
+      <Metric label={t('models:reasoning')} value={facts.defaultEffort} />
+      <Metric label={t('models:tiers')} value={facts.tierNames} />
     </div>
   )
 }
@@ -28,21 +30,26 @@ export function OpenaiPriceFacts({
   price: Price | null
   source: PriceSource | null
 }) {
+  const { t } = useTranslation('models')
   const modes = openaiServiceModes(price)
   return (
     <>
-      <Fact label='来源' value={priceSourceLabel(source)} />
+      <Fact label={t('models:source')} value={priceSourceLabel(source)} />
       <Fact
-        label='input / cached input / output'
+        label={t('models:openaiRateLabel')}
         value={`${fmtOpenaiRates(price)} / 1M`}
         mono
       />
       {price ? (
         <>
-          <Fact label='cache write' value={fmtPerM(price.cache_5m)} mono />
-          <Fact label='长上下文' value={tiersSummary(price)} />
           <Fact
-            label='服务档位价'
+            label={t('models:cacheWrite')}
+            value={fmtPerM(price.cache_5m)}
+            mono
+          />
+          <Fact label={t('models:longContext')} value={tiersSummary(price)} />
+          <Fact
+            label={t('models:serviceTierPrices')}
             value={modes.length ? modes.join(' / ') : '—'}
             mono
           />
@@ -59,31 +66,35 @@ export function OpenaiCapabilityFacts({
   facts: CatalogFacts
   live: boolean
 }) {
-  const status = live ? '对外可见' : '未进入目录'
+  const { t } = useTranslation('models')
+  const status = live ? t('models:publicVisible') : t('models:notInCatalog')
   if (!facts.synced) {
     return (
       <>
-        <Fact label='上游目录' value='未同步，点「同步 GPT」获取' />
-        <Fact label='目录状态' value={status} />
+        <Fact
+          label={t('models:upstreamCatalog')}
+          value={t('models:catalogSyncHint')}
+        />
+        <Fact label={t('models:catalogStatus')} value={status} />
       </>
     )
   }
   return (
     <>
-      <Fact label='上下文' value={facts.context} />
-      <Fact label='最大上下文' value={facts.maxContext} />
-      <Fact label='默认推理' value={facts.defaultEffort} />
-      <Fact label='可选推理' value={facts.efforts} />
-      <Fact label='服务档位' value={facts.tiers} />
-      <Fact label='输入' value={facts.input} />
-      <Fact label='网页搜索' value={facts.search} />
-      <Fact label='并行工具调用' value={facts.parallel} />
-      <Fact label='上游可见性' value={facts.visibility} />
+      <Fact label={t('models:context')} value={facts.context} />
+      <Fact label={t('models:maxContext')} value={facts.maxContext} />
+      <Fact label={t('models:defaultReasoning')} value={facts.defaultEffort} />
+      <Fact label={t('models:availableReasoning')} value={facts.efforts} />
+      <Fact label={t('models:serviceTiers')} value={facts.tiers} />
+      <Fact label={t('models:inputPrice')} value={facts.input} />
+      <Fact label={t('models:webSearch')} value={facts.search} />
+      <Fact label={t('models:parallelTools')} value={facts.parallel} />
+      <Fact label={t('models:upstreamVisibility')} value={facts.visibility} />
       <Fact
-        label='同步时间'
+        label={t('models:syncTime')}
         value={fmtAgo(facts.syncedAt) || facts.syncedAt || '—'}
       />
-      <Fact label='目录状态' value={status} />
+      <Fact label={t('models:catalogStatus')} value={status} />
     </>
   )
 }

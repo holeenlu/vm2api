@@ -1,0 +1,15 @@
+{
+  "back": "戻る",
+  "home": "ホームに戻る",
+  "forbiddenTitle": "アクセスが拒否されました",
+  "forbiddenDescription": "このリソースを表示する権限がありません。",
+  "generalTitle": "エラーが発生しました",
+  "generalDescription": "ご不便をおかけして申し訳ありません。しばらくしてから再度お試しください。",
+  "maintenanceTitle": "メンテナンス中です",
+  "maintenanceDescription": "現在サイトをご利用いただけません。まもなくサービスを再開します。",
+  "learnMore": "詳細を見る",
+  "notFoundTitle": "ページが見つかりません",
+  "notFoundDescription": "お探しのページは存在しないか、削除されています。",
+  "unauthorizedTitle": "ログインが必要です",
+  "unauthorizedDescription": "このリソースにアクセスするには、権限のあるアカウントでログインしてください。"
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=tapmodels control plane
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tapmodels
+EnvironmentFile=/etc/tapmodels.env
+ExecStart=/usr/bin/node src/server.mjs
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
