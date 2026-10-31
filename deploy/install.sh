@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# vm2api 一键安装 / 更新
+# tapmodels 一键安装 / 更新
 # 参考 sub2api deploy/install.sh 与 CLIProxyAPI installer：
 #   查 GitHub Release → 停服务 → 换版本 → 保留配置 → 拉起。
 #
 # 安装:
-#   curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+#   curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash
 # 更新:
-#   curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+#   curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
 # 检查:
-#   sudo bash /opt/vm2api/deploy/install.sh check
+#   sudo bash /opt/tapmodels/deploy/install.sh check
 #
 set -euo pipefail
 
@@ -25,17 +25,20 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-GITHUB_REPO="${VM2API_GITHUB_REPO:-dofastted/vm2api}"
-INSTALL_DIR="${VM2API_DIR:-/opt/vm2api}"
-SERVICE_NAME="vm2api"
+GITHUB_REPO="${TAPMODELS_GITHUB_REPO:-holeenlu/vm2api}"
+IMAGE_REPO="${TAPMODELS_IMAGE:-ghcr.io/holeenlu/tapmodels-gateway}"
+INSTALL_DIR="${TAPMODELS_DIR:-/opt/tapmodels}"
+SERVICE_NAME="tapmodels"
 DEFAULT_PORT="${PORT:-8787}"
+DOCKER_DAEMON_CONFIG="${TAPMODELS_DOCKER_DAEMON_CONFIG:-/etc/docker/daemon.json}"
+DOCKER_ADDRESS_POOL_BASE="${TAPMODELS_DOCKER_ADDRESS_POOL_BASE:-10.200.0.0/16}"
+DOCKER_ADDRESS_POOL_SIZE="${TAPMODELS_DOCKER_ADDRESS_POOL_SIZE:-24}"
 TARGET_VERSION=""
 ASSUME_YES=0
 NO_START=0
 SYNC_WRAP=1
 FROM_SOURCE=0
 DEFAULT_ADMIN_USER="admin"
-DEFAULT_ADMIN_PASSWORD="123456"
 WROTE_DEFAULT_PASSWORD=0
 HOST_ARCH=""
 REQUESTED_ARCH=""
@@ -69,7 +72,7 @@ usage() {
   uninstall            停控制面（默认保留 .env / vms / data）
 
 选项:
-  --version vX.Y.Z     指定 tag（可带 -amd64 / -arm64 后缀，须与宿主架构一致）
+  --version vX.Y.Z.N   指定 tag（兼容历史三段版本，可带 -amd64 / -arm64 后缀，须与宿主架构一致）
   --dir PATH           安装目录（默认 ${INSTALL_DIR}）
   --yes                非交互
   --no-start           只拉代码，不 compose up
@@ -105,6 +108,10 @@ normalize_tag() {
     return
   fi
   echo "v${v}"
+}
+
+is_release_tag() {
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.(0|[1-9][0-9]*))?$ ]]
 }
 
 version_of_tag() {
@@ -167,7 +174,7 @@ compose() {
 
 require_cmds() {
   local missing=()
-  for c in git curl docker; do
+  for c in git curl docker python3; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
   if [ ${#missing[@]} -gt 0 ]; then
@@ -186,10 +193,10 @@ github_api() {
   local url="$1"
   local args=(-fsSL --connect-timeout 10 --max-time 30
     -H "Accept: application/vnd.github+json"
-    -H "User-Agent: vm2api-installer"
+    -H "User-Agent: tapmodels-installer"
     -H "X-GitHub-Api-Version: 2022-11-28")
-  if [ -n "${GITHUB_TOKEN:-}${VM2API_GITHUB_TOKEN:-}" ]; then
-    args+=(-H "Authorization: Bearer ${GITHUB_TOKEN:-$VM2API_GITHUB_TOKEN}")
+  if [ -n "${GITHUB_TOKEN:-}${TAPMODELS_GITHUB_TOKEN:-}" ]; then
+    args+=(-H "Authorization: Bearer ${GITHUB_TOKEN:-$TAPMODELS_GITHUB_TOKEN}")
   fi
   curl "${args[@]}" "$url"
 }
@@ -198,17 +205,13 @@ latest_release_tag() {
   local json tag
   json="$(github_api "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null || true)"
   tag="$(printf '%s' "$json" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  if [ -n "$tag" ]; then
-    normalize_tag "$tag"
+  if is_release_tag "$tag"; then
+    echo "$tag"
     return
   fi
-  tag="$(git ls-remote --tags --refs "https://github.com/${GITHUB_REPO}.git" 2>/dev/null \
-    | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1 -k2,2n -k3,3n | tail -n1 || true)"
-  if [ -z "$tag" ]; then
-    err "拿不到 GitHub 最新 Release。可设 GITHUB_TOKEN，或指定 --version vX.Y.Z"
-    exit 1
-  fi
-  echo "$tag"
+  # Draft reservations already have Git tags; they are not installable releases.
+  err "拿不到 GitHub 最新正式 Release。可设 GITHUB_TOKEN，或指定 --version vX.Y.Z.N"
+  return 1
 }
 
 release_notes() {
@@ -235,11 +238,12 @@ path, current, target = sys.argv[1], sys.argv[2].lstrip("v"), sys.argv[3].lstrip
 text = open(path, encoding="utf-8").read()
 chunks = re.split(r"^## ", text, flags=re.M)[1:]
 def ver(h):
-    m = re.match(r"v?(\d+\.\d+\.\d+)", h)
+    m = re.match(r"v?(\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?)(?=\s|$)", h)
     return m.group(1) if m else None
 def tup(v):
-    if not v: return (0,0,0)
-    return tuple(int(x) for x in v.split(".")[:3])
+    if not v: return (0,0,0,0)
+    parts = tuple(int(x) for x in v.split("."))
+    return parts + (0,) * (4 - len(parts))
 cur, tgt = tup(current), tup(target)
 shown = 0
 for chunk in chunks:
@@ -327,12 +331,7 @@ guide_auth_error() {
   echo "  识别: 总览「加载失败」或 toast「鉴权失效，请重新登录」"
   echo "  处理: 打开登录页，不要直接进总览"
   echo "    http://127.0.0.1:${port}/cc#/login"
-  if [ "${WROTE_DEFAULT_PASSWORD:-0}" = 1 ]; then
-    echo "  默认账密: admin / 123456（本次写入的空密码默认值，登录后请改）"
-  else
-    echo "  已有密码见:"
-    echo "    grep '^VM2API_ADMIN_PASSWORD=' ${INSTALL_DIR}/.env"
-  fi
+  echo "  管理台密码保存在 ${INSTALL_DIR}/.env 的 TAPMODELS_ADMIN_PASSWORD（仅本机读取）"
   echo ""
 }
 
@@ -343,12 +342,7 @@ print_login_banner() {
   echo ""
   info "管理台登录: http://127.0.0.1:${port}/cc#/login"
   info "探活:       curl -sS --noproxy '*' http://127.0.0.1:${port}/health"
-  if [ "${WROTE_DEFAULT_PASSWORD:-0}" = 1 ]; then
-    info "默认账号:   ${DEFAULT_ADMIN_USER}"
-    info "默认密码:   ${DEFAULT_ADMIN_PASSWORD}（仅空字段写入；请登录后尽快改）"
-  else
-    info "管理台密码见 ${INSTALL_DIR}/.env 的 VM2API_ADMIN_PASSWORD"
-  fi
+  info "管理台密码见 ${INSTALL_DIR}/.env 的 TAPMODELS_ADMIN_PASSWORD（仅本机读取）"
   info "若总览报鉴权失效: 先打开上面的登录页"
 }
 
@@ -383,16 +377,17 @@ ensure_env() {
     cp "$example" "$envf"
   fi
   chmod 600 "$envf" || true
-  env_set_if_empty VM2API_ADMIN_USER "$DEFAULT_ADMIN_USER" || true
-  if env_set_if_empty VM2API_ADMIN_PASSWORD "$DEFAULT_ADMIN_PASSWORD"; then
-    WROTE_DEFAULT_PASSWORD=1
-    ok "已补默认管理台账密  ${DEFAULT_ADMIN_USER} / ${DEFAULT_ADMIN_PASSWORD}（只填空，已有密码未改）"
+  env_set_if_empty TAPMODELS_ADMIN_USER "$DEFAULT_ADMIN_USER" || true
+  if env_set_if_empty TAPMODELS_ADMIN_PASSWORD "$(gen_secret)"; then
+    ok "已生成随机管理台初始密码并保存到 .env（不在日志显示）"
   else
     info "保留已有管理台密码"
   fi
-  env_set_if_empty VM2API_API_KEY "$(gen_secret)" || true
-  env_set_if_empty VM2API_DB_SECRET "$(gen_secret)" || true
+  env_set_if_empty TAPMODELS_API_KEY "$(gen_secret)" || true
+  env_set_if_empty TAPMODELS_DB_SECRET "$(gen_secret)" || true
   chmod 600 "$envf" || true
+  SERVICE_NAME="$(env_get TAPMODELS_CONTAINER_NAME)"
+  SERVICE_NAME="${SERVICE_NAME:-tapmodels}"
 }
 
 wait_health() {
@@ -449,12 +444,12 @@ raise SystemExit(0 if d.get("ok") else 1)'
 
 sync_wrap_cli() {
   local key port response changed
-  key="$(read_env_key VM2API_API_KEY)"
+  key="$(read_env_key TAPMODELS_API_KEY)"
   port="$(read_env_key PORT)"
   port="${port:-$DEFAULT_PORT}"
   if [ -z "$key" ]; then
-    warn "没有 VM2API_API_KEY，跳过 wrap-cli/sync。可稍后："
-    echo "  curl -sS -X POST http://127.0.0.1:${port}/api/panel/wrap-cli/sync -H \"Authorization: Bearer \$VM2API_API_KEY\" -H 'Content-Type: application/json' -d '{\"restart\":true}'"
+    warn "没有 TAPMODELS_API_KEY，跳过 wrap-cli/sync。可稍后："
+    echo "  curl -sS -X POST http://127.0.0.1:${port}/api/panel/wrap-cli/sync -H \"Authorization: Bearer \$TAPMODELS_API_KEY\" -H 'Content-Type: application/json' -d '{\"restart\":true}'"
     return 1
   fi
   info "检查本机槽和集群槽的 kernel、cli-node、cc-node 是否变化"
@@ -519,6 +514,17 @@ fetch_file() {
   exit 1
 }
 
+fetch_file_tag_or_main() {
+  local tag="$1" rel="$2" dest="$3"
+  if curl -fsSL --connect-timeout 10 --max-time 60 "${RAW_BASE}/${tag}/${rel}" -o "${dest}.new"; then
+    mv -f "${dest}.new" "$dest"
+    return 0
+  fi
+  rm -f "${dest}.new"
+  warn "${tag} 缺少 ${rel}，从 main 补取最新部署脚本"
+  fetch_file main "$rel" "$dest"
+}
+
 # 镜像安装：只落部署文件，不 clone 仓库，不在本机构建。
 fetch_release_files() {
   local tag="$1"
@@ -529,6 +535,7 @@ fetch_release_files() {
   fetch_file "$tag" VERSION "${INSTALL_DIR}/VERSION"
   fetch_file "$tag" CHANGELOG.md "${INSTALL_DIR}/CHANGELOG.md" 1
   fetch_file "$tag" deploy/install.sh "${INSTALL_DIR}/deploy/install.sh" 1
+  fetch_file_tag_or_main "$tag" deploy/configure-docker-address-pools.py "${INSTALL_DIR}/deploy/configure-docker-address-pools.py"
   chmod +x "${INSTALL_DIR}/deploy/install.sh" 2>/dev/null || true
   if [ "$HOST_ARCH" = arm64 ]; then
     fetch_file "$tag" deploy/prepare-arm64.py "${INSTALL_DIR}/deploy/prepare-arm64.py" 1
@@ -539,6 +546,55 @@ fetch_release_files() {
   fi
   mkdir -p "${INSTALL_DIR}/vms" "${INSTALL_DIR}/data" "${INSTALL_DIR}/bin" \
     "${INSTALL_DIR}/share" "${INSTALL_DIR}/src/config"
+}
+
+configure_docker_address_pool() {
+  local helper result status backup
+  helper="${INSTALL_DIR}/deploy/configure-docker-address-pools.py"
+  if [ ! -f "$helper" ]; then
+    err "缺少 Docker 地址池配置脚本: ${helper}"
+    exit 1
+  fi
+  info "配置 Docker 槽位地址池 ${DOCKER_ADDRESS_POOL_BASE} /${DOCKER_ADDRESS_POOL_SIZE}"
+  result="$(python3 "$helper" \
+    --config "$DOCKER_DAEMON_CONFIG" \
+    --base "$DOCKER_ADDRESS_POOL_BASE" \
+    --size "$DOCKER_ADDRESS_POOL_SIZE")"
+  status="${result%%$'\t'*}"
+  if [ "$status" = unchanged ]; then
+    ok "Docker 地址池已存在，保留现有 daemon 配置"
+    return 0
+  fi
+  if [ "$status" != changed ]; then
+    err "Docker 地址池配置脚本返回异常: ${result}"
+    exit 1
+  fi
+  backup="${result#*$'\t'}"
+  if ! command -v dockerd >/dev/null 2>&1 || ! dockerd --validate --config-file "$DOCKER_DAEMON_CONFIG" >/dev/null 2>&1; then
+    if [ -n "$backup" ] && [ -f "$backup" ]; then
+      cp -f "$backup" "$DOCKER_DAEMON_CONFIG"
+    else
+      rm -f "$DOCKER_DAEMON_CONFIG"
+    fi
+    err "Docker daemon 配置校验失败，已恢复原配置"
+    exit 1
+  fi
+  ok "Docker daemon 配置校验通过"
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet docker; then
+    info "重启 Docker 使地址池生效"
+    if ! systemctl restart docker; then
+      if [ -n "$backup" ] && [ -f "$backup" ]; then
+        cp -f "$backup" "$DOCKER_DAEMON_CONFIG"
+        warn "Docker 重启失败，已恢复原 daemon 配置；修复 Docker 后再重试地址池扩容"
+      else
+        warn "Docker 重启失败；地址池配置文件为 ${DOCKER_DAEMON_CONFIG}，修复 Docker 后再重试"
+      fi
+      exit 1
+    fi
+    ok "Docker 已重启，地址池已生效"
+  else
+    warn "未检测到 systemd 正在管理 Docker；配置已写入 ${DOCKER_DAEMON_CONFIG}，需手动重启 Docker 才会生效"
+  fi
 }
 
 # 从 COMPOSE_FILE 去掉源码 ARM64 override 段，保留其它 overlay；全去掉后只剩 docker-compose.yml。
@@ -571,8 +627,8 @@ compose_file_without_arm64_override() {
 prepare_arch_env() {
   local mode="$1"
   local cf new_cf
-  env_set_if_empty VM2API_HOST_ROOT "${INSTALL_DIR}" || true
-  if [ "$mode" = image ]; then
+  env_set_if_empty TAPMODELS_HOST_ROOT "${INSTALL_DIR}" || true
+  if [ "$mode" != source ]; then
     # Prebuilt ghcr installs must not use the source-build ARM64 override (local image name).
     if [ "$HOST_ARCH" = arm64 ]; then
       cf="$(env_get COMPOSE_FILE)"
@@ -623,19 +679,11 @@ checkout_tag() {
   fi
   ensure_git_safe
   info "fetch tags"
-  # History was rewritten once to drop build artifacts; --force lets old clones take the new tags.
-  git fetch --force --tags origin
-  if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null && \
-     ! git rev-parse -q --verify "origin/${tag}" >/dev/null && \
-     ! git cat-file -t "${tag}" >/dev/null 2>&1; then
-    # fetch may have created the tag
-    if ! git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
-      err "找不到 tag ${tag}"
-      exit 1
-    fi
-  fi
+  git fetch --no-tags "https://github.com/${GITHUB_REPO}.git" "refs/tags/${tag}"
+  local release_commit
+  release_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
   info "checkout ${tag}（不碰 .env / vms / data）"
-  git checkout -f "${tag}"
+  git checkout -f --detach "$release_commit"
   chmod 755 bin/kin-* 2>/dev/null || true
 }
 
@@ -673,7 +721,7 @@ start_stack() {
     info "docker compose pull && up -d（拉预构建镜像，本机不构建）"
     if ! compose pull; then
       if [ "$HOST_ARCH" = arm64 ]; then
-        err "拉取 ARM64 控制面镜像失败：检查网络，并确认该版本已发布 $(env_get VM2API_IMAGE_TAG) 镜像。"
+        err "拉取 ARM64 控制面镜像失败：检查网络，并确认该版本已发布 $(env_get TAPMODELS_IMAGE_TAG) 镜像。"
       else
         err "拉取控制面镜像失败。检查网络与 registry 可达性，或用 --from-source 走本机构建。"
       fi
@@ -725,10 +773,10 @@ refresh_slot_services() {
   # A stale kin-egress can keep the old binary and its listen port after this
   # refresh. Leaving that as a warning reports the upgrade done while the old
   # exit is still serving traffic.
-  if ! docker exec "$SERVICE_NAME" test -f /opt/vm2api/scripts/fleet-services.mjs >/dev/null 2>&1; then
+  if ! docker exec "$SERVICE_NAME" test -f /opt/tapmodels/scripts/fleet-services.mjs >/dev/null 2>&1; then
     err "控制面缺少槽刷新脚本，不能确认槽内二进制已换到当前版本"
     exit 1
-  elif ! docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/fleet-services.mjs; then
+  elif ! docker exec "$SERVICE_NAME" node /opt/tapmodels/scripts/fleet-services.mjs; then
     err "槽内二进制刷新失败，见上方逐槽报告；失败的槽可能仍在跑旧的 cli-node / kin-egress"
     exit 1
   fi
@@ -737,7 +785,7 @@ refresh_slot_services() {
 print_banner() {
   echo ""
   echo -e "${CYAN}==============================================${NC}"
-  echo -e "${CYAN}  vm2api${NC}"
+  echo -e "${CYAN}  tapmodels${NC}"
   echo -e "${CYAN}==============================================${NC}"
 }
 
@@ -759,9 +807,11 @@ cmd_install() {
     mode=image
     fetch_release_files "$tag"
     ensure_env
-    env_set VM2API_IMAGE_TAG "$(image_tag_for "$tag")"
+    env_set TAPMODELS_IMAGE "$IMAGE_REPO"
+    env_set TAPMODELS_IMAGE_TAG "$(image_tag_for "$tag")"
   fi
   prepare_arch_env "$mode"
+  configure_docker_address_pool
   prepare_arm64_host
   start_stack
   ok "安装完成  ${INSTALL_DIR}  @ $(local_version)"
@@ -798,9 +848,11 @@ cmd_upgrade() {
   else
     fetch_release_files "$tag"
     ensure_env
-    env_set VM2API_IMAGE_TAG "$(image_tag_for "$tag")"
+    env_set TAPMODELS_IMAGE "$IMAGE_REPO"
+    env_set TAPMODELS_IMAGE_TAG "$(image_tag_for "$tag")"
   fi
   prepare_arch_env "$mode"
+  configure_docker_address_pool
   echo ""
   info "本版 changelog"
   print_changelog_slice "${INSTALL_DIR}/CHANGELOG.md" "$current" "$(version_of_tag "$tag")" || true
@@ -868,8 +920,8 @@ cmd_status() {
   echo "目录:    ${INSTALL_DIR}"
   echo "版本:    ${current}"
   echo "架构:    $(arch_of "$(uname -m)" || true)  ($(uname -m))"
-  if [ -f "${INSTALL_DIR}/.env" ] && [ -n "$(env_get VM2API_IMAGE_TAG)" ]; then
-    echo "镜像:    $(env_get VM2API_IMAGE_TAG)"
+  if [ -f "${INSTALL_DIR}/.env" ] && [ -n "$(env_get TAPMODELS_IMAGE_TAG)" ]; then
+    echo "镜像:    $(env_get TAPMODELS_IMAGE_TAG)"
   fi
   if [ -d "${INSTALL_DIR}/.git" ]; then
     echo "git:     $(git -C "${INSTALL_DIR}" describe --tags --always 2>/dev/null || echo unknown)"
@@ -913,13 +965,13 @@ while [ $# -gt 0 ]; do
       ;;
     --version)
       if [ $# -lt 2 ]; then
-        err "--version 需要参数，例如 v1.2.3 或 v1.2.3-arm64"
+        err "--version 需要参数，例如 v1.3.204.1（历史 v1.2.3 也支持）"
         exit 1
       fi
       REQUESTED_ARCH="$(suffix_arch "$2")"
       TARGET_VERSION="$(normalize_tag "$2")"
-      if ! [[ "$TARGET_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        err "无效版本 $2：格式 vX.Y.Z，可带 -amd64 / -arm64 后缀"
+      if ! is_release_tag "$TARGET_VERSION"; then
+        err "无效版本 $2：格式 vX.Y.Z.N（兼容历史三段），可带 -amd64 / -arm64 后缀"
         exit 1
       fi
       shift 2

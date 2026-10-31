@@ -266,7 +266,7 @@ test('panel import replaces credentials and returns the current account email', 
       routingConfig: { codex: { catalog_client_version: '0.160.0' } },
       requireAuth(req) {
         req.apiKeyKind = 'master'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       readBody: async () => ({ vm_id: vmId, mode: 'access_token', raw: token }),

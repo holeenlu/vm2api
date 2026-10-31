@@ -230,6 +230,9 @@ export async function updateOneSlot(
       }
     }
     if (action === 'telemetry') {
+      if (normalizeVmKind(vm).kind === 'codex' || slotHost(vm).native) {
+        return { ...result, ok: true, skipped: true, skip_reason: 'telemetry_unsupported' }
+      }
       const enabled =
         telemetryEnabled === undefined ? vm.seed_policy?.telemetry_disabled === false : telemetryEnabled === true
       const vmRef = getVm(projectRoot, id) || vm

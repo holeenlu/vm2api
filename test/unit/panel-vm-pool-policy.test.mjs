@@ -28,7 +28,7 @@ function handler(project, body, extra = {}) {
     cfg: { paths: { project }, vm: { id: null } },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {

@@ -68,3 +68,27 @@ test('catalog is unique aliases', () => {
   const ids = cat.data.map((x) => x.id)
   assert.equal(ids.filter((id) => id === 'sonnet').length, 1)
 })
+
+test('group scoping preserves upstream rotation, prefix routing and cooldown without exposing other addresses', () => {
+  const s = new ApiScheduler()
+  const now = Date.now()
+  const a = ep({ id: 'a', prefix: 'team-a', priority: 10 })
+  const b = ep({ id: 'b', prefix: 'team-b', priority: 0 })
+  const excluded = ep({ id: 'excluded', prefix: 'secret', priority: 100 })
+  s.reload([excluded, b, a])
+  const allowed = ['a', 'b']
+  assert.deepEqual(
+    Array.from({ length: 4 }, () => s.pick('sonnet', now, allowed).endpoint.id),
+    ['a', 'b', 'a', 'b'],
+  )
+  assert.equal(s.pick('team-b/sonnet', now, allowed).endpoint.id, 'b')
+  assert.equal(s.pick('secret/sonnet', now, allowed).ok, false)
+  assert.equal(s.pick('sonnet', now, []).ok, false)
+  assert.ok(s.catalog(allowed).data.every((model) => !model.id.startsWith('secret/')))
+  for (const key of a.api_key_entries) key.cooldown_until = new Date(now + 60_000).toISOString()
+  assert.equal(s.pick('sonnet', now, allowed).endpoint.id, 'b')
+  b.disabled = true
+  assert.equal(s.pick('sonnet', now, allowed).code, 'api_pool_exhausted')
+  a.disable_cooling = true
+  assert.equal(s.pick('sonnet', now, allowed).endpoint.id, 'a')
+})

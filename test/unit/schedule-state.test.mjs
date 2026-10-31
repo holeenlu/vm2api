@@ -10,6 +10,7 @@ import {
   applyHold,
   applyScheduleOff,
   applyUnschedulable,
+  clearLegacyProxyScheduleOff,
   migrateScheduleRecord,
   pickScheduleFields,
   resolveSlotState,
@@ -129,6 +130,36 @@ test('mutators keep the legacy trio in step', () => {
   applyScheduleOff(vm, false)
   assert.equal(vm.schedulable, true, 'operator 调度开 clears 不可调度 too')
   assert.equal(vm.unschedulable, undefined)
+})
+
+test('legacy proxy schedule_off is cleared as a self-healing restriction', () => {
+  const vm = {
+    id: 'vm-proxy-legacy',
+    status: 'paused',
+    schedule_off: true,
+    schedule_manual: true,
+    schedule_off_reason: 'proxy_cooldown',
+    schedulable: false,
+  }
+  assert.equal(clearLegacyProxyScheduleOff(vm), true)
+  assert.equal(vm.schedule_off, undefined)
+  assert.equal(vm.schedule_off_reason, undefined)
+  assert.equal(vm.schedulable, true)
+  assert.equal(vm.status, 'running')
+
+  const derived = {
+    schedule_off: true,
+    schedule_manual: true,
+    schedule_disabled_reason: 'proxy_cooldown',
+    schedulable: false,
+  }
+  assert.equal(clearLegacyProxyScheduleOff(derived), true)
+  assert.equal(derived.schedule_off, undefined)
+  assert.equal(derived.schedulable, true)
+
+  const manual = { schedule_off: true, schedule_off_reason: 'operator', schedulable: false }
+  assert.equal(clearLegacyProxyScheduleOff(manual), false)
+  assert.equal(manual.schedule_off, true)
 })
 
 test('only operator actions clear 不可调度', () => {
@@ -273,4 +304,11 @@ test('resolveSlotState reads records written before the migration', () => {
     availability: { key: 'quota', reason: 'quota_5h_header' },
   })
   assert.equal(leftover.schedule_state, 'restricted')
+})
+
+test('Fable-only quota reasons never restrict the whole slot', () => {
+  for (const code of ['fable_usage_limit', 'fable_quota']) {
+    assert.equal(stateOfReason(code).state, 'on')
+    assert.equal(stateOfReason(code).scope, null)
+  }
 })

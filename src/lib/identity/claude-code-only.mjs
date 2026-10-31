@@ -29,7 +29,7 @@ function headerText(headers, key) {
 }
 
 /**
- * Headers the CLI sends on every Messages and count_tokens call (captured from 2.1.280).
+ * Headers the CLI sends on every Messages call (captured from 2.1.280).
  * A UA alone is one string to copy; this set comes from the Stainless SDK plus the
  * CLI's own session header. Relays rewrite them, which is why the relayed path is
  * body-only and follows its own switch.
@@ -92,15 +92,14 @@ function isCliQuotaProbe(headers, body) {
 /**
  * Direct Claude Code: client header set, plus official system + user_id (same recognition
  * the persona path uses), session id agreeing across header and body, and billing version
- * agreeing with the UA. count_tokens bodies carry no system or user_id, so they are checked on
- * the header set alone; the CLI quota probe must match its fixed body exactly. Third-party
+ * agreeing with the UA. The CLI quota probe must match its fixed body exactly. Third-party
  * probes never get here: the caller refuses every health-probe shape first.
  * Relayed Claude Code (UA rewritten) is admitted only while `detect_proxied_official_cc` is on.
  */
-export function isClaudeCodeFamilyRequest(headers = {}, body = {}, { routing = {}, countTokens = false } = {}) {
+export function isClaudeCodeFamilyRequest(headers = {}, body = {}, { routing = {} } = {}) {
   if (looksLikeOhMyPiSystem(body?.system, headers) || inboundHasOpenAIToolShape(body)) return false
   if (hasClaudeCodeClientHeaders(headers)) {
-    if (countTokens || isCliQuotaProbe(headers, body)) return true
+    if (isCliQuotaProbe(headers, body)) return true
     if (
       isOfficialClaudeCodeTraffic(headers, body) &&
       sessionHeaderMatchesUserId(headers, body) &&
@@ -109,7 +108,7 @@ export function isClaudeCodeFamilyRequest(headers = {}, body = {}, { routing = {
       return true
     }
   }
-  return !countTokens && detectProxiedOfficialCcFromRouting(routing) && isProxiedOfficialClaudeCode(body, headers)
+  return detectProxiedOfficialCcFromRouting(routing) && isProxiedOfficialClaudeCode(body, headers)
 }
 
 export function claudeCodeOnlyError() {
