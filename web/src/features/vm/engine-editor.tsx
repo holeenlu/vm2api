@@ -1,14 +1,15 @@
-import { useMemo, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import type { Vm, VmKernelSnapshot } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { patchVm } from '@/lib/api'
 import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import {
-  DATAPLANE_HINT,
+  dataplaneHint,
   HOP_TRANSPORT_LABEL,
   dataplaneLabel,
 } from '@/features/vm/dataplane-contract'
@@ -18,7 +19,7 @@ import {
   inferenceEnginePatchValue,
   normalizeInferenceEngine,
 } from '@/features/vm/engine-contract'
-import { isRemoteVm, REMOTE_UNSUPPORTED_TEXT } from '@/features/vm/placement'
+import { isRemoteVm, remoteUnsupportedText } from '@/features/vm/placement'
 import { vmQueryOptions } from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
@@ -31,6 +32,8 @@ export function VmEngineEditor({
   vm: Vm
   kernel?: VmKernelSnapshot | null
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const configured = normalizeInferenceEngine(
     kernel?.configured_engine ?? vm.inference_engine,
@@ -47,47 +50,65 @@ export function VmEngineEditor({
   const inherits = configured === 'auto'
   const canEdit = useVmPerms().admin
   const remote = isRemoteVm(vm)
-  const status = useMemo(
-    () => ({
-      configured: inferenceEngineLabel(configured),
-      resolved: inferenceEngineLabel(resolved),
-      active: inferenceEngineLabel(active),
-    }),
-    [active, configured, resolved]
-  )
+  const status = {
+    configured: inferenceEngineLabel(configured),
+    resolved: inferenceEngineLabel(resolved),
+    active: inferenceEngineLabel(active),
+  }
   const inherit = useMutation({
     mutationFn: () =>
       patchVm(id, { inference_engine: inferenceEnginePatchValue('auto') }),
     onSuccess: async () => {
-      toast.success('推理内核已改为跟随全局')
+      toast.success(
+        tVm('vm:engineEditor.inferenceKernelNowFollowsGlobalSettings')
+      )
       await Promise.all([
         qc.invalidateQueries({ queryKey: vmQueryOptions(id).queryKey }),
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
       ])
     },
     onError: (error: Error) =>
-      toast.error(`恢复跟随全局失败：${error.message}`),
+      toast.error(
+        tVm('vm:engineEditor.failedToRestoreGlobalSettings', {
+          message: error.message,
+        })
+      ),
   })
 
   return (
-    <CardSection title='推理内核'>
+    <CardSection title={tVm('vm:engineEditor.inferenceKernel')}>
       <div className='grid gap-2 text-sm sm:grid-cols-3'>
-        <EngineValue label='已配置' value={status.configured} />
-        <EngineValue label='解析后' value={status.resolved} />
-        <EngineValue label='当前运行' value={status.active} />
+        <EngineValue
+          label={tVm('vm:codexKernelHealthCard.configured')}
+          value={status.configured}
+        />
+        <EngineValue
+          label={tVm('vm:engineEditor.resolved')}
+          value={status.resolved}
+        />
+        <EngineValue
+          label={tVm('vm:engineEditor.currentlyRunning')}
+          value={status.active}
+        />
       </div>
       <div className='mt-3 grid gap-2 text-sm sm:grid-cols-2'>
         <EngineValue
-          label='数据面'
+          label={tVm('vm:engineEditor.dataPlane')}
           value={isCodexVm(vm) ? '—' : dataplaneLabel(vm.resolved_dataplane)}
         />
       </div>
       <p className='mt-3 text-xs leading-relaxed text-muted-foreground'>
-        运输固定 {HOP_TRANSPORT_LABEL}。{DATAPLANE_HINT} 数据面在{' '}
-        <Link to='/wrap' className='underline underline-offset-4'>
-          内核页
-        </Link>{' '}
-        切换。Go HTTP 转发不再启用。
+        <Trans
+          ns='vm'
+          i18nKey='engineEditor.transportIsFixedToSwitchDataPlanesOnThe'
+          values={{
+            HOP_TRANSPORT_LABEL: HOP_TRANSPORT_LABEL,
+            DATAPLANE_HINT: dataplaneHint(),
+          }}
+          components={{
+            part0: <Link to='/wrap' className='underline underline-offset-4' />,
+          }}
+        />
       </p>
       {inherits || !canEdit ? null : (
         <Button
@@ -96,12 +117,18 @@ export function VmEngineEditor({
           disabled={inherit.isPending || remote}
           onClick={() => inherit.mutate()}
         >
-          {inherit.isPending ? '恢复中…' : '恢复跟随全局'}
+          {inherit.isPending
+            ? tVm('vm:engineEditor.restoring')
+            : tVm('vm:engineEditor.followGlobalSettings')}
         </Button>
       )}
       {remote && canEdit ? (
         <p className='mt-2 text-xs text-muted-foreground'>
-          切换推理内核：{REMOTE_UNSUPPORTED_TEXT}
+          <Trans
+            ns='vm'
+            i18nKey='engineEditor.switchInferenceKernel'
+            values={{ REMOTE_UNSUPPORTED_TEXT: remoteUnsupportedText() }}
+          />
         </p>
       ) : null}
     </CardSection>
@@ -115,6 +142,8 @@ function CardSection({
   title: string
   children: ReactNode
 }) {
+  useTranslation('vm')
+
   return (
     <section className='rounded-md border p-4'>
       <h3 className='mb-3 text-sm font-medium'>{title}</h3>
@@ -124,6 +153,8 @@ function CardSection({
 }
 
 function EngineValue({ label, value }: { label: string; value: string }) {
+  useTranslation('vm')
+
   return (
     <div>
       <div className='text-xs text-muted-foreground'>{label}</div>

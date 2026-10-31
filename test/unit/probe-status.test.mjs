@@ -287,6 +287,7 @@ test('complete Pro usage replaces stale Max windows in persisted panel data', as
     usage_status: 200,
     limits_present: true,
     usage_has_fable: true,
+    probed_at: '2026-09-25T12:00:00Z',
     seven_day_oi: { utilization: 0.2, resets_at: '2099-01-01T00:00:00Z' },
   })
   const result = (
@@ -311,4 +312,33 @@ test('complete Pro usage replaces stale Max windows in persisted panel data', as
   assert.equal(detail.vm.account_tier, 'pro')
   assert.equal(detail.vm.usage_has_fable, false)
   assert.equal(detail.vm.utilization_7d_oi, null)
+})
+
+test('automatic usage refresh never runs a Fable entitlement inference', async (t) => {
+  const f = fixture(t)
+  let fableCalls = 0
+  const result = await buildProbeOne({
+    ...f.args,
+    accountQuota: f.quota,
+    probeEntitlement: false,
+    usageCache: usageCache({
+      ok: true,
+      source: 'official-cc-usage',
+      limits_present: true,
+      probed_at: new Date().toISOString(),
+      five_hour: { utilization: 0.23, resets_at: '2099-01-01T00:00:00Z', status: 'allowed' },
+      seven_day: { utilization: 0.45, resets_at: '2099-01-02T00:00:00Z', status: 'allowed' },
+      seven_day_oi: { utilization: 0.67, resets_at: '2099-01-02T00:00:00Z', status: 'allowed' },
+      usage_has_fable: true,
+    }),
+    fableProbe: async () => {
+      fableCalls++
+      return {}
+    },
+  })
+  assert.equal(fableCalls, 0)
+  assert.equal(result.data.fable_probed, false)
+  assert.equal(result.data.quota.utilization_5h, 0.23)
+  assert.equal(result.data.quota.utilization_7d, 0.45)
+  assert.equal(result.data.quota.utilization_7d_oi, 0.67)
 })

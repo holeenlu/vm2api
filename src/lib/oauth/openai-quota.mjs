@@ -99,17 +99,16 @@ export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
   const extra = {
     codex_usage_updated_at: new Date(now).toISOString(),
   }
-  if (primary) {
-    extra.codex_primary_used_percent = primary.used_percent
-    extra.codex_primary_reset_after_seconds = primary.reset_after_seconds
-    extra.codex_primary_window_minutes = primary.window_minutes
-    extra.codex_primary_reset_at = primary.reset_at
-  }
-  if (secondary) {
-    extra.codex_secondary_used_percent = secondary.used_percent
-    extra.codex_secondary_reset_after_seconds = secondary.reset_after_seconds
-    extra.codex_secondary_window_minutes = secondary.window_minutes
-    extra.codex_secondary_reset_at = secondary.reset_at
+  // WHAM is a complete snapshot. An absent window must clear earlier headers,
+  // unlike a partial inference response where missing headers mean no update.
+  for (const [role, window] of [
+    ['primary', primary],
+    ['secondary', secondary],
+  ]) {
+    extra[`codex_${role}_used_percent`] = window?.used_percent ?? null
+    extra[`codex_${role}_reset_after_seconds`] = window?.reset_after_seconds ?? null
+    extra[`codex_${role}_window_minutes`] = window?.window_minutes ?? null
+    extra[`codex_${role}_reset_at`] = window?.reset_at ?? null
   }
   const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
   extra.codex_5h_used_percent = limits.used_5h_percent
@@ -447,13 +446,20 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     })
   }
 
+  const windowsReset = int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0
+  if (windowsReset > 0) {
+    // A redeemed credit starts a new billing interval even if WHAM keeps the
+    // old reset timestamp or the follow-up usage query fails.
+    const at = new Date().toISOString()
+    persistCodexQuotaSnapshot(projectRoot, vmId, { clearedWindows: { '5h': at, '7d': at } })
+  }
   const after = await queryUpstream(current, { fetchImpl, rotate: false, projectRoot, vmId, policy })
   if (!after.ok) {
     return {
       ok: true,
       warning: 'reset_credit_cache_refresh_failed',
       code: res.payload?.code || 'ok',
-      windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+      windows_reset: windowsReset,
       reset_credits: null,
       credits: null,
       usage: null,
@@ -464,7 +470,7 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
   return {
     ok: true,
     code: res.payload?.code || 'ok',
-    windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+    windows_reset: windowsReset,
     ...after,
   }
 }

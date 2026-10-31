@@ -195,14 +195,6 @@ func (c *Client) Messages(ctx context.Context, payload json.RawMessage, headers 
 	return c.do(ctx, http.MethodPost, "/v1/messages", payload, headers, credentialValue)
 }
 
-func (c *Client) CountTokens(ctx context.Context, payload json.RawMessage, headers map[string]string) (*Response, error) {
-	credentialValue, err := c.ensureCredential(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	return c.do(ctx, http.MethodPost, "/v1/messages/count_tokens", payload, headers, credentialValue)
-}
-
 func (c *Client) Get(ctx context.Context, path string, headers map[string]string) (*Response, error) {
 	credentialValue, err := c.ensureCredential(ctx, false)
 	if err != nil {

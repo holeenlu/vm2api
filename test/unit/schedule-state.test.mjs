@@ -274,3 +274,10 @@ test('resolveSlotState reads records written before the migration', () => {
   })
   assert.equal(leftover.schedule_state, 'restricted')
 })
+
+test('Fable-only quota reasons never restrict the whole slot', () => {
+  for (const code of ['fable_usage_limit', 'fable_quota']) {
+    assert.equal(stateOfReason(code).state, 'on')
+    assert.equal(stateOfReason(code).scope, null)
+  }
+})

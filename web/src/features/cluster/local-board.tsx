@@ -1,5 +1,6 @@
 import type { ClusterLocalStatus } from '@/types/panel-cluster'
 import type { HostStats } from '@/types/panel-overview'
+import { useTranslation } from 'react-i18next'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { StatusMark } from '@/components/status-mark'
 import { LocalLink } from '@/features/cluster/local-link'
@@ -25,10 +26,12 @@ export function LocalBoard({
   linkError: Error | null
   outbound: { ready: number; total: number }
 }) {
+  const { t } = useTranslation('cluster')
+
   const live = isLiveLink(node.link)
   return (
     <PanelCard
-      title='本机'
+      title={t('local')}
       meta={node.host}
       action={<StatusMark tone={LINK_TONE[node.link]} variant='pill' />}
     >
@@ -36,19 +39,19 @@ export function LocalBoard({
         <div className='min-w-0 flex-1'>
           <div className='grid grid-cols-2 gap-px bg-border/60 sm:grid-cols-4'>
             <StatCell
-              label='槽位'
+              label={t('slots')}
               value={formatNodeMetric(node, node.vmCount, fmtNum)}
             />
             <StatCell
-              label='凭证'
+              label={t('credentials')}
               value={formatNodeMetric(node, node.credCount, fmtNum)}
             />
             <StatCell
-              label='在线凭证'
+              label={t('onlineCredentials')}
               value={formatNodeMetric(node, node.onlineCredCount, fmtNum)}
             />
             <StatCell
-              label='总花费'
+              label={t('totalSpend')}
               value={formatNodeMetric(node, node.spendUsd, (n) => fmtUsd(n, 2))}
             />
           </div>

@@ -104,9 +104,9 @@ function buildDesktopAuthUrl({ state, codeChallenge, installationId }) {
   return outer.toString()
 }
 
-export function generateCodexAuthUrl({ vmId, proxyUrl, installationId } = {}) {
+export function generateCodexAuthUrl({ vmId, draftId, proxyUrl, installationId } = {}) {
   sweepExpired()
-  if (!vmId) throw fail('vm_required', 'vm_id required (先创建虚拟机)')
+  if (!vmId && !draftId) throw fail('vm_required', 'vm_id required (先创建虚拟机或授权草稿)')
   if (proxyUrl == null) throw fail('proxy_required', '虚拟机未绑定 SOCKS5，请先分配代理再生成授权链接')
   const state = b64url(crypto.randomBytes(32))
   const codeVerifier = b64url(crypto.randomBytes(32))
@@ -118,7 +118,8 @@ export function generateCodexAuthUrl({ vmId, proxyUrl, installationId } = {}) {
     state,
     codeVerifier,
     proxyUrl: proxyUrl === '' ? '' : String(proxyUrl),
-    vmId: String(vmId),
+    vmId: vmId ? String(vmId) : null,
+    draftId: draftId ? String(draftId) : null,
     installationId: install,
     createdAt,
   })
@@ -126,12 +127,13 @@ export function generateCodexAuthUrl({ vmId, proxyUrl, installationId } = {}) {
     auth_url: buildDesktopAuthUrl({ state, codeChallenge, installationId: install }),
     session_id: sessionId,
     expires_at: createdAt + CODEX_OAUTH_SESSION_TTL_MS,
-    vm_id: String(vmId),
+    ...(vmId ? { vm_id: String(vmId) } : {}),
+    ...(draftId ? { draft_id: String(draftId) } : {}),
     flavor: 'codex',
   }
 }
 
-export async function exchangeCodexAuthCode({ sessionId, code, proxyUrl, vmId, fetchImpl } = {}) {
+export async function exchangeCodexAuthCode({ sessionId, code, proxyUrl, vmId, draftId, fetchImpl } = {}) {
   sweepExpired()
   const session = sessions.get(sessionId)
   if (!session || Date.now() - session.createdAt > CODEX_OAUTH_SESSION_TTL_MS) {
@@ -140,6 +142,9 @@ export async function exchangeCodexAuthCode({ sessionId, code, proxyUrl, vmId, f
   }
   if (vmId && session.vmId && session.vmId !== String(vmId)) {
     throw fail('session_vm_mismatch', '授权会话与当前虚拟机不匹配')
+  }
+  if (draftId && session.draftId && session.draftId !== String(draftId)) {
+    throw fail('session_draft_mismatch', '授权会话与当前授权草稿不匹配')
   }
   const parsed = parseCodexOAuthCallback(code)
   if (!parsed.code) throw fail('code_required', '请粘贴 Codex 回调 URL 或授权码')

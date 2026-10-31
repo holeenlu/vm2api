@@ -6,6 +6,54 @@ import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { clearReleaseCache } from '../../src/lib/admin/release.mjs'
 
+test('manual panel version check bypasses the backend release cache', async (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-check-'))
+  clearReleaseCache()
+  t.after(() => {
+    clearReleaseCache()
+    fs.rmSync(project, { recursive: true, force: true })
+  })
+  fs.writeFileSync(path.join(project, 'VERSION'), '1.3.179\n')
+  let tag = 'v1.3.179'
+  let fetches = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetches++
+    return { ok: true, json: async () => ({ tag_name: tag }) }
+  })
+  const response = {}
+  const handler = createPanelHandler({
+    cfg: { paths: { project } },
+    routingConfig: {},
+    requireAuth(req) {
+      req.apiKeyKind = 'master'
+      req.panelRole = 'super_admin'
+      return true
+    },
+    json(_res, status, payload) {
+      response.status = status
+      response.body = payload.data
+    },
+  })
+  const res = {
+    setHeader(name, value) {
+      response[name] = value
+    },
+  }
+  const url = new URL('http://localhost/api/panel/version')
+  await handler({ method: 'GET' }, res, url)
+  assert.equal(response.body.update_available, false)
+  tag = 'v1.3.180'
+  await handler({ method: 'GET' }, res, url)
+  assert.equal(fetches, 1)
+  url.searchParams.set('force', '1')
+  await handler({ method: 'GET' }, res, url)
+  assert.equal(fetches, 2)
+  assert.equal(response.status, 200)
+  assert.equal(response.body.latest_tag, tag)
+  assert.equal(response.body.update_available, true)
+  assert.equal(response['Cache-Control'], 'no-store')
+})
+
 test('panel version remains the loaded backend version until a new handler boots', async (t) => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-update-'))
   clearReleaseCache()
@@ -21,7 +69,7 @@ test('panel version remains the loaded backend version until a new handler boots
       routingConfig: {},
       requireAuth(req) {
         req.apiKeyKind = 'master'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, payload) {

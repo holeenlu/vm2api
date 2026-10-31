@@ -28,49 +28,6 @@ test('runSlotOauth builds the usage command with the slot owner and container', 
   ])
 })
 
-test('runSlotOauth builds the worker argv and sends count-tokens stdin', async () => {
-  let seen = null
-  const result = await runSlotOauth(exec, 'count-tokens', {
-    body: { model: 'claude-test', messages: [{ role: 'user', content: 'hi' }] },
-    headers: { 'anthropic-version': '2023-06-01' },
-    timeoutMs: 1234,
-    runDocker: async (argv, options) => {
-      seen = { argv, options }
-      return {
-        code: 0,
-        stdout: 'diagnostic line\n{"ok":true,"status":200,"body":{"input_tokens":12},"headers":{"x-test":"ok"}}\n',
-        stderr: '',
-        timed_out: false,
-      }
-    },
-  })
-
-  assert.deepEqual(seen.argv, [
-    'exec',
-    '-i',
-    '-u',
-    '10007:987',
-    'kin-07',
-    '/usr/local/bin/kin-worker',
-    'oauth',
-    'count-tokens',
-    '--config',
-    '/run/kin/worker.json',
-  ])
-  assert.deepEqual(JSON.parse(seen.options.stdin), {
-    body: { model: 'claude-test', messages: [{ role: 'user', content: 'hi' }] },
-    headers: { 'anthropic-version': '2023-06-01' },
-  })
-  assert.equal(seen.options.timeoutMs, 1234)
-  assert.deepEqual(result, {
-    ok: true,
-    status: 200,
-    body: { input_tokens: 12 },
-    headers: { 'x-test': 'ok' },
-    via: 'slot-worker',
-  })
-})
-
 test('runSlotOauth sends reset-redeem stdin without wrapping it', async () => {
   let seen = null
   await runSlotOauth(exec, 'reset-redeem', {
@@ -172,6 +129,9 @@ test('slot oauth guard prevents node-fetch Anthropic host calls', () => {
   }
   visit(srcRoot)
   for (const file of files) {
+    // Explicitly authorized proxy diagnostics send anonymous GETs, never OAuth
+    // refresh/inference. proxy-quality.test verifies method, headers and no body.
+    if (path.relative(srcRoot, file) === 'lib/vm/proxy-quality.mjs') continue
     const source = fs.readFileSync(file, 'utf8')
     const hasNodeFetch = source.includes('node-fetch')
     const hasAnthropicHost =

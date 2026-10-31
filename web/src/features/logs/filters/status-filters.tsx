@@ -1,4 +1,5 @@
-import { ERROR_CLASS_IDS, ERROR_CLASS_META } from '@/lib/log-mute'
+import { useTranslation } from 'react-i18next'
+import { ERROR_CLASS_IDS } from '@/lib/log-mute'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -8,20 +9,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { errorClassLabel } from '@/features/logs/log-display'
 import type { LogsFilterState } from '../search'
 
 const ALL = '__all__'
 const NOT_200 = '!200'
-
-const COMMON_STATUS_CODES: [number, string][] = [
-  [200, '200 (成功)'],
-  [400, '400 (错误请求)'],
-  [401, '401 (未授权)'],
-  [429, '429 (限流)'],
-  [500, '500 (服务器错误)'],
-  [503, '503 (无可用账号)'],
-  [529, '529 (过载)'],
-]
 
 export function StatusFilters({
   filters,
@@ -32,6 +24,17 @@ export function StatusFilters({
   statusCodes: number[]
   onChange: (filters: LogsFilterState) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+  const COMMON_STATUS_CODES: [number, string][] = [
+    [200, translate('logs:statusSuccess')],
+    [400, translate('logs:statusBadRequest')],
+    [401, translate('logs:statusUnauthorized')],
+    [429, translate('logs:statusRateLimited')],
+    [500, translate('logs:statusServerError')],
+    [503, translate('logs:statusUnavailable')],
+    [529, translate('logs:statusOverloaded')],
+  ]
+
   const common = COMMON_STATUS_CODES.map(([code]) => code)
   const dynamic = statusCodes.filter((code) => !common.includes(code))
   const statusValue = filters.excludeStatus200
@@ -43,7 +46,7 @@ export function StatusFilters({
   return (
     <div className='grid gap-4 sm:grid-cols-2'>
       <div className='space-y-2'>
-        <Label>状态码</Label>
+        <Label>{translate('logs:statusCode')}</Label>
         <Select
           value={statusValue}
           onValueChange={(value) =>
@@ -58,11 +61,15 @@ export function StatusFilters({
           }
         >
           <SelectTrigger className='w-full'>
-            <SelectValue placeholder='全部状态码' />
+            <SelectValue placeholder={translate('logs:allStatusCodes')} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={ALL}>全部状态码</SelectItem>
-            <SelectItem value={NOT_200}>非 200（全部非成功请求）</SelectItem>
+            <SelectItem value={ALL}>
+              {translate('logs:allStatusCodes')}
+            </SelectItem>
+            <SelectItem value={NOT_200}>
+              {translate('logs:non200Requests')}
+            </SelectItem>
             {COMMON_STATUS_CODES.map(([code, label]) => (
               <SelectItem key={code} value={String(code)}>
                 {label}
@@ -77,12 +84,12 @@ export function StatusFilters({
         </Select>
       </div>
       <div className='space-y-2'>
-        <Label>重试次数≥</Label>
+        <Label>{translate('logs:minimumRetries')}</Label>
         <Input
           type='number'
           min={0}
           inputMode='numeric'
-          placeholder='输入次数（0 表示不限）'
+          placeholder={translate('logs:retryCountPlaceholder')}
           value={filters.minRetry ?? ''}
           onChange={(event) => {
             const n = Number.parseInt(event.target.value, 10)
@@ -94,7 +101,7 @@ export function StatusFilters({
         />
       </div>
       <div className='space-y-2'>
-        <Label>错误类</Label>
+        <Label>{translate('logs:errorClass')}</Label>
         <Select
           value={filters.errorClass ?? ALL}
           onValueChange={(value) =>
@@ -105,13 +112,13 @@ export function StatusFilters({
           }
         >
           <SelectTrigger className='w-full'>
-            <SelectValue placeholder='全部类' />
+            <SelectValue placeholder={translate('logs:allClasses')} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={ALL}>全部类</SelectItem>
+            <SelectItem value={ALL}>{translate('logs:allClasses')}</SelectItem>
             {ERROR_CLASS_IDS.map((id) => (
               <SelectItem key={id} value={id}>
-                {ERROR_CLASS_META[id].label}（{id}）
+                {errorClassLabel(id)}（{id}）
               </SelectItem>
             ))}
           </SelectContent>

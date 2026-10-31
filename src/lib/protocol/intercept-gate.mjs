@@ -1,5 +1,5 @@
 /**
- * One pre-hop gate for /v1 and count_tokens.
+ * One pre-hop gate for /v1.
  *
  * Order matches sub2api content-moderation Check: cheap hard rules, then the
  * persisted refusal/device cache, then the model. A block never hops.
