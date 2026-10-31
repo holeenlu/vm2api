@@ -5,6 +5,17 @@ export const SKIP_GPT =
 
 export const GPT_ID_PREFIX = /^gpt/i
 
+/** Deployment policy: Astra and Sol use a 500k default window, independent of sync. */
+export function gptContextWindowOverride(id) {
+  const slug =
+    String(id || '')
+      .trim()
+      .split('/')
+      .filter(Boolean)
+      .pop() || ''
+  return /^gpt-\d+(?:\.\d+)?-(?:astra|sol)(?:-|$)/i.test(slug) ? 500000 : undefined
+}
+
 export function isGptSeriesId(id) {
   const s = String(id || '').trim()
   return GPT_ID_PREFIX.test(s) && !SKIP_GPT.test(s)

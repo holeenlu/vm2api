@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm, VmDetailPayload } from '@/types/panel-vm'
 import { telemetryEnabled } from '@/features/vm/telemetry-policy'
 import {
@@ -32,10 +33,19 @@ export function slotState(
   const confirmed = telemetryPolicyConfirmed(observed, on)
   const base = { vm, on, confirmed, probing: false }
   if (observed?.state === 'unsupported') {
-    return { ...base, live: 'blocked', label: '此运行环境不支持' }
+    return {
+      ...base,
+      live: 'blocked',
+      label: t('vm:telemetryStatus.unsupported'),
+    }
   }
   if (!detail || detail.isPending) {
-    return { ...base, live: 'unknown', label: '探测原生状态', probing: true }
+    return {
+      ...base,
+      live: 'unknown',
+      label: t('vm:telemetryStatus.probing'),
+      probing: true,
+    }
   }
   if (!observed) {
     return {

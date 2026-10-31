@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { format } from 'date-fns'
+import { useTranslation } from 'react-i18next'
+import { SYSTEM_TIMEZONE } from '@/lib/system-time'
 import {
   Tooltip,
   TooltipContent,
@@ -37,6 +38,7 @@ export function RelativeTime({
   className?: string
   fallback?: string
 }) {
+  const { i18n } = useTranslation('logs')
   const [now, setNow] = useState(() => new Date())
   useEffect(() => subscribeToTick(() => setNow(new Date())), [])
   if (!date) return <span className={className}>{fallback}</span>
@@ -51,7 +53,16 @@ export function RelativeTime({
         </time>
       </TooltipTrigger>
       <TooltipContent>
-        {format(parsed, "yyyy-MM-dd HH:mm:ss 'GMT'xxx")}
+        {new Intl.DateTimeFormat(i18n.language, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          timeZoneName: 'short',
+          timeZone: SYSTEM_TIMEZONE,
+        }).format(parsed)}
       </TooltipContent>
     </Tooltip>
   )

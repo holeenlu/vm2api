@@ -8,10 +8,16 @@ import { OFFICIAL_STAINLESS } from '../identity/vm-identity.mjs'
 import { BETA_OAUTH, BOOTSTRAP_UA, BOOTSTRAP_URL } from './oauth-contract.mjs'
 
 export const CLAUDE_CLI_BOOTSTRAP_URL = BOOTSTRAP_URL
+export const SUBSCRIPTION_METADATA_KEYS = [
+  'subscription_type',
+  'rate_limit_tier',
+  'billing_type',
+  'subscription_updated_at',
+]
 
 function firstText(...values) {
   for (const value of values) {
-    const text = String(value || '').trim()
+    const text = typeof value === 'string' ? value.trim() : ''
     if (text) return text
   }
   return null
@@ -67,14 +73,29 @@ export function subscriptionTypeFromOauthRaw(raw) {
     const tier = planFromProfile(profile)
     if (tier) return tier
   }
-  return subscriptionTypeFromText(JSON.stringify(raw))
+  return subscriptionTypeFromText(raw.text)
 }
 
 export function flattenOauthIdentity(raw = {}) {
-  const account = asObject(raw.account)
-  const organization = asObject(raw.organization)
+  const profile = asObject(raw.profile || raw.oauth_profile)
+  const account = { ...asObject(profile.account), ...asObject(raw.account) }
+  const organization = { ...asObject(profile.organization), ...asObject(raw.organization) }
   const oauthAccount = asObject(raw.oauth_account)
-  const profile = asObject(raw.profile)
+  const rateLimitTier = firstText(
+    raw.rate_limit_tier,
+    raw.rateLimitTier,
+    raw.claudeAiOauth?.rateLimitTier,
+    organization.rate_limit_tier,
+    oauthAccount.rateLimitTier,
+  )
+  const billingType = firstText(
+    raw.billing_type,
+    raw.billingType,
+    organization.billing_type,
+    account.billing_type,
+    oauthAccount.billing_type,
+    oauthAccount.billingType,
+  )
   return {
     email: firstText(
       raw.email,
@@ -105,6 +126,8 @@ export function flattenOauthIdentity(raw = {}) {
       profile.organization_uuid,
     ),
     subscription_type: subscriptionTypeFromOauthRaw(raw),
+    ...(rateLimitTier ? { rate_limit_tier: rateLimitTier } : {}),
+    ...(billingType ? { billing_type: billingType } : {}),
   }
 }
 
@@ -121,6 +144,8 @@ export function applyOauthIdentity(cred = {}, identity = {}) {
   if (identity.account_uuid) next.account_uuid = identity.account_uuid
   if (identity.org_uuid) next.org_uuid = identity.org_uuid
   if (identity.subscription_type) next.subscription_type = identity.subscription_type
+  for (const key of ['rate_limit_tier', 'billing_type', 'subscription_updated_at'])
+    if (identity[key]) next[key] = identity[key]
   return next
 }
 

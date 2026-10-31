@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { format, subDays } from 'date-fns'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { RepriceResult } from '@/types/panel-pricing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtUsd } from '@/lib/format'
+import { systemDateTime, systemDateTimeToIso } from '@/lib/system-time'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -19,13 +20,13 @@ import { Label } from '@/components/ui/label'
 import { invalidatePricing } from '@/features/models/queries'
 
 function toLocal(d: Date): string {
-  return format(d, "yyyy-MM-dd'T'HH:mm")
+  return systemDateTime(d).slice(0, 16)
 }
 
 function defaultRange() {
   const until = new Date()
   return {
-    since: toLocal(subDays(until, 7)),
+    since: toLocal(new Date(until.getTime() - 7 * 86400000)),
     until: toLocal(until),
   }
 }
@@ -37,21 +38,23 @@ export function RepriceDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  const { t } = useTranslation('models')
+
   const qc = useQueryClient()
   const [range, setRange] = useState(defaultRange)
   const [result, setResult] = useState<RepriceResult | null>(null)
 
   const reprice = useMutation({
     mutationFn: () => {
-      const since = new Date(range.since)
-      const until = new Date(range.until)
+      const since = new Date(systemDateTimeToIso(range.since))
+      const until = new Date(systemDateTimeToIso(range.until))
       if (
         !Number.isFinite(since.getTime()) ||
         !Number.isFinite(until.getTime())
       ) {
-        throw new Error('时间无效')
+        throw new Error(t('models:invalidTime'))
       }
-      if (since >= until) throw new Error('起始时间必须早于结束时间')
+      if (since >= until) throw new Error(t('models:invalidTimeRange'))
       return api<RepriceResult>('/api/panel/pricing/reprice', {
         method: 'POST',
         body: JSON.stringify({
@@ -63,7 +66,11 @@ export function RepriceDialog({
     onSuccess: async (data) => {
       setResult(data)
       toast.success(
-        `已重算 ${data.rows} 行，改写 ${data.changed}，仍未定价 ${data.still_unpriced}`
+        t('models:repriceResult', {
+          count: data.rows,
+          changed: data.changed,
+          unpriced: data.still_unpriced,
+        })
       )
       await invalidatePricing(qc)
     },
@@ -80,15 +87,12 @@ export function RepriceDialog({
     >
       <DialogContent className='sm:max-w-md'>
         <DialogHeader>
-          <DialogTitle>按当前价重算</DialogTitle>
-          <DialogDescription>
-            只改写 total_cost 及其分项，并给未定价行补价。actual_cost
-            与倍率不动。
-          </DialogDescription>
+          <DialogTitle>{t('models:reprice')}</DialogTitle>
+          <DialogDescription>{t('models:repriceHint')}</DialogDescription>
         </DialogHeader>
         <div className='grid gap-3 sm:grid-cols-2'>
           <div className='space-y-1.5'>
-            <Label htmlFor='reprice-since'>起始</Label>
+            <Label htmlFor='reprice-since'>{t('models:start')}</Label>
             <Input
               id='reprice-since'
               type='datetime-local'
@@ -99,7 +103,7 @@ export function RepriceDialog({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='reprice-until'>结束</Label>
+            <Label htmlFor='reprice-until'>{t('models:end')}</Label>
             <Input
               id='reprice-until'
               type='datetime-local'
@@ -113,21 +117,29 @@ export function RepriceDialog({
         {result ? (
           <dl className='grid grid-cols-2 gap-2 rounded-lg border bg-muted/40 p-3 text-sm'>
             <div>
-              <dt className='text-xs text-muted-foreground'>处理行</dt>
+              <dt className='text-xs text-muted-foreground'>
+                {t('models:processedRows')}
+              </dt>
               <dd className='font-mono tabular-nums'>{result.rows}</dd>
             </div>
             <div>
-              <dt className='text-xs text-muted-foreground'>改写</dt>
+              <dt className='text-xs text-muted-foreground'>
+                {t('models:changedRows')}
+              </dt>
               <dd className='font-mono tabular-nums'>{result.changed}</dd>
             </div>
             <div>
-              <dt className='text-xs text-muted-foreground'>仍未定价</dt>
+              <dt className='text-xs text-muted-foreground'>
+                {t('models:stillUnpriced')}
+              </dt>
               <dd className='font-mono tabular-nums'>
                 {result.still_unpriced}
               </dd>
             </div>
             <div>
-              <dt className='text-xs text-muted-foreground'>差额 USD</dt>
+              <dt className='text-xs text-muted-foreground'>
+                {t('models:usdDifference')}
+              </dt>
               <dd className='font-mono tabular-nums'>
                 {result.delta_usd > 0 ? '+' : ''}
                 {fmtUsd(result.delta_usd, 4)}
@@ -141,14 +153,16 @@ export function RepriceDialog({
             variant='outline'
             onClick={() => onOpenChange(false)}
           >
-            关闭
+            {t('models:close')}
           </Button>
           <Button
             type='button'
             disabled={reprice.isPending}
             onClick={() => reprice.mutate()}
           >
-            {reprice.isPending ? '重算中…' : '开始重算'}
+            {reprice.isPending
+              ? t('models:repricing')
+              : t('models:startReprice')}
           </Button>
         </DialogFooter>
       </DialogContent>

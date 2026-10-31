@@ -599,3 +599,79 @@ test('an anchor reads the newest entry an earlier turn wrote, not an unwritten u
   const { anchor } = prepareCachePrefix('w', marked(history(12, { 2: 'x', 7: 'y' })), 2)
   assert.equal(anchor, 0)
 })
+
+// Per-message records are carried over from the previous turn's snapshot when
+// the message hash is unchanged. These cover the cases where the record at an
+// index must NOT be the one the index held last turn.
+const lines = (length, edits = {}) =>
+  Array.from({ length }, (_, i) => ({
+    role: i % 2 ? 'assistant' : 'user',
+    content: [{ type: 'text', text: edits[i] ?? `m${i}` }],
+  }))
+
+test('an edit deep in history is still located after many unchanged turns', () => {
+  clearCachePrefixSessions()
+  let now = 0
+  prepareCachePrefix('deep', { messages: lines(20) }, now)
+  // Thirty turns that reuse every record before the tail.
+  for (let i = 0; i < 30; i++) {
+    now += 1
+    assert.equal(prepareCachePrefix('deep', { messages: lines(20 + i + 1) }, now).break, null)
+  }
+  now += 1
+  const broke = prepareCachePrefix('deep', { messages: lines(51, { 3: 'EDITED' }) }, now).break
+  assert.equal(broke.section, 'messages')
+  assert.equal(broke.index, 3)
+  assert.equal(broke.kind, 'text')
+  assert.equal(broke.diff.reason, 'part')
+  assert.deepEqual(
+    broke.diff.fields.changed.map((item) => `${item.key}:${item.change}`),
+    ['text:length'],
+  )
+})
+
+test('an insertion at the front shifts every index and reuses no record', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('shift', { messages: lines(12) }, 0)
+  assert.equal(prepareCachePrefix('shift', { messages: lines(14) }, 1).break, null)
+  const shifted = [{ role: 'user', content: [{ type: 'text', text: 'front' }] }, ...lines(14)]
+  const broke = prepareCachePrefix('shift', { messages: shifted }, 2).break
+  assert.equal(broke.index, 0)
+  // Index 0 is compared against the message that used to sit there, not against
+  // the record the previous snapshot stored for it.
+  assert.equal(broke.diff.reason, 'part')
+  assert.deepEqual(
+    broke.diff.fields.changed.map((item) => `${item.key}:${item.change}`),
+    ['text:length'],
+  )
+  // The shifted history is now the baseline: growing it again is clean.
+  assert.equal(
+    prepareCachePrefix('shift', { messages: [...shifted, { role: 'user', content: [{ type: 'text', text: 'n' }] }] }, 3)
+      .break,
+    null,
+  )
+})
+
+test('a truncated history breaks at its new tail and the shorter history becomes the baseline', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('cut', { messages: lines(20) }, 0)
+  const broke = prepareCachePrefix('cut', { messages: lines(8) }, 1).break
+  assert.equal(broke.section, 'messages')
+  assert.equal(broke.index, 8)
+  assert.equal(broke.diff.reason, 'missing')
+  assert.equal(prepareCachePrefix('cut', { messages: lines(9) }, 2).break, null)
+})
+
+test('a reused record still reports the right role change at a shifted index', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('role', { messages: lines(10) }, 0)
+  const flipped = lines(10)
+  // 7 is an assistant turn; flipping it changes the hash without touching text.
+  flipped[7] = { ...flipped[7], role: 'user' }
+  const broke = prepareCachePrefix('role', { messages: flipped }, 1).break
+  assert.equal(broke.index, 7)
+  assert.equal(broke.kind, 'structure')
+  assert.equal(broke.diff.reason, 'role')
+  assert.equal(broke.diff.prev, 'assistant')
+  assert.equal(broke.diff.next, 'user')
+})

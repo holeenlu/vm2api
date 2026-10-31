@@ -1,4 +1,5 @@
 import type { RequestLogStats, StatsBucket } from '@/types/panel-overview'
+import { useTranslation } from 'react-i18next'
 import {
   CartesianGrid,
   Line,
@@ -9,6 +10,7 @@ import {
   YAxis,
 } from 'recharts'
 import { fmtNum } from '@/lib/format'
+import { systemDateTime } from '@/lib/system-time'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/empty-state'
@@ -51,7 +53,7 @@ function promptPoints(
     const cacheRate = promptCacheRate({ input, read, creation })
     points.push({
       key,
-      label: `${String(date.getHours()).padStart(2, '0')}:00`,
+      label: systemDateTime(date).slice(11, 13) + ':00',
       cacheRate,
       cacheRatePct: cacheRate == null ? null : cacheRate * 100,
       input,
@@ -69,6 +71,8 @@ function PromptTip({
   active?: boolean
   payload?: { payload: PromptPoint }[]
 }) {
+  const { t } = useTranslation('database')
+
   const point = active ? payload?.[0]?.payload : undefined
   if (!point) return null
   return (
@@ -76,17 +80,17 @@ function PromptTip({
       <div className='font-medium'>{point.label}</div>
       <dl className='mt-1.5 space-y-0.5 tabular-nums'>
         <div className='flex justify-between gap-4'>
-          <dt className='text-muted-foreground'>命中率</dt>
+          <dt className='text-muted-foreground'>{t('hitRate')}</dt>
           <dd>{formatMetricPercent(point.cacheRate)}</dd>
         </div>
         <div className='flex justify-between gap-4'>
-          <dt className='text-muted-foreground'>读取 / 写入</dt>
+          <dt className='text-muted-foreground'>{t('readWrite')}</dt>
           <dd>
             {fmtNum(point.read)} / {fmtNum(point.creation)}
           </dd>
         </div>
         <div className='flex justify-between gap-4'>
-          <dt className='text-muted-foreground'>输入</dt>
+          <dt className='text-muted-foreground'>{t('input')}</dt>
           <dd>{fmtNum(point.input)}</dd>
         </div>
       </dl>
@@ -107,6 +111,8 @@ export function PromptCacheMetricsPanel({
   window: PromptCacheWindow
   onWindowChange: (window: PromptCacheWindow) => void
 }) {
+  const { t } = useTranslation('database')
+
   const input = Number(stats?.window?.input_tokens || 0)
   const read = Number(stats?.window?.cache_read_tokens || 0)
   const creation = Number(stats?.window?.cache_creation_tokens || 0)
@@ -116,13 +122,10 @@ export function PromptCacheMetricsPanel({
 
   return (
     <PanelCard
-      title='提示词缓存'
-      meta='request_logs · 按小时'
+      title={t('promptCache')}
+      meta={t('hourlyLogs')}
       action={
-        <div
-          className='flex items-center gap-1'
-          aria-label='提示词缓存统计窗口'
-        >
+        <div className='flex items-center gap-1' aria-label={t('promptWindow')}>
           {(['1h', '6h', '24h'] as const).map((item) => (
             <Button
               key={item}
@@ -143,7 +146,7 @@ export function PromptCacheMetricsPanel({
         <div
           className='space-y-4 p-4'
           role='status'
-          aria-label='正在加载提示词缓存指标'
+          aria-label={t('loadingPrompt')}
         >
           <div className='grid grid-cols-2 gap-3 sm:grid-cols-4'>
             {Array.from({ length: 4 }).map((_, index) => (
@@ -154,30 +157,30 @@ export function PromptCacheMetricsPanel({
         </div>
       ) : error ? (
         <div className='px-4 py-8 text-center text-sm text-muted-foreground'>
-          提示词缓存统计加载失败：{errorMessage(error)}
+          {t('promptLoadFailed', { value1: errorMessage(error) })}
         </div>
       ) : (
         <>
           <div className='grid grid-cols-2 gap-px bg-border/60 sm:grid-cols-4'>
             <StatCell
-              label='缓存命中率'
+              label={t('cacheHitRate')}
               value={formatMetricPercent(rate)}
-              hint='读取 /（输入 + 读取 + 写入）'
+              hint={t('hitRateFormula')}
             />
             <StatCell
-              label='缓存读取'
+              label={t('cacheRead')}
               value={fmtNum(read)}
-              hint='cache read tokens'
+              hint={t('readTokens')}
             />
             <StatCell
-              label='缓存写入'
+              label={t('cacheWrite')}
               value={fmtNum(creation)}
-              hint='cache creation tokens'
+              hint={t('creationTokens')}
             />
             <StatCell
-              label='提示词总量'
+              label={t('promptTotal')}
               value={fmtNum(input + read + creation)}
-              hint={`${window} 窗口`}
+              hint={t('windowLabel', { value1: window })}
             />
           </div>
 
@@ -224,7 +227,7 @@ export function PromptCacheMetricsPanel({
               </ResponsiveContainer>
             ) : (
               <div className='grid min-h-[224px] place-items-center'>
-                <EmptyState reason='所选窗口没有可计算的提示词 token；产生请求后会显示缓存趋势。' />
+                <EmptyState reason={t('noPromptTokens')} />
               </div>
             )}
           </div>

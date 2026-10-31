@@ -1,11 +1,13 @@
-import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t } from '@/i18n'
 import type {
   ApiEndpoint,
   ApiEndpointPreset,
   ApiKeyEntry,
   ApiModelEntry,
 } from '@/types/panel-api-endpoints'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtExpiresAt } from '@/lib/format'
@@ -31,15 +33,21 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { apiEndpointsQueryOptions } from '@/features/api-endpoints/queries'
+import { modelPolicyQueryOptions } from '@/features/models/queries'
+import {
+  appendSystemModels,
+  hasModelDraftContent,
+  systemEndpointModels,
+} from './default-models'
 
 type EndpointKind = 'claude' | 'openai' | 'custom'
 type Protocol = 'anthropic' | 'openai'
 type EpAuthScheme = 'x_api_key' | 'authorization_bearer'
 
-const KIND_FALLBACK_LABEL: Record<EndpointKind, string> = {
-  claude: 'Claude 官方',
-  openai: 'OpenAI 官方',
-  custom: '自定义',
+const KIND_LABEL_KEYS: Record<EndpointKind, string> = {
+  claude: 'apiEndpoints:claudeOfficial',
+  openai: 'apiEndpoints:openaiOfficial',
+  custom: 'apiEndpoints:custom',
 }
 
 type ModelDraft = {
@@ -60,6 +68,8 @@ export function EndpointDetailSheet({
   presets: ApiEndpointPreset[]
   onOpenChange: (open: boolean) => void
 }) {
+  useTranslation('apiEndpoints')
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
@@ -88,6 +98,8 @@ function EndpointForm({
   presets: ApiEndpointPreset[]
   onOpenChange: (open: boolean) => void
 }) {
+  const { t } = useTranslation('apiEndpoints')
+
   const qc = useQueryClient()
   const isEdit = !!endpoint
   const [kind, setKind] = useState<EndpointKind>(endpoint?.kind || 'claude')
@@ -96,11 +108,14 @@ function EndpointForm({
       (presetFor(presets, kind).protocol as Protocol)
   )
   const [authScheme, setAuthScheme] = useState<EpAuthScheme>(
-    endpoint?.auth_scheme || 'x_api_key'
+    endpoint?.auth_scheme ||
+      (kind === 'openai' ? 'authorization_bearer' : 'x_api_key')
   )
   const [name, setName] = useState(
     endpoint?.name || presetFor(presets, kind).label
   )
+  // Keep the auto-filled name stable across language changes, like the draft itself.
+  const autoName = useRef(presetFor(presets, kind).label)
   const [baseUrl, setBaseUrl] = useState(
     endpoint?.base_url || presetFor(presets, kind).base_url
   )
@@ -115,6 +130,11 @@ function EndpointForm({
   const [models, setModels] = useState<ModelDraft[]>(
     modelsFromEndpoint(endpoint)
   )
+  const autoModels = useRef<ModelDraft[] | null>(null)
+  const modelPolicy = useQuery({
+    ...modelPolicyQueryOptions(kind === 'openai' ? 'openai' : 'anthropic'),
+    enabled: kind !== 'custom',
+  })
   const [newKey, setNewKey] = useState('')
   const [newProxy, setNewProxy] = useState('')
   const keys = endpoint?.api_key_entries || []
@@ -122,19 +142,43 @@ function EndpointForm({
   const refresh = () =>
     qc.invalidateQueries({ queryKey: apiEndpointsQueryOptions().queryKey })
 
+  useEffect(() => {
+    if (kind === 'custom' || hasModelDraftContent(models)) return
+    const defaults = systemEndpointModels(kind, modelPolicy.data).map(
+      (model) => ({
+        name: model.name,
+        alias: model.alias,
+        image: !!model.image,
+        thinking: (model.thinking?.levels || []).join(','),
+      })
+    )
+    if (defaults.length) {
+      autoModels.current = defaults
+      setModels(defaults)
+    }
+  }, [kind, models, modelPolicy.data])
+
   const applyKind = (nextKind: EndpointKind) => {
+    if (
+      autoModels.current &&
+      JSON.stringify(models) === JSON.stringify(autoModels.current)
+    ) {
+      setModels([])
+    }
+    autoModels.current = null
     const nextPreset = presetFor(presets, nextKind)
-    const prevPreset = presetFor(presets, kind)
     setKind(nextKind)
     if (nextKind !== 'custom') {
       setBaseUrl(nextPreset.base_url)
       setProtocol((nextPreset.protocol as Protocol) || 'anthropic')
     }
+    setAuthScheme(nextKind === 'openai' ? 'authorization_bearer' : 'x_api_key')
     // 名称为空、或仍是「自动填充」态时才跟着类型联动；用户改过名字就不再覆盖
-    const autoNames = [prevPreset.label, 'api', '']
+    const autoNames = [autoName.current, 'api', '']
     if (autoNames.includes(name.trim())) {
       setName(nextKind === 'custom' ? '' : nextPreset.label)
     }
+    autoName.current = nextPreset.label
   }
 
   const fetchModels = useMutation({
@@ -145,7 +189,7 @@ function EndpointForm({
     }> => {
       if (!isEdit) {
         const key = newKey.trim()
-        if (!key) throw new Error('先填上游 key')
+        if (!key) throw new Error(t('apiEndpoints:keyRequired'))
         return api<{ models?: ApiModelEntry[] }>(
           '/api/panel/api-endpoints/fetch-models',
           {
@@ -156,7 +200,8 @@ function EndpointForm({
               base_url: baseUrl.trim(),
               api_key: key,
               proxy_url: newProxy.trim(),
-              auth_scheme: authScheme,
+              auth_scheme:
+                kind === 'openai' ? 'authorization_bearer' : authScheme,
             }),
           }
         )
@@ -179,11 +224,15 @@ function EndpointForm({
               }))
             : modelsFromEndpoint(null)
         )
-        toast.success(`拉到 ${fetched.length} 个模型`)
+        toast.success(
+          t('apiEndpoints:fetchedModels', { count: fetched.length })
+        )
       } else {
         setModels(modelsFromEndpoint(data.item ?? null))
         toast.success(
-          `拉到 ${data.fetched ?? data.item?.models?.length ?? 0} 个模型`
+          t('apiEndpoints:fetchedModels', {
+            count: data.fetched ?? data.item?.models?.length ?? 0,
+          })
         )
         await refresh()
       }
@@ -208,7 +257,9 @@ function EndpointForm({
       )
     },
     onSuccess: async () => {
-      toast.success(isEdit ? '已保存' : '地址已添加')
+      toast.success(
+        isEdit ? t('apiEndpoints:saved') : t('apiEndpoints:addressAdded')
+      )
       onOpenChange(false)
       await refresh()
     },
@@ -217,7 +268,7 @@ function EndpointForm({
 
   const addKey = useMutation({
     mutationFn: (body: { api_key: string; proxy_url: string }) => {
-      if (!endpoint) throw new Error('地址不存在')
+      if (!endpoint) throw new Error(t('apiEndpoints:addressNotFound'))
       return api(
         `/api/panel/api-endpoints/${encodeURIComponent(endpoint.id)}/keys`,
         {
@@ -227,7 +278,7 @@ function EndpointForm({
       )
     },
     onSuccess: async () => {
-      toast.success('key 已加入')
+      toast.success(t('apiEndpoints:keyAdded'))
       setNewKey('')
       setNewProxy('')
       await refresh()
@@ -237,14 +288,14 @@ function EndpointForm({
 
   const removeKey = useMutation({
     mutationFn: (kid: string) => {
-      if (!endpoint) throw new Error('地址不存在')
+      if (!endpoint) throw new Error(t('apiEndpoints:addressNotFound'))
       return api(
         `/api/panel/api-endpoints/${encodeURIComponent(endpoint.id)}/keys/${encodeURIComponent(kid)}`,
         { method: 'DELETE' }
       )
     },
     onSuccess: async () => {
-      toast.success('已删除 key')
+      toast.success(t('apiEndpoints:keyDeleted'))
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -255,18 +306,23 @@ function EndpointForm({
   return (
     <>
       <SheetHeader className='pb-2'>
-        <SheetTitle>{isEdit ? '编辑地址' : '添加地址'}</SheetTitle>
+        <SheetTitle>
+          {isEdit
+            ? t('apiEndpoints:editAddress')
+            : t('apiEndpoints:addAddress')}
+        </SheetTitle>
         <SheetDescription>
           {isEdit
             ? endpoint?.name || endpoint?.id
-            : '直连上游 · key 池 · 模型 alias。地址不要带 /v1。'}
+            : t('apiEndpoints:detailDescription')}
         </SheetDescription>
       </SheetHeader>
       <div className='space-y-6 pb-8'>
         <section className='space-y-3'>
-          <h3 className='text-sm font-medium'>基本信息</h3>
-          <Field label='类型'>
+          <h3 className='text-sm font-medium'>{t('apiEndpoints:basicInfo')}</h3>
+          <Field label={t('apiEndpoints:kind')}>
             <Select
+              disabled={endpoint?.connection_editable === false}
               value={kind}
               onValueChange={(value) => applyKind(value as EndpointKind)}
             >
@@ -279,18 +335,22 @@ function EndpointForm({
                   : (['claude', 'openai', 'custom'] as EndpointKind[]).map(
                       (k) => ({
                         kind: k,
-                        label: KIND_FALLBACK_LABEL[k],
+                        label: t(KIND_LABEL_KEYS[k]),
                       })
                     )
                 ).map((p) => (
                   <SelectItem key={p.kind} value={p.kind}>
-                    {p.label}
+                    {p.kind === 'claude' ||
+                    p.kind === 'openai' ||
+                    p.kind === 'custom'
+                      ? t(KIND_LABEL_KEYS[p.kind])
+                      : p.label}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </Field>
-          <Field label='名称'>
+          <Field label={t('apiEndpoints:name')}>
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -298,8 +358,9 @@ function EndpointForm({
             />
           </Field>
           {kind === 'custom' ? (
-            <Field label='地址'>
+            <Field label={t('apiEndpoints:address')}>
               <Input
+                disabled={endpoint?.connection_editable === false}
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
                 placeholder='https://api.example.com'
@@ -307,8 +368,9 @@ function EndpointForm({
             </Field>
           ) : null}
           {kind === 'custom' ? (
-            <Field label='协议'>
+            <Field label={t('apiEndpoints:protocol')}>
               <Select
+                disabled={endpoint?.connection_editable === false}
                 value={protocol}
                 onValueChange={(value) => setProtocol(value as Protocol)}
               >
@@ -322,22 +384,23 @@ function EndpointForm({
               </Select>
             </Field>
           ) : null}
-          <Field label='前缀'>
+          <Field label={t('apiEndpoints:prefix')}>
             <Input
               value={prefix}
               onChange={(e) => setPrefix(e.target.value)}
-              placeholder='可选'
+              placeholder={t('apiEndpoints:optional')}
             />
           </Field>
-          <Field label='优先级'>
+          <Field label={t('apiEndpoints:priority')}>
             <Input
               type='number'
               value={priority}
               onChange={(e) => setPriority(e.target.value)}
             />
           </Field>
-          <Field label='上游认证'>
+          <Field label={t('apiEndpoints:upstreamAuth')}>
             <Select
+              disabled={endpoint?.connection_editable === false}
               value={authScheme}
               onValueChange={(value) => setAuthScheme(value as EpAuthScheme)}
             >
@@ -353,17 +416,20 @@ function EndpointForm({
             </Select>
           </Field>
           <div className='flex items-center justify-between gap-3'>
-            <Label htmlFor='disable_cooling'>关闭 429 冷却</Label>
+            <Label htmlFor='disable_cooling'>
+              {t('apiEndpoints:disable429Cooling')}
+            </Label>
             <Switch
               id='disable_cooling'
               checked={disableCooling}
               onCheckedChange={setDisableCooling}
             />
           </div>
-          <Field label='Headers（JSON）'>
+          <Field label={t('apiEndpoints:headersJson')}>
             <Textarea
               className='font-mono text-xs'
               rows={4}
+              disabled={endpoint?.connection_editable === false}
               value={headersText}
               onChange={(e) => setHeadersText(e.target.value)}
               placeholder='{"anthropic-beta":"…"}'
@@ -372,7 +438,9 @@ function EndpointForm({
         </section>
 
         <section className='space-y-3'>
-          <h3 className='text-sm font-medium'>上游 key</h3>
+          <h3 className='text-sm font-medium'>
+            {t('apiEndpoints:upstreamKey')}
+          </h3>
           {isEdit ? (
             keys.length ? (
               <div className='space-y-2'>
@@ -386,11 +454,19 @@ function EndpointForm({
                 ))}
               </div>
             ) : (
-              <p className='text-xs text-muted-foreground'>还没有 key</p>
+              <p className='text-xs text-muted-foreground'>
+                {t('apiEndpoints:noKeys')}
+              </p>
             )
           ) : null}
           <div className='grid gap-2 sm:grid-cols-2'>
-            <Field label={isEdit ? '新 key' : '上游 key'}>
+            <Field
+              label={
+                isEdit
+                  ? t('apiEndpoints:newKey')
+                  : t('apiEndpoints:upstreamKey')
+              }
+            >
               <Input
                 id='api_key'
                 name='api_key'
@@ -401,11 +477,11 @@ function EndpointForm({
                 placeholder='sk-…'
               />
             </Field>
-            <Field label='代理'>
+            <Field label={t('apiEndpoints:proxy')}>
               <Input
                 value={newProxy}
                 onChange={(e) => setNewProxy(e.target.value)}
-                placeholder='socks5://… 可选'
+                placeholder={t('apiEndpoints:proxyPlaceholder')}
               />
             </Field>
           </div>
@@ -418,13 +494,13 @@ function EndpointForm({
               onClick={() => {
                 const api_key = newKey.trim()
                 if (!api_key) {
-                  toast.error('先填上游 key')
+                  toast.error(t('apiEndpoints:keyRequired'))
                   return
                 }
                 addKey.mutate({ api_key, proxy_url: newProxy.trim() })
               }}
             >
-              加 key
+              {t('apiEndpoints:addKey')}
             </Button>
           ) : (
             <Button
@@ -435,15 +511,42 @@ function EndpointForm({
               loading={fetchModels.isPending}
               onClick={() => fetchModels.mutate()}
             >
-              获取模型
+              {t('apiEndpoints:fetchModels')}
             </Button>
           )}
         </section>
 
         <section className='space-y-3'>
           <div className='flex items-center justify-between gap-2'>
-            <h3 className='text-sm font-medium'>模型</h3>
-            <div className='flex items-center gap-2'>
+            <h3 className='text-sm font-medium'>{t('apiEndpoints:models')}</h3>
+            <div className='flex flex-wrap items-center gap-2'>
+              {kind !== 'custom' ? (
+                <Button
+                  type='button'
+                  size='sm'
+                  variant='outline'
+                  disabled={!modelPolicy.data || modelPolicy.isFetching}
+                  onClick={() =>
+                    setModels((rows) =>
+                      appendSystemModels(
+                        rows.filter(
+                          (row) => row.name.trim() || row.alias.trim()
+                        ),
+                        systemEndpointModels(kind, modelPolicy.data).map(
+                          (model) => ({
+                            name: model.name,
+                            alias: model.alias,
+                            image: !!model.image,
+                            thinking: '',
+                          })
+                        )
+                      )
+                    )
+                  }
+                >
+                  {t('apiEndpoints:addWhitelistModels')}
+                </Button>
+              ) : null}
               {isEdit ? (
                 <Button
                   type='button'
@@ -453,7 +556,7 @@ function EndpointForm({
                   loading={fetchModels.isPending}
                   onClick={() => fetchModels.mutate()}
                 >
-                  获取模型
+                  {t('apiEndpoints:fetchModels')}
                 </Button>
               ) : null}
               <Button
@@ -467,7 +570,7 @@ function EndpointForm({
                   ])
                 }
               >
-                加一行
+                {t('apiEndpoints:addRow')}
               </Button>
             </div>
           </div>
@@ -492,11 +595,16 @@ function EndpointForm({
             </div>
           ) : (
             <p className='text-xs text-muted-foreground'>
-              还没有模型。点「加一行」补 alias。
+              {t('apiEndpoints:noModelsHint')}
             </p>
           )}
         </section>
       </div>
+      {endpoint?.connection_editable === false && (
+        <p className='px-4 text-sm text-muted-foreground'>
+          {t('apiEndpoints:connectionAdminOnly')}
+        </p>
+      )}
       <SheetFooter>
         <Button
           type='button'
@@ -504,7 +612,7 @@ function EndpointForm({
           onClick={() => {
             const headers = parseHeadersJson(headersText)
             if (!headers) {
-              toast.error('Headers 不是合法 JSON')
+              toast.error(t('apiEndpoints:invalidHeadersJson'))
               return
             }
             const api_key = newKey.trim()
@@ -516,9 +624,20 @@ function EndpointForm({
               prefix: prefix.trim(),
               priority: Number(priority || 0),
               disable_cooling: disableCooling,
-              auth_scheme: authScheme,
+              auth_scheme:
+                kind === 'openai' ? 'authorization_bearer' : authScheme,
               headers,
               models: collectModels(models),
+            }
+            if (isEdit && endpoint?.connection_editable === false) {
+              for (const field of [
+                'kind',
+                'protocol',
+                'base_url',
+                'auth_scheme',
+                'headers',
+              ])
+                delete body[field]
             }
             if (!isEdit) {
               body.api_key_entries = api_key
@@ -528,7 +647,7 @@ function EndpointForm({
             save.mutate(body)
           }}
         >
-          {isEdit ? '保存' : '添加'}
+          {isEdit ? t('apiEndpoints:save') : t('apiEndpoints:add')}
         </Button>
       </SheetFooter>
     </>
@@ -544,6 +663,8 @@ function KeyRow({
   busy: boolean
   onRemove: () => void
 }) {
+  const { t } = useTranslation('apiEndpoints')
+
   const cooldown = cooldownLabel(entry.cooldown_until)
   return (
     <div className='flex flex-wrap items-center gap-2 rounded-md border px-3 py-2'>
@@ -553,7 +674,9 @@ function KeyRow({
           (entry.key_suffix ? `••••${entry.key_suffix}` : '••••••••')}
       </span>
       {entry.disabled ? (
-        <span className='text-xs text-muted-foreground'>停用</span>
+        <span className='text-xs text-muted-foreground'>
+          {t('apiEndpoints:disable')}
+        </span>
       ) : null}
       {cooldown ? (
         <span className='text-xs text-muted-foreground'>{cooldown}</span>
@@ -566,7 +689,7 @@ function KeyRow({
         disabled={busy}
         onClick={onRemove}
       >
-        删
+        {t('apiEndpoints:remove')}
       </Button>
     </div>
   )
@@ -581,17 +704,19 @@ function ModelRow({
   onChange: (next: Partial<ModelDraft>) => void
   onRemove: () => void
 }) {
+  const { t } = useTranslation('apiEndpoints')
+
   return (
     <div className='flex flex-wrap items-center gap-2'>
       <Input
         className='min-w-[8rem] flex-1'
-        placeholder='上游 name'
+        placeholder={t('apiEndpoints:upstreamName')}
         value={row.name}
         onChange={(e) => onChange({ name: e.target.value })}
       />
       <Input
         className='min-w-[8rem] flex-1'
-        placeholder='alias'
+        placeholder={t('apiEndpoints:alias')}
         value={row.alias}
         onChange={(e) => onChange({ alias: e.target.value })}
       />
@@ -600,16 +725,16 @@ function ModelRow({
           checked={row.image}
           onCheckedChange={(value) => onChange({ image: value === true })}
         />
-        图
+        {t('apiEndpoints:imageCapability')}
       </label>
       <Input
         className='min-w-[10rem] flex-1'
-        placeholder='thinking levels'
+        placeholder={t('apiEndpoints:thinkingLevels')}
         value={row.thinking}
         onChange={(e) => onChange({ thinking: e.target.value })}
       />
       <Button type='button' size='sm' variant='ghost' onClick={onRemove}>
-        删
+        {t('apiEndpoints:remove')}
       </Button>
     </div>
   )
@@ -622,6 +747,8 @@ function Field({
   label: string
   children: React.ReactNode
 }) {
+  useTranslation('apiEndpoints')
+
   return (
     <div className='space-y-1'>
       <Label>{label}</Label>
@@ -636,24 +763,31 @@ function presetFor(
   kind: string
 ): { kind: string; label: string; base_url: string; protocol: string } {
   const found = presets.find((p) => p.kind === kind)
-  if (found) return found
+  if (found)
+    return {
+      ...found,
+      label:
+        kind === 'claude' || kind === 'openai' || kind === 'custom'
+          ? t(KIND_LABEL_KEYS[kind])
+          : found.label,
+    }
   if (kind === 'custom')
     return {
       kind: 'custom',
-      label: '自定义',
+      label: t('apiEndpoints:custom'),
       base_url: '',
       protocol: 'anthropic',
     }
   if (kind === 'openai')
     return {
       kind: 'openai',
-      label: 'OpenAI 官方',
+      label: t('apiEndpoints:openaiOfficial'),
       base_url: 'https://api.openai.com',
       protocol: 'openai',
     }
   return {
     kind: 'claude',
-    label: 'Claude 官方',
+    label: t('apiEndpoints:claudeOfficial'),
     base_url: 'https://api.anthropic.com',
     protocol: 'anthropic',
   }
@@ -702,6 +836,6 @@ function parseHeadersJson(raw: string): Record<string, string> | null {
 function cooldownLabel(until?: number): string | null {
   if (!until) return null
   const formatted = fmtExpiresAt(until)
-  if (!formatted || formatted === '—') return '冷却中'
-  return `冷却中 · ${formatted}`
+  if (!formatted || formatted === '—') return t('apiEndpoints:cooling')
+  return t('apiEndpoints:coolingUntil', { when: formatted })
 }

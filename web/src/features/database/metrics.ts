@@ -1,4 +1,6 @@
+import { i18n } from '@/i18n'
 import { fmtBytes, fmtNum } from '@/lib/format'
+import { SYSTEM_TIMEZONE } from '@/lib/system-time'
 
 function finite(value: number | null | undefined): number | null {
   if (value == null || !Number.isFinite(value)) return null
@@ -34,5 +36,9 @@ export function promptCacheRate({
 export function formatMetricTime(value: string | null): string {
   if (!value) return '—'
   const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : '—'
+  return Number.isFinite(parsed)
+    ? new Date(parsed).toLocaleString(i18n.language, {
+        timeZone: SYSTEM_TIMEZONE,
+      })
+    : '—'
 }

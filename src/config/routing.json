@@ -227,8 +227,8 @@
   },
   "vm": {
     "default_runtime": "docker",
-    "memory": "512m",
-    "vcpus": 2,
+    "memory": "4g",
+    "vcpus": 4,
     "disk_gb": 20,
     "cpu_model": "host",
     "smbios": {

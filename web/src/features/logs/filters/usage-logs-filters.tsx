@@ -1,133 +1,114 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Clock, Network, Server, User } from 'lucide-react'
+import type { PanelRole } from '@/types/panel-auth'
+import { Search } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import { canFilterLogUsers, filtersForRole } from '../filter-policy'
 import { usageLogFilterOptionsQueryOptions } from '../queries'
 import type { LogsFilterState } from '../search'
 import { ActiveFiltersDisplay } from './active-filters-display'
-import { FilterSection } from './filter-section'
 import { IdentityFilters } from './identity-filters'
-import { QuickFiltersBar } from './quick-filters-bar'
 import { RequestFilters } from './request-filters'
 import { StatusFilters } from './status-filters'
 import { TimeFilters } from './time-filters'
 
-/**
- * 草稿 / 应用模型（hub `UsageLogsFilters`）：所有控件、快捷预设、chip 移除
- * 只改本地草稿，点「应用筛选」才写入 URL。
- */
+/** One compact draft form for all tabs; only Query commits it to the URL. */
 export function UsageLogsFilters({
-  isAdmin,
+  role,
   filters,
   onApply,
   onReset,
+  actions,
 }: {
-  isAdmin: boolean
+  role: PanelRole | undefined
   filters: LogsFilterState
   onApply: (filters: LogsFilterState) => void
   onReset: () => void
+  actions?: ReactNode
 }) {
+  const { t } = useTranslation('logs')
   const [draft, setDraft] = useState(filters)
   useEffect(() => setDraft(filters), [filters])
-  const options = useQuery(usageLogFilterOptionsQueryOptions())
-  const optionsLoading = options.isLoading
-
-  const identityCount =
-    (isAdmin && draft.userId ? 1 : 0) +
-    (draft.keyId ? 1 : 0) +
-    (isAdmin && draft.vmId ? 1 : 0) +
-    (draft.sessionId ? 1 : 0)
-  const requestCount =
-    (draft.model ? 1 : 0) +
-    (draft.mismatch ? 1 : 0) +
-    (draft.endpoint ? 1 : 0) +
-    (draft.protocol ? 1 : 0)
-  const statusCount =
-    (draft.statusCode != null || draft.excludeStatus200 ? 1 : 0) +
-    ((draft.minRetry ?? 0) > 0 ? 1 : 0) +
-    (draft.errorClass ? 1 : 0)
-
+  const safeDraft = filtersForRole(draft, role)
+  const options = useQuery({
+    ...usageLogFilterOptionsQueryOptions(role, filters.scope),
+    enabled: !!role,
+  })
+  const reset = () => {
+    setDraft({ scope: filters.scope })
+    onReset()
+  }
   return (
-    <div className='space-y-4'>
-      <QuickFiltersBar filters={draft} onChange={setDraft} />
+    <form
+      className='space-y-4 p-4'
+      onSubmit={(event) => {
+        event.preventDefault()
+        onApply(filtersForRole(draft, role))
+      }}
+    >
+      <div className='flex flex-wrap items-center justify-between gap-2'>
+        <span className='text-sm font-medium'>{t('logs:filters')}</span>
+        <span className='text-xs text-muted-foreground'>
+          {t(
+            filters.scope === 'mine' || role === 'user'
+              ? 'logs:scopeOwnLogs'
+              : role === 'super_admin'
+                ? 'logs:scopeAllLogs'
+                : 'logs:scopeManagedLogs'
+          )}
+        </span>
+      </div>
+      <div className='grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] items-end gap-3'>
+        <IdentityFilters
+          role={role}
+          filters={safeDraft}
+          options={options.data}
+          optionsLoading={options.isLoading}
+          onChange={setDraft}
+        />
+        <RequestFilters
+          role={role}
+          filters={safeDraft}
+          options={options.data}
+          optionsLoading={options.isLoading}
+          onChange={setDraft}
+        />
+        <StatusFilters
+          role={role}
+          filters={safeDraft}
+          statusCodes={options.data?.statusCodes ?? []}
+          onChange={setDraft}
+        />
+      </div>
+      <div className='flex flex-wrap items-end justify-between gap-3 border-t pt-3'>
+        <TimeFilters filters={safeDraft} onChange={setDraft} />
+        <div className='flex flex-wrap items-center gap-2'>
+          <Button type='submit' size='sm' disabled={!role}>
+            <Search className='size-4' />
+            {t('logs:search')}
+          </Button>
+          <Button type='button' size='sm' variant='outline' onClick={reset}>
+            {t('logs:reset')}
+          </Button>
+          {actions}
+        </div>
+      </div>
+      {options.error ? (
+        <p role='alert' className='text-sm text-destructive'>
+          {t('logs:filterOptionsFailed')}
+        </p>
+      ) : null}
       <ActiveFiltersDisplay
-        isAdmin={isAdmin}
-        filters={draft}
+        isAdmin={canFilterLogUsers(role, filters.scope)}
+        filters={filtersForRole(filters, role)}
         options={options.data}
-        onRemove={setDraft}
-        onClearAll={() => {
-          setDraft({})
-          onReset()
+        onRemove={(next) => {
+          setDraft(next)
+          onApply(next)
         }}
+        onClearAll={reset}
       />
-      <div className='grid gap-4 lg:grid-cols-2'>
-        <FilterSection
-          title='时间范围'
-          description='按日期和时间筛选'
-          icon={Clock}
-          defaultOpen
-          activeCount={draft.startTime != null && draft.endTime != null ? 1 : 0}
-        >
-          <TimeFilters filters={draft} onChange={setDraft} />
-        </FilterSection>
-        <FilterSection
-          title='身份信息'
-          description={
-            isAdmin ? '按用户、密钥、供应商和会话筛选' : '按密钥和会话筛选'
-          }
-          icon={User}
-          defaultOpen
-          activeCount={identityCount}
-        >
-          <IdentityFilters
-            isAdmin={isAdmin}
-            filters={draft}
-            options={options.data}
-            optionsLoading={optionsLoading}
-            onChange={setDraft}
-          />
-        </FilterSection>
-        <FilterSection
-          title='请求参数'
-          description='按模型、端点、协议筛选'
-          icon={Network}
-          activeCount={requestCount}
-        >
-          <RequestFilters
-            filters={draft}
-            options={options.data}
-            optionsLoading={optionsLoading}
-            onChange={setDraft}
-          />
-        </FilterSection>
-        <FilterSection
-          title='状态信息'
-          description='按状态码、重试次数和错误类筛选'
-          icon={Server}
-          activeCount={statusCount}
-        >
-          <StatusFilters
-            filters={draft}
-            statusCodes={options.data?.statusCodes ?? []}
-            onChange={setDraft}
-          />
-        </FilterSection>
-      </div>
-      <div className='flex flex-wrap items-center gap-2 pt-2'>
-        <Button type='button' onClick={() => onApply(draft)}>
-          应用筛选
-        </Button>
-        <Button
-          type='button'
-          variant='outline'
-          onClick={() => {
-            setDraft({})
-            onReset()
-          }}
-        >
-          重置
-        </Button>
-      </div>
-    </div>
+    </form>
   )
 }

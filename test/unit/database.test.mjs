@@ -293,6 +293,126 @@ test('migration 037 normalizes OpenAI input including NULL route fields; SUM(pro
   db.close()
 })
 
+test('local 044 upgrades to cluster links without rewriting applied relay migrations or balances', async () => {
+  const migrationsDir = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'local-044-migrations')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(migrationsDir)) {
+    if (file < '045') fs.copyFileSync(path.join(migrationsDir, file), path.join(oldDir, file))
+  }
+  const dbPath = path.join(tmp, 'upgrade-044.db')
+  const old = new DatabaseSync(dbPath)
+  applyMigrations(old, { migrationsDir: oldDir })
+  const user = { id: 'upgrade-customer' }
+  old.exec(
+    "INSERT INTO users(id,username,email,password_hash,role) VALUES('upgrade-customer','upgrade-customer','customer@test','hash','user')",
+  )
+  old.prepare('UPDATE users SET balance = 12.5 WHERE id = ?').run(user.id)
+  const applied = old.prepare('SELECT version, name, checksum FROM schema_migrations ORDER BY version').all()
+  old.close()
+  const db = openDatabase({ dbPath })
+  assert.deepEqual(
+    db.prepare("SELECT version, name, checksum FROM schema_migrations WHERE version < '045' ORDER BY version").all(),
+    applied,
+  )
+  assert.equal(db.prepare('SELECT balance FROM users WHERE id = ?').get(user.id).balance, 12.5)
+  assert.equal(
+    db.prepare("SELECT name FROM schema_migrations WHERE version = '039'").get().name,
+    '039_relay_operations.sql',
+  )
+  assert.equal(
+    db.prepare("SELECT name FROM schema_migrations WHERE version = '045'").get().name,
+    '045_cluster_node_direct_links.sql',
+  )
+  assert.ok(
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cluster_node_direct_links'").get(),
+  )
+  assert.deepEqual(applyMigrations(db), [])
+})
+
+test('local 045 upgrades platform and inbound device without changing applied history or balances', async () => {
+  const migrationsDir = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'local-045-migrations')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(migrationsDir)) {
+    if (file < '046') fs.copyFileSync(path.join(migrationsDir, file), path.join(oldDir, file))
+  }
+  const dbPath = path.join(tmp, 'upgrade-045.db')
+  const old = new DatabaseSync(dbPath)
+  applyMigrations(old, { migrationsDir: oldDir })
+  const { ClusterNodesRepo } = await import('../../src/lib/db/repos/cluster-nodes-repo.mjs')
+  const user = { id: 'upgrade-native' }
+  old.exec(
+    "INSERT INTO users(id,username,email,password_hash,role) VALUES('upgrade-native','upgrade-native','native@test','hash','user')",
+  )
+  old.prepare('UPDATE users SET balance = 12.5 WHERE id = ?').run(user.id)
+  new ClusterNodesRepo(old).insert({
+    id: 'node-existing',
+    label: 'existing',
+    host: 'example.test',
+    port: 22,
+    username: 'kin',
+    auth_type: 'key',
+    private_key: 'fixture-key',
+    host_key_alg: 'ssh-ed25519',
+    host_key_sha256: 'SHA256:fixture',
+  })
+  old.exec(
+    "INSERT INTO usage_logs (id, request_id, created_at) VALUES ('old-log', 'old-request', '2026-10-20T00:00:00Z')",
+  )
+  const history = old.prepare('SELECT version, name, checksum FROM schema_migrations ORDER BY version').all()
+  old.close()
+  const db = openDatabase({ dbPath })
+  assert.deepEqual(
+    db.prepare("SELECT version, name, checksum FROM schema_migrations WHERE version < '046' ORDER BY version").all(),
+    history,
+  )
+  assert.equal(db.prepare('SELECT balance FROM users WHERE id = ?').get(user.id).balance, 12.5)
+  assert.equal(db.prepare("SELECT platform FROM cluster_nodes WHERE id = 'node-existing'").get().platform, 'linux')
+  assert.equal(
+    db.prepare("SELECT inbound_device_id FROM usage_logs WHERE id = 'old-log'").get().inbound_device_id,
+    null,
+  )
+  assert.deepEqual(
+    db
+      .prepare("SELECT name FROM schema_migrations WHERE version >= '046' ORDER BY version")
+      .all()
+      .map((r) => r.name),
+    [
+      '046_cluster_node_platform.sql',
+      '047_usage_logs_inbound_device.sql',
+      '048_billing_subscription_windows.sql',
+      '049_usage_logs_image_generation.sql',
+      '050_usage_logs_stream_timing.sql',
+      '051_usage_logs_jev_state.sql',
+      '052_jev_usage.sql',
+      '053_request_attempt_scheduler_timing.sql',
+      '054_panel_role_names.sql',
+      '055_usage_logs_upstream_service_tier.sql',
+      '056_supplier_platform.sql',
+      '057_runtime_config_revision.sql',
+      '057_supplier_login_role.sql',
+      '058_request_attempt_send_state.sql',
+      '059_account_protection_runtime.sql',
+      '060_request_log_config_revision.sql',
+      '062_vendor_billing_profile.sql',
+      '063_admin_data_scope.sql',
+      '064_api_key_creator_scope.sql',
+      '065_vendor_proxy_pool_metadata.sql',
+      '066_admin_domain_wallets.sql',
+      '067_vendor_contract_platform_prices.sql',
+      '068_vendor_admin_remark.sql',
+      '069_completed_usage_charges.sql',
+      '070_vendor_settlement_previews.sql',
+      '071_codex_response_owners.sql',
+      '072_global_supplier_pricing.sql',
+      '073_remove_usage_wallet_ledger.sql',
+      '074_usage_response_model.sql',
+    ],
+  )
+  assert.deepEqual(applyMigrations(db), [])
+})
+
 test('checksum mismatch on applied migration throws', () => {
   const migDir = path.join(tmp, 'migs')
   fs.mkdirSync(migDir, { recursive: true })
@@ -416,14 +536,54 @@ test('withTransaction only runs inline for a real outer transaction', () => {
   assert.equal(called, false)
 })
 
-test('migration 042 adds image generation columns; old rows and prompt totals stay the same', () => {
+test('048 adds subscription index to existing billing history without rewriting migrations or balances', () => {
+  const migrationsDir = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'before-048')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(migrationsDir))
+    if (file < '048') fs.copyFileSync(path.join(migrationsDir, file), path.join(oldDir, file))
+  const db = new DatabaseSync(':memory:')
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    const history = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+    const user = { id: 'index-upgrade' }
+    db.exec(
+      "INSERT INTO users(id,username,email,password_hash,role) VALUES('index-upgrade','index-upgrade','index@test','hash','user')",
+    )
+    db.prepare(
+      "INSERT INTO billing_reservations(request_id,user_id,api_key_id,group_id,status,reserved_micros,rate_multiplier,group_version,created_at,updated_at) VALUES('existing',?,'k',1,'pending_usage',42,1,1,'2026-10-20','2026-10-20')",
+    ).run(user.id)
+    const row = db.prepare('SELECT * FROM billing_reservations').get()
+    applyMigrations(db, { migrationsDir })
+    assert.deepEqual(
+      db.prepare("SELECT * FROM schema_migrations WHERE version < '048' ORDER BY version").all(),
+      history,
+    )
+    const upgraded = db.prepare('SELECT * FROM billing_reservations').get()
+    assert.deepEqual(Object.fromEntries(Object.keys(row).map((key) => [key, upgraded[key]])), { ...row })
+    assert.equal(upgraded.balance_exempt, 0)
+    assert.equal(upgraded.wallet_domain_id, null)
+    assert.deepEqual(
+      db
+        .prepare('PRAGMA index_info(idx_billing_reservations_subscription_created)')
+        .all()
+        .map((r) => r.name),
+      ['subscription_id', 'created_at'],
+    )
+    assert.deepEqual(applyMigrations(db, { migrationsDir }), [])
+  } finally {
+    db.close()
+  }
+})
+
+test('migration 049 adds image generation columns; old rows and prompt totals stay the same', () => {
   const src = path.join(process.cwd(), 'src/lib/db/migrations')
-  const migSrc = path.join(tmp, 'mig042')
+  const migSrc = path.join(tmp, 'mig049')
   fs.mkdirSync(migSrc, { recursive: true })
   for (const f of fs.readdirSync(src)) {
-    if (f.endsWith('.sql') && f < '042') fs.copyFileSync(path.join(src, f), path.join(migSrc, f))
+    if (f.endsWith('.sql') && f < '049') fs.copyFileSync(path.join(src, f), path.join(migSrc, f))
   }
-  const db = new DatabaseSync(path.join(tmp, 'mig042.db'))
+  const db = new DatabaseSync(path.join(tmp, 'mig049.db'))
   applyMigrations(db, { migrationsDir: migSrc })
   db.prepare(`
     INSERT INTO usage_logs (id, request_id, created_at, model, input_tokens, cache_read_tokens, output_tokens, total_cost)
@@ -433,8 +593,8 @@ test('migration 042 adds image generation columns; old rows and prompt totals st
     'SELECT SUM(IFNULL(input_tokens, 0) + IFNULL(cache_read_tokens, 0) + IFNULL(cache_creation_tokens, 0)) AS n FROM usage_logs'
   const before = db.prepare(prompt).get().n
   fs.copyFileSync(
-    path.join(src, '042_usage_logs_image_generation.sql'),
-    path.join(migSrc, '042_usage_logs_image_generation.sql'),
+    path.join(src, '049_usage_logs_image_generation.sql'),
+    path.join(migSrc, '049_usage_logs_image_generation.sql'),
   )
   applyMigrations(db, { migrationsDir: migSrc })
   assert.equal(db.prepare(prompt).get().n, before)
@@ -455,4 +615,88 @@ test('migration 042 adds image generation columns; old rows and prompt totals st
     },
   )
   db.close()
+})
+
+test('054 renames legacy SA/AD once and preserves users and commercial data', () => {
+  const migrationsDir = path.resolve('src/lib/db/migrations')
+  const dir = path.join(tmp, 'before-role-names')
+  fs.mkdirSync(dir, { recursive: true })
+  for (const file of fs.readdirSync(migrationsDir))
+    if (file.endsWith('.sql') && file < '054') fs.copyFileSync(path.join(migrationsDir, file), path.join(dir, file))
+  const db = new DatabaseSync(':memory:')
+  try {
+    applyMigrations(db, { migrationsDir: dir })
+    db.exec(
+      "INSERT INTO users(id,username,email,password_hash,role,balance,balance_micros) VALUES('sa','legacy-sa','sa@test','hash-sa','admin',3,3000000),('ad','legacy-ad','ad@test','hash-ad','super',2,2000000),('u','consumer','u@test','hash-u','user',1,1000000)",
+    )
+    const before = db
+      .prepare('SELECT id,username,email,password_hash,balance,balance_micros FROM users ORDER BY id')
+      .all()
+    assert.deepEqual(applyMigrations(db), [
+      '054_panel_role_names.sql',
+      '055_usage_logs_upstream_service_tier.sql',
+      '056_supplier_platform.sql',
+      '057_runtime_config_revision.sql',
+      '057_supplier_login_role.sql',
+      '058_request_attempt_send_state.sql',
+      '059_account_protection_runtime.sql',
+      '060_request_log_config_revision.sql',
+      '062_vendor_billing_profile.sql',
+      '063_admin_data_scope.sql',
+      '064_api_key_creator_scope.sql',
+      '065_vendor_proxy_pool_metadata.sql',
+      '066_admin_domain_wallets.sql',
+      '067_vendor_contract_platform_prices.sql',
+      '068_vendor_admin_remark.sql',
+      '069_completed_usage_charges.sql',
+      '070_vendor_settlement_previews.sql',
+      '071_codex_response_owners.sql',
+      '072_global_supplier_pricing.sql',
+      '073_remove_usage_wallet_ledger.sql',
+      '074_usage_response_model.sql',
+    ])
+    assert.deepEqual(
+      db
+        .prepare('SELECT role FROM users ORDER BY id')
+        .all()
+        .map((r) => r.role),
+      ['admin', 'super_admin', 'user'],
+    )
+    assert.deepEqual(
+      db
+        .prepare(`SELECT id,username,email,password_hash,
+        CASE WHEN role='admin' THEN (SELECT balance_micros/1000000.0 FROM admin_domains WHERE id=users.admin_domain_id) ELSE balance END balance,
+        CASE WHEN role='admin' THEN (SELECT balance_micros FROM admin_domains WHERE id=users.admin_domain_id) ELSE balance_micros END balance_micros
+        FROM users ORDER BY id`)
+        .all(),
+      before,
+    )
+    assert.deepEqual(applyMigrations(db), [])
+    assert.equal(db.prepare("SELECT role FROM users WHERE id='ad'").get().role, 'admin')
+  } finally {
+    db.close()
+  }
+})
+
+test('074 adds observed response model without changing historical log or billing data', () => {
+  const migrationsDir = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'before-response-model')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(migrationsDir))
+    if (file < '074') fs.copyFileSync(path.join(migrationsDir, file), path.join(oldDir, file))
+  const db = new DatabaseSync(path.join(tmp, 'upgrade.db'))
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    db.exec(`INSERT INTO usage_logs (id, request_id, created_at, model, requested_model, upstream_model, via, total_cost, actual_cost)
+      VALUES ('legacy', 'legacy', '2026-10-31T00:00:00Z', 'gpt-6-astra', 'gpt-6-astra', 'gpt-6-astra', 'codex-kernel', 0.25, 0.5)`)
+    const before = db.prepare('SELECT * FROM usage_logs WHERE id=?').get('legacy')
+    applyMigrations(db, { migrationsDir })
+    applyMigrations(db, { migrationsDir })
+    const after = db.prepare('SELECT * FROM usage_logs WHERE id=?').get('legacy')
+    assert.equal(after.response_model, null)
+    delete after.response_model
+    assert.deepEqual(after, before)
+  } finally {
+    db.close()
+  }
 })

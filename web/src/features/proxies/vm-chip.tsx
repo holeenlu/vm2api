@@ -1,10 +1,11 @@
 import { Link } from '@tanstack/react-router'
 import type { Vm } from '@/types/panel-vm'
 import { GripVertical, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
 /** 槽位拖拽的 dataTransfer 类型。自定义 MIME，避免和文本拖拽混淆。 */
-export const VM_DRAG_TYPE = 'application/x-vm2api-vm'
+export const VM_DRAG_TYPE = 'application/x-tapmodels-vm'
 
 const DOT: Record<'ok' | 'bad' | 'none', string> = {
   ok: 'var(--status-ok-solid)',
@@ -35,6 +36,8 @@ export function VmChip({
   onUnbind?: () => void
   onDragChange: (vmId: string) => void
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const id = vm?.id || vmId || ''
   const name = vm?.name || id
   return (
@@ -75,15 +78,18 @@ export function VmChip({
           {name}
         </Link>
       ) : (
-        <span className='truncate text-muted-foreground' title='槽位已不存在'>
+        <span
+          className='truncate text-muted-foreground'
+          title={translate('proxies:slotMissing')}
+        >
           {name}
         </span>
       )}
       {onUnbind ? (
         <button
           type='button'
-          aria-label={`解绑 ${name}`}
-          title='解绑'
+          aria-label={translate('proxies:unbindNamed', { p0: name })}
+          title={translate('proxies:unbind')}
           disabled={disabled}
           onClick={onUnbind}
           className='-me-0.5 grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50'

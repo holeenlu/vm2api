@@ -390,6 +390,8 @@ export function officialLoginCredentialToOauth(doc, extra = {}) {
     account_uuid: identity.account_uuid,
     org_uuid: identity.org_uuid,
     subscription_type: identity.subscription_type,
+    rate_limit_tier: identity.rate_limit_tier,
+    billing_type: identity.billing_type,
     type: 'oauth',
     mode: 'oauth',
     source: AUTH_LOGIN_SOURCE,

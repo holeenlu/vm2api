@@ -24,12 +24,33 @@ export function claudeCodeOnlyFromRouting(routing) {
   return routing?.compatibility?.claude_code_only === true
 }
 
+/**
+ * Claude Desktop 4.4212.0 probes its gateway without a CLI fingerprint. Admit
+ * only its exact, one-token "." request, not arbitrary inference or extra fields.
+ * This is a shape exception available to any authenticated key, not proof of
+ * an official client; callers must keep normal model, quota and billing checks.
+ */
+export function isClaudeDesktopConnectionProbe(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+  if (Object.keys(body).length !== 3 || typeof body.model !== 'string' || !body.model.trim()) return false
+  if (body.max_tokens !== 1 || !Array.isArray(body.messages) || body.messages.length !== 1) return false
+  const message = body.messages[0]
+  return (
+    message != null &&
+    typeof message === 'object' &&
+    !Array.isArray(message) &&
+    Object.keys(message).length === 2 &&
+    message.role === 'user' &&
+    message.content === '.'
+  )
+}
+
 function headerText(headers, key) {
   return String(headers?.[key] ?? '').trim()
 }
 
 /**
- * Headers the CLI sends on every Messages and count_tokens call (captured from 2.1.280).
+ * Headers the CLI sends on every Messages call (captured from 2.1.280).
  * A UA alone is one string to copy; this set comes from the Stainless SDK plus the
  * CLI's own session header. Relays rewrite them, which is why the relayed path is
  * body-only and follows its own switch.
@@ -92,15 +113,14 @@ function isCliQuotaProbe(headers, body) {
 /**
  * Direct Claude Code: client header set, plus official system + user_id (same recognition
  * the persona path uses), session id agreeing across header and body, and billing version
- * agreeing with the UA. count_tokens bodies carry no system or user_id, so they are checked on
- * the header set alone; the CLI quota probe must match its fixed body exactly. Third-party
+ * agreeing with the UA. The CLI quota probe must match its fixed body exactly. Third-party
  * probes never get here: the caller refuses every health-probe shape first.
  * Relayed Claude Code (UA rewritten) is admitted only while `detect_proxied_official_cc` is on.
  */
-export function isClaudeCodeFamilyRequest(headers = {}, body = {}, { routing = {}, countTokens = false } = {}) {
+export function isClaudeCodeFamilyRequest(headers = {}, body = {}, { routing = {} } = {}) {
   if (looksLikeOhMyPiSystem(body?.system, headers) || inboundHasOpenAIToolShape(body)) return false
   if (hasClaudeCodeClientHeaders(headers)) {
-    if (countTokens || isCliQuotaProbe(headers, body)) return true
+    if (isCliQuotaProbe(headers, body)) return true
     if (
       isOfficialClaudeCodeTraffic(headers, body) &&
       sessionHeaderMatchesUserId(headers, body) &&
@@ -109,7 +129,7 @@ export function isClaudeCodeFamilyRequest(headers = {}, body = {}, { routing = {
       return true
     }
   }
-  return !countTokens && detectProxiedOfficialCcFromRouting(routing) && isProxiedOfficialClaudeCode(body, headers)
+  return detectProxiedOfficialCcFromRouting(routing) && isProxiedOfficialClaudeCode(body, headers)
 }
 
 export function claudeCodeOnlyError() {
