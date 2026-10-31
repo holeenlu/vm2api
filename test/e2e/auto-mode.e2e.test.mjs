@@ -42,7 +42,7 @@ function unixRequest(socketPath, token, endpoint, payload) {
 }
 
 async function harness(t, layout = 'zero', cliPath = cli) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-automode-e2e-'))
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-automode-e2e-'))
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }))
   const captured = []
   const capturedHeaders = []

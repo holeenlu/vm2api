@@ -61,6 +61,26 @@ test('live x-codex headers map to extra without assuming 5h/7d', () => {
   assert.equal(view.quota.utilization_7d, 0.125)
 })
 
+for (const disabled of ['primary', 'secondary']) {
+  test(`zero-length ${disabled} headers do not fabricate a 5h window`, () => {
+    const weekly = disabled === 'primary' ? 'secondary' : 'primary'
+    const extra = extraFromCodexHeaders({
+      [`x-codex-${disabled}-used-percent`]: '0',
+      [`x-codex-${disabled}-window-minutes`]: '0',
+      [`x-codex-${disabled}-reset-after-seconds`]: '0',
+      [`x-codex-${weekly}-used-percent`]: '50',
+      [`x-codex-${weekly}-window-minutes`]: '10080',
+      [`x-codex-${weekly}-reset-after-seconds`]: '400000',
+    })
+    const quota = buildCodexUsageView(extra).quota
+    assert.equal(quota.utilization_5h, null)
+    assert.equal(quota.reset_5h, null)
+    assert.equal(quota.utilization_7d, 0.5)
+    assert.ok(quota.reset_7d)
+    assert.equal(codexQuotaPark(extra).limited, false)
+  })
+}
+
 test('capped window parks until reset', () => {
   const now = Date.parse('2026-09-17T00:00:00.000Z')
   const extra = extraFromCodexHeaders(

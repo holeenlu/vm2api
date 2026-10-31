@@ -16,7 +16,7 @@ function makeCreateHandler(project, body, proxyPool, accountQuota, extra = {}) {
     ...(extra.probeLocalKvm ? { probeLocalKvm: extra.probeLocalKvm } : {}),
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -37,7 +37,7 @@ function makeCreateHandler(project, body, proxyPool, accountQuota, extra = {}) {
   return { handlePanel, response }
 }
 
-test('Docker create persists only an explicitly requested CPU quota, never legacy vcpus', async () => {
+test('Docker create persists default CPU quota and honors explicit overrides', async () => {
   for (const machine of [{ vcpus: 4 }, { docker_cpus: 0 }, { docker_cpus: 0.5 }]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-cpu-'))
     try {
@@ -51,8 +51,8 @@ test('Docker create persists only an explicitly requested CPU quota, never legac
       assert.equal(response.status, 200, JSON.stringify(response.body))
       const vm = response.body.data.vm
       const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`), 'utf8'))
-      assert.equal(saved.machine.docker_cpus, machine.docker_cpus)
-      assert.equal(Object.hasOwn(saved.machine, 'docker_cpus'), Object.hasOwn(machine, 'docker_cpus'))
+      assert.equal(saved.machine.docker_cpus, machine.docker_cpus ?? machine.vcpus)
+      assert.equal(Object.hasOwn(saved.machine, 'docker_cpus'), true)
       assert.equal(saved.status, 'stopped')
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
@@ -241,6 +241,7 @@ test('auto-numbering skips ids a deleted VM left behind in account history', asy
     await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
     assert.equal(response.status, 200, response.body?.error?.message || JSON.stringify(response.body))
     assert.equal(response.body?.data?.vm?.id, 'vm-03', 'a fresh slot must not inherit vm-02 history')
+    assert.equal(response.body.data.vm.name, 'vm-03')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -284,10 +285,11 @@ test('create stamps docker machine from routing defaults', async () => {
     const id = response.body?.data?.vm?.id
     const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8'))
     assert.equal(saved.runtime.type, 'docker')
-    assert.equal(saved.machine.memory, '512m')
-    assert.equal(saved.machine.vcpus, 2)
+    assert.equal(saved.machine.memory, '4g')
+    assert.equal(saved.machine.vcpus, 4)
+    assert.equal(saved.machine.docker_cpus, 4)
     assert.equal(response.body.data.vm.runtime_type, 'docker')
-    assert.equal(response.body.data.vm.machine.memory, '512m')
+    assert.equal(response.body.data.vm.machine.memory, '4g')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -400,6 +402,29 @@ test('create writes the requested locale into the slot and its fingerprint', asy
   }
 })
 
+for (const timezone of [undefined, 'America/New_York']) {
+  test(`Taiwan locale creation preserves ${timezone ? 'manual' : 'automatic'} timezone selection`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-zh-tw-'))
+    try {
+      const { handlePanel, response } = makeCreateHandler(root, {
+        start: false,
+        auto_allocate_proxy: false,
+        locale: 'zh_TW.UTF-8',
+        timezone,
+      })
+      await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/create'))
+      assert.equal(response.status, 200)
+      const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', response.body.data.vm.id + '.json'), 'utf8'))
+      assert.equal(saved.locale, 'zh_TW.UTF-8')
+      assert.equal(saved.fingerprint.locale, 'zh_TW.UTF-8')
+      assert.equal(saved.timezone, timezone || null)
+      assert.equal(saved.timezone_source, timezone ? 'manual' : 'auto')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
 test('create rejects an unknown locale before writing the slot', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-create-locale-bad-'))
   try {
@@ -413,16 +438,17 @@ test('create rejects an unknown locale before writing the slot', async () => {
   }
 })
 
-test('GET /vms/create-options is available to a tenant user', async () => {
+test('AD cannot inspect VM creation options', async () => {
   const response = {}
   const handlePanel = createPanelHandler({
+    panelUsers: { repo: { scopeIds: () => ['u-1'], scopeRootId: () => 'u-1' } },
     cfg: { paths: { project: os.tmpdir() } },
     routingConfig: { vm: { memory: '4g', default_runtime: 'kvm', allow_tcg: true } },
     probeLocalKvm: async () => ({ ok: true, accel: 'tcg', error: null }),
     requireAuth(req) {
       req.panelUser = 'tenant'
       req.apiKeyKind = 'session'
-      req.panelRole = 'user'
+      req.panelRole = 'admin'
       req.panelUserId = 'u-1'
       return true
     },
@@ -435,9 +461,6 @@ test('GET /vms/create-options is available to a tenant user', async () => {
   })
   const handled = await handlePanel({ method: 'GET' }, {}, new URL('http://localhost/api/panel/vms/create-options'))
   assert.equal(handled, true)
-  assert.equal(response.status, 200, response.body?.error?.message || JSON.stringify(response.body))
-  assert.equal(response.body?.ok, true)
-  assert.equal(response.body.data.vm.memory, '4g')
-  assert.equal(response.body.data.vm.default_runtime, 'kvm')
-  assert.deepEqual(response.body.data.kvm, { ok: true, accel: 'tcg', error: null })
+  assert.equal(response.status, 403)
+  assert.equal(response.body.error.code, 'forbidden')
 })

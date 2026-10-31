@@ -13,6 +13,7 @@ import { getDb } from '../database.mjs'
 import { DEFAULT_MUTED_ERROR_CLASSES, enrichLogRow, excludeErrorClassSql } from '../../admin/error-class.mjs'
 import { reportTimezone, zonedDayStartMs } from '../../core/timezone.mjs'
 import {
+  ADMIN_DOMAIN_IDS_SQL,
   ERROR_PRED,
   PROMPT_TOKENS_SQL,
   SUCCESS_PRED,
@@ -173,13 +174,15 @@ export function toUsageLogRow(row, names, chain = []) {
   const cacheRead = num(row.cache_read_tokens)
   const blocked = blockedBy(row)
   return {
+    billingStatus: row.billing_status || 'unmetered',
+    groupId: row.billing_group_id ?? row.group_id ?? null,
     id: row.id,
     requestId: row.request_id ?? null,
     createdAt: row.created_at,
     userId: row.user_id ?? null,
     userName: row.user_id ? (names.users.get(row.user_id) ?? null) : null,
     keyId: row.api_key_id ?? null,
-    keyName: row.api_key_id ? (names.keys.get(row.api_key_id) ?? null) : null,
+    keyName: row.api_key_name || (row.api_key_id ? (names.keys.get(row.api_key_id) ?? null) : null),
     sessionId: row.outbound_session_id ?? null,
     /** What the caller sent; differs from sessionId whenever the gateway rebuilt it. */
     clientSessionId: row.session_id ?? null,
@@ -273,6 +276,7 @@ function toProviderChainItem(r, names) {
     terminalState: r.terminal_state ?? null,
     action: r.action ?? null,
     downstreamCommitted: !!r.downstream_committed,
+    sendState: r.send_state ?? 'not_sent',
     waitMs: nullableNum(r.wait_ms),
     queueWaitMs: nullableNum(r.queue_wait_ms),
     schedulingMs: nullableNum(r.scheduling_ms),
@@ -321,6 +325,7 @@ function buildFilter(filters, defaultMuted) {
   }
   eq('user_id', filters.user_id)
   eq('api_key_id', filters.key_id)
+  eq('billing_group_id', filters.group_id)
   eq('vm_id', filters.vm_id)
   if (filters.session_id) {
     // Either side of the mapping finds the conversation.
@@ -473,6 +478,33 @@ export class UsageLogsView {
     }
   }
 
+  ranking(filters, scope = 'key') {
+    const { items, capped, total } = this.exportRows({ ...filters, limit: 5000 })
+    const names = lookupNames(this.db, { keyIds: items.map((r) => r.api_key_id), userIds: items.map((r) => r.user_id) })
+    const entries = new Map()
+    for (const r of items) {
+      const id = scope === 'user' ? r.user_id : r.api_key_id
+      if (!id) continue
+      const entry = entries.get(id) || {
+        id,
+        name: scope === 'user' ? names.users.get(id) || id : r.api_key_name || names.keys.get(id) || id,
+        owner: scope === 'key' ? names.users.get(r.user_id) || null : null,
+        requests: 0,
+        tokens: 0,
+        cost: null,
+      }
+      entry.requests++
+      entry.tokens += rowTotalTokens(r)
+      if (r.actual_cost != null) entry.cost = (entry.cost || 0) + Number(r.actual_cost)
+      entries.set(id, entry)
+    }
+    return {
+      entries: [...entries.values()].sort((a, b) => (b.cost || 0) - (a.cost || 0) || b.requests - a.requests),
+      sampled: items.length,
+      capped: capped || total > items.length,
+    }
+  }
+
   /** Names + provider chains for a whole page: one attempts query, one lookup per entity kind. */
   _hydrate(rows) {
     if (!rows.length) return []
@@ -517,7 +549,7 @@ export class UsageLogsView {
         SELECT COUNT(*) AS requests,
                COALESCE(SUM(CASE WHEN ${SUCCESS_PRED} THEN 1 ELSE 0 END), 0) AS success,
                COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END), 0) AS errors,
-               COALESCE(SUM(total_cost), 0) AS cost,
+               COALESCE(SUM(actual_cost), 0) AS cost,
                COALESCE(SUM(actual_cost), 0) AS actual_cost,
                COALESCE(SUM(input_tokens), 0) AS input_tokens,
                COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -561,7 +593,7 @@ export class UsageLogsView {
     for (const r of rows) {
       if (r.error_class) acc.errors++
       else if (r.status != null && r.status < 400) acc.success++
-      acc.cost += num(r.total_cost)
+      acc.cost += num(r.actual_cost)
       acc.actual_cost += num(r.actual_cost)
       for (const k of [
         'input_tokens',
@@ -638,19 +670,34 @@ export class UsageLogsView {
     let keys
     let vmIds
     let accountIds
-    if (owner_user_id) {
+    if (owner_user_id?.type === 'panel_users' || owner_user_id?.type === 'panel_admin_scope') {
+      const scopeId = owner_user_id.scopeRootId || owner_user_id.adminId || null
+      const id = owner_user_id.userId || null
+      users = scopeId
+        ? this.db
+            .prepare(`SELECT id, username, email FROM users
+            WHERE id IN (${ADMIN_DOMAIN_IDS_SQL})${id ? ' AND id = ?' : ''} ORDER BY username`)
+            .all(scopeId, ...(id ? [id] : []))
+        : []
+      keys = []
+      vmIds = []
+      accountIds = []
+    } else if (owner_user_id?.type === 'panel_key_creator') {
+      users = []
+      keys = this.db
+        .prepare(
+          'SELECT id, name, user_id FROM api_keys WHERE created_by_user_id = ? AND deleted_at IS NULL ORDER BY name',
+        )
+        .all(String(owner_user_id.creatorId || ''))
+      vmIds = []
+      accountIds = []
+    } else if (owner_user_id) {
       users = this.db.prepare('SELECT id, username, email FROM users WHERE id = ?').all(String(owner_user_id))
       keys = this.db
-        .prepare('SELECT id, name, user_id FROM api_keys WHERE user_id = ? AND deleted_at IS NULL ORDER BY name')
+        .prepare('SELECT id, name, user_id FROM api_keys WHERE user_id = ? ORDER BY name')
         .all(String(owner_user_id))
-      // Pool slots that served this tenant appear in its rows even when not owned.
-      vmIds = uniq([
-        ...this.db
-          .prepare('SELECT id FROM vms WHERE owner_user_id = ?')
-          .all(String(owner_user_id))
-          .map((r) => r.id),
-        ...distinct('vm_id'),
-      ])
+      // Historical filters follow caller snapshots, never current resource ownership.
+      vmIds = distinct('vm_id')
       accountIds = uniq([...distinct('final_account_id'), ...distinct('account_id')])
     } else {
       users = this.db.prepare('SELECT id, username, email FROM users WHERE deleted_at IS NULL ORDER BY username').all()
@@ -733,7 +780,7 @@ export class UsageLogsView {
                MIN(created_at) AS first_at,
                COUNT(*) AS requests,
                SUM(IFNULL(input_tokens, 0) + IFNULL(output_tokens, 0) + IFNULL(cache_read_tokens, 0) + IFNULL(cache_creation_tokens, 0)) AS tokens,
-               COALESCE(SUM(total_cost), 0) AS cost
+               COALESCE(SUM(actual_cost), 0) AS cost
         FROM usage_logs ${cond}
         GROUP BY outbound_session_id
         ORDER BY last_at DESC
@@ -800,7 +847,7 @@ export class UsageLogsView {
         .prepare(`
         SELECT COUNT(*) AS requests,
                COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END), 0) AS errors,
-               COALESCE(SUM(total_cost), 0) AS cost,
+               COALESCE(SUM(actual_cost), 0) AS cost,
                COALESCE(SUM(actual_cost), 0) AS actual_cost,
                AVG(duration_ms) AS avg_duration_ms,
                COUNT(DISTINCT outbound_session_id) AS sessions

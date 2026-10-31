@@ -97,7 +97,7 @@ export function connectSsh({
         )
       }
       if (err?.level === 'client-authentication') {
-        return fail(new ClusterError(401, 'auth_failed', `SSH 认证失败（${username}@${host}）`))
+        return fail(new ClusterError(403, 'auth_failed', `SSH 认证失败（${username}@${host}）`))
       }
       if (err?.level === 'client-timeout') {
         return fail(new ClusterError(504, 'ssh_timeout', `SSH 握手超时（${host}:${port}）`))

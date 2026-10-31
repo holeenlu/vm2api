@@ -181,3 +181,15 @@ test('liveOauthToSetupToken keeps flattened identity', () => {
   assert.equal(out.account_uuid, 'acct-live')
   assert.equal(out.org_uuid, 'org-live')
 })
+
+test('account display metadata retains observed billing and rate tier without credentials', () => {
+  const identity = flattenOauthIdentity({
+    account: { email_address: 'plan@example.test', billing_type: 'apple_subscription' },
+    organization: { rate_limit_tier: 'default_claude_max_20x' },
+    access_token: 'secret',
+  })
+  assert.equal(identity.rate_limit_tier, 'default_claude_max_20x')
+  assert.equal(identity.billing_type, 'apple_subscription')
+  assert.equal(identity.subscription_type, 'max')
+  assert.equal('access_token' in identity, false)
+})

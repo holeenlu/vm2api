@@ -851,3 +851,32 @@ test('disabled organization 400 is an org pause, not an invalid request', () => 
   assert.equal(policy.pauseSchedule, true)
   assert.equal(shouldContinue(policy), true)
 })
+
+test('Claude account blockers use stable reasons and pause scheduling', () => {
+  const cases = [
+    ['OAuth access token has been revoked.', 'oauth_revoked'],
+    ['OAuth authentication is currently not allowed for this organization.', 'organization_disabled'],
+    ['OAuth access token has expired. Re-authenticate to continue.', 'oauth_expired'],
+    [
+      "We've updated our Consumer Terms and Privacy Policy. You'll need to accept them in claude.ai with the email in /status to continue.",
+      'terms_not_accepted',
+    ],
+    [
+      '代理不可用：http://user:secret@example.test:7253 ({"type":"error","error":{"type":"upstream_error","message":"no upstream response before the CLI\'s model validation deadline"}})',
+      'proxy_unavailable',
+    ],
+  ]
+  for (const [message, reason] of cases) {
+    const policy = classifyUpstreamResult(
+      { status: 403, body: { error: { type: 'upstream_error', message } } },
+      { model: 'claude-opus-test' },
+    )
+    assert.equal(policy.reason, reason, message)
+    if (reason !== 'oauth_revoked') assert.equal(policy.pauseSchedule, true, message)
+    assert.equal(policy.scope, 'account', message)
+    assert.equal(policy.retrySameAccount, false, message)
+    if (reason !== 'oauth_revoked') {
+      assert.equal(policy.detail.message, reason === 'proxy_unavailable' ? '代理不可用' : message, message)
+    }
+  }
+})

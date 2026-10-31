@@ -1,5 +1,6 @@
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { ArrowRight } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -27,12 +28,14 @@ export function StatusBadge({
   errorCode?: string | null
   className?: string
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const badge = (
     <Badge
       variant='outline'
       className={cn(statusBadgeClass(statusCode, finalState), className)}
     >
-      {statusCode ?? '未知'}
+      {statusCode ?? translate('logs:unknown')}
     </Badge>
   )
   const title = statusBadgeTooltip(statusCode, finalState, errorCode)
@@ -48,6 +51,8 @@ export function StatusBadge({
 }
 
 export function ThinkingEffortBadge({ effort }: { effort: string }) {
+  useTranslation('logs')
+
   return (
     <Badge
       variant='outline'
@@ -66,6 +71,8 @@ export function ThinkingEffortBadge({ effort }: { effort: string }) {
  * 否则是模型缺省（面板 default_effort，没有则目录缺省）。off 不显示。
  */
 export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
+  const { t: translate } = useTranslation('logs')
+
   if (!effort) return <span className='text-muted-foreground'>-</span>
   return (
     <Tooltip delayDuration={250}>
@@ -78,10 +85,7 @@ export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
         </span>
       </TooltipTrigger>
       <TooltipContent className='max-w-xs space-y-1'>
-        <p className='text-xs'>
-          实际发往槽位的思考强度。调用方带了 effort
-          用调用方的；没带则显示模型缺省。不补（off）为空。
-        </p>
+        <p className='text-xs'>{translate('logs:reasoningEffortHint')}</p>
       </TooltipContent>
     </Tooltip>
   )
@@ -94,6 +98,8 @@ export function ModelDisplayWithRedirect({
   row: UsageLogRow
   onRedirectClick: () => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const audit = resolveModelAuditDisplay(row)
   const model = audit.primaryBillingModel
   return (
@@ -130,7 +136,7 @@ export function ModelDisplayWithRedirect({
             </div>
           </TooltipTrigger>
           <TooltipContent className='max-w-xs'>
-            上游供应商实际返回的模型与请求的模型不一致。计费仍然基于请求模型。
+            {translate('logs:modelMismatchHint')}
           </TooltipContent>
         </Tooltip>
       ) : null}

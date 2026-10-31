@@ -23,11 +23,11 @@ function byName(tools) {
   return Object.fromEntries(tools.map((tool) => [tool.name, tool]))
 }
 
-test('applyEagerToolStreaming stays off unless the panel turns it on', () => {
+test('applyEagerToolStreaming defaults on when unset', () => {
   const unset = applyEagerToolStreaming(body(), {})
   const emptyFailover = applyEagerToolStreaming(body(), { failover: {} })
-  assert.equal(byName(unset.tools).Write.eager_input_streaming, undefined)
-  assert.equal(byName(emptyFailover.tools).Write.eager_input_streaming, undefined)
+  assert.equal(byName(unset.tools).Write.eager_input_streaming, true)
+  assert.equal(byName(emptyFailover.tools).Write.eager_input_streaming, true)
   assert.equal(byName(applyEagerToolStreaming(body(), on).tools).Write.eager_input_streaming, true)
 })
 
@@ -46,8 +46,8 @@ test('applyEagerToolStreaming marks every custom tool and keeps caller booleans'
   assert.equal(tools.web_search.eager_input_streaming, undefined)
 })
 
-test('the eager flag survives outbound tool sanitizing when the panel enables it', () => {
-  const out = officialMessagesBody(applyEagerToolStreaming(body(), on))
+test('the eager flag survives outbound tool sanitizing', () => {
+  const out = officialMessagesBody(applyEagerToolStreaming(body(), {}))
   assert.equal(out.tools.find((tool) => tool.name === 'Write').eager_input_streaming, true)
 })
 
@@ -67,7 +67,7 @@ test('OpenAI chat and responses tools get eager on the outbound Anthropic body',
       ],
     }
     const converted = toClaudeMessages(protocol, inbound)
-    const out = officialMessagesBody(applyEagerToolStreaming(converted.claude, on))
+    const out = officialMessagesBody(applyEagerToolStreaming(converted.claude, {}))
     const tools = byName(out.tools)
     assert.equal(tools.Write.eager_input_streaming, true)
     assert.equal(tools.Edit.eager_input_streaming, false)
@@ -81,7 +81,7 @@ test('applyEagerToolStreaming marks leftover OpenAI function tools before saniti
     messages: [{ role: 'user', content: 'hi' }],
     tools: [{ type: 'function', function: { name: 'Write', parameters: schema } }],
   }
-  const marked = applyEagerToolStreaming(openaiBody, on)
+  const marked = applyEagerToolStreaming(openaiBody, {})
   assert.equal(marked.tools[0].eager_input_streaming, true)
   assert.equal(marked.tools[0].function.eager_input_streaming, true)
   const out = officialMessagesBody(marked)
