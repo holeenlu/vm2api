@@ -6,10 +6,12 @@ import {
   type QueryClient,
 } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import type { Vm, VmSeedSettings } from '@/types/panel-vm'
+import { t as translate } from '@/i18n'
+import type { Vm } from '@/types/panel-vm'
 import { ArrowRight, ChevronRight, RefreshCw } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
-import { api, isApiError } from '@/lib/api'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { isCodexVm, slotNameLabel } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
@@ -27,7 +29,7 @@ import {
   secondsFrom,
   unitBounds,
   unitOf,
-  UPLOAD_INTERVAL_PRESETS,
+  getUploadIntervalPresets,
   type IntervalUnit,
 } from '@/features/settings/telemetry-interval'
 import {
@@ -45,48 +47,67 @@ import {
   vmQueryOptions,
   vmSeedUploadLogQueryOptions,
 } from '@/features/vm/queries'
-import { seedSaveState } from '@/features/vm/seed-settings'
-import { telemetrySeedFlags } from '@/features/vm/telemetry-policy'
+import {
+  telemetryEnabled,
+  telemetrySeedFlags,
+} from '@/features/vm/telemetry-policy'
 
-const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
-  {
+function getLiveStates(): Record<
+  LiveKey,
+  { legend: string; swatch: string; text: string }
+> {
+  return {
     live: {
-      legend: '上传中',
+      legend: translate('settings:telemetry.uploading'),
       swatch: 'bg-primary',
       text: 'text-primary',
     },
     idle: {
-      legend: '开 · 原生就绪',
+      legend: translate('settings:telemetry.idle'),
       swatch: 'bg-[var(--status-caution-solid)]',
       text: 'text-[var(--status-caution)]',
     },
     blocked: {
-      legend: '等待或失败',
+      legend: translate('settings:telemetry.blocked'),
       swatch: 'bg-[var(--status-warn-solid)]',
       text: 'text-[var(--status-warn)]',
     },
     parked: {
-      legend: '槽已停 · 待确认',
+      legend: translate('settings:telemetry.parked'),
       swatch: 'bg-[var(--ok-2)]',
       text: 'text-muted-foreground',
     },
     unknown: {
-      legend: '原生状态待确认',
+      legend: translate('settings:telemetry.unknown'),
       swatch: 'bg-[var(--status-none)]',
       text: 'text-muted-foreground',
     },
     off: {
-      legend: '关',
+      legend: translate('settings:telemetry.off'),
       swatch: 'bg-[var(--track)]',
       text: 'text-muted-foreground',
     },
   }
+}
 
-/** Desired policy is saved separately from publication and native acknowledgment. */
+type SeedPutResult = {
+  service?: {
+    failed_count?: number
+    items?: { error?: string }[]
+  } | null
+}
+
+/** Returns the sidecar restart error, if the seed write itself succeeded but the restart did not. */
 async function writeTelemetry(id: string, enabled: boolean) {
-  return api<VmSeedSettings>(
+  const res = await api<SeedPutResult>(
     `/api/panel/vms/${encodeURIComponent(id)}/seed-settings`,
     { method: 'PUT', body: JSON.stringify(telemetrySeedFlags(enabled)) }
+  )
+  const svc = res?.service
+  if (!svc?.failed_count) return null
+  return (
+    svc.items?.find((item) => item.error)?.error ||
+    translate('settings:telemetry.restartFailed')
   )
 }
 
@@ -98,68 +119,77 @@ async function refreshAfterWrite(qc: QueryClient, ids: string[]) {
   ])
 }
 
-const CONTRACT: { file: string; key: string; on: string; off: string }[] = [
-  {
-    file: 'settings.json · env',
-    key: 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
-    on: '"1"',
-    off: '"0"',
-  },
-  {
-    file: 'settings.json · env',
-    key: 'DISABLE_TELEMETRY',
-    on: '不写',
-    off: '"1"',
-  },
-  {
-    file: 'settings.json · env',
-    key: 'DO_NOT_TRACK',
-    on: '不写',
-    off: '"1"',
-  },
-  {
-    file: 'settings.json · env',
-    key: 'CLAUDE_CODE_USE_BEDROCK / VERTEX',
-    on: '"0"',
-    off: '"0"',
-  },
-  {
-    file: 'settings.json',
-    key: 'grove_enabled',
-    on: 'false',
-    off: 'false',
-  },
-  {
-    file: 'kin-seed.json',
-    key: 'telemetry',
-    on: 'enabled',
-    off: 'disabled',
-  },
-  {
-    file: 'kin-seed.json',
-    key: 'seed_policy.telemetry_disabled',
-    on: 'false',
-    off: 'true',
-  },
-]
+function getContract(): {
+  file: string
+  key: string
+  on: string
+  off: string
+}[] {
+  return [
+    {
+      file: 'settings.json · env',
+      key: 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+      on: '"1"',
+      off: '"0"',
+    },
+    {
+      file: 'settings.json · env',
+      key: 'DISABLE_TELEMETRY',
+      on: translate('settings:telemetry.omit'),
+      off: '"1"',
+    },
+    {
+      file: 'settings.json · env',
+      key: 'DO_NOT_TRACK',
+      on: translate('settings:telemetry.omit'),
+      off: '"1"',
+    },
+    {
+      file: 'settings.json · env',
+      key: 'CLAUDE_CODE_USE_BEDROCK / VERTEX',
+      on: '"0"',
+      off: '"0"',
+    },
+    {
+      file: 'settings.json',
+      key: 'grove_enabled',
+      on: 'false',
+      off: 'false',
+    },
+    {
+      file: 'kin-seed.json',
+      key: 'telemetry',
+      on: 'enabled',
+      off: 'disabled',
+    },
+    {
+      file: 'run/worker.json',
+      key: 'telemetry.enabled',
+      on: 'true',
+      off: 'false',
+    },
+  ]
+}
 
 function pipeline(interval: number): { title: string; body: string }[] {
   return [
     {
-      title: '播种',
-      body: '单 VM 开关发布到当前 VM；常驻 cli-node 热读，不重启 VM、推理进程或出口服务。',
+      title: translate('settings:telemetry.seed'),
+      body: translate('settings:telemetry.seedHelp'),
     },
     {
-      title: '身份',
-      body: '只读取当前 VM 的凭证、settings、身份和系统特征；有效票据与新鲜出口信息齐备后才可发送。',
+      title: translate('settings:telemetry.identity'),
+      body: translate('settings:telemetry.identityHelp'),
     },
     {
-      title: '上传',
-      body: `必要原生 1P 事件每 ${intervalLabel(interval)} 合批；无额外 GrowthBook 实验事件或 Datadog 上传。`,
+      title: translate('settings:telemetry.upload'),
+      body: translate('settings:telemetry.uploadHelp', {
+        value1: intervalLabel(interval),
+      }),
     },
     {
-      title: '静默',
-      body: '无事件不发空批。缺票据或出口信息就暂存；关闭立即清队列，换出口丢弃旧出口事件。',
+      title: translate('settings:telemetry.silent'),
+      body: translate('settings:telemetry.silentHelp'),
     },
   ]
 }
@@ -171,6 +201,8 @@ function IntervalSetting({
   value: number
   onChange: (seconds: number) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const [unit, setUnit] = useState<IntervalUnit>(() => unitOf(value))
   const [min, max] = unitBounds(unit)
   const switchUnit = (next: IntervalUnit) => {
@@ -182,35 +214,39 @@ function IntervalSetting({
     <div className='space-y-3 border-t border-[var(--hairline)] pt-4'>
       <StepperSetting
         id='telemetry-upload-interval'
-        label='上传间隔'
+        label={t('telemetry.interval')}
         desc={
           <>
-            只在有待发事件时按间隔合批。全局保存后确认发布各 VM 的 kernel.json；
-            不重启进程，缺有效凭证或当前出口信息时暂停上传。
+            {
+              <>
+                {t('telemetry.intervalHelp')}
+                {value > 600 ? ' ' + t('telemetry.longInterval') : ''}
+              </>
+            }
           </>
         }
         value={amountIn(value, unit)}
         min={min}
         max={max}
-        unit={unit === 'hour' ? '小时' : '分钟'}
+        unit={unit === 'hour' ? t('hoursUnit') : t('minutesUnit')}
         onChange={(amount) => onChange(secondsFrom(amount, unit))}
       />
       <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
         <ChipGroup
-          label='常用间隔'
+          label={t('telemetry.intervalPresets')}
           value={value}
-          options={UPLOAD_INTERVAL_PRESETS}
+          options={getUploadIntervalPresets()}
           onChange={(seconds) => {
             setUnit(unitOf(seconds))
             onChange(seconds)
           }}
         />
         <ChipGroup<IntervalUnit>
-          label='单位'
+          label={t('unit')}
           value={unit}
           options={[
-            ['min', '分钟'],
-            ['hour', '小时'],
+            ['min', t('minutesUnit')],
+            ['hour', t('hoursUnit')],
           ]}
           onChange={switchUnit}
         />
@@ -226,14 +262,17 @@ export function TelemetryPane({
   interval: number
   onIntervalChange: (seconds: number) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const qc = useQueryClient()
   const dash = useQuery(dashboardQueryOptions())
   const routing = useQuery(routingQueryOptions())
   const vms: Vm[] = dash.data?.vms || []
   const claude = vms.filter((vm) => !isCodexVm(vm))
   const codexCount = vms.length - claude.length
-  // A saved opt-out is not proof that the VM stopped its sender.
-  const probed = claude
+  const probed = claude.filter(
+    (vm) => vm.status === 'running' && telemetryEnabled(vm.seed_policy)
+  )
   const details = useQueries({
     queries: probed.map((vm) => ({
       ...vmQueryOptions(vm.id),
@@ -243,13 +282,6 @@ export function TelemetryPane({
   })
   const detailById = new Map(probed.map((vm, i) => [vm.id, details[i]]))
   const slots = claude.map((vm) => slotState(vm, detailById.get(vm.id)))
-  const targetsFor = (enabled: boolean) =>
-    slots
-      .filter(
-        (slot) =>
-          slot.on !== enabled || (!slot.confirmed && slot.live !== 'parked')
-      )
-      .map((slot) => slot.vm)
 
   const [busy, setBusy] = useState<Set<string>>(() => new Set())
   const [bulk, setBulk] = useState<{
@@ -264,21 +296,30 @@ export function TelemetryPane({
   const setOne = async (vm: Vm, enabled: boolean) => {
     setBusy((cur) => new Set(cur).add(vm.id))
     try {
-      const result = await writeTelemetry(vm.id, enabled)
-      const state = seedSaveState(result)
-      if (state === 'applied')
-        toast.success(`${vm.id} 原生已确认${enabled ? '开启' : '关闭'}`)
-      else if (state === 'published')
-        toast.info(`${vm.id} 文件已发布，等待 VM 确认`)
-      else if (state === 'unsupported')
-        toast.warning(`${vm.id} 此运行环境不支持 VM 原生遥测`)
-      else toast.warning(`${vm.id} 已保存，生效状态尚未确认`)
+      const svcError = await writeTelemetry(vm.id, enabled)
+      if (svcError) {
+        toast.warning(
+          t(
+            enabled
+              ? 'telemetry.enabledRestartFailed'
+              : 'telemetry.disabledRestartFailed',
+            { slot: vm.id, error: svcError }
+          )
+        )
+      } else {
+        toast.success(
+          t(enabled ? 'telemetry.slotEnabled' : 'telemetry.slotDisabled', {
+            slot: vm.id,
+          })
+        )
+      }
     } catch (error) {
-      const state = seedSaveState(isApiError(error) ? error.data : null)
-      const message = error instanceof Error ? error.message : String(error)
-      if (state !== 'unknown')
-        toast.warning(`${vm.id} 已保存，发布或原生确认失败：${message}`)
-      else toast.error(`${vm.id} 写入失败：${message}`)
+      toast.error(
+        t('telemetry.slotWriteFailed', {
+          value1: vm.id,
+          value2: error instanceof Error ? error.message : String(error),
+        })
+      )
     } finally {
       await refreshAfterWrite(qc, [vm.id])
       setBusy((cur) => {
@@ -290,20 +331,19 @@ export function TelemetryPane({
   }
 
   const runBulk = async (enabled: boolean) => {
-    const targets = targetsFor(enabled)
+    const targets = claude.filter(
+      (vm) => telemetryEnabled(vm.seed_policy) !== enabled
+    )
     setConfirm(null)
     if (!targets.length) return
     const failed: string[] = []
-    const pending: string[] = []
+    const restartFailed: string[] = []
     for (const [index, vm] of targets.entries()) {
       setBulk({ enabled, done: index, total: targets.length, current: vm.id })
       try {
-        if (seedSaveState(await writeTelemetry(vm.id, enabled)) !== 'applied')
-          pending.push(vm.id)
-      } catch (error) {
-        if (seedSaveState(isApiError(error) ? error.data : null) !== 'unknown')
-          pending.push(vm.id)
-        else failed.push(vm.id)
+        if (await writeTelemetry(vm.id, enabled)) restartFailed.push(vm.id)
+      } catch {
+        failed.push(vm.id)
       }
     }
     setBulk(null)
@@ -311,18 +351,31 @@ export function TelemetryPane({
       qc,
       targets.map((vm) => vm.id)
     )
-    const confirmed = targets.length - failed.length - pending.length
-    const verb = enabled ? '开启' : '关闭'
+    const ok = targets.length - failed.length
     if (failed.length) {
       toast.error(
-        `原生确认${verb} ${confirmed} 槽，待确认 ${pending.length}，写入失败 ${failed.length}：${failed.join('、')}`
+        t(
+          enabled
+            ? 'telemetry.batchEnableFailed'
+            : 'telemetry.batchDisableFailed',
+          { count: ok, failed: failed.length, errors: failed.join(', ') }
+        )
       )
-    } else if (pending.length) {
+    } else if (restartFailed.length) {
       toast.warning(
-        `原生确认${verb} ${confirmed} 槽；已保存但未确认：${pending.join('、')}`
+        t(
+          enabled
+            ? 'telemetry.batchEnableRestartFailed'
+            : 'telemetry.batchDisableRestartFailed',
+          { count: ok, errors: restartFailed.join(', ') }
+        )
       )
     } else {
-      toast.success(`原生确认${verb} ${confirmed} 槽`)
+      toast.success(
+        t(enabled ? 'telemetry.batchEnabled' : 'telemetry.batchDisabled', {
+          count: ok,
+        })
+      )
     }
   }
 
@@ -330,9 +383,11 @@ export function TelemetryPane({
     (key) => [key, slots.filter((s) => s.live === key).length] as const
   )
   const onCount = slots.filter((s) => s.on).length
-  const toEnable = targetsFor(true).length
-  const toDisable = targetsFor(false).length
-  const pendingTargets = confirm === null ? [] : targetsFor(confirm)
+  const toEnable = claude.length - onCount
+  const pendingTargets =
+    confirm === null
+      ? []
+      : claude.filter((vm) => telemetryEnabled(vm.seed_policy) !== confirm)
   const pendingRunning = pendingTargets.filter(
     (vm) => vm.status === 'running'
   ).length
@@ -349,23 +404,22 @@ export function TelemetryPane({
       <Card className='gap-5'>
         <CardHeader className='flex flex-wrap items-start justify-between gap-x-6 gap-y-3'>
           <div className='min-w-0 space-y-1.5'>
-            <CardTitle className='text-base'>遥测</CardTitle>
-            <p className='max-w-[68ch] text-sm text-muted-foreground'>
-              每个 Claude 槽只有一个开关。写入{' '}
-              <code className='font-mono text-xs text-foreground'>
-                telemetry_disabled === false
-              </code>{' '}
-              才算开，缺这个值也是关。把{' '}
-              <code className='font-mono text-xs text-foreground'>
-                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
-              </code>{' '}
-              改成 0 不会打开：关的时候播种才写成 0，开的时候写成 1。官方 CLI
-              把这个变量的任何已设置值都当成只走必要流量。旧 Go
-              遥测服务已下线，发送者是常驻 cli-node，默认关。展开槽位可提取最近
-              40 条计数日志，不含正文或身份。
-              {codexCount
-                ? ` GPT 使用独立统计链路，${codexCount} 个不在此列。`
-                : ''}
+            <CardTitle className='text-base'>{t('nav.telemetry')}</CardTitle>
+            <p className='max-w-[60ch] text-sm text-muted-foreground'>
+              <>
+                <Trans
+                  t={t}
+                  i18nKey='telemetry.description'
+                  components={{
+                    part1: (
+                      <code className='font-mono text-xs text-foreground' />
+                    ),
+                  }}
+                />
+                {codexCount
+                  ? ' ' + t('telemetry.gptExcluded', { count: codexCount })
+                  : ''}
+              </>
             </p>
           </div>
           <div className='flex items-center gap-2'>
@@ -374,31 +428,43 @@ export function TelemetryPane({
               disabled={!!bulk || toEnable === 0}
               onClick={() => setConfirm(true)}
             >
-              全部开启
-              {toEnable ? (
-                <span className='font-mono text-xs tabular-nums opacity-80'>
-                  {toEnable}
-                </span>
-              ) : null}
+              {
+                <Trans
+                  t={t}
+                  i18nKey='telemetry.enableAll'
+                  count={toEnable}
+                  components={{
+                    amount: (
+                      <span className='font-mono text-xs tabular-nums opacity-80' />
+                    ),
+                  }}
+                />
+              }
             </Button>
             <Button
               size='sm'
               variant='outline'
-              disabled={!!bulk || toDisable === 0}
+              disabled={!!bulk || onCount === 0}
               onClick={() => setConfirm(false)}
             >
-              全部关闭
-              {toDisable ? (
-                <span className='font-mono text-xs tabular-nums opacity-80'>
-                  {toDisable}
-                </span>
-              ) : null}
+              {
+                <Trans
+                  t={t}
+                  i18nKey='telemetry.disableAll'
+                  count={onCount}
+                  components={{
+                    amount: (
+                      <span className='font-mono text-xs tabular-nums opacity-80' />
+                    ),
+                  }}
+                />
+              }
             </Button>
             <Button
               size='icon'
               variant='ghost'
               className='size-8'
-              aria-label='重新探测'
+              aria-label={t('telemetry.reprobe')}
               disabled={fetching}
               onClick={() => {
                 void dash.refetch()
@@ -419,10 +485,13 @@ export function TelemetryPane({
                 <span key={key} className='inline-flex items-center gap-1.5'>
                   <span
                     aria-hidden
-                    className={cn('size-2 rounded-[2px]', LIVE[key].swatch)}
+                    className={cn(
+                      'size-2 rounded-[2px]',
+                      getLiveStates()[key].swatch
+                    )}
                   />
                   <span className='text-muted-foreground'>
-                    {LIVE[key].legend}
+                    {getLiveStates()[key].legend}
                   </span>
                   <span className='font-mono text-foreground tabular-nums'>
                     {n}
@@ -431,7 +500,10 @@ export function TelemetryPane({
               ) : null
             )}
             <span className='ms-auto font-mono text-muted-foreground tabular-nums'>
-              {onCount} / {slots.length} 策略开启
+              {t('telemetry.enabledRatio', {
+                value1: onCount,
+                value2: slots.length,
+              })}
             </span>
           </div>
           {bulk ? (
@@ -440,7 +512,7 @@ export function TelemetryPane({
               className='flex items-center gap-3 rounded-md bg-muted/60 px-3 py-2 text-xs'
             >
               <span className='text-muted-foreground'>
-                正在{bulk.enabled ? '开启' : '关闭'}
+                {t(bulk.enabled ? 'telemetry.enabling' : 'telemetry.disabling')}
               </span>
               <span className='font-mono text-foreground'>{bulk.current}</span>
               <span className='relative h-1 flex-1 overflow-hidden rounded-full bg-[var(--track)]'>
@@ -460,10 +532,12 @@ export function TelemetryPane({
 
       <Card className='gap-0 py-0'>
         {dash.isLoading ? (
-          <p className='px-6 py-5 text-sm text-muted-foreground'>读取槽位…</p>
+          <p className='px-6 py-5 text-sm text-muted-foreground'>
+            {t('telemetry.loadingSlots')}
+          </p>
         ) : slots.length === 0 ? (
           <p className='px-6 py-5 text-sm text-muted-foreground'>
-            还没有 Claude 槽。建好槽并完成官方初装后，这里会列出它的遥测状态。
+            {t('telemetry.noSlots')}
           </p>
         ) : (
           <ul className='divide-y divide-[var(--hairline)]'>
@@ -486,25 +560,27 @@ export function TelemetryPane({
 
       <Card className='gap-5'>
         <CardHeader>
-          <CardTitle className='text-base'>播种写什么</CardTitle>
+          <CardTitle className='text-base'>
+            {t('telemetry.seedContract')}
+          </CardTitle>
           <p className='text-sm text-muted-foreground'>
-            开关只认
-            telemetry_disabled。下面是播种时跟着写的镜像，手改环境变量不会保持，也不能单独当开关。槽内这些键是锁定项，种子页的
-            extra_env 改不动。
+            {t('telemetry.seedContractHelp')}
           </p>
         </CardHeader>
         <CardContent>
           <table className='w-full text-sm'>
             <thead>
               <tr className='text-left text-xs text-(--text-tertiary)'>
-                <th className='hidden pb-2 font-medium sm:table-cell'>文件</th>
-                <th className='pb-2 font-medium'>键</th>
-                <th className='w-px pe-4 pb-2 font-medium'>开</th>
-                <th className='w-px pb-2 font-medium'>关</th>
+                <th className='hidden pb-2 font-medium sm:table-cell'>
+                  {t('telemetry.file')}
+                </th>
+                <th className='pb-2 font-medium'>{t('telemetry.key')}</th>
+                <th className='w-px pe-4 pb-2 font-medium'>{t('on')}</th>
+                <th className='w-px pb-2 font-medium'>{t('telemetry.off')}</th>
               </tr>
             </thead>
             <tbody className='divide-y divide-[var(--hairline)]'>
-              {CONTRACT.map((row) => {
+              {getContract().map((row) => {
                 const flips = row.on !== row.off
                 return (
                   <tr key={`${row.file}:${row.key}`}>
@@ -554,15 +630,15 @@ export function TelemetryPane({
       <Card className='gap-0 py-0'>
         <ul className='divide-y divide-[var(--hairline)]'>
           <RelatedRow
-            label='初装后发布遥测策略'
-            detail='初装成功后只发布已保存的开关，不读取环境变量，不自动开启，也不改写身份。'
+            label={t('telemetry.syncAfterToken')}
+            detail={t('telemetry.syncAfterTokenHelp')}
             on={routing.isLoading ? null : official?.sync_telemetry === true}
             tab='init'
-            tabLabel='初装'
+            tabLabel={t('nav.init')}
           />
           <RelatedRow
-            label='Codex analytics'
-            detail='GPT 内核自己的统计上报，与 Claude VM 原生遥测独立。'
+            label={t('telemetry.codexAnalytics')}
+            detail={t('telemetry.gptHelp')}
             on={routing.isLoading ? null : codex?.analytics?.enabled === true}
             tab='openai'
             tabLabel='OpenAI'
@@ -574,30 +650,40 @@ export function TelemetryPane({
         open={confirm !== null}
         onOpenChange={(next) => !next && setConfirm(null)}
         title={
-          confirm ? '开启全部 Claude 槽的遥测？' : '关闭全部 Claude 槽的遥测？'
+          confirm ? t('telemetry.confirmEnable') : t('telemetry.confirmDisable')
         }
         desc={
           <div className='space-y-2'>
             <p>
-              依次重写 {pendingTargets.length} 个槽的种子文件
-              {pendingRunning
-                ? `；其中 ${pendingRunning} 个运行中，将等待原生配置确认，不中断推理或重启出口`
-                : ''}
-              。
+              {
+                <>
+                  {t('telemetry.confirmWrite', {
+                    count: pendingTargets.length,
+                  })}
+                  {pendingRunning
+                    ? ' ' +
+                      t('telemetry.confirmRunning', { count: pendingRunning })
+                    : ''}
+                </>
+              }
             </p>
             {confirm ? (
               <p>
-                只有本 VM 的有效 profile 凭据、真实身份和新鲜出口信息齐备后，
-                才按周期发送必要原生 1P 事件。不会制造初装活动或从控制面代发。
-                {pendingRemote
-                  ? ` ${pendingRemote} 个集群槽必须完成所在节点的文件发布与原生确认。`
-                  : ''}
+                {
+                  <>
+                    {t('telemetry.confirmIdentity')}
+                    {pendingRemote
+                      ? ' ' +
+                        t('telemetry.confirmRemote', { count: pendingRemote })
+                      : ''}
+                  </>
+                }
               </p>
             ) : null}
           </div>
         }
-        cancelBtnText='取消'
-        confirmText={confirm ? '开启' : '关闭'}
+        cancelBtnText={t('cancel')}
+        confirmText={confirm ? t('telemetry.enableAction') : t('off')}
         destructive={confirm === false}
         handleConfirm={() => confirm !== null && void runBulk(confirm)}
       />
@@ -612,12 +698,14 @@ function FleetBar({
   counts: (readonly [LiveKey, number])[]
   total: number
 }) {
+  useTranslation('settings')
+
   return (
     <div
       role='img'
       aria-label={counts
         .filter(([, n]) => n)
-        .map(([key, n]) => `${LIVE[key].legend} ${n}`)
+        .map(([key, n]) => `${getLiveStates()[key].legend} ${n}`)
         .join('，')}
       className='flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-[var(--track)]'
     >
@@ -628,7 +716,7 @@ function FleetBar({
                 key={key}
                 className={cn(
                   'h-full first:rounded-s-full last:rounded-e-full motion-safe:transition-[flex-grow] motion-safe:duration-500 motion-safe:[transition-timing-function:var(--ease-out-expo)]',
-                  LIVE[key].swatch
+                  getLiveStates()[key].swatch
                 )}
                 style={{ flexGrow: n, flexBasis: 0 }}
               />
@@ -640,12 +728,14 @@ function FleetBar({
 }
 
 function Lamp({ live, probing }: { live: LiveKey; probing: boolean }) {
+  useTranslation('settings')
+
   return (
     <span
       aria-hidden
       className={cn(
         'relative inline-flex size-2 shrink-0 rounded-full',
-        LIVE[live].swatch,
+        getLiveStates()[live].swatch,
         live === 'off' && 'bg-muted-foreground/40',
         probing && 'motion-safe:animate-pulse'
       )}
@@ -672,7 +762,9 @@ function SlotRow({
   onToggleOpen: () => void
   onSet: (enabled: boolean) => void
 }) {
-  const { vm, on, live, label, probing, confirmed } = slot
+  const { t } = useTranslation('settings')
+
+  const { vm, on, live, label, probing } = slot
   const name = slotNameLabel(vm)
   const panelId = `telemetry-log-${vm.id}`
   return (
@@ -682,7 +774,10 @@ function SlotRow({
           type='button'
           aria-expanded={open}
           aria-controls={panelId}
-          aria-label={`${open ? '收起' : '展开'} ${vm.id} 上传记录`}
+          aria-label={t(
+            open ? 'telemetry.collapseUploads' : 'telemetry.expandUploads',
+            { slot: vm.id }
+          )}
           onClick={onToggleOpen}
           className='-m-1 rounded-md p-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
         >
@@ -702,11 +797,11 @@ function SlotRow({
           </div>
           <div className='mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground sm:hidden'>
             <Lamp live={live} probing={probing} />
-            <span className={LIVE[live].text}>{label}</span>
+            <span className={getLiveStates()[live].text}>{label}</span>
           </div>
           {vm.node_name || vm.node_id ? (
             <div className='mt-0.5 truncate text-xs text-(--text-tertiary)'>
-              节点 {vm.node_name || vm.node_id}
+              {t('telemetry.node', { value1: vm.node_name || vm.node_id })}
             </div>
           ) : null}
         </div>
@@ -714,18 +809,20 @@ function SlotRow({
           className='hidden items-center gap-2 text-xs sm:flex'
           title={
             live === 'blocked'
-              ? '按真实状态等待有效凭证、当前出口信息，或显示最近上传失败；不会借用宿主或其他 VM 数据。'
+              ? vm.node_id
+                ? t('telemetry.clusterIdentityMissing')
+                : t('telemetry.identityMissing')
               : live === 'idle'
-                ? '原生发送者空闲或等待下一次合批。'
+                ? t('telemetry.processIdle')
                 : undefined
           }
         >
           <Lamp live={live} probing={probing} />
-          <span className={LIVE[live].text}>{label}</span>
+          <span className={getLiveStates()[live].text}>{label}</span>
         </div>
         <div
           role='group'
-          aria-label={`${vm.id} 遥测开关`}
+          aria-label={t('telemetry.switchLabel', { value1: vm.id })}
           className={cn(
             'inline-flex rounded-md border border-[var(--hairline)] bg-muted/40 p-0.5',
             busy && 'opacity-70'
@@ -738,13 +835,11 @@ function SlotRow({
                 key={String(value)}
                 type='button'
                 aria-pressed={active}
-                aria-label={`${value ? '开启' : '关闭'} ${vm.id} 遥测`}
-                disabled={busy || locked || (active && confirmed)}
-                title={
-                  active && !confirmed
-                    ? '重新发布当前策略并等待 VM 确认'
-                    : undefined
-                }
+                aria-label={t(
+                  value ? 'telemetry.enableSlot' : 'telemetry.disableSlot',
+                  { slot: vm.id }
+                )}
+                disabled={busy || locked || active}
                 onClick={() => onSet(value)}
                 className={cn(
                   'min-w-9 rounded-[5px] px-2.5 py-1 text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-default',
@@ -755,13 +850,20 @@ function SlotRow({
                     : 'text-muted-foreground enabled:hover:text-foreground'
                 )}
               >
-                {busy && !active ? '…' : value ? '开' : '关'}
+                {busy && !active ? '…' : value ? t('on') : t('telemetry.off')}
               </button>
             )
           })}
         </div>
       </div>
-      {open ? <UploadPanel id={vm.id} panelId={panelId} on={on} /> : null}
+      {open ? (
+        <UploadPanel
+          id={vm.id}
+          panelId={panelId}
+          on={on}
+          remote={!!vm.node_id}
+        />
+      ) : null}
     </li>
   )
 }
@@ -770,11 +872,15 @@ function UploadPanel({
   id,
   panelId,
   on,
+  remote,
 }: {
   id: string
   panelId: string
   on: boolean
+  remote: boolean
 }) {
+  const { t } = useTranslation('settings')
+
   const log = useQuery({
     ...vmSeedUploadLogQueryOptions(id),
     refetchInterval: 10_000,
@@ -787,30 +893,38 @@ function UploadPanel({
       className='animate-settings-pane-in space-y-3 border-t border-[var(--hairline)] bg-muted/25 px-4 py-4 sm:ps-13 sm:pe-6'
     >
       {log.isLoading ? (
-        <p className='text-xs text-muted-foreground'>读取上传记录…</p>
+        <p className='text-xs text-muted-foreground'>
+          {t('telemetry.loadingUploads')}
+        </p>
       ) : log.error ? (
         <p className='text-xs text-destructive'>
-          读不到上传记录：{(log.error as Error).message}
+          {t('telemetry.uploadsFailed', {
+            value1: (log.error as Error).message,
+          })}
         </p>
       ) : summary.entries.length === 0 ? (
         <p className='text-xs text-muted-foreground'>
-          {on
-            ? '还没有上传记录。完成一次原生批量上传后会出现。'
-            : '遥测关着，没有新的上传记录。'}
+          {remote
+            ? t('telemetry.clusterUploadsUnavailable')
+            : on
+              ? t('telemetry.noUploads')
+              : t('telemetry.disabledNoUploads')}
         </p>
       ) : (
         <>
           <dl className='flex flex-wrap gap-x-6 gap-y-1 text-xs'>
-            <Stat label='最近尝试'>
+            <Stat label={t('telemetry.lastUpload')}>
               {summary.last ? relativeAgo(summary.last, now) : '—'}
             </Stat>
-            <Stat label='批次'>{summary.batch}</Stat>
-            <Stat label='事件尝试'>{summary.events}</Stat>
-            <Stat label='失败' tone={summary.failed ? 'bad' : undefined}>
+            <Stat label={t('telemetry.batches')}>{summary.batch}</Stat>
+            <Stat label='GrowthBook'>{summary.evals}</Stat>
+            <Stat label={t('failed')} tone={summary.failed ? 'bad' : undefined}>
               {summary.failed}
             </Stat>
             <span className='text-(--text-tertiary)'>
-              最近 {summary.entries.length} 条
+              {t('telemetry.recentEntries', {
+                count: Number(summary.entries.length),
+              })}
             </span>
           </dl>
           <Timeline
@@ -821,13 +935,10 @@ function UploadPanel({
           <details className='group'>
             <summary className='inline-flex cursor-pointer items-center gap-1 rounded text-xs text-muted-foreground select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'>
               <ChevronRight className='size-3.5 group-open:rotate-90 motion-safe:transition-transform' />
-              计数 / 状态记录
+              {t('telemetry.rawRecords')}
             </summary>
             <pre className='mt-2 max-h-64 overflow-auto rounded-md bg-background/60 px-3 py-2 font-mono text-[11px] leading-5 text-foreground'>
-              {[...summary.entries]
-                .reverse()
-                .map((entry) => entry.raw)
-                .join('\n')}
+              {[...(log.data || [])].reverse().join('\n')}
             </pre>
           </details>
         </>
@@ -873,6 +984,8 @@ function Timeline({
   first: number | null
   last: number | null
 }) {
+  const { t } = useTranslation('settings')
+
   if (first === null || last === null) return null
   const span = last - first
   return (
@@ -887,10 +1000,14 @@ function Timeline({
           return (
             <span
               key={`${entry.at}:${i}`}
-              title={`${clock(entry.at)} · ${entry.events} 个事件 · ${entry.ok ? '成功' : entry.error || '失败'}`}
+              title={`${clock(entry.at)} · ${entry.kind}${entry.name ? ` ${entry.name}` : ''} · ${entry.state}`}
               className={cn(
                 'absolute top-1/2 w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full',
-                !entry.ok ? 'h-5 bg-[var(--status-bad)]' : 'h-3 bg-primary'
+                !entry.ok
+                  ? 'h-5 bg-[var(--status-bad)]'
+                  : entry.kind === 'eval'
+                    ? 'h-5 bg-[var(--chart-2)]'
+                    : 'h-3 bg-primary'
               )}
               style={{ left: `calc(0.5rem + ${x} * (100% - 1rem))` }}
             />
@@ -900,8 +1017,9 @@ function Timeline({
       <div className='mt-1 flex items-center justify-between font-mono text-[11px] text-(--text-tertiary) tabular-nums'>
         <span>{clock(first)}</span>
         <span className='flex items-center gap-3 font-sans'>
-          <Key swatch='bg-primary' label='批次' />
-          <Key swatch='bg-[var(--status-bad)]' label='失败' />
+          <Key swatch='bg-primary' label={t('telemetry.batches')} />
+          <Key swatch='bg-[var(--chart-2)]' label='GrowthBook' />
+          <Key swatch='bg-[var(--status-bad)]' label={t('failed')} />
         </span>
         <span>{clock(last)}</span>
       </div>
@@ -948,6 +1066,8 @@ function RelatedRow({
   tab: 'init' | 'openai'
   tabLabel: string
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <li className='flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3.5 sm:px-6'>
       <div className='min-w-48 flex-1'>
@@ -960,14 +1080,14 @@ function RelatedRow({
           on ? 'text-primary' : 'text-muted-foreground'
         )}
       >
-        {on === null ? '…' : on ? '开' : '关'}
+        {on === null ? '…' : on ? t('on') : t('telemetry.off')}
       </span>
       <Link
         to='/settings/$tab'
         params={{ tab }}
         className='inline-flex items-center gap-1 rounded text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
       >
-        在「{tabLabel}」修改
+        {t('telemetry.editIn', { page: tabLabel })}
         <ArrowRight className='size-3' aria-hidden />
       </Link>
     </li>

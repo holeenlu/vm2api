@@ -79,6 +79,11 @@ export async function startGateway(opts = {}) {
     fs.mkdirSync(path.dirname(routingFile), { recursive: true })
     fs.copyFileSync(path.join(GATEWAY_ROOT, 'config', 'routing.json'), routingFile)
   }
+  if (opts.disableWatchdog) {
+    const routing = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
+    routing.kernel_watchdog = { ...(routing.kernel_watchdog || {}), enabled: false }
+    fs.writeFileSync(routingFile, JSON.stringify(routing, null, 2) + '\n')
+  }
   const port = opts.port || (await pickFreePort())
   const traceFile = opts.traceFile || path.join(project, 'mock-trace.json')
   const env = {
@@ -102,6 +107,7 @@ export async function startGateway(opts = {}) {
     KIN_MOCK_TRACE_FILE: traceFile,
     KIN_MOCK_TEXT: opts.mockText || 'pong',
     KIN_CRS_MOCK: '1',
+    KIN_KERNEL_BIN: '/bin/true', // Test transport supplies health and responses; no executable upstream kernel.
   }
   if (opts.env) Object.assign(env, opts.env)
 

@@ -1,13 +1,16 @@
+import { t } from '@/i18n'
 import { SearchIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useSearch } from '@/context/search-provider'
 import { Button } from './ui/button'
 
 export function Search({
   className = '',
-  placeholder = 'Search',
+  placeholder = t('common:search'),
   ...props
 }: React.ComponentProps<'button'> & { placeholder?: string }) {
+  useTranslation('common')
   const { setOpen } = useSearch()
   return (
     <Button

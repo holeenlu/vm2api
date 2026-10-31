@@ -355,7 +355,7 @@ test('prepareCliHopBody keeps trailing message-level max on Opus 5.5', () => {
   assert.equal(body.messages[1].content.length, 0)
 })
 
-test('prepareCliHopBody lifts last effort on Sonnet 5 and Haiku and leaves effort policy to cli-node', () => {
+test('prepareCliHopBody lifts message effort and leaves Haiku policy to cli-node', () => {
   const sonnet = prepareCliHopBody({
     model: 'claude-sonnet-5',
     max_tokens: 256,
@@ -380,7 +380,6 @@ test('prepareCliHopBody lifts last effort on Sonnet 5 and Haiku and leaves effor
       { role: 'system', content: [], output_config: { effort: 'max' } },
     ],
   })
-  // 5a4f2f1d: effort policy (including Haiku) belongs to cli-node; Node only lifts the control turn.
   assert.deepEqual(haiku.output_config, { effort: 'max' })
   assert.equal(
     haiku.messages.some((message) => message.role === 'system' || message.output_config),

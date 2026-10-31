@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   accountStatus,
   accountUsable,
@@ -18,6 +19,7 @@ import {
   scheduleStateLabel,
   vmCircuit,
   vmCircuitTitle,
+  vmRestrictionRecovery,
 } from './vm-status'
 
 function liveVm(over: Partial<Vm> = {}): Vm {
@@ -33,6 +35,11 @@ function liveVm(over: Partial<Vm> = {}): Vm {
     ...over,
   }
 }
+
+// Keep the existing Chinese UI assertions independent of the host locale.
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('health probe must not paint a live ticket unavailable', () => {
   it('ignores availability.bad from test-chat credential_refresh_failed', () => {
@@ -203,7 +210,11 @@ describe('health probe must not paint a live ticket unavailable', () => {
       cls: 'bad',
       text: '无效凭证',
     })
-    expect(poolStatus(vm)).toMatchObject({ cls: 'bad', text: '无效凭证' })
+    expect(poolStatus(vm)).toMatchObject({
+      key: 'bad',
+      cls: 'bad',
+      text: '异常',
+    })
     expect(accountUsable(vm)).toBe(false)
   })
 
@@ -223,7 +234,8 @@ describe('health probe must not paint a live ticket unavailable', () => {
       key: 'revoke',
       text: '已吊销',
     })
-    expect(poolStatus(vm).text).toBe('已吊销')
+    expect(poolStatus(vm)).toMatchObject({ key: 'revoke', text: '异常' })
+    expect(restrictionCopy(vm)).toMatch(/吊销|oauth_revoked/)
   })
 })
 
@@ -708,10 +720,10 @@ describe('four-state schedule model (backend resolveSlotState)', () => {
     expect(scheduleStateLabel(vm)).toBe('不可调度')
     expect(poolStatus(vm)).toMatchObject({
       key: 'unschedulable',
-      text: '不可调度 · 组织禁用',
+      text: '异常',
       cls: 'bad',
     })
-    expect(accountStatus(vm).text).toBe('不可调度 · 组织禁用')
+    expect(accountStatus(vm).text).toBe('异常')
     expect(fleetGroup(vm)).toBe('unschedulable')
     expect(fleetCounts([vm]).unschedulable).toBe(1)
     expect(
@@ -719,7 +731,26 @@ describe('four-state schedule model (backend resolveSlotState)', () => {
         ...vm,
         unschedulable_detail: { status: 403, message: 'OAuth not allowed' },
       })
-    ).toBe('不可调度 · 组织禁用：OAuth not allowed')
+    ).toBe('异常：OAuth not allowed')
+  })
+
+  it.each([
+    ['oauth_expired', '凭证过期'],
+    ['terms_not_accepted', '未接受条款'],
+    ['proxy_unavailable', '代理不可用'],
+  ])('renders the shared unschedulable reason %s', (reason, text) => {
+    const vm = liveVm({
+      schedule_state: 'unschedulable',
+      schedulable: false,
+      unschedulable_reason: reason,
+      unschedulable_text: text,
+    })
+    expect(poolStatus(vm)).toMatchObject({
+      key: 'unschedulable',
+      text: '异常',
+      cls: 'bad',
+    })
+    expect(restrictionCopy(vm)).toMatch(new RegExp(text))
   })
 
   it('a slot that never had a ticket stays 未使用, not an error', () => {
@@ -776,5 +807,126 @@ describe('four-state schedule model (backend resolveSlotState)', () => {
       text: '熔断中',
       cls: 'bad',
     })
+  })
+})
+
+describe('restriction recovery information', () => {
+  it('accepts Unix-second reset headers in legacy window snapshots', () => {
+    const now = Date.parse('2030-01-01T00:00:00Z')
+    const until = now + 86400_000
+    const info = vmRestrictionRecovery(
+      liveVm({
+        schedule_state: 'restricted',
+        restriction_reason: 'quota_7d',
+        status_7d: 'rejected',
+        utilization_7d: 1,
+        reset_7d: String(until / 1000),
+      }),
+      now
+    )
+    expect(info?.until).toBe(until)
+  })
+
+  const now = new Date(2030, 9, 29, 22, 57, 0).getTime()
+  const until = new Date(2030, 10, 3, 9, 0, 0).getTime()
+
+  it('shows a complete local date and duration for the actual rate-limit deadline', () => {
+    const info = vmRestrictionRecovery(
+      liveVm({
+        schedule_state: 'restricted',
+        restriction_reason: 'rate_limited',
+        restriction_text: 'rate_limited',
+        restriction_until: until,
+      }),
+      now
+    )
+    expect(info?.description).toContain('限流中，当前不参与调度')
+    expect(info?.description).toContain('2030/11/03 09:00:00')
+    expect(info?.description).not.toContain('rate_limited')
+    expect(info?.remaining).toBe('剩余 4d10h3m')
+  })
+
+  it('uses the matching 5h/7d reset when the scheduler has no deadline', () => {
+    const five = now + 2 * 3600_000
+    const seven = now + 3 * 86400_000
+    for (const [window, expected] of [
+      ['5h', five],
+      ['7d', seven],
+    ] as const) {
+      const info = vmRestrictionRecovery(
+        liveVm({
+          schedule_state: 'restricted',
+          restriction_reason: `quota_${window}_header`,
+          reset_5h: new Date(five).toISOString(),
+          reset_7d: new Date(seven).toISOString(),
+          cooldown_until: now + 60_000,
+          cooldown_reason: 'overloaded',
+        }),
+        now
+      )
+      expect(info?.until).toBe(expected)
+    }
+  })
+
+  it('does not borrow a quota reset for an unknown generic 429 recovery time', () => {
+    const info = vmRestrictionRecovery(
+      liveVm({
+        schedule_state: 'restricted',
+        restriction_reason: 'rate_limited_unknown',
+        reset_5h: new Date(until).toISOString(),
+        reset_7d: new Date(until).toISOString(),
+      }),
+      now
+    )
+    expect(info?.until).toBeNull()
+    expect(info?.remaining).toBe('恢复时间待确认')
+    expect(info?.description).not.toContain('2030')
+  })
+
+  it('uses a real cooldown and waits for confirmation after its deadline', () => {
+    const vm = liveVm({
+      schedule_state: 'restricted',
+      restriction_reason: 'rate_limited',
+      cooldown_until: until,
+    })
+    expect(vmRestrictionRecovery(vm, now)?.until).toBe(until)
+    expect(vmRestrictionRecovery(vm, until + 1000)?.remaining).toBe(
+      '等待确认恢复'
+    )
+    expect(
+      vmRestrictionRecovery(
+        {
+          ...vm,
+          restriction_until: Number.NaN,
+          cooldown_until: Number.POSITIVE_INFINITY,
+        },
+        now
+      )?.until
+    ).toBeNull()
+  })
+
+  it('does not promise slot recovery for manual-off or new-session-only limits', () => {
+    expect(
+      vmRestrictionRecovery(
+        liveVm({ schedule_state: 'off', cooldown_until: until }),
+        now
+      )
+    ).toBeNull()
+    expect(
+      vmRestrictionRecovery(
+        liveVm({
+          schedule_state: 'restricted',
+          restriction_reason: 'seats_full',
+          restriction_scope: 'new_session',
+        }),
+        now
+      )
+    ).toBeNull()
+    expect(
+      vmRestrictionRecovery(
+        liveVm({ utilization_5h: 0.9, status_5h: 'allowed_warning' }),
+        now
+      )
+    ).toBeNull()
   })
 })

@@ -10,7 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { getDb, isDbOpen } from '../db/database.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
-import { socksProxyUrl } from './socks-address.mjs'
+import { proxyUrl } from './proxy-address.mjs'
 import { assertProxyAllowed, proxyBlockedReason } from './proxy-policy.mjs'
 
 export const EGRESS_BIN = process.env.KIN_EGRESS_BIN || '/opt/kin-gateway/bin/kin-egress'
@@ -365,6 +365,37 @@ export function ensureEgressNetwork(proxyId, run = docker) {
   return { ok: true, ...info, reused: false }
 }
 
+/**
+ * Docker's default address pools are finite. A stopped/removed VM can leave an
+ * empty kin-eg network behind, which eventually makes the next proxy binding
+ * fail with "all predefined address pools have been fully subnetted". Reclaim
+ * only empty managed networks with no live kin-egress process; never touch a
+ * network that still has containers or an owned helper process.
+ */
+export function reclaimUnusedEgressNetworks(projectRoot, run = docker) {
+  const listed = run(['network', 'ls', '--format', '{{.Name}}'])
+  if (!listed.ok) return { ok: false, removed: [], error: listed.stderr || 'docker network list failed' }
+  const removed = []
+  for (const raw of String(listed.stdout || '').split(/\r?\n/)) {
+    const name = raw.trim()
+    if (!name.startsWith('kin-eg-')) continue
+    const inspected = run(['network', 'inspect', '-f', '{{json .Containers}}', name])
+    if (!inspected.ok) continue
+    let containers
+    try {
+      containers = JSON.parse(String(inspected.stdout || '{}'))
+    } catch {
+      continue
+    }
+    if (containers && Object.keys(containers).length) continue
+    const proxyId = name.slice('kin-eg-'.length)
+    if (projectRoot && egressPidsForProxyConfig(projectRoot, proxyId).length) continue
+    const deleted = run(['network', 'rm', name])
+    if (deleted.ok || /no such network|not found/i.test(deleted.stderr || '')) removed.push(name)
+  }
+  return { ok: true, removed }
+}
+
 function applyIptables(plan, runIptables = iptables) {
   const checkIdx = plan.add.findIndex((a) => a.includes('-C'))
   // apply -N (ignore exists), skip -C pairs if already present, then -A/-I
@@ -601,7 +632,7 @@ export function egressListening(projectRoot, proxyId, timeoutMs = 400) {
 export function boundProxyUrl(proxy) {
   if (isLocalEgressProxy(proxy)) return ''
   assertProxyAllowed(proxy)
-  return socksProxyUrl(proxy)
+  return proxyUrl(proxy)
 }
 
 // reqwest's order for an https destination; HTTP_PROXY only covers http:// destinations.
@@ -820,10 +851,14 @@ export async function startProxyEgress(
   const proxyId = proxy?.id
   const proxyUrl = boundProxyUrl(proxy)
   if (!proxyId || !proxyUrl) return { ok: false, error: 'bound SOCKS5 id and url required; refusing fallback' }
-  const net = ensureEgressNetwork(proxyId, runDocker)
+  let net = ensureEgressNetwork(proxyId, runDocker)
+  if (!net.ok && /predefined address pools|fully subnetted/i.test(net.error || '')) {
+    reclaimUnusedEgressNetworks(projectRoot, runDocker)
+    net = ensureEgressNetwork(proxyId, runDocker)
+  }
   if (!net.ok) return net
   const listenHost = listenHostOverride || net.gateway || gatewayFromSubnet(net.subnet)
-  if (!listenHost) return { ok: false, error: 'egress network gateway missing' }
+  if (!listenHost) return { ok: false, error: 'egress network route missing' }
   const selectedPorts = ports || portsForProxy(proxyId)
   const chain = chainName(proxyId)
   const plan = iptablesPlan({

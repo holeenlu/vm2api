@@ -1,7 +1,7 @@
 {
-  "name": "vm2api",
+  "name": "tapmodels",
   "private": true,
-  "description": "VM-fidelity subscription-to-API gateway",
+  "description": "VM-fidelity multi-model service platform",
   "type": "module",
   "main": "src/server.mjs",
   "scripts": {

@@ -14,7 +14,7 @@ import {
   CHATGPT_RESET_CREDITS_URL,
   CHATGPT_RESET_CONSUME_URL,
 } from '../../src/lib/oauth/openai-quota.mjs'
-import { persistCodexQuotaSnapshot } from '../../src/lib/vm/codex-slot.mjs'
+import { persistCodexQuotaSnapshot, summarizeCodexSlot } from '../../src/lib/vm/codex-slot.mjs'
 import {
   evaluateOpenAIQuotaGate,
   effectiveOpenAIPolicy,
@@ -86,6 +86,47 @@ test('extraFromRateLimit maps shorter window to 5h', () => {
   assert.equal(extra.codex_7d_used_percent, 34)
   assert.equal(extra.codex_5h_window_minutes, 300)
   assert.equal(extra.codex_7d_window_minutes, 10080)
+})
+
+test('complete WHAM snapshots remove a missing window instead of resurrecting cached headers', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wham-missing-window-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptSlot(root)
+  persistCodexQuotaSnapshot(root, 'vm-codex-01', {
+    extra: {
+      codex_secondary_used_percent: 0,
+      codex_secondary_window_minutes: 0,
+      codex_secondary_reset_at: '2026-10-29T10:42:48.791Z',
+      codex_secondary_reset_after_seconds: 0,
+      codex_5h_used_percent: 90,
+      codex_5h_reset_at: '2026-10-29T10:42:48.791Z',
+    },
+  })
+  const result = await queryOpenaiQuota({
+    projectRoot: root,
+    vmId: 'vm-codex-01',
+    fetchImpl: async (url) => ({
+      status: 200,
+      json: async () =>
+        String(url).startsWith(CHATGPT_USAGE_URL)
+          ? {
+              rate_limit: {
+                primary_window: { used_percent: 17, limit_window_seconds: 604800, reset_at: 1_800_100_000 },
+                secondary_window: null,
+              },
+              rate_limit_reset_credits: { available_count: 0 },
+            }
+          : { available_count: 0 },
+    }),
+  })
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json')))
+  const quota = summarizeCodexSlot(root, saved).usage.quota
+  assert.equal(result.ok, true)
+  assert.equal(quota.utilization_5h, null)
+  assert.equal(quota.reset_5h, null)
+  assert.equal(quota.utilization_7d, 0.17)
+  assert.equal(saved.codex.extra.codex_secondary_reset_at, null)
+  assert.equal(saved.codex.extra.codex_secondary_window_minutes, null)
 })
 
 test('parseResetCreditDetails accepts array and object containers', () => {
@@ -274,6 +315,36 @@ test('queryOpenaiQuota rejects Claude slots', async () => {
   assert.equal(result.ok, false)
   assert.equal(result.error, 'not_gpt_slot')
 })
+
+for (const outcome of ['refresh-failed', 'consume-failed', 'no-windows-reset']) {
+  test(`Codex billing reset boundary: ${outcome}`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-reset-boundary-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    writeGptSlot(root)
+    const old = '2026-01-01T00:00:00.000Z'
+    persistCodexQuotaSnapshot(root, 'vm-codex-01', { clearedWindows: { '5h': old, '7d': old } })
+    const result = await resetOpenaiQuota({
+      projectRoot: root,
+      vmId: 'vm-codex-01',
+      fetchImpl: async (url) =>
+        String(url) === CHATGPT_RESET_CONSUME_URL
+          ? {
+              status: outcome === 'consume-failed' ? 409 : 200,
+              json: async () => ({ code: 'ok', windows_reset: outcome === 'no-windows-reset' ? 0 : 2 }),
+            }
+          : { status: 503, json: async () => ({}) },
+    })
+    const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+    assert.equal(result.ok, outcome !== 'consume-failed')
+    if (outcome === 'refresh-failed') {
+      assert.equal(result.warning, 'reset_credit_cache_refresh_failed')
+      assert.ok(Date.parse(vm.codex.cleared_windows['5h']) > Date.parse(old))
+      assert.equal(vm.codex.cleared_windows['5h'], vm.codex.cleared_windows['7d'])
+    } else {
+      assert.deepEqual(vm.codex.cleared_windows, { '5h': old, '7d': old })
+    }
+  })
+}
 
 test('persistCodexQuotaSnapshot keeps expiration list', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-snap-'))

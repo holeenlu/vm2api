@@ -122,7 +122,7 @@ test('a live login session is not reused after the container stops or cli-node d
       startReady: async () => ({
         ok: true,
         rust_ok: true,
-        rust: { ok: true, health: { vm_telemetry: true, telemetry_ready: true } },
+        rust: { ok: true, engine: 'rust', rust: { ok: true, health: { vm_telemetry: true, telemetry_ready: true } } },
       }),
     })
   try {

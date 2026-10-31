@@ -1,12 +1,24 @@
+import { t as tVm } from '@/i18n'
+
 export type SlotPersonaPreset =
   'inherit' | 'official' | 'official_full' | 'zero' | 'official_303'
 
 const SLOT_LABELS: Record<SlotPersonaPreset, string> = {
-  inherit: '跟随全局',
-  official: '官方提示词',
-  official_full: '官方完整提示词',
-  zero: '0注入',
-  official_303: '官方 2.1.303（按模型）',
+  get inherit() {
+    return tVm('vm:personaContract.followGlobal')
+  },
+  get official() {
+    return tVm('vm:personaContract.officialPrompt')
+  },
+  get official_full() {
+    return tVm('vm:personaContract.fullOfficialPrompt')
+  },
+  get zero() {
+    return tVm('vm:personaContract.noInjection')
+  },
+  get official_303() {
+    return tVm('lib:persona.official303')
+  },
 }
 
 export const SLOT_PERSONA_OPTIONS: {
@@ -14,7 +26,9 @@ export const SLOT_PERSONA_OPTIONS: {
   label: string
 }[] = (Object.keys(SLOT_LABELS) as SlotPersonaPreset[]).map((value) => ({
   value,
-  label: SLOT_LABELS[value],
+  get label() {
+    return SLOT_LABELS[value]
+  },
 }))
 
 export function normalizeSlotPersonaPreset(
