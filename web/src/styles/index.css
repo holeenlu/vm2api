@@ -275,11 +275,8 @@
   animation: log-highlight-flash 800ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* ── 欢迎页（公开落地页）────────────────────────────────────────
-   落地页对齐 newapi 新版首页：中性黑白主色、1rem 圆角、蓝紫点缀。
-   只在 .welcome-theme 作用域内覆盖 token，控制台本身的绿色主题不动；
-   独立登录页（#/login）也套这个类。 */
-.welcome-theme {
+/* 独立登录页保留中性配色；欢迎页直接复用全站主题。 */
+.login-theme {
   --radius: 1rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -298,9 +295,8 @@
   --border: oklch(0.93 0 0);
   --input: oklch(0.93 0 0);
   --ring: oklch(0.708 0 0);
-  --welcome-success: oklch(0.596 0.145 163.225);
 }
-.dark .welcome-theme {
+.dark .login-theme {
   --background: oklch(0.235 0 0);
   --foreground: oklch(0.965 0 0);
   --card: oklch(0.285 0 0);
@@ -318,7 +314,6 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 17%);
   --ring: oklch(0.68 0 0);
-  --welcome-success: oklch(0.696 0.17 162.48);
 }
 
 @keyframes welcome-fade-up {
@@ -331,32 +326,11 @@
     transform: translateY(0);
   }
 }
-@keyframes welcome-scale-in {
-  from {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
 .welcome-fade-up {
   animation: welcome-fade-up 0.6s var(--ease-out-expo) both;
 }
-.welcome-scale-in {
-  animation: welcome-scale-in 0.6s var(--ease-out-expo) both;
-}
-/* Reveal 未进视口前先藏起来；进视口后挂上动画类。 */
-.welcome-reveal-pending {
-  opacity: 0;
-}
 @media (prefers-reduced-motion: reduce) {
-  .welcome-fade-up,
-  .welcome-scale-in {
+  .welcome-fade-up {
     animation: none;
-  }
-  .welcome-reveal-pending {
-    opacity: 1;
   }
 }

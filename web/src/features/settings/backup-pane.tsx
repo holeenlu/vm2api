@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { ApiError, api, panelFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -20,6 +22,8 @@ import {
 import { RawConfigFields } from '@/features/settings/raw-config-fields'
 
 export function BackupPane() {
+  const { t } = useTranslation('settings')
+
   const qc = useQueryClient()
   const list = useQuery(backupsQueryOptions())
   const cfg = useQuery(backupConfigQueryOptions())
@@ -27,7 +31,7 @@ export function BackupPane() {
   const create = useMutation({
     mutationFn: () => api('/api/panel/backups', { method: 'POST', body: '{}' }),
     onSuccess: async () => {
-      toast.success('已创建备份')
+      toast.success(t('backup.created'))
       await qc.invalidateQueries({ queryKey: backupsQueryOptions().queryKey })
     },
     onError: (error: Error) => toast.error(error.message),
@@ -38,7 +42,11 @@ export function BackupPane() {
     const res = await panelFetch(
       `/api/panel/backups/${encodeURIComponent(id)}/download`
     )
-    if (!res.ok) throw new ApiError('下载失败', res.status)
+    if (!res.ok)
+      throw new ApiError(
+        translate('settings:backup.downloadFailed'),
+        res.status
+      )
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -51,19 +59,19 @@ export function BackupPane() {
   return (
     <Card>
       <CardHeader className='flex flex-row items-center justify-between'>
-        <CardTitle>备份</CardTitle>
+        <CardTitle>{t('backup.title')}</CardTitle>
         <Button
           size='sm'
           onClick={() => create.mutate()}
           disabled={create.isPending}
           loading={create.isPending}
         >
-          创建
+          {t('create')}
         </Button>
       </CardHeader>
       <CardContent className='space-y-4'>
         <p className='text-sm text-muted-foreground'>
-          恢复须 confirm: true。恢复期间协议口 503。
+          {t('backup.restoreHint')}
         </p>
         <RawConfigFields
           value={cfg.data as Record<string, unknown> | undefined}
@@ -72,7 +80,7 @@ export function BackupPane() {
           <TableHeader>
             <TableRow>
               <TableHead>ID</TableHead>
-              <TableHead>时间</TableHead>
+              <TableHead>{t('time')}</TableHead>
               <TableHead></TableHead>
             </TableRow>
           </TableHeader>
@@ -89,14 +97,14 @@ export function BackupPane() {
                       download(b.id).catch((e: Error) => toast.error(e.message))
                     }
                   >
-                    下载
+                    {t('download')}
                   </Button>
                   <Button
                     size='sm'
                     variant='destructive'
                     onClick={() => setRestoreId(b.id)}
                   >
-                    恢复
+                    {t('restore')}
                   </Button>
                 </TableCell>
               </TableRow>
@@ -106,10 +114,10 @@ export function BackupPane() {
         <ConfirmDialog
           open={!!restoreId}
           onOpenChange={() => setRestoreId('')}
-          title='确认恢复备份'
-          desc='恢复会覆盖当前状态，期间协议口返回 503。必须显式确认。'
-          confirmText='确认恢复'
-          cancelBtnText='取消'
+          title={t('backup.confirmTitle')}
+          desc={t('backup.confirmDescription')}
+          confirmText={t('backup.confirmRestore')}
+          cancelBtnText={t('cancel')}
           destructive
           handleConfirm={() => {
             api(`/api/panel/backups/${encodeURIComponent(restoreId)}/restore`, {
@@ -117,7 +125,7 @@ export function BackupPane() {
               body: JSON.stringify({ confirm: true }),
             })
               .then(async () => {
-                toast.success('已开始恢复')
+                toast.success(t('backup.restoring'))
                 setRestoreId('')
                 await qc.invalidateQueries({ queryKey: ['panel'] })
               })

@@ -94,6 +94,7 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
           await preflightNode(id, {
             kernel: kernelOf(body.kernel),
             runtime: runtimeKind({ runtime_type: body.runtime_type }),
+            memory: body.memory,
           }),
         ),
       )

@@ -23,11 +23,6 @@ export function normalizeTimezone(value) {
   return validTimezone(value) || DEFAULT_TIMEZONE
 }
 
-/** Panel/report tz from the browser: any IANA zone, unknown → UTC (never the slot default). */
-export function reportTimezone(value) {
-  return validTimezone(value) || 'UTC'
-}
-
 const partsFormatters = new Map()
 
 /** Wall-clock parts of `ms` in `timeZone`. */

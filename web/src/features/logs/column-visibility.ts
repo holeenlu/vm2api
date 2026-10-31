@@ -1,3 +1,5 @@
+import type { PanelRole } from '@/types/panel-auth'
+
 /** 可隐藏列，顺序 = 下拉菜单顺序（hub `DEFAULT_VISIBLE_COLUMNS`）。时间/模型/状态恒显示。 */
 export const LOGS_TABLE_COLUMNS = [
   { id: 'user', label: '用户' },
@@ -13,6 +15,17 @@ export const LOGS_TABLE_COLUMNS = [
 ] as const
 
 export type LogsTableColumn = (typeof LOGS_TABLE_COLUMNS)[number]['id']
+
+// Role restrictions are independent of saved visibility preferences.
+export function canShowLogColumn(
+  column: LogsTableColumn,
+  role: PanelRole | undefined
+) {
+  if (column === 'sessionId' || column === 'provider')
+    return role === 'super_admin'
+  if (role === 'user' && (column === 'user' || column === 'ip')) return false
+  return true
+}
 
 export const DEFAULT_HIDDEN_COLUMNS: LogsTableColumn[] = ['ip']
 

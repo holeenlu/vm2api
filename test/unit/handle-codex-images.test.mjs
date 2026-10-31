@@ -1,3 +1,10 @@
+import http from 'node:http'
+import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
+import { ApiScheduler } from '../../src/lib/pool/api-scheduler.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { RelayBilling } from '../../src/lib/admin/relay-billing.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -6,7 +13,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { handleCodexImages } from '../../src/lib/protocol/handle-codex.mjs'
 import { CODEX_IMAGE_EDITS_URL, CODEX_IMAGE_GENERATIONS_URL } from '../../src/lib/protocol/codex-models.mjs'
-import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { openDatabase, closeDatabase, getDb } from '../../src/lib/db/database.mjs'
 import { loadGptModelPolicy, saveGptModelPolicy } from '../../src/lib/protocol/gpt-model-policy.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
@@ -46,7 +53,7 @@ async function images({ kind = 'generations', body, headers = {}, ops = {}, stic
   const logBag = {}
   const stats = { errors: 0, requests: 0, by_route: {} }
   await handleCodexImages({
-    req: { headers: { 'user-agent': 'codex_exec/0.163.0', ...headers } },
+    req: { apiKeyKind: 'master', headers: { 'user-agent': 'codex_exec/0.163.0', ...headers } },
     res,
     kind,
     body: body ?? { model: 'gpt-image-2.5-flare', prompt: 'a cat', size: '1024x1024' },
@@ -234,9 +241,11 @@ test('a non-JSON upstream answer is a 502, and upstream errors pass through', as
   assert.equal(rejected.logBag.final_state, 'upstream_error')
 })
 
-function protocolHarness(rows, { apiKeyStore = null } = {}) {
+function protocolHarness(rows, { apiKeyStore = null, apiEndpointStore, apiScheduler, requestId = 'req-img' } = {}) {
   return createHandleProtocol({
-    apiKeyStore,
+    apiKeyStore: apiKeyStore || new ApiKeyStore({ db: getDb() }),
+    apiEndpointStore,
+    apiScheduler,
     cfg: { limits: { max_body_bytes: 1 << 20 }, rewrite: { enabled: false }, paths: { project: root } },
     json(res, status, body) {
       res.statusCode = status
@@ -244,10 +253,10 @@ function protocolHarness(rows, { apiKeyStore = null } = {}) {
     },
     readBody,
     requireAuth: (req) => {
-      req.apiKeyKind = 'managed'
+      req.apiKeyKind = req.apiKeyRecord ? 'managed' : 'master'
       return true
     },
-    requestLog: { start: () => ({ request_id: 'req-img' }), finish: (_ctx, row) => rows.push(row) },
+    requestLog: { start: () => ({ request_id: requestId }), finish: (_ctx, row) => rows.push(row) },
     stats: { errors: 0, requests: 0, by_route: {} },
     groupsRepo: { rateMultiplier: () => 1 },
     routingConfig: {},
@@ -302,30 +311,34 @@ test('the images route rejects a broken multipart edit as a 400', async () => {
   assert.equal(rows[0].error_code, 'invalid_image_edit')
 })
 
-test('the images route picks slots by the key owner role, like search', async () => {
-  writeGptVm('vm-platform')
-  writeGptVm('vm-tenant')
-  const file = path.join(root, 'vms', 'vm-tenant.json')
-  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), owner_user_id: 'u1' }))
-  const roles = { a1: 'admin', u1: 'user' }
-  const apiKeyStore = {
-    users: { getById: (id) => ({ id, role: roles[id] }) },
-    acquire: () => ({ ok: true }),
-    release() {},
-  }
-  const run = async (userId) => {
-    const rows = []
-    const { handleImages } = protocolHarness(rows, { apiKeyStore })
-    const req = Readable.from([Buffer.from('{"model":"gpt-image-2.5-flare","prompt":"x"}')])
+test('the images route selects only authorized group slots and rejects revoked keys', async () => {
+  writeGptVm('vm-authorized')
+  writeGptVm('vm-outside')
+  const db = getDb(),
+    groups = new GroupsRepo(db),
+    keys = new ApiKeyStore({ db })
+  const group = groups.create({ name: 'images', platform: 'openai', models: ['gpt-image-2.5-flare'] })
+  groups.assignResource('vm', 'vm-authorized', [group.id], 0)
+  const record = keys.create({ group_id: group.id })
+  const run = async (model = 'gpt-image-2.5-flare') => {
+    const rows = [],
+      { handleImages } = protocolHarness(rows, { apiKeyStore: keys })
+    const req = Readable.from([Buffer.from(JSON.stringify({ model, prompt: 'x' }))])
     req.headers = { 'content-type': 'application/json' }
-    req.apiKeyRecord = { id: `key-${userId}`, user_id: userId }
+    req.apiKeyRecord = record
     const res = fakeRes()
     await handleImages(req, res, '/v1/images/generations', 'generations')
     res.finish()
-    return rows[0]
+    return { res, row: rows[0] }
   }
-  assert.equal((await run('a1')).vm_id, 'vm-platform')
-  assert.equal((await run('u1')).vm_id, 'vm-tenant')
+  const first = await run()
+  assert.equal(first.row.vm_id, 'vm-authorized')
+  assert.equal(first.res.body.error.code, 'proxy_required')
+  assert.equal((await run('gpt-image-2.5-sunburst')).res.statusCode, 403)
+  db.prepare("UPDATE api_keys SET status='disabled' WHERE id=?").run(record.id)
+  const denied = await run()
+  assert.equal(denied.res.statusCode, 403)
+  assert.equal(denied.row.vm_id, null)
 })
 
 test('the images route reads JSON generations', async () => {
@@ -339,4 +352,108 @@ test('the images route reads JSON generations', async () => {
   res.finish()
   assert.equal(res.body.error.code, 'proxy_required')
   assert.equal(rows[0].model, 'gpt-image-2.5-flare')
+})
+
+test('API Images route forwards multipart, bills once, and rechecks live group and key permissions', async (t) => {
+  const dir = fs.mkdtempSync('/tmp/api-img-')
+  const savedSocket = process.env.KIN_API_KERNEL_SOCK
+  process.env.KIN_API_KERNEL_SOCK = path.join(dir, 'kernel.sock')
+  const calls = []
+  const kernel = http.createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    calls.push(JSON.parse(raw))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ data: [{ b64_json: 'aGk=' }], usage: USAGE }))
+  })
+  t.after(async () => {
+    await new Promise((resolve) => kernel.close(resolve))
+    if (savedSocket == null) delete process.env.KIN_API_KERNEL_SOCK
+    else process.env.KIN_API_KERNEL_SOCK = savedSocket
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+  await new Promise((resolve) => kernel.listen(process.env.KIN_API_KERNEL_SOCK, resolve))
+  const db = getDb(),
+    users = new PanelUserStore({ db }),
+    groups = new GroupsRepo(db)
+  const user = users.create({ username: 'image-customer', password: 'fixture-password', role: 'user' })
+  const store = new ApiEndpointStore({ db }),
+    scheduler = new ApiScheduler(),
+    keys = new ApiKeyStore({ db })
+  const makeEndpoint = (name) =>
+    store.create({
+      kind: 'openai',
+      name,
+      api_key_entries: [{ api_key: 'sk-' + name }],
+      models: [{ name: 'gpt-image-2.5-flare', alias: 'gpt-image-2.5-flare', image: true }],
+    })
+  makeEndpoint('outside')
+  const ep = makeEndpoint('authorized')
+  scheduler.reload(store.listRaw())
+  const group = groups.create({ name: 'images-api', platform: 'openai', models: ['gpt-image-2.5-flare'] })
+  groups.assignResource('api_endpoint', ep.id, [group.id], 0)
+  groups.setGrants(user.id, [group.id])
+  const key = keys.create({ user_id: user.id, group_id: group.id, max_concurrency: 1 })
+  const billing = new RelayBilling(db)
+  billing.adjust(user.id, { amount: 10, reason: 'fixture', idempotency_key: 'image-credit' }, 'test-admin')
+  let sequence = 0
+  async function request({ multipart = false, model = 'gpt-image-2.5-flare', beforeRead } = {}) {
+    const rows = [],
+      requestId = 'api-image-' + ++sequence
+    const { handleImages } = protocolHarness(rows, {
+      apiKeyStore: keys,
+      apiEndpointStore: store,
+      apiScheduler: scheduler,
+      requestId,
+    })
+    let bytes,
+      contentType = 'application/json'
+    if (multipart) {
+      const form = new FormData()
+      form.append('model', model)
+      form.append('prompt', 'night')
+      form.append('image[]', new Blob([PNG]), 'a.png')
+      const encoded = new Request('http://local/', { method: 'POST', body: form })
+      bytes = Buffer.from(await encoded.arrayBuffer())
+      contentType = encoded.headers.get('content-type')
+    } else bytes = Buffer.from(JSON.stringify({ model, prompt: 'cat' }))
+    const req = Readable.from(
+      (async function* () {
+        beforeRead?.()
+        yield bytes
+      })(),
+    )
+    req.headers = { 'content-type': contentType }
+    req.apiKeyRecord = key
+    const res = fakeRes()
+    await handleImages(
+      req,
+      res,
+      '/v1/images/' + (multipart ? 'edits' : 'generations'),
+      multipart ? 'edits' : 'generations',
+    )
+    res.finish()
+    res.finish()
+    return { res, row: rows[0], requestId }
+  }
+  const result = await request({ multipart: true })
+  assert.equal(result.res.statusCode, 200)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].headers.authorization, 'Bearer sk-authorized')
+  assert.equal(calls[0].url, 'https://api.openai.com/v1/images/edits')
+  assert.equal(JSON.parse(calls[0].body).images[0].image_url, 'data:image/png;base64,' + PNG.toString('base64'))
+  assert.equal(result.row.billing_status, 'settled')
+  assert.ok(result.row.actual_cost > 0)
+  assert.equal(billing.balance(user.id).balance, 10 - result.row.actual_cost)
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM billing_charges WHERE request_id=?').get(result.requestId).n, 1)
+  assert.doesNotMatch(JSON.stringify(result.row.inbound_summary), /base64/)
+  assert.equal((await request()).res.statusCode, 200) // concurrency lease was released
+  assert.equal((await request({ model: 'gpt-image-2.5-sunburst' })).res.statusCode, 403)
+  const revoked = await request({ beforeRead: () => keys.update(key.id, { status: 'disabled' }) })
+  assert.equal(revoked.res.statusCode, 403)
+  assert.equal(calls.length, 2)
+  keys.update(key.id, { status: 'active' })
+  groups.setGrants(user.id, [])
+  assert.equal((await request()).res.statusCode, 403)
+  assert.equal(calls.length, 2)
 })

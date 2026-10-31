@@ -1,13 +1,11 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { VIEW_TITLES } from '@/config/nav'
 import type { ApiEndpoint } from '@/types/panel-api-endpoints'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
-import { cn } from '@/lib/utils'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
@@ -15,11 +13,21 @@ import { CardGridSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
 import { EndpointDetailSheet } from '@/features/api-endpoints/endpoint-detail-sheet'
 import { apiEndpointsQueryOptions } from '@/features/api-endpoints/queries'
+import { EndpointCard } from './endpoint-card'
+import { EndpointGroups } from './endpoint-groups'
 
 export function ApiEndpointsPage() {
+  const { t } = useTranslation('apiEndpoints')
+
   const qc = useQueryClient()
   const q = useQuery(apiEndpointsQueryOptions())
-  const items = q.data?.items || []
+  const [search, setSearch] = useState('')
+  const [assign, setAssign] = useState<ApiEndpoint | null>(null)
+  const items = (q.data?.items || []).filter((ep) =>
+    `${ep.name} ${ep.base_url} ${ep.prefix}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  )
   const [creating, setCreating] = useState(false)
   const [editId, setEditId] = useState('')
   const [del, setDel] = useState<ApiEndpoint | null>(null)
@@ -35,7 +43,9 @@ export function ApiEndpointsPage() {
         body: JSON.stringify({ disabled }),
       }),
     onSuccess: async (_data, vars) => {
-      toast.success(vars.disabled ? '已停用' : '已启用')
+      toast.success(
+        vars.disabled ? t('apiEndpoints:disabled') : t('apiEndpoints:enabled')
+      )
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -43,7 +53,7 @@ export function ApiEndpointsPage() {
 
   return (
     <PageHeader
-      title={VIEW_TITLES.api}
+      title={t('apiEndpoints:title')}
       extra={
         <Button
           onClick={() => {
@@ -51,10 +61,17 @@ export function ApiEndpointsPage() {
             setCreating(true)
           }}
         >
-          添加地址
+          {t('apiEndpoints:addAddress')}
         </Button>
       }
     >
+      <Input
+        className='mb-4 max-w-md'
+        aria-label={t('apiEndpoints:searchEndpoints')}
+        placeholder={t('apiEndpoints:searchPlaceholder')}
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
       <QueryGate
         loading={q.isLoading}
         error={q.error}
@@ -74,17 +91,25 @@ export function ApiEndpointsPage() {
       >
         {items.length === 0 ? (
           <p className='rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground'>
-            还没有直连上游地址。添加一个 base_url + key 池，协议密钥就能按
-            prefix 路由过去。
+            {search.trim()
+              ? t('apiEndpoints:noMatches')
+              : t('apiEndpoints:empty')}
           </p>
         ) : (
           <div className='space-y-4'>
             <div className='flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground'>
-              <span>地址 {stats.count}</span>
               <span>
-                {stats.ready}/{stats.total} key 可用
+                {t('apiEndpoints:addressCount', { count: stats.count })}
               </span>
-              <span>停用 {stats.disabled}</span>
+              <span>
+                {t('apiEndpoints:availableKeys', {
+                  ready: stats.ready,
+                  count: stats.total,
+                })}
+              </span>
+              <span>
+                {t('apiEndpoints:disabledCount', { count: stats.disabled })}
+              </span>
             </div>
             <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
               {items.map((endpoint) => (
@@ -92,6 +117,7 @@ export function ApiEndpointsPage() {
                   key={endpoint.id}
                   endpoint={endpoint}
                   busy={toggle.isPending}
+                  onGroups={() => setAssign(endpoint)}
                   onEdit={() => {
                     setCreating(false)
                     setEditId(endpoint.id)
@@ -122,10 +148,12 @@ export function ApiEndpointsPage() {
       <ConfirmDialog
         open={!!del}
         onOpenChange={() => setDel(null)}
-        title='删除 API 地址'
-        desc={`会删掉「${del?.name || del?.id || ''}」下的全部上游 key 和模型。`}
-        confirmText='删除'
-        cancelBtnText='取消'
+        title={t('apiEndpoints:deleteAddress')}
+        desc={t('apiEndpoints:deleteAddressDescription', {
+          name: del?.name || del?.id || '',
+        })}
+        confirmText={t('apiEndpoints:delete')}
+        cancelBtnText={t('apiEndpoints:cancel')}
         destructive
         handleConfirm={() => {
           if (!del) return
@@ -133,122 +161,17 @@ export function ApiEndpointsPage() {
             method: 'DELETE',
           })
             .then(() => {
-              toast.success('已删除')
+              toast.success(t('apiEndpoints:deleted'))
               setDel(null)
               return refresh()
             })
             .catch((e: Error) => toast.error(e.message))
         }}
       />
-    </PageHeader>
-  )
-}
-
-function EndpointCard({
-  endpoint,
-  busy,
-  onEdit,
-  onToggle,
-  onDelete,
-}: {
-  endpoint: ApiEndpoint
-  busy: boolean
-  onEdit: () => void
-  onToggle: () => void
-  onDelete: () => void
-}) {
-  const keys = endpoint.api_key_entries || []
-  const ready = keys.filter(
-    (entry) => !entry.disabled && !entry.cooldown_until
-  ).length
-  const models = endpoint.models || []
-  return (
-    <Card
-      className={cn(
-        'h-full cursor-pointer transition-colors',
-        endpoint.disabled ? 'bg-muted/60' : 'hover:bg-accent/40'
+      {assign && (
+        <EndpointGroups endpoint={assign} onClose={() => setAssign(null)} />
       )}
-      onClick={onEdit}
-    >
-      <CardContent className='space-y-3'>
-        <div className='flex items-start justify-between gap-2'>
-          <div className='min-w-0'>
-            <div className='flex items-center gap-1.5 truncate font-medium'>
-              <span className='truncate'>{endpoint.name || 'api'}</span>
-              <Badge variant='outline' className='shrink-0 font-normal'>
-                {kindLabel(endpoint.kind)}
-              </Badge>
-            </div>
-            <p className='truncate font-mono text-xs text-muted-foreground'>
-              {endpoint.base_url || '未填地址'}
-              {endpoint.prefix ? ` · prefix ${endpoint.prefix}` : ''}
-            </p>
-          </div>
-          {endpoint.disabled ? (
-            <span className='shrink-0 text-xs text-muted-foreground'>
-              已停用
-            </span>
-          ) : null}
-        </div>
-        <div className='flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground'>
-          <span>
-            {ready}/{keys.length} key 可用
-          </span>
-          <span>{models.length} 模型</span>
-          {endpoint.disable_cooling ? <span>冷却关</span> : null}
-          {endpoint.priority ? <span>优先 {endpoint.priority}</span> : null}
-          {endpoint.protocol !== 'openai' ? (
-            <span>
-              {endpoint.auth_scheme === 'authorization_bearer'
-                ? 'Bearer'
-                : 'x-api-key'}
-            </span>
-          ) : null}
-        </div>
-        {models.length ? (
-          <div className='flex flex-wrap gap-1'>
-            {models.map((model) => (
-              <Badge key={`${model.name}:${model.alias}`} variant='secondary'>
-                {model.alias}
-              </Badge>
-            ))}
-          </div>
-        ) : null}
-        <div className='flex flex-wrap gap-1 border-t pt-2'>
-          <Button
-            size='sm'
-            variant='ghost'
-            onClick={(event) => {
-              event.stopPropagation()
-              onEdit()
-            }}
-          >
-            编辑
-          </Button>
-          <Button
-            size='sm'
-            variant='ghost'
-            disabled={busy}
-            onClick={(event) => {
-              event.stopPropagation()
-              onToggle()
-            }}
-          >
-            {endpoint.disabled ? '启用' : '停用'}
-          </Button>
-          <Button
-            size='sm'
-            variant='destructive'
-            onClick={(event) => {
-              event.stopPropagation()
-              onDelete()
-            }}
-          >
-            删除
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+    </PageHeader>
   )
 }
 
@@ -265,10 +188,4 @@ function summarize(items: ApiEndpoint[]) {
     ).length
   }
   return { count: items.length, ready, total, disabled }
-}
-
-function kindLabel(kind: ApiEndpoint['kind']): string {
-  if (kind === 'claude') return 'Claude 官方'
-  if (kind === 'openai') return 'OpenAI 官方'
-  return '自定义'
 }

@@ -1,21 +1,41 @@
 import { useState } from 'react'
+import { i18n } from '@/i18n'
 import type {
   ErrorCodeBucket,
   ErrorCollection,
   IngressHit,
 } from '@/types/panel-logs'
 import { ChevronDown, EyeOff, Eye } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { fmtNum } from '@/lib/format'
 import { maskPresentedKey } from '@/lib/log-mute'
 import { ERROR_CLASS_TONE } from '@/lib/log-tone'
+import { SYSTEM_TIMEZONE } from '@/lib/system-time'
 import { cn } from '@/lib/utils'
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import { errorClassLabel } from '@/features/logs/log-display'
 
 const LS_OPEN = 'kin_logs_errors_open'
+
+function readOpenPreference(): boolean {
+  try {
+    return localStorage.getItem(LS_OPEN) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function writeOpenPreference(open: boolean): void {
+  try {
+    localStorage.setItem(LS_OPEN, open ? '1' : '0')
+  } catch {
+    // Some embedded/private browser contexts deny localStorage access.
+  }
+}
 
 /** 走 :root 的 --status-* 设计 token，不自造颜色（quality-guidelines）。 */
 function toneStyle(id: string): React.CSSProperties {
@@ -44,6 +64,8 @@ function ClassChip({
   onToggleMute: (id: string) => void
   onSelect: (id: string) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   return (
     <span
       className={cn(
@@ -57,7 +79,7 @@ function ClassChip({
         type='button'
         onClick={() => onSelect(id)}
         className='cursor-pointer font-medium'
-        title={`只看${label}`}
+        title={translate('logs:filterClass', { p0: label })}
       >
         {label} {count}
       </button>
@@ -65,8 +87,12 @@ function ClassChip({
         type='button'
         onClick={() => onToggleMute(id)}
         className='cursor-pointer opacity-60 transition-opacity hover:opacity-100'
-        title={muted ? '取消屏蔽' : '屏蔽这一类'}
-        aria-label={muted ? `取消屏蔽${label}` : `屏蔽${label}`}
+        title={muted ? translate('logs:unmute') : translate('logs:muteClass')}
+        aria-label={
+          muted
+            ? translate('logs:unmuteNamedClass', { p0: label })
+            : translate('logs:muteNamedClass', { p0: label })
+        }
       >
         {muted ? <Eye className='size-3' /> : <EyeOff className='size-3' />}
       </button>
@@ -75,22 +101,28 @@ function ClassChip({
 }
 
 function IngressHitsTable({ hits }: { hits: IngressHit[] }) {
+  const { t: translate } = useTranslation('logs')
+
   return (
     <div className='rounded-lg border border-border/60'>
       <div className='border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground'>
-        入站鉴权失败来源（按 Key + IP 分组，前 40）
+        {translate('logs:authFailuresTitle')}
       </div>
       <div className='flex h-7 items-center border-b border-border/60 px-3 text-[11px] font-medium text-muted-foreground/80'>
         <div className='min-w-[160px] flex-[2] truncate'>
-          入站 Key（已掩码）
+          {translate('logs:maskedInboundKey')}
         </div>
-        <div className='min-w-[110px] flex-1 truncate px-1.5'>IP</div>
-        <div className='min-w-[110px] flex-1 truncate px-1.5'>错误码</div>
+        <div className='min-w-[110px] flex-1 truncate px-1.5'>
+          {translate('logs:ip')}
+        </div>
+        <div className='min-w-[110px] flex-1 truncate px-1.5'>
+          {translate('logs:errorCode')}
+        </div>
         <div className='min-w-[60px] flex-[0.6] truncate px-1.5 text-right'>
-          次数
+          {translate('logs:count')}
         </div>
         <div className='min-w-[80px] flex-1 truncate px-1.5 text-right'>
-          最近
+          {translate('logs:latest')}
         </div>
       </div>
       {hits.map((hit, i) => (
@@ -113,7 +145,9 @@ function IngressHitsTable({ hits }: { hits: IngressHit[] }) {
           </div>
           <div className='min-w-[80px] flex-1 truncate px-1.5 text-right font-mono text-muted-foreground'>
             {hit.last_ts
-              ? new Date(hit.last_ts).toTimeString().slice(0, 8)
+              ? new Date(hit.last_ts).toLocaleTimeString(i18n.language, {
+                  timeZone: SYSTEM_TIMEZONE,
+                })
               : '—'}
           </div>
         </div>
@@ -133,15 +167,23 @@ function ByCodeTable({
   codes: ErrorCodeBucket[]
   onSelectClass: (id: string) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   return (
     <div className='rounded-lg border border-border/60'>
       <div className='flex h-7 items-center border-b border-border/60 bg-muted/30 px-3 text-[11px] font-medium text-muted-foreground/80'>
-        <div className='min-w-[80px] flex-1 truncate'>归类</div>
-        <div className='min-w-[130px] flex-[1.4] truncate px-1.5'>错误码</div>
-        <div className='min-w-[56px] flex-[0.5] truncate px-1.5 text-right'>
-          次数
+        <div className='min-w-[80px] flex-1 truncate'>
+          {translate('logs:classification')}
         </div>
-        <div className='min-w-[160px] flex-[2.5] truncate px-1.5'>最近</div>
+        <div className='min-w-[130px] flex-[1.4] truncate px-1.5'>
+          {translate('logs:errorCode')}
+        </div>
+        <div className='min-w-[56px] flex-[0.5] truncate px-1.5 text-right'>
+          {translate('logs:count')}
+        </div>
+        <div className='min-w-[160px] flex-[2.5] truncate px-1.5'>
+          {translate('logs:latest')}
+        </div>
       </div>
       {codes.map((row) => (
         <button
@@ -151,7 +193,7 @@ function ByCodeTable({
           className='flex h-9 w-full cursor-pointer items-center border-b border-border/40 px-3 text-left text-xs transition-colors last:border-b-0 hover:bg-accent/50'
         >
           <div className='min-w-[80px] flex-1 truncate'>
-            {row.error_label || row.error_class}
+            {errorClassLabel(row.error_class, row.error_label)}
           </div>
           <div className='min-w-[130px] flex-[1.4] truncate px-1.5 font-mono'>
             {row.error_code || '—'}
@@ -184,15 +226,21 @@ export function ErrorCollectionPanel({
   onToggleMute: (id: string) => void
   onSelectClass: (id: string) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   // 值班时的展开偏好跨会话保留；默认展开（异常信号不能默认藏起来）。
-  const [open, setOpen] = useState(() => localStorage.getItem(LS_OPEN) !== '0')
-  const byClass = collection.by_class || []
-  const hits = collection.ingress_hits || []
+  const [open, setOpen] = useState(readOpenPreference)
+  const byClass = Array.isArray(collection.by_class) ? collection.by_class : []
+  const hits = Array.isArray(collection.ingress_hits)
+    ? collection.ingress_hits
+    : []
   if (!byClass.length && !hits.length) return null
 
   const visible = byClass.filter((c) => !muted.includes(c.id))
   const hidden = byClass.filter((c) => muted.includes(c.id))
-  const codes = (collection.by_code || []).filter(
+  const codes = (
+    Array.isArray(collection.by_code) ? collection.by_code : []
+  ).filter(
     (row) => !muted.includes(row.error_class) || activeClass === row.error_class
   )
   // ingress_hits 不受屏蔽影响（后端直接查 DB），所以 auth 被屏蔽时
@@ -203,7 +251,7 @@ export function ErrorCollectionPanel({
 
   function handleOpenChange(next: boolean) {
     setOpen(next)
-    localStorage.setItem(LS_OPEN, next ? '1' : '0')
+    writeOpenPreference(next)
   }
 
   return (
@@ -217,7 +265,7 @@ export function ErrorCollectionPanel({
           type='button'
           className='flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-xs text-muted-foreground transition-colors select-none hover:text-foreground'
         >
-          <span>错误集合</span>
+          <span>{translate('logs:errorCollection')}</span>
           {visibleTotal > 0 ? (
             <span className='font-semibold text-foreground tabular-nums'>
               {fmtNum(visibleTotal)}
@@ -234,12 +282,12 @@ export function ErrorCollectionPanel({
                     color: `var(--status-${ERROR_CLASS_TONE[c.id] || 'bad'})`,
                   }}
                 >
-                  {c.label || c.id} {fmtNum(c.count)}
+                  {errorClassLabel(c.id, c.label)} {fmtNum(c.count)}
                 </span>
               ))}
               {hidden.length ? (
                 <span className='whitespace-nowrap'>
-                  已屏蔽 {hidden.length} 类
+                  {translate('logs:mutedClassCount', { count: hidden.length })}
                 </span>
               ) : null}
             </span>
@@ -259,7 +307,7 @@ export function ErrorCollectionPanel({
               <ClassChip
                 key={c.id}
                 id={c.id}
-                label={c.label || c.id}
+                label={errorClassLabel(c.id, c.label)}
                 count={c.count}
                 muted={false}
                 active={activeClass === c.id}
@@ -269,18 +317,20 @@ export function ErrorCollectionPanel({
             ))}
             {visible.length === 0 && hidden.length > 0 ? (
               <span className='text-xs text-muted-foreground'>
-                最近记录都是已屏蔽错误。点右侧「已屏蔽」里的类可查看明细。
+                {translate('logs:allRecentErrorsMuted')}
               </span>
             ) : null}
           </div>
           {hidden.length ? (
             <div className='flex flex-wrap items-center gap-1.5 border-t border-border/40 pt-2'>
-              <span className='text-xs text-muted-foreground'>已屏蔽</span>
+              <span className='text-xs text-muted-foreground'>
+                {translate('logs:mutedClassCount', { count: hidden.length })}
+              </span>
               {hidden.map((c) => (
                 <ClassChip
                   key={c.id}
                   id={c.id}
-                  label={c.label || c.id}
+                  label={errorClassLabel(c.id, c.label)}
                   count={c.count}
                   muted
                   active={activeClass === c.id}

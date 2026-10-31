@@ -1,3 +1,4 @@
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -38,54 +39,56 @@ function seed(db, rows) {
       path: '/v1/messages',
       status: 200,
       model: 'claude-sonnet-4',
+      actual_cost: r.total_cost ?? null,
+      user_id: r.api_key_id === 'k1' ? 'u1' : r.api_key_id === 'k2' ? 'u2' : null,
       ...r,
     })
   }
 }
 
-test('day buckets follow local midnights across a DST change', () => {
+test('business day buckets stay UTC+8 across a client DST change', () => {
   const tz = 'America/New_York'
   const now = Date.parse('2026-03-09T15:00:00Z') // 11:00 EDT, the day after spring-forward
-  const { buckets, resolution } = resolveWindow('7days', tz, now)
+  const { buckets, resolution } = resolveWindow('7days', 'Asia/Shanghai', now)
   assert.equal(resolution, 'day')
   assert.equal(buckets.length, 7)
-  assert.equal(new Date(buckets[0]).toISOString(), '2026-03-03T05:00:00.000Z')
-  assert.equal(new Date(buckets[5]).toISOString(), '2026-03-08T05:00:00.000Z')
-  assert.equal(new Date(buckets[6]).toISOString(), '2026-03-09T04:00:00.000Z')
+  assert.equal(new Date(buckets[0]).toISOString(), '2026-03-02T16:00:00.000Z')
+  assert.equal(new Date(buckets[5]).toISOString(), '2026-03-07T16:00:00.000Z')
+  assert.equal(new Date(buckets[6]).toISOString(), '2026-03-08T16:00:00.000Z')
 
   const db = freshDb()
   seed(db, [
-    { created_at: '2026-03-09T03:30:00.000Z', total_cost: 1 }, // 23:30 EDT on Mar 8
-    { created_at: '2026-03-09T04:30:00.000Z', total_cost: 2 }, // 00:30 EDT on Mar 9
+    { created_at: '2026-03-08T15:59:59.999Z', total_cost: 1 }, // 23:59:59.999 UTC+8 on Mar 8
+    { created_at: '2026-03-08T16:00:00.000Z', total_cost: 2 }, // 00:00 UTC+8 on Mar 9
   ])
   const data = new StatisticsRepo(db).statistics({ range: '7days', dimension: 'model', tz, now })
   const cost = data.metrics.cost
-  assert.equal(cost[5].date, '2026-03-08T05:00:00.000Z')
+  assert.equal(cost[5].date, '2026-03-07T16:00:00.000Z')
   assert.equal(cost[5].s0, 1)
   assert.equal(cost[6].s0, 2)
-  assert.equal(data.tz, tz)
-  assert.equal(data.since, '2026-03-03T05:00:00.000Z')
+  assert.equal(data.tz, 'Asia/Shanghai')
+  assert.equal(data.since, '2026-03-02T16:00:00.000Z')
 })
 
-test('hourly buckets start at local midnight in half-hour zones; bad tz falls back to UTC', () => {
+test('business hourly buckets ignore client and invalid zones and start at UTC+8 midnight', () => {
   const db = freshDb()
-  const now = Date.parse('2026-05-01T00:00:00Z') // 05:30 in Kolkata
+  const now = Date.parse('2026-05-01T00:00:00Z') // 08:00 UTC+8
   seed(db, [
-    { created_at: '2026-04-30T18:29:59.000Z', total_cost: 100 }, // previous local day
-    { created_at: '2026-04-30T19:29:00.000Z', total_cost: 1 }, // 00:59 local
-    { created_at: '2026-04-30T19:30:00.000Z', total_cost: 2 }, // 01:00 local
+    { created_at: '2026-04-30T15:59:59.000Z', total_cost: 100 }, // previous local day
+    { created_at: '2026-04-30T16:59:00.000Z', total_cost: 1 }, // 00:59 local
+    { created_at: '2026-04-30T17:00:00.000Z', total_cost: 2 }, // 01:00 local
   ])
   const repo = new StatisticsRepo(db)
   const data = repo.statistics({ range: 'today', dimension: 'model', tz: 'Asia/Kolkata', now })
   assert.equal(data.resolution, 'hour')
-  assert.equal(data.metrics.cost.length, 6)
-  assert.equal(data.metrics.cost[0].date, '2026-04-30T18:30:00.000Z')
+  assert.equal(data.metrics.cost.length, 8)
+  assert.equal(data.metrics.cost[0].date, '2026-04-30T16:00:00.000Z')
   assert.equal(data.metrics.cost[0].s0, 1)
   assert.equal(data.metrics.cost[1].s0, 2)
   assert.equal(data.totals.cost, 3)
   const utc = repo.statistics({ range: 'today', tz: 'Mars/Base', now })
-  assert.equal(utc.tz, 'UTC')
-  assert.equal(utc.since, '2026-05-01T00:00:00.000Z')
+  assert.equal(utc.tz, 'Asia/Shanghai')
+  assert.equal(utc.since, '2026-04-30T16:00:00.000Z')
 })
 
 test('series keep the top 8 by cost, fold the rest into __others__, and name empty values', () => {
@@ -131,7 +134,7 @@ test('deltas compare with the previous equal-length window', () => {
   assert.equal(empty.deltas.requests, null)
 })
 
-test('leaderboard sorts by official cost, names entities, and caps the limit', () => {
+test('leaderboard sorts by customer spend, names entities, and caps the limit', () => {
   const db = freshDb()
   const now = Date.parse('2026-05-01T12:00:00Z')
   const at = '2026-05-01T09:00:00.000Z'
@@ -164,7 +167,7 @@ test('leaderboard sorts by official cost, names entities, and caps the limit', (
   assert.equal(alice.successRequests, 1)
   assert.equal(alice.errorRequests, 1)
   assert.equal(alice.successRate, 0.5)
-  assert.equal(alice.totalActualCost, 2)
+  assert.equal(alice.totalActualCost, 3)
   assert.equal(alice.cacheHitRate, 0.2)
   assert.equal(repo.leaderboard({ range: 'today', scope: 'key', limit: 1, tz: 'UTC', now }).entries[0].name, 'bob-key')
   assert.equal(repo.leaderboard({ range: 'today', scope: 'key', limit: 500, tz: 'UTC', now }).entries.length, 3)
@@ -285,7 +288,7 @@ test('API OpenAI replies converted to non-streaming Anthropic retain disjoint hi
       const totals = repo.statistics(options).totals
       assert.equal(totals.cacheHitRate, 0.8)
       assert.equal(totals.inputTokens, 20 - cacheWrite)
-      assert.equal(totals.cost, 0.25)
+      assert.equal(totals.cost, 0.2)
       for (const scope of ['user', 'key', 'model', 'vm']) {
         const entry = repo.leaderboard({ ...options, scope }).entries[0]
         assert.equal(entry.cacheHitRate, 0.8, scope)
@@ -325,7 +328,7 @@ test('mixed-provider cache rates weight each row by prompt tokens for every scop
       { ...shared, via: 'codex-kernel', input_tokens: 500, cache_read_tokens: 400, cache_creation_tokens: 100 },
       { created_at: at, user_id: 'u2', api_key_id: 'k2', input_tokens: 50, cache_read_tokens: 50 },
       // Outside the current window: must not change its denominator.
-      { ...shared, created_at: '2026-04-30T23:59:59.000Z', cache_creation_tokens: 10_000 },
+      { ...shared, created_at: '2026-04-30T15:59:59.000Z', cache_creation_tokens: 10_000 },
     ])
     const repo = new StatisticsRepo(db)
     const options = { range: 'today', tz: 'UTC', now }
@@ -359,14 +362,21 @@ test('panel routes owner-scope statistics for users and reject user/vm groupings
       { created_at: at, user_id: 'u1', api_key_id: 'k1', total_cost: 1 },
       { created_at: at, user_id: 'u2', api_key_id: 'k2', total_cost: 7 },
     ])
+    const panelUsers = new PanelUserStore({ db })
+    const manager = panelUsers.create({ username: 'manager', password: 'manager-pass', role: 'admin' })
+    db.prepare("UPDATE users SET parent_user_id = ?, admin_domain_id = ? WHERE id IN ('u1', 'u2')").run(
+      manager.id,
+      manager.id,
+    )
     const call = async (role, url) => {
       const response = {}
       const handle = createPanelHandler({
         cfg: { paths: { project: dir } },
+        panelUsers,
         requireAuth(req) {
           req.panelUser = role
           req.panelRole = role
-          req.panelUserId = 'u1'
+          req.panelUserId = role === 'admin' ? manager.id : 'u1'
           return true
         },
         json(_res, status, body) {

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
+import { useTranslation } from 'react-i18next'
 import { formatCurrency } from '@/lib/usage-format'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -22,19 +23,28 @@ function CostRow({
   amount: number
   tokens: number
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const unit = unitPricePerMillion(amount, tokens)
   return (
     <div className='flex items-start justify-between gap-3'>
       <span className={LABEL}>{label}</span>
       <div className='text-right font-mono tabular-nums'>
         <div>{formatCurrency(amount, 6)}</div>
-        {unit ? <div className={LABEL}>@ ${unit} / 1M</div> : null}
+        {unit ? (
+          <div className={LABEL}>
+            @ ${unit}
+            {translate('logs:perMillion')}
+          </div>
+        ) : null}
       </div>
     </div>
   )
 }
 
 function TtlChip({ ttl }: { ttl: '5m' | '1h' }) {
+  useTranslation('logs')
+
   return (
     <Badge
       variant='outline'
@@ -50,6 +60,8 @@ function TtlChip({ ttl }: { ttl: '5m' | '1h' }) {
  * 分组倍率生效时总费用 = 实收，基础合计划线展示。
  */
 export function CostTooltipContent({ row }: { row: UsageLogRow }) {
+  const { t: translate } = useTranslation('logs')
+
   const breakdown = row.costBreakdown
   const multiplier = effectiveMultiplier(
     breakdown?.groupMultiplier ?? row.groupCostMultiplier
@@ -58,7 +70,7 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
   const baseTotal = breakdown?.baseTotal ?? row.costUsd
 
   const tokenSplit = cacheWriteSplit({
-    total: row.cacheCreationInputTokens,
+    total: row.cacheCreationInputTokens ?? null,
     fiveM: row.cacheCreation5mInputTokens,
     oneH: row.cacheCreation1hInputTokens,
     ttl: row.cacheTtlApplied,
@@ -72,13 +84,15 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
   return (
     <div className='space-y-3'>
       <div className='flex items-center justify-between gap-2'>
-        <span className='text-xs font-semibold'>计费详情</span>
+        <span className='text-xs font-semibold'>
+          {translate('logs:billingDetails')}
+        </span>
         {row.context1mApplied ? (
           <Badge
             variant='outline'
             className={`shrink-0 px-1 text-[10px] leading-tight ${PURPLE}`}
           >
-            1M 上下文
+            {translate('logs:oneMillionContext')}
           </Badge>
         ) : null}
       </div>
@@ -86,14 +100,14 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
         <div className='space-y-2'>
           {(breakdown.input ?? 0) > 0 ? (
             <CostRow
-              label='输入'
+              label={translate('logs:input')}
               amount={breakdown.input ?? 0}
               tokens={row.inputTokens}
             />
           ) : null}
           {(breakdown.output ?? 0) > 0 ? (
             <CostRow
-              label='输出'
+              label={translate('logs:output')}
               amount={breakdown.output ?? 0}
               tokens={row.outputTokens}
             />
@@ -102,7 +116,7 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
             <CostRow
               label={
                 <>
-                  缓存写入
+                  {translate('logs:cacheWrite')}
                   <TtlChip ttl='5m' />
                 </>
               }
@@ -114,7 +128,7 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
             <CostRow
               label={
                 <>
-                  缓存写入
+                  {translate('logs:cacheWrite')}
                   <TtlChip ttl='1h' />
                 </>
               }
@@ -124,14 +138,14 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
           ) : null}
           {(breakdown.cacheRead ?? 0) > 0 ? (
             <CostRow
-              label='缓存读取'
+              label={translate('logs:cacheRead')}
               amount={breakdown.cacheRead ?? 0}
               tokens={row.cacheReadInputTokens}
             />
           ) : null}
           {multiplier != null && baseTotal != null ? (
             <div className='flex items-center justify-between gap-3 border-t border-primary-foreground/20 pt-2'>
-              <span className={LABEL}>基础合计</span>
+              <span className={LABEL}>{translate('logs:baseTotal')}</span>
               <span className='font-mono tabular-nums'>
                 {formatCurrency(baseTotal, 6)}
               </span>
@@ -140,17 +154,22 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
           {multiplier != null ? (
             <div className='space-y-2 rounded-md border border-primary-foreground/20 bg-primary-foreground/10 p-2'>
               <div className='flex items-center justify-between text-[11px]'>
-                <span className='text-primary-foreground/70'>分组倍率</span>
-                <span className='font-mono'>x{multiplier.toFixed(2)}</span>
+                <span className='text-primary-foreground/70'>
+                  {translate('logs:groupMultiplier')}
+                </span>
+                <span className='font-mono'>
+                  {translate('logs:multiplierSymbol')}
+                  {multiplier.toFixed(2)}
+                </span>
               </div>
             </div>
           ) : null}
           {breakdown.pricingModel ? (
             <div className='flex items-center justify-between gap-3'>
-              <span className={LABEL}>计价模型</span>
+              <span className={LABEL}>{translate('logs:pricingModel')}</span>
               <span className='truncate font-mono text-[11px]'>
                 {breakdown.pricingModel === 'unpriced'
-                  ? '无价表'
+                  ? translate('logs:noPriceTable')
                   : breakdown.pricingModel}
               </span>
             </div>
@@ -158,7 +177,7 @@ export function CostTooltipContent({ row }: { row: UsageLogRow }) {
         </div>
       ) : null}
       <div className='flex items-end justify-between gap-3 border-t border-primary-foreground/20 pt-2'>
-        <span className={LABEL}>总费用</span>
+        <span className={LABEL}>{translate('logs:totalCost')}</span>
         <div className='text-right font-mono tabular-nums'>
           {multiplier != null && baseTotal != null ? (
             <div className='text-[11px] text-primary-foreground/60 line-through'>

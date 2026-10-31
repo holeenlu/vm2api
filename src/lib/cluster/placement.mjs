@@ -242,11 +242,11 @@ export function startSlotImageBuild(nodeId, kernel, { runtime, connect } = {}) {
  * against the live node; error-level failures block creation, warn-level ones
  * are shown but do not.
  */
-export async function preflightNode(nodeId, { kernel, runtime } = {}) {
+export async function preflightNode(nodeId, { kernel, runtime, memory } = {}) {
   const { manager, projectRoot } = state()
   const kind = runtimeKind({ runtime_type: runtime })
   const routing = placementRouting()
-  const memStr = slotMemory(null, routing)
+  const memStr = memory == null ? slotMemory(null, routing) : slotMemory({ machine: { memory } }, routing)
   const checks = []
   const add = (id, ok, level, message) => checks.push({ id, ok, level, message })
   let spec = null

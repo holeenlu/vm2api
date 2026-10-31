@@ -13,6 +13,7 @@ import {
 import { isContentPolicyErrorCode } from '../core/refusal-guard.mjs'
 import { isPlanLimitMessage, parseLimitResetFromMessage, parseResetMs } from './quota-window.mjs'
 import { attachFailureDecision } from './unit-decision.mjs'
+import { normalizeAccountReason } from '../../shared/account-status-reason.mjs'
 
 const ENTITLEMENT_PATTERNS = [
   /extra usage required/i,
@@ -43,12 +44,6 @@ const SCHEMA_PATTERNS = [/additionalProperties/i, /output_config/i]
 const SEARCH_HISTORY_PATTERNS = [/encrypted_content/i, /`?search_result`?\s+block/i, /web_search_result/i]
 
 const ADAPTIVE_PATTERNS = [/adaptive thinking/i, /thinking\.type.*adaptive/i, /does not support adaptive/i]
-
-const ORGANIZATION_DISABLED_PATTERNS = [
-  /organization has been disabled/i,
-  /oauth authentication is currently not allowed/i,
-  /organization.*(?:blocked|banned|disabled)/i,
-]
 
 function bodyMessage(body) {
   if (typeof body === 'string') return body
@@ -250,6 +245,18 @@ export function clampOauth401CooldownMs(ms) {
 
 const GRANT_DEAD = /token has been revoked|oauth_revoked|invalid_grant/i
 
+function pauseSchedulePolicy(result, reason, status, message) {
+  return {
+    scope: 'account',
+    action: result.committed ? 'stop' : 'continue',
+    reason,
+    cooldownUntil: null,
+    retrySameAccount: false,
+    pauseSchedule: true,
+    detail: { status, message: message?.slice(0, 500) },
+  }
+}
+
 function classifyOAuth401(hasRefresh, hay) {
   if (hasRefresh === false) {
     return {
@@ -361,22 +368,15 @@ function classifyUpstreamResultRaw(
       retrySameAccount: false,
     }
   }
+  const accountReason = normalizeAccountReason(message)
+  if (accountReason === 'terms_not_accepted') {
+    return pauseSchedulePolicy(result, 'terms_not_accepted', status, message)
+  }
   // The org refuses this seat. Not a token death and not a timed cooldown:
   // pause the slot until an operator resumes it, and give the request to
   // another unit instead of returning the 403.
-  if (
-    (status === 400 || status === 401 || status === 403) &&
-    ORGANIZATION_DISABLED_PATTERNS.some((pattern) => pattern.test(message))
-  ) {
-    return {
-      scope: 'account',
-      action: result.committed ? 'stop' : 'continue',
-      reason: 'organization_disabled',
-      cooldownUntil: null,
-      retrySameAccount: false,
-      pauseSchedule: true,
-      detail: { status, message: message.slice(0, 500) },
-    }
+  if ((status === 400 || status === 401 || status === 403) && accountReason === 'organization_disabled') {
+    return pauseSchedulePolicy(result, 'organization_disabled', status, message)
   }
   if (/token has been revoked|oauth_revoked|invalid_grant|authentication_error/i.test(hay) || status === 401) {
     if (isUnconfirmedAuthFailure(result)) {

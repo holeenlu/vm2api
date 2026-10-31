@@ -32,6 +32,7 @@ import {
   waitEgressExit,
   egressPidActive,
   ensureProxyEgress,
+  reclaimUnusedEgressNetworks,
   startProxyEgress,
   runExclusiveProxyEgress,
   waitPortReleased,
@@ -348,6 +349,28 @@ test('iptables plan redirects tcp and dns, returns subnet, drops the rest', () =
   assert.ok(joined.findIndex((s) => s.includes('-I FORWARD')) < joined.findIndex((s) => s.includes('-t nat')))
 })
 
+test('reclaims only empty managed networks when Docker address pools are exhausted', () => {
+  const calls = []
+  const run = (args) => {
+    calls.push(args)
+    if (args[0] === 'network' && args[1] === 'ls')
+      return { ok: true, stdout: 'kin-eg-px-empty\nkin-eg-px-busy\nbridge\n' }
+    if (args[0] === 'network' && args[1] === 'inspect' && args.at(-1) === 'kin-eg-px-empty')
+      return { ok: true, stdout: '{}' }
+    if (args[0] === 'network' && args[1] === 'inspect' && args.at(-1) === 'kin-eg-px-busy')
+      return { ok: true, stdout: '{"container":{"Name":"kin-01"}}' }
+    if (args[0] === 'network' && args[1] === 'rm') return { ok: true, stdout: 'kin-eg-px-empty' }
+    return { ok: false, stderr: 'unexpected docker call' }
+  }
+  const result = reclaimUnusedEgressNetworks('/tmp/egress-reclaim-test', run)
+  assert.deepEqual(result, { ok: true, removed: ['kin-eg-px-empty'] })
+  assert.ok(calls.some((args) => args.join(' ') === 'network rm kin-eg-px-empty'))
+  assert.equal(
+    calls.some((args) => args.join(' ') === 'network rm kin-eg-px-busy'),
+    false,
+  )
+})
+
 test('helper startup failure leaves a forwarding block in place before any slot can go direct', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-eg-fail-closed-'))
   const calls = []
@@ -476,7 +499,7 @@ test('host hops: local Codex follows the deployment proxy, local Claude stays di
   assert.equal(hostProxyUrlForVm({ id: 'vm-cc', platform: 'anthropic', proxy: local }), '')
   assert.equal(
     hostProxyUrlForVm({ id: 'vm-gpt', platform: 'openai', proxy: { host: '10.0.0.5', port: 1080 } }),
-    'socks5h://10.0.0.5:1080',
+    'socks5://10.0.0.5:1080',
   )
 })
 

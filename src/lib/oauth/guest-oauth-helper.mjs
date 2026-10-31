@@ -5,7 +5,7 @@ import { slotHost } from '../vm/slot-host.mjs'
 import { slotExecArgv } from '../vm/slot-exec.mjs'
 import { slotExec, startSlotReady } from '../vm/slot-runtime.mjs'
 import { getVm, patchVmRecord } from '../vm/vm-registry.mjs'
-import { hasBoundExit, isLocalEgressProxy, boundProxyUrl } from '../vm/egress.mjs'
+import { hasBoundExit, isLocalEgressProxy, boundProxyUrl, slotNetworkForVm } from '../vm/egress.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { postRustKernelTelemetryEvent, rustKernelPaths } from '../transport/rust-kernel-client.mjs'
 import { runSlotProcess } from '../transport/slot-oauth.mjs'
@@ -99,6 +99,13 @@ export async function runGuestOAuthAuthService(
   const context = await prepare({ exec, projectRoot, routing, timeoutMs })
   const { host, configDir, home } = context
   exec = context.exec
+  // A started slot on a kin-eg-* network already routes all traffic through
+  // its bound egress. Passing the pool URL again makes kin-oauth-auth create a
+  // second proxy hop and, for HTTP pool entries, fail its SOCKS transport
+  // parser. Keep the URL only for a host/local execution path without the
+  // transparent slot network.
+  const transparentEgress = slotNetworkForVm(exec.vm).startsWith('kin-eg-')
+  const guestProxyUrl = transparentEgress ? '' : isLocalEgressProxy(exec.vm.proxy) ? '' : boundProxyUrl(exec.vm.proxy)
   // The approved Linux cutover must not change macOS non-telemetry behavior.
   // This is an explicit native-host path, never a Linux execution fallback.
   if (host.native) return runNative(payload)
@@ -153,7 +160,7 @@ export async function runGuestOAuthAuthService(
       stdin:
         JSON.stringify({
           ...payload,
-          proxy_url: isLocalEgressProxy(exec.vm.proxy) ? '' : boundProxyUrl(exec.vm.proxy),
+          proxy_url: guestProxyUrl,
         }) + '\n',
     })
     if (result?.timed_out) throw fail('oauth_auth_timeout', 'Target VM OAuth helper timed out')

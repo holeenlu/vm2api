@@ -363,7 +363,7 @@ test('panel keeps upstream 401 and 429 inside data so the page can render them',
       },
       requireAuth(req) {
         req.panelUser = 'admin'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, body) {
@@ -394,11 +394,11 @@ test('panel keeps upstream 401 and 429 inside data so the page can render them',
 })
 
 test('anthropic console is admin-only', () => {
-  assert.equal(canViewPage('admin', 'anthropic'), true)
+  assert.equal(canViewPage('super_admin', 'anthropic'), true)
   assert.equal(canViewPage('user', 'anthropic'), false)
-  assert.equal(canViewPage('super', 'anthropic'), false)
+  assert.equal(canViewPage('admin', 'anthropic'), false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'super_admin').ok, true)
 })
 test('saved Anthropic row reloads its proxy and can test or fetch models without retyping the key', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-console-row-'))
@@ -434,7 +434,7 @@ test('saved Anthropic row reloads its proxy and can test or fetch models without
     },
     requireAuth(req) {
       req.panelUser = 'admin'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, body) {
@@ -545,7 +545,7 @@ test('an explicit direct choice overrides a saved proxy for both test and model 
     forwardApi: forward,
     requireAuth(req) {
       req.panelUser = 'admin'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, body) {

@@ -14,155 +14,59 @@ const serverSrc = [
   fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/server.mjs'), 'utf8'),
 ].join('\n')
 
-test('user sees vm / proxies / keys / billing / logs / statistics', () => {
-  assert.deepEqual(viewsForRole('user'), ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'])
-  assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'logs', 'statistics', 'vm'])
-  assert.equal(canViewPage('admin', 'statistics'), true)
-  assert.equal(canViewPage('user', 'vm'), true)
-  assert.equal(canViewPage('user', 'overview'), false)
-  assert.equal(canViewPage('super', 'vm'), true)
-  assert.equal(canViewPage('admin', 'users'), true)
-  assert.equal(canViewPage('admin', 'api'), true)
-  assert.equal(canViewPage('admin', 'system'), true)
-  assert.equal(canViewPage('user', 'api'), false)
-  assert.equal(canViewPage('admin', 'database'), true)
-  assert.equal(canViewPage('super', 'database'), false)
-  assert.equal(canViewPage('user', 'database'), false)
-  assert.equal(hasCapability('super', 'vm.schedule'), true)
-  assert.equal(hasCapability('user', 'vm.schedule'), true)
-})
-
-test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/schedulable', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/package', 'user').ok, false)
-  assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/package', 'user').ok, false)
-  assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/proxies', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys/key_a/stats', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/request-logs', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/dashboard', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/usage', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/official-cc-bootstrap', 'user').ok, false)
-  assert.equal(authorizePanelRoute('PATCH', '/api/panel/vms/vm-01/owner', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/users', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/version', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/update', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/diagnose', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/recover', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/recover', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/recover', 'super').ok, false)
-})
-
-test('user can query quota and redeem reset credits on owned vms and keys', () => {
-  const allowed = [
-    '/api/panel/vms/vm-01/openai-quota/refresh',
-    '/api/panel/vms/vm-01/openai-quota/reset',
-    '/api/panel/vms/vm-01/claude-reset/query',
-    '/api/panel/vms/vm-01/claude-reset/redeem',
-    '/api/panel/api-keys/key_a/reset-quota',
-  ]
-  for (const p of allowed) {
-    assert.equal(authorizePanelRoute('POST', p, 'user').ok, true, `user POST ${p}`)
-    assert.equal(authorizePanelRoute('GET', p, 'user').ok, false, `user GET ${p}`)
-    assert.equal(authorizePanelRoute('POST', p, 'super').ok, false, `super POST ${p}`)
+test('SA retains custom commercial views; AD and U cannot manage infrastructure', () => {
+  for (const view of ['profile', 'groups', 'subscriptions', 'keys', 'billing'])
+    assert.ok(viewsForRole('super_admin').includes(view), view)
+  for (const view of ['profile', 'subscriptions', 'keys', 'logs']) assert.ok(viewsForRole('user').includes(view), view)
+  for (const role of ['admin', 'user']) {
+    for (const path of [
+      '/api/panel/vms/create',
+      '/api/panel/vms/import',
+      '/api/panel/vms/x/start',
+      '/api/panel/proxies/import',
+    ])
+      assert.equal(authorizePanelRoute('POST', path, role).ok, false, role + path)
+    for (const path of ['/api/panel/subscriptions', '/api/panel/groups'])
+      assert.equal(authorizePanelRoute('POST', path, role).ok, false, role + path)
+    assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', role).ok, false)
   }
-  assert.equal(authorizePanelRoute('POST', '/api/panel/api-keys/key_a/reset', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/claude-reset/other', 'user').ok, false)
-})
-
-test('user can rotate owned api keys; super cannot', () => {
-  const p = '/api/panel/api-keys/key_a/rotate'
-  assert.equal(authorizePanelRoute('POST', p, 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', p, 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', p, 'super').ok, false)
-})
-
-test('usage-logs and statistics are read-only for user and super', () => {
-  const paths = [
-    '/api/panel/usage-logs',
-    '/api/panel/usage-logs/summary',
-    '/api/panel/usage-logs/filter-options',
-    '/api/panel/usage-logs/session-suggestions',
-    '/api/panel/usage-logs/active-sessions',
-    '/api/panel/usage-logs/overview',
-    '/api/panel/statistics',
-    '/api/panel/statistics/leaderboard',
-  ]
-  for (const role of ['user', 'super']) {
-    for (const p of paths) {
-      assert.equal(authorizePanelRoute('GET', p, role).ok, true, `${role} GET ${p}`)
-      assert.equal(authorizePanelRoute('POST', p, role).ok, false, `${role} POST ${p}`)
-    }
-    assert.equal(authorizePanelRoute('GET', '/api/panel/usage-logs/other', role).ok, false)
-  }
-})
-
-test('super can schedule VMs but cannot touch credentials or delete', () => {
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01', 'super').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/schedulable', 'super').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/cooldown/clear', 'super').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/circuit/reset', 'super').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/package', 'super').ok, false)
-  assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/package', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/refresh', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/generate-auth-url', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/exchange-code', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/to-setup-token', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'super').ok, false)
-  assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/oauth/credential', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'user').ok, false)
-  assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/users', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/version', 'super').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/update', 'super').ok, false)
-})
-
-test('user can manage owned vm test schedules; default template write is admin-only', () => {
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/test-schedule', 'user').ok, true)
-  assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/test-schedule', 'user').ok, true)
-  assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01/test-schedule', 'user').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/test-schedule/default', 'user').ok, true)
-  assert.equal(authorizePanelRoute('PUT', '/api/panel/test-schedule/default', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/test-schedule/sync', 'user').ok, true)
-  assert.equal(authorizePanelRoute('PUT', '/api/panel/test-schedule/default', 'admin').ok, true)
-})
-
-test('admin is unrestricted', () => {
-  assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'admin').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/users', 'admin').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'admin').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/database/metrics', 'admin').ok, true)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/version', 'admin').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/update', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/users/u/balance', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/users/u/balance-history', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/me', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/groups', 'user').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/redeem', 'user').ok, false)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys/x/connection', 'user').ok, true)
+  assert.equal(hasCapability('user', 'vm.schedule'), false)
+  assert.equal(canViewPage('admin', 'vm'), false)
+  for (const role of ['super_admin', 'admin', 'user', 'vendor']) {
+    assert.equal(canViewPage(role, 'home'), false)
+    assert.equal(canViewPage(role, 'ops'), false)
+  }
 })
 
-test('user and super can GET/PUT onboarding; POST is admin-only', () => {
-  for (const role of ['user', 'super', 'admin']) {
-    assert.equal(authorizePanelRoute('GET', '/api/panel/onboarding', role).ok, true, `${role} GET`)
-    assert.equal(authorizePanelRoute('PUT', '/api/panel/onboarding', role).ok, true, `${role} PUT`)
+test('SA is unrestricted', () => {
+  for (const [method, path] of [
+    ['DELETE', '/api/panel/vms/x'],
+    ['POST', '/api/panel/users'],
+    ['POST', '/api/panel/vms/import'],
+    ['GET', '/api/panel/database/metrics'],
+    ['POST', '/api/panel/update'],
+  ])
+    assert.equal(authorizePanelRoute(method, path, 'super_admin').ok, true, path)
+})
+
+test('all roles can read and update onboarding progress', () => {
+  for (const role of ['super_admin', 'admin', 'user']) {
+    assert.equal(authorizePanelRoute('GET', '/api/panel/onboarding', role).ok, true)
+    assert.equal(authorizePanelRoute('PUT', '/api/panel/onboarding', role).ok, true)
   }
-  assert.equal(authorizePanelRoute('POST', '/api/panel/onboarding', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/onboarding', 'super').ok, false)
-  assert.equal(authorizePanelRoute('DELETE', '/api/panel/onboarding', 'user').ok, false)
 })
 
 test('onboarding profile writes are admin-only', async () => {
   const { Readable } = await import('node:stream')
   const { readBody } = await import('../../src/lib/http/respond.mjs')
-  for (const role of ['user', 'super']) {
+  for (const role of ['user', 'admin']) {
     let routingWrites = 0
     const response = {}
     const handlePanel = createPanelHandler({
@@ -221,7 +125,7 @@ test('admin models refresh stays delegated to the server route', async () => {
     requireAuth(req) {
       authCalls += 1
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json() {

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { validTimezone, zoneNowLabel } from '@/lib/timezone'
 import { Input } from '@/components/ui/input'
 import {
@@ -34,6 +35,8 @@ export function TimezonePicker({
   disabled,
   className,
 }: TimezonePickerProps) {
+  const { t: tVm } = useTranslation('vm')
+
   const preset = isPresetTimezone(value)
   const [custom, setCustom] = useState(!preset && !!value)
   const selectValue = preset ? value : custom ? VM_TIMEZONE_CUSTOM : ''
@@ -54,8 +57,11 @@ export function TimezonePicker({
           onChange(next)
         }}
       >
-        <SelectTrigger className={className} aria-label='时区'>
-          <SelectValue placeholder='选择时区' />
+        <SelectTrigger
+          className={className}
+          aria-label={tVm('vm:physicalFeaturesCard.timezone')}
+        >
+          <SelectValue placeholder={tVm('vm:timezonePicker.selectTimezone')} />
         </SelectTrigger>
         <SelectContent>
           {VM_TIMEZONES.map(([id, label]) => (
@@ -72,13 +78,16 @@ export function TimezonePicker({
             spellCheck={false}
             autoComplete='off'
             placeholder='Asia/Tokyo'
-            aria-label='自定义时区'
+            aria-label={tVm('vm:timezonePicker.customTimezone')}
             disabled={disabled}
             value={value}
             onChange={(e) => onChange(e.target.value)}
           />
           <span className='w-28 shrink-0 text-xs text-muted-foreground'>
-            {now || (validTimezone(value) ? '' : '无效时区')}
+            {now ||
+              (validTimezone(value)
+                ? ''
+                : tVm('vm:timezonePicker.invalidTimezone'))}
           </span>
         </div>
       ) : null}

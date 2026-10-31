@@ -716,6 +716,43 @@ test('401 without refresh disables the grant and keeps failover', () => {
   assert.equal(shouldContinue(policy), true)
 })
 
+test('explicit expired access-token prose still refreshes a refreshable credential', () => {
+  const result = {
+    status: 401,
+    terminalState: 'rejected',
+    body: {
+      error: { type: 'authentication_error', message: 'OAuth access token has expired. Re-authenticate to continue.' },
+    },
+  }
+  const policy = classifyUpstreamResult(result, { hasRefresh: true })
+  assert.equal(policy.reason, 'oauth_refresh_required')
+  assert.equal(policy.retrySameAccount, true)
+  assert.equal(policy.decision.credentialRefreshNeeded, true)
+  assert.equal(policy.pauseSchedule, undefined)
+  assert.equal(classifyUpstreamResult(result, { hasRefresh: false }).reason, 'oauth_no_refresh')
+})
+
+test('a validation deadline without proxy evidence stays a recoverable provider timeout', () => {
+  const policy = classifyUpstreamResult({
+    status: 502,
+    body: {
+      error: { type: 'upstream_error', message: "no upstream response before the CLI's model validation deadline" },
+    },
+  })
+  assert.equal(policy.reason, 'provider_timeout')
+  assert.equal(policy.retrySameAccount, true)
+  assert.equal(policy.pauseSchedule, undefined)
+})
+
+test('transient proxy prose does not permanently disable an account', () => {
+  const policy = classifyUpstreamResult({
+    status: 502,
+    body: { error: { type: 'upstream_error', message: 'proxy connection error: connection reset by peer' } },
+  })
+  assert.equal(policy.reason, 'provider_overloaded')
+  assert.equal(policy.pauseSchedule, undefined)
+})
+
 test('fable 403 is plan denied and does not park the credential', () => {
   const policy = classifyUpstreamResult(
     {
@@ -850,4 +887,28 @@ test('disabled organization 400 is an org pause, not an invalid request', () => 
   assert.equal(policy.reason, 'organization_disabled')
   assert.equal(policy.pauseSchedule, true)
   assert.equal(shouldContinue(policy), true)
+})
+
+test('deterministic Claude account blockers keep stable reasons and pause scheduling', () => {
+  const cases = [
+    ['OAuth access token has been revoked.', 'oauth_revoked'],
+    ['OAuth authentication is currently not allowed for this organization.', 'organization_disabled'],
+    [
+      "We've updated our Consumer Terms and Privacy Policy. You'll need to accept them in claude.ai with the email in /status to continue.",
+      'terms_not_accepted',
+    ],
+  ]
+  for (const [message, reason] of cases) {
+    const policy = classifyUpstreamResult(
+      { status: 403, body: { error: { type: 'upstream_error', message } } },
+      { model: 'claude-opus-test' },
+    )
+    assert.equal(policy.reason, reason, message)
+    if (reason !== 'oauth_revoked') assert.equal(policy.pauseSchedule, true, message)
+    assert.equal(policy.scope, 'account', message)
+    assert.equal(policy.retrySameAccount, false, message)
+    if (reason !== 'oauth_revoked') {
+      assert.equal(policy.detail.message, message, message)
+    }
+  }
 })

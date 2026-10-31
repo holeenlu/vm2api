@@ -89,7 +89,7 @@ export function upstreamAuthHeaders(protocol, apiKey, extra = {}) {
 }
 
 const SKIP_OPENAI =
-  /^(whisper|tts-|dall-e|chatgpt-image|gpt-image|text-embedding|text-moderation|omni-moderation|davinci|babbage|curie)/i
+  /^(whisper|tts-|dall-e|chatgpt-image|text-embedding|text-moderation|omni-moderation|davinci|babbage|curie)/i
 
 export function parseUpstreamModels(payload, protocol = 'anthropic') {
   const rows = Array.isArray(payload?.data)
@@ -111,6 +111,7 @@ export function parseUpstreamModels(payload, protocol = 'anthropic') {
     out.push({
       name,
       alias: name,
+      ...(protocol === 'openai' && /^gpt-image/i.test(name) ? { image: true } : {}),
       display_name: String(row?.display_name || row?.id || name),
     })
   }
