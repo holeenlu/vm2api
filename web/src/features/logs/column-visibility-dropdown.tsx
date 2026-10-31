@@ -1,4 +1,5 @@
 import { Columns3, RotateCcw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -18,6 +19,8 @@ export function ColumnVisibilityDropdown({
   hidden: readonly LogsTableColumn[]
   onChange: (hidden: LogsTableColumn[]) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const total = LOGS_TABLE_COLUMNS.length
   return (
     <DropdownMenu>
@@ -31,7 +34,7 @@ export function ColumnVisibilityDropdown({
       </DropdownMenuTrigger>
       <DropdownMenuContent align='end' className='w-48'>
         <DropdownMenuLabel className='text-xs font-medium'>
-          显示/隐藏列
+          {translate('logs:columnVisibility')}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {LOGS_TABLE_COLUMNS.map((column) => {
@@ -67,7 +70,7 @@ export function ColumnVisibilityDropdown({
           }}
         >
           <RotateCcw className='h-3.5 w-3.5' />
-          <span className='text-sm'>重置</span>
+          <span className='text-sm'>{translate('logs:reset')}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -29,8 +29,8 @@ test('resolveLogMode: env + header overrides', () => {
   assert.equal(resolveLogMode('off', { headers: { 'x-kin-log': 'normal' } }), 'normal')
 })
 
-test('newRequestId keeps incoming X-Request-ID', () => {
-  assert.equal(newRequestId({ headers: { 'x-request-id': 'rid-1' } }), 'rid-1')
+test('newRequestId is server generated and never trusts caller collisions', () => {
+  assert.notEqual(newRequestId({ headers: { 'x-request-id': 'rid-1' } }), 'rid-1')
   assert.match(newRequestId({ headers: {} }), /^[0-9a-f-]{36}$/i)
 })
 
@@ -280,7 +280,7 @@ test('keyUsageStats counts only that key and ranks VMs', () => {
   const store = tmpStore('normal')
   const insert = store.db.prepare(`
     INSERT INTO usage_logs (id, request_id, created_at, path, model, upstream_model, status,
-      vm_id, api_key_id, input_tokens, output_tokens, total_cost, duration_ms)
+      vm_id, api_key_id, input_tokens, output_tokens, actual_cost, duration_ms)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 50, ?, ?)
   `)
   const now = new Date().toISOString()
@@ -631,6 +631,20 @@ test('debug mode stores full redacted body', () => {
   assert.match(bodyStr, /REDACTED/)
   assert.doesNotMatch(bodyStr, /ABCDEFGH12345678/)
   assert.deepEqual(dbg[0].hop_meta.params.dropped, ['max_tokens'])
+})
+
+test('debug header provenance and envelope remain private in usage projections', async () => {
+  const { projectUsage } = await import('../../src/lib/admin/usage-projection.mjs')
+  const diagnostics = {
+    outbound_headers: { accept: 'application/json' },
+    outbound_headers_source: 'cli_final',
+    worker_envelope_headers: { 'x-app': 'internal' },
+  }
+  const record = { request_id: 'req', ...diagnostics, nested: { ...diagnostics } }
+  for (const role of ['user', 'admin']) {
+    assert.deepEqual(projectUsage(record, role), { request_id: 'req', nested: {} })
+  }
+  assert.deepEqual(projectUsage(record, 'super_admin'), record)
 })
 
 test('debug records retain final header provenance and a separate redacted worker envelope', () => {
@@ -1169,7 +1183,7 @@ test('debug response body masks credentials that fit inside the capture window',
   assert.match(body, /REDACTED/)
 })
 
-test('tenant log scope follows the slot owner at write time, not the current owner', () => {
+test('caller log scope never grants VM owners access to platform diagnostics', () => {
   const store = tmpStore()
   store.db.exec(`
     INSERT INTO users (id, email, username, password_hash) VALUES ('alice', 'a@x', 'alice', 'x'), ('bob', 'b@x', 'bob', 'x');
@@ -1177,16 +1191,16 @@ test('tenant log scope follows the slot owner at write time, not the current own
   `)
   logOne(store, { user_id: 'bob', vm_id: 'vm-a', error_code: 'upstream_error', status: 500 })
   store.db.exec(`UPDATE vms SET owner_user_id = 'alice', origin = 'admin_assigned' WHERE id = 'vm-a'`)
-  const testChat = logOne(store, { api_key_kind: 'master', vm_id: 'vm-a', error_code: 'upstream_error', status: 500 })
+  logOne(store, { api_key_kind: 'master', vm_id: 'vm-a', error_code: 'upstream_error', status: 500 })
 
   const mine = store.queryNormal({ owner_user_id: 'alice' })
   assert.deepEqual(
     mine.items.map((r) => r.request_id),
-    [testChat.request_id],
+    [],
   )
   assert.deepEqual(
     store.windowStats({ owner_user_id: 'alice' }).error_collection.recent.map((r) => r.request_id),
-    [testChat.request_id],
+    [],
   )
   assert.equal(store.queryNormal({}).total, 2)
 })

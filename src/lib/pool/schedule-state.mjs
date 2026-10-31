@@ -26,8 +26,10 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
   credential_refresh_failed: '刷新失败',
   credential_blocked: '凭证不可用',
   organization_disabled: '组织禁用',
+  terms_not_accepted: '未接受条款',
   proxy_required: '未绑代理',
   proxy_desynced: '代理失配',
+  proxy_unavailable: '代理不可用',
   runtime_start_failed: '启动失败',
   circuit_escalated: '熔断升级',
   legacy_unknown: '待确认',
@@ -37,6 +39,12 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
 export const HOLD_MAINTENANCE = 'maintenance'
 export const HOLD_PROXY = 'proxy_cooldown'
 const HOLD_REASONS = Object.freeze({
+  vendor_disabled: '供应商已停用',
+  vendor_paused: '供应商资源已暂停',
+  vendor_archived: '供应商资源已归档',
+  vendor_scope_revoked: '供应范围已撤销',
+  vendor_proxy_disabled: '供应商代理不可用',
+  vendor_policy_unavailable: '供应商状态不可读取',
   [HOLD_MAINTENANCE]: '维护中',
   [HOLD_PROXY]: '代理异常',
 })
@@ -50,7 +58,6 @@ const RESTRICTED_SLOT = [
   { match: /^quota_7d/, text: '7d 限制' },
   { match: /^(account_quota_exhausted|rate_limited|rate_limited_unknown|rpm_limited)$/, text: '限流中' },
   { match: /^[a-z]+_rate_limited$/, text: '限流中' },
-  { match: /^(weekly_split_|fable_split|regular_split|fable_quota)/, text: '周额度切分' },
   {
     match: /^(auth_cooldown|authentication_failed_after_refresh|permission_denied|oauth_refresh_required)$/,
     text: '鉴权冷却',
@@ -87,7 +94,7 @@ const STATELESS = [
   /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|invalid_request|entitlement_required|http_\d+)$/,
   /_repairable$/,
   /^(concurrency_limit|concurrency_disabled|rpm_limit|slot_busy|quota_band_inflight|refresh_pending)$/,
-  /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_plan_denied|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
+  /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_usage_limit|fable_quota|fable_plan_denied|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
   /^(quota_guard_request_too_large|no_eligible_accounts|pool_overload_cooldown|pool_rate_limited|vm_unschedulable)$/,
   /^(wrap_connection_error|worker_transport_failure|worker_timeout|upstream_network_error|stream_interrupted|empty_response|incomplete_assistant|downstream_committed_or_incomplete|provider_timeout|client_cancelled|oauth_unconfirmed)$/,
   // Seat placement labels (why this VM was picked), not a slot condition.
@@ -154,10 +161,17 @@ export function deriveScheduleFields(vm, { preserveStatus = true } = {}) {
   const off = vm.schedule_off === true
   const bad = vm.unschedulable?.reason || null
   const hold = vm.schedule_hold?.reason || null
-  const schedulable = !off && !bad && !hold
+  const vendorDisabled = vm.vendor_disabled === true || vm.vendor_resource_paused === true
+  const schedulable = !vendorDisabled && !off && !bad && !hold
   vm.schedulable = schedulable
   vm.schedule_manual = off
-  vm.schedule_disabled_reason = off ? vm.schedule_off_reason || 'disabled' : bad || hold || null
+  vm.schedule_disabled_reason = vendorDisabled
+    ? vm.vendor_resource_paused
+      ? 'vendor_paused'
+      : 'vendor_disabled'
+    : off
+      ? vm.schedule_off_reason || 'disabled'
+      : bad || hold || null
   const status = String(vm.status || '').toLowerCase()
   if (schedulable && status === 'paused') vm.status = 'running'
   if (!preserveStatus && !schedulable && status === 'running') vm.status = 'paused'
@@ -354,6 +368,7 @@ export function resolveSlotState({
     restriction_scope: scope,
     restriction_soft: soft,
   })
+  if (vm.vendor_disabled === true) return restricted('vendor_disabled', null)
   if (vm.schedule_hold?.reason) return restricted(vm.schedule_hold.reason, null)
   const until = Number(restrictionUntil) || Number(availability?.until) || 0
   const live = until > now

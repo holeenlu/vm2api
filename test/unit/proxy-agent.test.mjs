@@ -17,12 +17,12 @@ function socks5Peer(seen) {
   })
 }
 
-test('SOCKS5 proxy on an IPv6 literal is dialled, with the destination resolved remotely', async (t) => {
+test('SOCKS5H proxy on an IPv6 literal is dialled, with the destination resolved remotely', async (t) => {
   const seen = []
   const peer = socks5Peer(seen)
   await new Promise((resolve) => peer.listen(0, '::1', resolve))
   t.after(() => peer.close())
-  const res = await makeProxyFetch(`socks5://[::1]:${peer.address().port}`)('http://upstream.invalid/')
+  const res = await makeProxyFetch(`socks5h://[::1]:${peer.address().port}`)('http://upstream.invalid/')
   assert.equal(await res.text(), 'ok')
   assert.deepEqual(seen, ['upstream.invalid'])
 })

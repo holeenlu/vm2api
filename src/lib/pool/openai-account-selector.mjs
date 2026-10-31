@@ -1,9 +1,11 @@
+import { CODEX_SMART_WEIGHTS } from './codex-scheduling-policy.mjs'
 /**
  * OpenAI account decision, ported from codex-proxy-rs
  * `gateway-core` AccountSelector (`selection.rs`).
  *
  * Eligibility, then session affinity as a preferred account, then the
- * highest weight band. `smart` is the default strategy.
+ * highest weight band, then the lowest commercial group priority inside it.
+ * `smart` is the default strategy.
  */
 
 export const SMART_LOAD_WEIGHT = 1
@@ -25,6 +27,12 @@ function weightOf(candidate) {
   return weight
 }
 
+/** Group-resource priority: lower runs first. Unknown sorts after any known value. */
+function groupPriorityOf(candidate) {
+  const priority = Number(candidate?.groupPriority)
+  return candidate?.groupPriority == null || !Number.isFinite(priority) ? Infinity : priority
+}
+
 function effectiveConcurrency(candidate, fallback) {
   const own = Number(candidate?.concurrency)
   const cap = Number.isFinite(own) && own > 0 ? own : Number(fallback)
@@ -36,7 +44,7 @@ export function capacityUtilization(candidate, defaultConcurrency) {
   return Number(candidate?.inFlight || 0) / effectiveConcurrency(candidate, defaultConcurrency)
 }
 
-export function smartScore(candidate, defaultConcurrency) {
+export function smartScore(candidate, defaultConcurrency, weights = CODEX_SMART_WEIGHTS, now = Date.now()) {
   const load = 1 - Math.min(1, Math.max(0, capacityUtilization(candidate, defaultConcurrency)))
   const rank = candidate?.quotaRemainingRank
   const quota =
@@ -48,11 +56,15 @@ export function smartScore(candidate, defaultConcurrency) {
     Number.isFinite(latencyMs) && latencyMs > 0
       ? SMART_LATENCY_HALF_SCORE_MS / (SMART_LATENCY_HALF_SCORE_MS + latencyMs)
       : 1
+  const until = candidate?.quotaResetAt
+  const remaining = until == null ? 0 : Number(until) - now
+  const reset = remaining > 0 ? 3600_000 / (3600_000 + remaining) : 0
   return (
-    SMART_LOAD_WEIGHT * load +
-    SMART_QUOTA_WEIGHT * quota +
-    SMART_FAILURE_WEIGHT * failure +
-    SMART_LATENCY_WEIGHT * latency
+    weights.load * load +
+    weights.quota * quota +
+    weights.health * failure +
+    weights.latency * latency +
+    weights.reset * reset
   )
 }
 
@@ -79,7 +91,7 @@ export function schedulingBlocker(candidate, context = {}) {
   return null
 }
 
-function preferredOutcome(candidates, context, highestWeight) {
+function preferredOutcome(candidates, context, highestWeight, bestGroupPriority) {
   const preferredId = context.preferredAccountId ? asId(context.preferredAccountId) : ''
   if (!preferredId) return { kind: 'not_requested', candidate: null, blocker: null }
   const candidate = candidates.find((item) => asId(item.id) === preferredId) || null
@@ -89,6 +101,9 @@ function preferredOutcome(candidates, context, highestWeight) {
   if (!context.preferredOverridesWeight && weightOf(candidate) < highestWeight) {
     return { kind: 'blocked', candidate, blocker: 'lower_weight' }
   }
+  if (!context.preferredOverridesWeight && groupPriorityOf(candidate) > bestGroupPriority) {
+    return { kind: 'blocked', candidate, blocker: 'lower_group_priority' }
+  }
   return { kind: 'hit', candidate, blocker: null }
 }
 
@@ -97,8 +112,8 @@ function selectInBand(eligible, context) {
   const fallbackConcurrency = context.maxConcurrent
   if (strategy === 'quota_reset_priority') {
     const ranked = [...eligible].sort((left, right) => {
-      const leftReset = Number(left.quotaResetAt)
-      const rightReset = Number(right.quotaResetAt)
+      const leftReset = left.quotaResetAt == null ? NaN : Number(left.quotaResetAt)
+      const rightReset = right.quotaResetAt == null ? NaN : Number(right.quotaResetAt)
       const leftMissing = !Number.isFinite(leftReset)
       const rightMissing = !Number.isFinite(rightReset)
       if (leftMissing !== rightMissing) return leftMissing ? 1 : -1
@@ -134,11 +149,19 @@ function selectInBand(eligible, context) {
   }
   const scored = eligible.map((candidate) => ({
     candidate,
-    score: smartScore(candidate, fallbackConcurrency),
+    score: smartScore(candidate, fallbackConcurrency, context.smartWeights, context.now),
   }))
   const best = scored.reduce((max, item) => (item.score > max ? item.score : max), -Infinity)
   const band = scored
-    .filter((item) => best - item.score <= SMART_SCORE_TOLERANCE)
+    .filter(
+      (item) =>
+        best - item.score <=
+        (SMART_SCORE_TOLERANCE *
+          Object.entries(context.smartWeights || CODEX_SMART_WEIGHTS)
+            .filter(([key]) => key !== 'queue')
+            .reduce((sum, [, value]) => sum + value, 0)) /
+          3.3,
+    )
     .sort((left, right) => asId(left.candidate.id).localeCompare(asId(right.candidate.id)))
   const cursor = Number(context.roundRobinCursor) || 0
   return band[cursor % band.length]?.candidate || null
@@ -152,11 +175,13 @@ export function selectOpenAIAccount(candidates, context = {}) {
   const eligible = list.filter((candidate) => !schedulingBlocker(candidate, context))
   if (!eligible.length) return null
   const highestWeight = eligible.reduce((max, candidate) => Math.max(max, weightOf(candidate)), -Infinity)
-  const preferred = preferredOutcome(list, context, highestWeight)
+  const weightBand = eligible.filter((candidate) => weightOf(candidate) === highestWeight)
+  const bestGroupPriority = weightBand.reduce((min, candidate) => Math.min(min, groupPriorityOf(candidate)), Infinity)
+  const preferred = preferredOutcome(list, context, highestWeight, bestGroupPriority)
   if (preferred.kind === 'hit') {
     return { candidate: preferred.candidate, preferred: 'hit', blocker: null }
   }
-  const band = eligible.filter((candidate) => weightOf(candidate) === highestWeight)
+  const band = weightBand.filter((candidate) => groupPriorityOf(candidate) === bestGroupPriority)
   const candidate = selectInBand(band, context)
   if (!candidate) return null
   return {

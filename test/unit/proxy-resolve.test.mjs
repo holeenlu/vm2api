@@ -23,7 +23,7 @@ test('prefers pool credentials over host-only vm.proxy', () => {
     proxyPool: pool,
   })
   assert.equal(resolved.ok, true)
-  assert.equal(resolved.proxyUrl, 'socks5h://user:s3cret@10.0.0.5:1080')
+  assert.equal(resolved.proxyUrl, 'socks5://user:s3cret@10.0.0.5:1080')
 })
 
 test('blocks import when bound proxy is fail or dead', () => {

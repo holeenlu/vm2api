@@ -1,15 +1,55 @@
+import { t as translate } from '@/i18n'
+
 /** 可隐藏列，顺序 = 下拉菜单顺序（hub `DEFAULT_VISIBLE_COLUMNS`）。时间/模型/状态恒显示。 */
 export const LOGS_TABLE_COLUMNS = [
-  { id: 'user', label: '用户' },
-  { id: 'key', label: '密钥' },
-  { id: 'sessionId', label: '出站 Session' },
-  { id: 'ip', label: 'IP' },
-  { id: 'provider', label: '供应商' },
-  { id: 'reasoningEffort', label: '思考强度' },
-  { id: 'tokens', label: 'Tokens' },
-  { id: 'cache', label: '缓存' },
-  { id: 'performance', label: '性能' },
-  { id: 'cost', label: '成本' },
+  {
+    id: 'user',
+    get label() {
+      return translate('logs:user')
+    },
+  },
+  {
+    id: 'key',
+    get label() {
+      return translate('logs:key')
+    },
+  },
+  {
+    id: 'ip',
+    get label() {
+      return translate('logs:ip')
+    },
+  },
+  {
+    id: 'reasoningEffort',
+    get label() {
+      return translate('logs:reasoningEffort')
+    },
+  },
+  {
+    id: 'tokens',
+    get label() {
+      return translate('logs:tokens')
+    },
+  },
+  {
+    id: 'cache',
+    get label() {
+      return translate('logs:cache')
+    },
+  },
+  {
+    id: 'performance',
+    get label() {
+      return translate('logs:performance')
+    },
+  },
+  {
+    id: 'cost',
+    get label() {
+      return translate('logs:actualCharge')
+    },
+  },
 ] as const
 
 export type LogsTableColumn = (typeof LOGS_TABLE_COLUMNS)[number]['id']
@@ -22,7 +62,7 @@ const VALID: Record<string, true> = Object.fromEntries(
 
 /** 按面板用户分键，同一浏览器切换账号互不串。 */
 function storageKey(user: string): string {
-  return `vm2api-columns:usage-logs:${user}`
+  return `tapmodels-columns:usage-logs:${user}`
 }
 
 export function readHiddenColumns(user: string): LogsTableColumn[] {

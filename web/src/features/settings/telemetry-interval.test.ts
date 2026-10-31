@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   amountIn,
   intervalLabel,
@@ -6,6 +7,10 @@ import {
   unitOf,
   uploadIntervalOf,
 } from './telemetry-interval'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('telemetry upload interval', () => {
   it('falls back to 10 minutes for missing or invalid values, like the gateway', () => {

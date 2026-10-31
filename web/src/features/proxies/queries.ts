@@ -3,10 +3,18 @@ import type { ProxyPoolPayload } from '@/types/panel-proxy'
 import { api } from '@/lib/api'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 
-export function proxiesQueryOptions() {
+export function proxiesQueryOptions(vendorId = '', platform = '') {
   return queryOptions({
-    queryKey: ['panel', 'proxies'] as const,
-    queryFn: () => api<ProxyPoolPayload>('/api/panel/proxies'),
+    queryKey: ['panel', 'proxies', vendorId, platform] as const,
+    queryFn: () => {
+      const params = new URLSearchParams()
+      if (vendorId) params.set('vendor_id', vendorId)
+      if (platform) params.set('platform', platform)
+      const query = params.toString()
+      return api<ProxyPoolPayload>(
+        '/api/panel/proxies' + (query ? `?${query}` : '')
+      )
+    },
   })
 }
 
@@ -15,7 +23,7 @@ export function useRefreshProxies() {
   const qc = useQueryClient()
   return () =>
     Promise.all([
-      qc.invalidateQueries({ queryKey: proxiesQueryOptions().queryKey }),
+      qc.invalidateQueries({ queryKey: ['panel', 'proxies'] }),
       qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
       qc.invalidateQueries({ queryKey: ['panel', 'vm'] }),
       qc.invalidateQueries({ queryKey: ['panel', 'vms'] }),
