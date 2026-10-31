@@ -1,3 +1,4 @@
+import { t as tVm } from '@/i18n'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { usedPctOf } from '@/lib/format'
@@ -26,36 +27,58 @@ export type ZoneDef = {
 export const ZONES: readonly ZoneDef[] = [
   {
     key: 'pool',
-    label: '在池',
-    hint: '正在接单',
+    get label() {
+      return tVm('vm:vmRackModel.inPool')
+    },
+    get hint() {
+      return tVm('vm:vmRackModel.acceptingRequests')
+    },
     tone: 'ok',
     color: 'var(--status-ok-solid)',
   },
   {
     key: 'restricted',
-    label: '受限',
-    hint: '冷却、熔断或窗口将满，自动出池',
+    get label() {
+      return tVm('vm:vmRackModel.restricted')
+    },
+    get hint() {
+      return tVm(
+        'vm:vmRackModel.automaticallyRemovedFromThePoolDuringCooldownCircuitBreaking'
+      )
+    },
     tone: 'warn',
     color: 'var(--status-warn-solid)',
   },
   {
     key: 'off',
-    label: '关闭调用',
-    hint: '人工关掉了调度',
+    get label() {
+      return tVm('vm:vmRackModel.requestsDisabled')
+    },
+    get hint() {
+      return tVm('vm:vmRackModel.schedulingWasManuallyDisabled')
+    },
     tone: 'off',
     color: 'var(--status-none)',
   },
   {
     key: 'none',
-    label: '未使用',
-    hint: '无凭证',
+    get label() {
+      return tVm('vm:vmRackModel.unused')
+    },
+    get hint() {
+      return tVm('vm:detailStatusBoard.noCredentials')
+    },
     tone: 'none',
     color: 'color-mix(in oklch, var(--status-none) 55%, transparent)',
   },
   {
     key: 'dead',
-    label: '不可调度',
-    hint: '凭证失效、组织禁用或配置错误，需人工处理；最近坏的在前',
+    get label() {
+      return tVm('common:sync14008Unschedulable')
+    },
+    get hint() {
+      return tVm('vm:vmRackModel.mostRecentlyInvalidFirst')
+    },
     tone: 'bad',
     color: 'var(--status-bad-solid)',
   },
@@ -104,14 +127,14 @@ export function vmWindows(vm: Vm): WindowReadout[] {
   const windows: WindowReadout[] = [
     {
       key: '5h',
-      label: '5H',
+      label: tVm('vm:units.fiveHours'),
       pct: probed('5h'),
       note: null,
       reset: vm.reset_5h,
     },
     {
       key: '7d',
-      label: '7D',
+      label: tVm('vm:units.sevenDays'),
       pct: probed('7d'),
       note: null,
       reset: vm.reset_7d,
@@ -161,7 +184,11 @@ export type Rack = {
  * 按节点分机架，机架内按分区分段。入参应已排好序（`sortVms`），
  * 段内保持原顺序。本机架排第一，其余按标签。空机架不返回。
  */
-export function buildRacks(vms: Vm[], filter: VmZoneFilter = 'all'): Rack[] {
+export function buildRacks(
+  vms: Vm[],
+  filter: VmZoneFilter = 'all',
+  translate: (key: string) => string = tVm
+): Rack[] {
   const byNode = new Map<string | null, Vm[]>()
   for (const vm of vms) {
     if (filter !== 'all' && zoneOf(vm) !== filter) continue
@@ -176,7 +203,7 @@ export function buildRacks(vms: Vm[], filter: VmZoneFilter = 'all'): Rack[] {
       nodeId,
       label: nodeId
         ? list.find((vm) => vm.node_name)?.node_name || nodeId
-        : '本机',
+        : translate('vm:createExitField.localMachine'),
       zones: ZONES.map((zone) => ({
         zone,
         vms: list.filter((vm) => zoneOf(vm) === zone.key),
@@ -229,8 +256,15 @@ export function rackTotals(
     t.ledger = t.ledger.length
       ? t.ledger.map((r, i) => ({
           ...r,
-          cost: r.cost + rows[i].cost,
-          tokens: r.tokens + rows[i].tokens,
+          cost:
+            r.cost == null || rows[i].cost == null
+              ? null
+              : r.cost + rows[i].cost!,
+          tokens:
+            r.tokens == null || rows[i].tokens == null
+              ? null
+              : r.tokens + rows[i].tokens!,
+          estimated: r.estimated || rows[i].estimated,
         }))
       : rows
   }

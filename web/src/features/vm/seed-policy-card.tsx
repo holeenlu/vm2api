@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { VmKernelSnapshot, VmSeedSettings } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -34,16 +35,27 @@ import { telemetryEnabled } from '@/features/vm/telemetry-policy'
 type ObservedTelemetry = NonNullable<VmKernelSnapshot['telemetry']>
 
 function Lamp({ tone }: { tone: 'on' | 'off' | 'unknown' }) {
+  useTranslation('vm')
+
   return (
     <span
       aria-hidden
       className={cn(
-        'inline-flex size-2.5 shrink-0 rounded-full',
+        'relative inline-flex size-2.5 shrink-0 rounded-full',
         tone === 'on' && 'bg-primary',
         tone === 'off' && 'bg-[var(--status-warn)]',
         tone === 'unknown' && 'bg-muted-foreground/50'
       )}
-    />
+    >
+      {tone !== 'unknown' ? (
+        <span
+          className={cn(
+            'absolute inset-0 rounded-full motion-safe:animate-ping',
+            tone === 'on' ? 'bg-primary/70' : 'bg-[var(--status-warn)]/70'
+          )}
+        />
+      ) : null}
+    </span>
   )
 }
 
@@ -70,6 +82,8 @@ function ChoiceField({
   disabled: boolean
   onChange: (value: string) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const selected = namedChoice(table, value)
   return (
     <Select
@@ -87,7 +101,9 @@ function ChoiceField({
           <SelectItem key={key} value={key}>{`${key} · ${zone}`}</SelectItem>
         ))}
         {selected === 'custom' ? (
-          <SelectItem value='custom'>{value || '自定义'}</SelectItem>
+          <SelectItem value='custom'>
+            {value || tVm('vm:seedPolicyCard.custom')}
+          </SelectItem>
         ) : null}
       </SelectContent>
     </Select>
@@ -99,7 +115,15 @@ function LocaleField(props: {
   disabled: boolean
   onChange: (value: string) => void
 }) {
-  return <ChoiceField label='语言' table={SEED_LOCALE_OPTIONS} {...props} />
+  const { t: tVm } = useTranslation('vm')
+
+  return (
+    <ChoiceField
+      label={tVm('vm:createVmForm.language')}
+      table={SEED_LOCALE_OPTIONS}
+      {...props}
+    />
+  )
 }
 
 function ZoneField({
@@ -117,10 +141,12 @@ function ZoneField({
   onFollow: () => void
   onFixed: (value: string) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <div className='space-y-1'>
       <ChoiceField
-        label='时区'
+        label={tVm('vm:physicalFeaturesCard.timezone')}
         table={SEED_TIMEZONE_OPTIONS}
         value={follow ? proxyZone : fixed}
         disabled={disabled}
@@ -136,12 +162,17 @@ function ZoneField({
       >
         {follow
           ? proxyZone
-            ? `跟随当前 SOCKS5 · ${proxyZone}`
-            : '跟随当前 SOCKS5 · 还没有时区'
-          : '改回跟随当前 SOCKS5'}
+            ? tVm('vm:seedPolicyCard.followCurrentSOCKS5', {
+                proxyZone: proxyZone,
+              })
+            : tVm('vm:seedPolicyCard.followCurrentSOCKS5TimezoneUnavailable')
+          : tVm('vm:seedPolicyCard.followCurrentSOCKS5Again')}
       </Button>
       <p className='text-[11px] text-muted-foreground'>
-        播种时由槽位写入，不经 extra_env
+        <Trans
+          ns='vm'
+          i18nKey='seedPolicyCard.writtenByTheSlotDuringSeedingNotThroughExtra'
+        />
       </p>
     </div>
   )
@@ -152,32 +183,38 @@ function TelemetryUploadLog({
   loading,
   error,
 }: {
-  lines: string[] | null | undefined
+  lines?: string[] | null
   loading: boolean
   error?: string | null
 }) {
+  const { t: tVm } = useTranslation('vm')
   const summary = summarizeUploads(lines || [])
   if (loading)
     return (
-      <p className='mt-2 text-xs text-muted-foreground'>读取原生计数记录…</p>
+      <p className='mt-2 text-xs text-muted-foreground'>
+        {tVm('seedPolicyCard.uploadLoading')}
+      </p>
     )
   if (error)
     return (
       <p role='alert' className='mt-2 text-xs text-destructive'>
-        计数记录读取失败：{error}
+        {tVm('seedPolicyCard.uploadError', { error })}
       </p>
     )
   if (!summary.entries.length)
     return (
       <p className='mt-2 text-xs text-muted-foreground'>
-        暂无原生上传尝试。等待凭据或出口时不上传，空队列不发空批。
+        {tVm('seedPolicyCard.noNativeUploads')}
       </p>
     )
   return (
     <div className='mt-2 space-y-2'>
       <p className='text-xs text-muted-foreground'>
-        {summary.batch} 批 · {summary.events} 条事件尝试 · {summary.failed}{' '}
-        次失败
+        {tVm('seedPolicyCard.uploadCounts', {
+          batches: summary.batch,
+          events: summary.events,
+          failed: summary.failed,
+        })}
       </p>
       <pre className='max-h-72 overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-[11px] leading-5 text-foreground'>
         {summary.entries.map((entry) => entry.raw).join('\n')}
@@ -201,6 +238,8 @@ function ToggleRow({
   disabled: boolean
   onCheckedChange: (next: boolean) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   return (
     <div className='flex items-center justify-between gap-3 py-2.5'>
       <div className='min-w-0'>
@@ -209,14 +248,16 @@ function ToggleRow({
         </Label>
         <p className='text-xs text-muted-foreground'>{detail}</p>
       </div>
-      <div className='flex items-center gap-2'>
+      <div className='flex shrink-0 items-center gap-2'>
         <span
           className={cn(
-            'font-mono text-[11px] tracking-wide',
+            'shrink-0 font-mono text-[11px] tracking-wide whitespace-nowrap',
             checked ? 'text-primary' : 'text-muted-foreground'
           )}
         >
-          {checked ? '开' : '关'}
+          {checked
+            ? tVm('vm:seedPolicyCard.on')
+            : tVm('vm:seedPolicyCard.offSwitch')}
         </span>
         <Switch
           id={id}
@@ -256,6 +297,8 @@ export function SeedPolicyCard({
   uploadError?: string | null
   proxyTimezone?: string | null
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const [locked, setLocked] = useState(true)
   const [askUnlock, setAskUnlock] = useState(false)
   const [askSave, setAskSave] = useState(false)
@@ -283,7 +326,7 @@ export function SeedPolicyCard({
   const fileError =
     readError ||
     (seed.seed_files?.ok === false
-      ? seed.seed_files.error || '所在 VM 的播种文件暂不可读'
+      ? seed.seed_files.error || tVm('seedPolicyCard.filesUnavailable')
       : null)
   const editDisabled = locked || saving || !!fileError
 
@@ -294,35 +337,50 @@ export function SeedPolicyCard({
     <div className='grid items-start gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(18rem,0.8fr)]'>
       <section className='min-w-0 overflow-hidden rounded-xl border bg-card'>
         <header className='flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b px-4 py-3'>
-          <h2 className='text-sm font-semibold'>当前槽 settings.json</h2>
+          <h2 className='text-sm font-semibold'>
+            <Trans ns='vm' i18nKey='seedPolicyCard.currentSlotSettingsJson' />
+          </h2>
           <p className='order-last w-full text-xs text-muted-foreground'>
-            {seed.seed_files?.source === 'node'
-              ? '所在节点文件'
-              : seed.seed_files?.source === 'local'
-                ? '本机 VM 文件'
-                : '文件来源待确认'}{' '}
-            · 不以控制面镜像代替远端事实
+            {tVm(
+              seed.seed_files?.source === 'node'
+                ? 'seedPolicyCard.sourceNode'
+                : seed.seed_files?.source === 'local'
+                  ? 'seedPolicyCard.sourceLocal'
+                  : 'seedPolicyCard.sourceUnknown'
+            )}{' '}
+            · {tVm('seedPolicyCard.sourceHelp')}
           </p>
           <p className='font-mono text-[11px] text-muted-foreground'>
             {fileError
-              ? '读取未确认'
+              ? tVm('seedPolicyCard.readUnconfirmed')
               : fileMissing
-                ? '文件未写入'
-                : `${rows.length} 项`}
-            {locked ? ' · 已锁定' : ' · 已解锁'}
+                ? tVm('vm:seedPolicyCard.fileNotWritten')
+                : tVm('vm:seedPolicyCard.entries', {
+                    length: rows.length,
+                    count: rows.length,
+                  })}
+            {locked
+              ? tVm('vm:seedPolicyCard.locked')
+              : tVm('vm:seedPolicyCard.unlocked')}
           </p>
         </header>
         {fileError ? (
           <p role='alert' className='px-4 py-6 text-sm text-destructive'>
-            读取未确认：{fileError}。保留草稿，文件恢复后再播种。
+            {tVm('seedPolicyCard.readError', { error: fileError })}
           </p>
         ) : fileMissing ? (
           <p className='px-4 py-8 text-sm text-muted-foreground'>
-            这槽还没有 settings.json。播种之后，这里显示写进文件的项。
+            <Trans
+              ns='vm'
+              i18nKey='seedPolicyCard.thisSlotHasNoSettingsJsonYetSeedIt'
+            />
           </p>
         ) : rows.length === 0 ? (
           <p className='px-4 py-8 text-sm text-muted-foreground'>
-            文件在，但没有 env 项。
+            <Trans
+              ns='vm'
+              i18nKey='seedPolicyCard.fileExistsButHasNoEnvEntries'
+            />
           </p>
         ) : (
           <div className='divide-y'>
@@ -335,7 +393,9 @@ export function SeedPolicyCard({
                   {claudeNamed.has(key) ? (
                     <span
                       className='size-1.5 shrink-0 rounded-full bg-primary'
-                      title='也写在 claude.setting'
+                      title={tVm(
+                        'vm:seedPolicyCard.alsoPresentInClaudeSetting'
+                      )}
                     />
                   ) : (
                     <span className='size-1.5 shrink-0' />
@@ -374,7 +434,9 @@ export function SeedPolicyCard({
                   {claudeNamed.has(key) ? (
                     <span
                       className='size-1.5 shrink-0 rounded-full bg-primary'
-                      title='也写在 claude.setting'
+                      title={tVm(
+                        'vm:seedPolicyCard.alsoPresentInClaudeSetting'
+                      )}
                     />
                   ) : (
                     <span className='size-1.5 shrink-0' />
@@ -402,11 +464,24 @@ export function SeedPolicyCard({
                   />
                 ) : key === 'LC_ALL' ? (
                   <span className='font-mono text-xs text-muted-foreground'>
-                    {draft.locale} · 随 LANG 播种时固定
+                    <Trans
+                      ns='vm'
+                      i18nKey='seedPolicyCard.fixedWithLANGAtSeeding'
+                      values={{ locale: draft.locale }}
+                    />
                   </span>
                 ) : (
                   <span className='font-mono text-xs text-muted-foreground'>
-                    {draft.env[key] === '' ? '空' : draft.env[key]} · 播种时固定
+                    <Trans
+                      ns='vm'
+                      i18nKey='seedPolicyCard.fixedAtSeeding'
+                      values={{
+                        value:
+                          draft.env[key] === ''
+                            ? tVm('vm:seedPolicyCard.emptyValue')
+                            : draft.env[key],
+                      }}
+                    />
                   </span>
                 )}
               </div>
@@ -425,7 +500,11 @@ export function SeedPolicyCard({
                     {row.key}
                   </span>
                   <span className='font-mono text-xs text-muted-foreground'>
-                    {row.value} · 播种时固定
+                    <Trans
+                      ns='vm'
+                      i18nKey='seedPolicyCard.fixedAtSeeding'
+                      values={{ value: row.value }}
+                    />
                   </span>
                 </div>
               ))}
@@ -441,16 +520,27 @@ export function SeedPolicyCard({
         >
           <Lamp tone={live.tone} />
           <div className='min-w-0'>
-            <p className='text-sm font-semibold'>VM 原生遥测</p>
-            <p className='text-xs text-muted-foreground'>{live.label}</p>
-            <p className='mt-1 text-xs text-muted-foreground'>
-              已保存策略：
-              {live.desired === true
-                ? '开启'
-                : live.desired === false
-                  ? '关闭'
-                  : '未知'}{' '}
-              · {live.confirmed ? 'VM 已确认' : '尚未确认生效'}
+            <p className='text-sm font-semibold'>
+              <Trans
+                ns='vm'
+                i18nKey='seedPolicyCard.telemetry'
+                values={{
+                  value:
+                    live.on === true
+                      ? tVm('vm:seedPolicyCard.on')
+                      : live.on === false
+                        ? tVm('vm:seedPolicyCard.offSwitch')
+                        : tVm('vm:detailAccountTab.unknown'),
+                }}
+              />
+            </p>
+            <p className='text-xs text-muted-foreground'>
+              {live.label}
+              {live.running === true
+                ? tVm('vm:seedPolicyCard.processRunning')
+                : live.running === false
+                  ? tVm('vm:seedPolicyCard.processStopped')
+                  : tVm('vm:seedPolicyCard.processStateUnknown')}
             </p>
           </div>
         </div>
@@ -458,31 +548,35 @@ export function SeedPolicyCard({
         <div className='divide-y px-4'>
           <ToggleRow
             id='seed-telemetry'
-            label='遥测'
+            label={tVm('vm:detailStatusBoard.telemetry')}
             detail={
               on
-                ? '只允许本 VM 的必要原生 1P 事件按周期合批；其他非必要流量仍受限。'
-                : '停止采集和新发送、取消未完成上传并清空队列；以 VM 确认为准。'
+                ? tVm(
+                    'vm:seedPolicyCard.nonessentialTraffic1DNTOffBothFollowThisSwitch'
+                  )
+                : tVm(
+                    'vm:seedPolicyCard.nonessentialTraffic0DNTOnBothFollowThisSwitch'
+                  )
             }
             checked={on}
-            disabled={
-              editDisabled || (!on && telemetry?.state === 'unsupported')
-            }
+            disabled={editDisabled}
             onCheckedChange={(value) => patch({ telemetry_disabled: !value })}
           />
           {REJECT_FLAGS.map(([key, label]) => (
             <ToggleRow
               key={key}
               id={`seed-${key}`}
-              label={label}
+              label={tVm(label)}
               detail={
                 key === 'reject_client_settings'
                   ? draft.reject_client_settings
-                    ? '入站 settings / env 会被丢掉。'
-                    : '入站 settings 会留下来。'
+                    ? tVm('vm:seedPolicyCard.incomingSettingsEnvAreDiscarded')
+                    : tVm('vm:seedPolicyCard.incomingSettingsAreRetained')
                   : draft.reject_client_metadata_identity
-                    ? '入站 user / machine 身份会被丢掉。'
-                    : '入站身份会留下来。'
+                    ? tVm(
+                        'vm:seedPolicyCard.incomingUserMachineIdentitiesAreDiscarded'
+                      )
+                    : tVm('vm:seedPolicyCard.incomingIdentitiesAreRetained')
               }
               checked={!!draft[key]}
               disabled={editDisabled}
@@ -502,11 +596,15 @@ export function SeedPolicyCard({
             onChange={(event) => patch({ claude_setting: event.target.value })}
             className='min-h-28 font-mono text-xs'
             spellCheck={false}
-            placeholder='每行 KEY=value'
+            placeholder={tVm('vm:seedPolicyCard.oneKEYValuePerLine')}
           />
           <p className='text-xs text-muted-foreground'>
-            换票只发布已保存的策略，不会重新开启遥测。
-            {dirty ? ' 有未发布的编辑。' : ' 尚未修改本次草稿。'}
+            {tVm(
+              'vm:seedPolicyCard.tokenExchangeDoesNotChangeThisTelemetrySetting'
+            )}
+            {dirty
+              ? tVm('vm:seedPolicyCard.changesHaveNotBeenSeeded')
+              : tVm('vm:seedPolicyCard.matchesTheCurrentPolicy')}
           </p>
         </div>
 
@@ -514,10 +612,10 @@ export function SeedPolicyCard({
           <Button
             size='sm'
             variant='outline'
-            disabled={saving || !locked}
+            disabled={saving || !locked || !!fileError}
             onClick={() => setAskUnlock(true)}
           >
-            解锁
+            <Trans ns='vm' i18nKey='seedPolicyCard.unlock' />
           </Button>
           <Button
             size='sm'
@@ -526,7 +624,9 @@ export function SeedPolicyCard({
             }
             onClick={() => setAskSave(true)}
           >
-            {saving ? '写入中…' : '播种'}
+            {saving
+              ? tVm('vm:codexCredentialPanel.writing')
+              : tVm('vm:officialCcCard.applySeed')}
           </Button>
           <Button
             size='sm'
@@ -537,16 +637,18 @@ export function SeedPolicyCard({
               setDraft(saved)
             }}
           >
-            重置
+            <Trans ns='vm' i18nKey='detailOpsTab.reset' />
           </Button>
         </div>
         <ConfirmDialog
           open={askUnlock}
           onOpenChange={setAskUnlock}
-          title='解锁种子配置'
-          desc='解锁后才能改当前槽的配置。改完仍要再次确认才会写入。'
-          confirmText='解锁'
-          cancelBtnText='取消'
+          title={tVm('vm:seedPolicyCard.unlockSeedConfiguration')}
+          desc={tVm(
+            'vm:seedPolicyCard.unlockToEditThisSlotSConfigurationSavingChanges'
+          )}
+          confirmText={tVm('vm:seedPolicyCard.unlock')}
+          cancelBtnText={tVm('vm:authSchemeEditor.cancel')}
           handleConfirm={() => {
             setBaseline(saved)
             setDraft(saved)
@@ -557,12 +659,15 @@ export function SeedPolicyCard({
         <ConfirmDialog
           open={askSave}
           onOpenChange={setAskSave}
-          title='确认播种'
-          desc='只发布本次显式修改到当前 VM 的播种文件及原生通路，不更换身份或凭据。手动系统时区不会覆盖遥测的当前出口时区；发布完成与 VM 确认分开显示。'
-          confirmText='确认写入'
-          cancelBtnText='取消'
+          title={tVm('vm:seedPolicyCard.confirmSeeding')}
+          desc={tVm(
+            'vm:seedPolicyCard.writesChangesToThisSlotSSettingsJsonAnd'
+          )}
+          confirmText={tVm('vm:seedPolicyCard.confirmWrite')}
+          cancelBtnText={tVm('vm:authSchemeEditor.cancel')}
           isLoading={saving}
           handleConfirm={async () => {
+            if (fileError) return
             try {
               await onSave(seedSaveBody(draft, baseline))
               setAskSave(false)
@@ -575,11 +680,13 @@ export function SeedPolicyCard({
         <div className='border-t px-4 py-3'>
           <ToggleRow
             id='seed-telemetry-debug'
-            label='调试上传'
+            label={tVm('vm:seedPolicyCard.debugUploads')}
             detail={
               debug
-                ? '仅显示本 VM 的批次、事件数与错误码，不展示载荷或凭据。'
-                : '默认关闭，不读取计数记录。'
+                ? tVm(
+                    'vm:seedPolicyCard.showTelemetryActuallyUploadedByThisSlot'
+                  )
+                : tVm('vm:seedPolicyCard.offByDefaultUploadHistoryIsNotFetched')
             }
             checked={debug}
             disabled={saving}

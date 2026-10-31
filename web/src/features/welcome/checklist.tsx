@@ -13,6 +13,7 @@ import {
   Send,
   type LucideIcon,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -27,6 +28,7 @@ import {
 import type { OnboardingPayload } from './types'
 
 const STEP_ICONS: Record<OnboardingStepId, LucideIcon> = {
+  service_group: Boxes,
   admin_password: LockKeyhole,
   egress: Globe,
   slot_account: Boxes,
@@ -42,6 +44,8 @@ export function WelcomeChecklist({
   payload: OnboardingPayload
   views?: string[] | null
 }) {
+  const { t } = useTranslation('welcome')
+
   const action = useOnboardingAction()
   const known = payload.steps.filter(
     (step): step is { id: OnboardingStepId; done: boolean } =>
@@ -57,10 +61,10 @@ export function WelcomeChecklist({
       onSuccess: () => {
         toast.success(
           kind === 'reset'
-            ? '将再次显示引导'
+            ? t('welcome:showGuideAgain')
             : kind === 'complete'
-              ? '已结束引导'
-              : '已跳过引导'
+              ? t('welcome:guideCompleted')
+              : t('welcome:guideDismissed')
         )
       },
       onError: (error: Error) => toast.error(error.message),
@@ -70,34 +74,26 @@ export function WelcomeChecklist({
   return (
     <section
       id='welcome-setup'
-      className='relative z-10 scroll-mt-20 px-6 pb-8'
+      className='relative mx-auto max-w-6xl scroll-mt-20 px-4 pb-6 sm:px-6 lg:px-8'
     >
-      <div className='welcome-fade-up mx-auto max-w-6xl overflow-hidden rounded-2xl border bg-card shadow-xs'>
+      <div className='overflow-hidden rounded-xl border bg-card shadow-xs'>
         <div className='relative p-4 sm:p-6'>
-          <div
-            aria-hidden
-            className='pointer-events-none absolute inset-0 opacity-60 dark:opacity-30'
-            style={{
-              background:
-                'radial-gradient(ellipse 50% 60% at 0% 0%, oklch(0.72 0.18 250 / 14%) 0%, transparent 70%), radial-gradient(ellipse 40% 50% at 100% 0%, oklch(0.70 0.12 280 / 12%) 0%, transparent 70%)',
-            }}
-          />
           <div className='relative grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]'>
             <div className='flex min-w-0 flex-col gap-5'>
               <div className='flex max-w-2xl flex-col gap-1'>
                 <div className='flex items-center gap-2 text-xs font-medium tracking-wider text-muted-foreground uppercase'>
                   <ListChecks aria-hidden className='size-3.5' />
-                  首配清单
+                  {t('welcome:checklist')}
                 </div>
                 <h2 className='text-xl font-semibold tracking-tight sm:text-2xl'>
-                  几分钟把这台网关配到能用
+                  {t('welcome:checklistTitle')}
                 </h2>
                 <p className='text-sm leading-relaxed text-muted-foreground'>
-                  状态读自网关当前的真实数据，做完一步刷新就会打勾。
+                  {t('welcome:checklistHelp')}
                 </p>
               </div>
 
-              <ol className='rounded-2xl border bg-background/45 p-2 backdrop-blur'>
+              <ol className='rounded-xl border bg-background p-2'>
                 {known.map((step, i) => {
                   const meta = STEP_META[step.id]
                   const Icon = STEP_ICONS[step.id]
@@ -117,8 +113,7 @@ export function WelcomeChecklist({
                       <span
                         className={cn(
                           'relative z-10 flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background shadow-xs',
-                          step.done &&
-                            'border-[color-mix(in_oklch,var(--welcome-success)_30%,transparent)] bg-[color-mix(in_oklch,var(--welcome-success)_10%,var(--background))]'
+                          step.done && 'border-primary/30 bg-accent'
                         )}
                       >
                         <StatusIcon
@@ -126,15 +121,17 @@ export function WelcomeChecklist({
                           className={cn(
                             'size-4',
                             step.done
-                              ? 'text-[var(--welcome-success)]'
+                              ? 'text-primary'
                               : 'text-muted-foreground/60'
                           )}
                         />
                         <span className='sr-only'>
-                          {step.done ? '已完成' : '未完成'}
+                          {step.done
+                            ? t('welcome:completed')
+                            : t('welcome:incomplete')}
                         </span>
                       </span>
-                      <div className='flex min-w-0 flex-1 flex-wrap items-center justify-between gap-3 rounded-xl border bg-background/70 px-3 py-2.5 shadow-xs'>
+                      <div className='flex min-w-0 flex-1 flex-wrap items-center justify-between gap-3 rounded-xl border bg-background px-3 py-2.5 shadow-xs'>
                         <div className='flex min-w-0 items-start gap-2.5'>
                           <span className='mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted'>
                             <Icon aria-hidden className='size-3.5' />
@@ -166,7 +163,7 @@ export function WelcomeChecklist({
                             rel='noreferrer'
                             className='inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
                           >
-                            文档
+                            {t('welcome:docs')}
                             <ArrowUpRight aria-hidden className='size-3' />
                           </a>
                           {showPanel ? (
@@ -177,7 +174,7 @@ export function WelcomeChecklist({
                               className='group h-8 rounded-lg px-2.5 text-xs'
                             >
                               <Link to={meta.panelTo}>
-                                前往
+                                {t('welcome:goTo')}
                                 <ArrowRight
                                   aria-hidden
                                   className='size-3.5 transition-transform group-hover:translate-x-0.5'
@@ -193,10 +190,10 @@ export function WelcomeChecklist({
               </ol>
             </div>
 
-            <aside className='flex flex-col gap-4 rounded-2xl border bg-background/60 p-4 backdrop-blur sm:p-5'>
+            <aside className='flex flex-col gap-4 rounded-xl border bg-background/60 p-4 backdrop-blur sm:p-5'>
               <div className='flex items-baseline justify-between'>
                 <span className='text-xs font-medium tracking-wider text-muted-foreground uppercase'>
-                  进度
+                  {t('welcome:progress')}
                 </span>
                 <span className='font-mono text-sm tabular-nums'>
                   {doneCount}/{total}
@@ -204,21 +201,23 @@ export function WelcomeChecklist({
               </div>
               <div
                 role='progressbar'
-                aria-label='引导进度'
+                aria-label={t('welcome:guideProgress')}
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={percent}
                 className='h-2 overflow-hidden rounded-full bg-muted'
               >
                 <div
-                  className='h-full rounded-full bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 transition-[width] duration-500'
+                  className='h-full rounded-full bg-primary transition-[width] duration-300 motion-reduce:transition-none'
                   style={{ width: `${percent}%` }}
                 />
               </div>
 
               {next ? (
                 <div className='rounded-xl border bg-card px-3 py-3'>
-                  <p className='text-xs text-muted-foreground'>下一步</p>
+                  <p className='text-xs text-muted-foreground'>
+                    {t('welcome:nextStep')}
+                  </p>
                   <p className='mt-0.5 text-sm font-medium'>
                     {STEP_META[next.id].title}
                   </p>
@@ -229,7 +228,7 @@ export function WelcomeChecklist({
                       className='group mt-3 h-8 w-full rounded-lg text-xs'
                     >
                       <Link to={STEP_META[next.id].panelTo}>
-                        去完成
+                        {t('welcome:completeStep')}
                         <ArrowRight
                           aria-hidden
                           className='size-3.5 transition-transform group-hover:translate-x-0.5'
@@ -240,11 +239,8 @@ export function WelcomeChecklist({
                 </div>
               ) : (
                 <div className='flex items-center gap-2 rounded-xl border bg-card px-3 py-3 text-sm'>
-                  <Check
-                    aria-hidden
-                    className='size-4 text-[var(--welcome-success)]'
-                  />
-                  所有步骤都已就绪
+                  <Check aria-hidden className='size-4 text-primary' />
+                  {t('welcome:allReady')}
                 </div>
               )}
 
@@ -253,9 +249,8 @@ export function WelcomeChecklist({
                   <>
                     <p className='text-xs leading-relaxed text-muted-foreground'>
                       {payload.status === 'completed'
-                        ? '已结束引导'
-                        : '已跳过引导'}
-                      ，不再自动弹出。
+                        ? t('welcome:guideCompletedNotice')
+                        : t('welcome:guideDismissedNotice')}
                     </p>
                     <Button
                       size='sm'
@@ -264,7 +259,7 @@ export function WelcomeChecklist({
                       disabled={action.isPending}
                       onClick={() => run('reset')}
                     >
-                      重新显示引导
+                      {t('welcome:restartGuide')}
                     </Button>
                   </>
                 ) : (
@@ -275,7 +270,7 @@ export function WelcomeChecklist({
                       disabled={action.isPending}
                       onClick={() => run('complete')}
                     >
-                      结束引导
+                      {t('welcome:finishGuide')}
                     </Button>
                     <Button
                       size='sm'
@@ -284,10 +279,10 @@ export function WelcomeChecklist({
                       disabled={action.isPending}
                       onClick={() => run('dismiss')}
                     >
-                      跳过引导
+                      {t('welcome:skipGuide')}
                     </Button>
                     <p className='text-[11px] leading-relaxed text-muted-foreground'>
-                      跳过或结束后记为已使用，不再弹出。用户菜单「欢迎与引导」仍可打开。
+                      {t('welcome:guideFooter')}
                     </p>
                   </>
                 )}

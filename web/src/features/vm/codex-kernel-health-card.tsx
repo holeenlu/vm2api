@@ -1,4 +1,5 @@
 import type { VmKernelHealth } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { Field } from '@/features/vm/detail-section-primitives'
 
 export function CodexKernelHealthFields({
@@ -12,19 +13,27 @@ export function CodexKernelHealthFields({
       })
     | null
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const up = Boolean(health?.reachable)
   return (
     <>
-      <Field label='Codex 内核' compact>
-        {up ? '可达' : health?.error_code || '不可达'}
+      <Field label={tVm('vm:codexKernelHealthCard.codexKernel')} compact>
+        {up
+          ? tVm('vm:codexKernelHealthCard.reachable')
+          : health?.error_code || tVm('vm:codexKernelHealthCard.unreachable')}
       </Field>
-      <Field label='版本' compact>
+      <Field label={tVm('vm:codexKernelHealthCard.version')} compact>
         {health?.worker_version || '—'}
       </Field>
       <Field label='SOCKS' compact>
-        {health?.proxy_ok == null ? '—' : health.proxy_ok ? '已配置' : '缺失'}
+        {health?.proxy_ok == null
+          ? '—'
+          : health.proxy_ok
+            ? tVm('vm:codexKernelHealthCard.configured')
+            : tVm('vm:codexKernelHealthCard.missing')}
       </Field>
-      <Field label='凭证条数' compact>
+      <Field label={tVm('vm:codexKernelHealthCard.credentialCount')} compact>
         {health?.accounts == null ? '—' : String(health.accounts)}
       </Field>
     </>

@@ -4,6 +4,8 @@ import {
   billingRowSlot,
   isLeftoverUsageAccount,
   isLeftoverUsageRow,
+  vmCostLedger,
+  vmProjected7d,
   usageAccountForVm,
   vmTotalCost,
 } from '@/lib/vm-usage'
@@ -72,5 +74,46 @@ describe('GPT vm-id usage rows are live when the slot has no uuid', () => {
     }
     expect(isLeftoverUsageRow(leftover, claude)).toBe(true)
     expect(usageAccountForVm(claude, [leftover])).toBeNull()
+  })
+})
+
+describe('7d projected total', () => {
+  it('uses the persisted 7d estimate for the total ledger row', () => {
+    const vm = {
+      id: 'vm-07',
+      estimate_7d: {
+        status: 'ok',
+        spent_usd: 12,
+        total_usd: 48,
+        remaining_usd: 36,
+        total_tokens: 9600,
+        used_ratio: 0.25,
+      },
+      total_cost: 20,
+      total_tokens: 4000,
+    } as Vm
+    expect(vmProjected7d(vm)).toEqual({ cost: 48, tokens: 9600 })
+    expect(vmCostLedger(vm)[vmCostLedger(vm).length - 1]).toMatchObject({
+      key: 'total',
+      cost: 48,
+      tokens: 9600,
+      estimated: true,
+    })
+  })
+
+  it('keeps projected total unknown instead of substituting lifetime spend', () => {
+    const vm = {
+      id: 'vm-08',
+      estimate_7d: { status: 'low_usage', total_usd: null, total_tokens: null },
+      total_cost: 20,
+      total_tokens: 4000,
+    } as Vm
+    expect(vmProjected7d(vm)).toBeNull()
+    expect(vmCostLedger(vm)[vmCostLedger(vm).length - 1]).toMatchObject({
+      key: 'total',
+      cost: null,
+      tokens: null,
+      estimated: false,
+    })
   })
 })

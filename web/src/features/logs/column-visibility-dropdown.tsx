@@ -1,4 +1,6 @@
+import type { PanelRole } from '@/types/panel-auth'
 import { Columns3, RotateCcw } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -9,32 +11,50 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { LOGS_TABLE_COLUMNS, type LogsTableColumn } from './column-visibility'
+import {
+  canShowLogColumn,
+  LOGS_TABLE_COLUMNS,
+  type LogsTableColumn,
+} from './column-visibility'
 
 export function ColumnVisibilityDropdown({
   hidden,
+  role,
   onChange,
 }: {
+  role: PanelRole | undefined
   hidden: readonly LogsTableColumn[]
   onChange: (hidden: LogsTableColumn[]) => void
 }) {
-  const total = LOGS_TABLE_COLUMNS.length
+  const { t: translate } = useTranslation('logs')
+
+  const columns = LOGS_TABLE_COLUMNS.filter((column) =>
+    canShowLogColumn(column.id, role)
+  )
+  const total = columns.length
+  const visible = columns.filter((column) => !hidden.includes(column.id)).length
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant='outline' size='sm' className='h-8 gap-1.5'>
+        <Button
+          type='button'
+          aria-label={translate('logs:columnVisibility')}
+          variant='outline'
+          size='sm'
+          className='h-8 gap-1.5'
+        >
           <Columns3 className='h-3.5 w-3.5' />
           <span className='hidden sm:inline'>
-            {total - hidden.length}/{total}
+            {visible}/{total}
           </span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align='end' className='w-48'>
         <DropdownMenuLabel className='text-xs font-medium'>
-          显示/隐藏列
+          {translate('logs:columnVisibility')}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {LOGS_TABLE_COLUMNS.map((column) => {
+        {columns.map((column) => {
           const visible = !hidden.includes(column.id)
           return (
             <DropdownMenuItem
@@ -67,7 +87,7 @@ export function ColumnVisibilityDropdown({
           }}
         >
           <RotateCcw className='h-3.5 w-3.5' />
-          <span className='text-sm'>重置</span>
+          <span className='text-sm'>{translate('logs:reset')}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

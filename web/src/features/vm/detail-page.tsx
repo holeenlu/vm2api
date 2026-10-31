@@ -6,12 +6,14 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
+import { t as tr } from '@/i18n'
 import type {
   Vm,
   VmKernelSnapshot,
   VmProxySnap,
   VmSeedSettings,
 } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api, isApiError } from '@/lib/api'
 import {
@@ -31,6 +33,7 @@ import { compactEmail, isCodexVm } from '@/lib/vm-kind'
 import {
   accountStatus,
   claudeTier,
+  distinctStatusTones,
   poolStatus,
   restrictionCopy,
   vmRunning,
@@ -39,13 +42,6 @@ import { cacheHitPct } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Tooltip,
@@ -55,8 +51,9 @@ import {
 import { ChoiceTiles } from '@/components/choice-tiles'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
-import { PlatformChip, SlotIdentity } from '@/components/platform-chip'
+import { PlatformChip } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
+import { SearchSelect } from '@/components/search-select'
 import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesForVmBind } from '@/features/proxies/proxy-sort'
@@ -114,6 +111,8 @@ type VmJob = {
 
 /** 页签留在外层：切槽位时主体按 id 重挂清掉上一个槽的输入，但停在同一页签。 */
 export function VmDetailPage() {
+  useTranslation('vm')
+
   const { id } = useParams({ from: '/_authenticated/vm/$id' })
   const [tab, setTab] = useState('overview')
   return <VmDetailBody key={id} id={id} tab={tab} onTabChange={setTab} />
@@ -128,6 +127,8 @@ function VmDetailBody({
   tab: string
   onTabChange: (tab: string) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const navigate = useNavigate()
   const [seedDebug, setSeedDebug] = useState(false)
   const qc = useQueryClient()
@@ -136,7 +137,7 @@ function VmDetailBody({
     ...dashboardQueryOptions(5000),
     enabled: perms.dashboard,
   })
-  // 租户读不了 dashboard，槽位下拉改用自己能看到的列表。
+  // 槽位下拉复用资源管理角色的可见列表。
   const slots = useQuery({
     ...vmsListQueryOptions(),
     enabled: perms.known && !perms.dashboard,
@@ -231,11 +232,11 @@ function VmDetailBody({
           if (boot.ok) toast.success(boot.message)
           else toast.warning(boot.message)
         } else if (path === '/stop') {
-          toast.success('已关机，调度已关闭')
+          toast.success(tr('vm:detailPage.stoppedSchedulingDisabled'))
         } else if (path === '/activate') {
-          toast.success('已设为活跃槽')
+          toast.success(tr('vm:sync14008ActiveSlotSet'))
         } else {
-          toast.success('已执行 ' + path)
+          toast.success(tVm('vm:messages.executedPath', { path }))
         }
       },
     })
@@ -249,9 +250,17 @@ function VmDetailBody({
       const sync = (
         saved as { timezone_sync?: { kernel_hot?: boolean } } | undefined
       )?.timezone_sync
-      const hot = sync?.kernel_hot ? ' · 已热更新 kernel.json' : ''
+      const hot = sync?.kernel_hot === true
       toast.success(
-        (body.timezone_follow_proxy ? '已跟随代理时区' : '已保存时区') + hot
+        tVm(
+          body.timezone_follow_proxy
+            ? hot
+              ? 'vm:messages.followTimezoneHot'
+              : 'vm:detailPage.nowFollowingTheProxyTimezone'
+            : hot
+              ? 'vm:messages.savedTimezoneHot'
+              : 'vm:detailPage.timezoneSaved'
+        )
       )
       await refreshAll()
     },
@@ -269,12 +278,12 @@ function VmDetailBody({
       ),
     onSuccess: async (result) => {
       const state = seedSaveState(result)
-      if (state === 'applied') toast.success('播种已发布，VM 已确认生效')
+      if (state === 'applied') toast.success(tVm('detailPage.seedApplied'))
       else if (state === 'published')
-        toast.info('播种文件已发布，等待 VM 启动或确认')
+        toast.info(tVm('detailPage.seedPublished'))
       else if (state === 'unsupported')
-        toast.warning('播种已保存；此环境不支持 VM 原生遥测')
-      else toast.warning('策略已保存，原生生效状态尚未确认')
+        toast.warning(tVm('detailPage.seedUnsupported'))
+      else toast.warning(tVm('detailPage.seedSaved'))
       await refreshAll()
       await qc.invalidateQueries({
         queryKey: ['panel', 'vm', id, 'seed'],
@@ -286,8 +295,10 @@ function VmDetailBody({
     onError: async (error: Error) => {
       const state = seedSaveState(isApiError(error) ? error.data : null)
       if (state !== 'unknown')
-        toast.warning(`策略已保存，发布或原生确认未完成：${error.message}`)
-      else toast.error(`播种失败：${error.message}`)
+        toast.warning(
+          tVm('detailPage.seedConfirmationFailed', { error: error.message })
+        )
+      else toast.error(tVm('detailPage.seedFailed', { error: error.message }))
       await refreshAll()
       await qc.invalidateQueries({ queryKey: ['panel', 'vm', id, 'seed'] })
     },
@@ -308,8 +319,11 @@ function VmDetailBody({
     onSuccess: async () => {
       toast.success(
         deletePlan.kind === 'switch'
-          ? `已切换活跃到 ${deletePlan.replacement.id} 并删除 ${id}`
-          : '已删除'
+          ? tr('vm:sync14008SwitchedAndDeleted', {
+              value1: deletePlan.replacement.id,
+              value2: id,
+            })
+          : tr('vm:detailPage.deleted')
       )
       await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
       navigate({ to: '/vm' })
@@ -320,7 +334,9 @@ function VmDetailBody({
     mutationFn: (mode: 'keep' | 'traits') => postVm(id, '/reset', { mode }),
     onSuccess: async (_data, mode) => {
       toast.success(
-        mode === 'keep' ? `已保留原数据重建 ${id}` : `已按新特征重建 ${id}`
+        mode === 'keep'
+          ? tVm('vm:detailPage.rebuiltWithExistingData', { id: id })
+          : tVm('vm:detailPage.rebuiltWithANewIdentity', { id: id })
       )
       setConfirmReset(false)
       setResetInput('')
@@ -370,10 +386,12 @@ function VmDetailBody({
   // 语义不同，这里按各自来源给文案，提前禁用而不是等 400。
   const refreshBlocked =
     credType === 'apikey'
-      ? 'Console API Key 不能刷新'
+      ? tVm('vm:detailPage.consoleAPIKeysCannotBeRefreshed')
       : credType === 'setup-token' && !vm.has_refresh
-        ? '官方 Setup Token（无 refresh）不能刷新'
+        ? tVm('vm:detailPage.officialSetupTokensWithoutARefreshTokenCannotBe')
         : ''
+  const accountTone = accountStatus(vm)
+  const extraPoolTones = distinctStatusTones([poolStatus(vm)], accountTone.text)
 
   return (
     <PageHeader
@@ -387,49 +405,56 @@ function VmDetailBody({
       >
         <div className='mb-4 flex flex-wrap items-center gap-2'>
           <Button variant='ghost' size='sm' asChild>
-            <Link to='/vm'>列表</Link>
+            <Link to='/vm'>
+              <Trans ns='vm' i18nKey='detailPage.list' />
+            </Link>
           </Button>
           {slotList.length > 1 ? (
-            <Select
+            <SearchSelect
+              className='w-64'
+              label={tVm('vm:detailPage.switchNode')}
               value={id}
-              onValueChange={(next) =>
-                navigate({ to: '/vm/$id', params: { id: next } })
-              }
-            >
-              <SelectTrigger className='h-8 w-[220px]' aria-label='切换节点'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {slotList.map((v) => (
-                  <SelectItem key={v.id} value={v.id} className='max-w-[280px]'>
-                    <SlotIdentity vm={v} compact />
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              options={slotList.map((v) => ({
+                id: v.id,
+                name: `${v.name || v.id} · ${v.id}`,
+              }))}
+              searchPlaceholder={tVm('vm:detailPage.searchSlots')}
+              onChange={(next) => {
+                if (next) void navigate({ to: '/vm/$id', params: { id: next } })
+              }}
+            />
           ) : null}
           <PlatformChip vm={vm} />
           <ActiveVmBadge vm={vm} className='text-[11px]' />
           <RuntimeChip vm={vm} className='text-[11px]' />
           <NodeChip nodeId={vm.node_id} className='text-[11px]' />
-          <StatusMark tone={accountStatus(vm)} variant='pill' />
+          <StatusMark tone={accountTone} variant='pill' />
           {claudeTier(vm).key !== 'none' ? (
             <StatusMark tone={claudeTier(vm)} variant='pill' />
           ) : null}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span>
-                <StatusMark tone={poolStatus(vm)} variant='pill' />
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>{restrictionCopy(vm)}</TooltipContent>
-          </Tooltip>
+          {extraPoolTones.map((tone) => (
+            <Tooltip key={`${tone.key}:${tone.text}`}>
+              <TooltipTrigger asChild>
+                <span>
+                  <StatusMark tone={tone} variant='pill' />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{restrictionCopy(vm)}</TooltipContent>
+            </Tooltip>
+          ))}
           <span className='text-sm text-muted-foreground'>
-            {vmRunning(vm) ? '运行' : '停止'}
+            {vmRunning(vm)
+              ? tVm('vm:detailPage.running')
+              : tVm('vm:detailPage.stop')}
           </span>
           <div className='flex items-center gap-1.5 rounded-md border px-2 py-1 text-sm text-muted-foreground'>
-            调度
-            <SchedulableSwitch {...vmSchedulableProps(vm)} />
+            <Trans
+              ns='vm'
+              i18nKey='detailPage.scheduling'
+              components={{
+                part0: <SchedulableSwitch {...vmSchedulableProps(vm)} />,
+              }}
+            />
           </div>
           {perms.power ? (
             <div className='ms-auto flex flex-wrap gap-2'>
@@ -444,11 +469,16 @@ function VmDetailBody({
                         disabled={busy('/start')}
                         onClick={() => act('/stop')}
                       >
-                        关机
+                        <Trans ns='vm' i18nKey='detailPage.shutDown' />
                       </Button>
                     </span>
                   </TooltipTrigger>
-                  <TooltipContent>关机会同时关闭调度</TooltipContent>
+                  <TooltipContent>
+                    <Trans
+                      ns='vm'
+                      i18nKey='detailPage.shuttingDownAlsoDisablesScheduling'
+                    />
+                  </TooltipContent>
                 </Tooltip>
               ) : (
                 <Tooltip>
@@ -460,11 +490,16 @@ function VmDetailBody({
                         disabled={busy('/stop')}
                         onClick={() => act('/start')}
                       >
-                        开机
+                        <Trans ns='vm' i18nKey='createOptions.start' />
                       </Button>
                     </span>
                   </TooltipTrigger>
-                  <TooltipContent>有凭证时开机会重新开启调度</TooltipContent>
+                  <TooltipContent>
+                    <Trans
+                      ns='vm'
+                      i18nKey='detailPage.startingASlotWithCredentialsEnablesSchedulingAgain'
+                    />
+                  </TooltipContent>
                 </Tooltip>
               )}
               <Button
@@ -473,24 +508,36 @@ function VmDetailBody({
                 loading={busy('/probe')}
                 onClick={() => act('/probe', {})}
               >
-                探测
+                <Trans ns='vm' i18nKey='detailAccountTab.probe' />
               </Button>
             </div>
           ) : null}
         </div>
         <Tabs value={tab} onValueChange={onTabChange}>
           <TabsList>
-            <TabsTrigger value='overview'>概览</TabsTrigger>
-            <TabsTrigger value='account'>账号</TabsTrigger>
-            <TabsTrigger value='proxy'>代理</TabsTrigger>
+            <TabsTrigger value='overview'>
+              <Trans ns='vm' i18nKey='detailPage.overview' />
+            </TabsTrigger>
+            <TabsTrigger value='account'>
+              <Trans ns='vm' i18nKey='detailAccountTab.account' />
+            </TabsTrigger>
+            <TabsTrigger value='proxy'>
+              <Trans ns='vm' i18nKey='detailPage.proxy' />
+            </TabsTrigger>
             {tabs.includes('test') ? (
-              <TabsTrigger value='test'>测试</TabsTrigger>
+              <TabsTrigger value='test'>
+                <Trans ns='vm' i18nKey='detailPage.test' />
+              </TabsTrigger>
             ) : null}
             {tabs.includes('ops') ? (
-              <TabsTrigger value='ops'>运维</TabsTrigger>
+              <TabsTrigger value='ops'>
+                <Trans ns='vm' i18nKey='detailPage.operations' />
+              </TabsTrigger>
             ) : null}
             {tabs.includes('seed') ? (
-              <TabsTrigger value='seed'>种子</TabsTrigger>
+              <TabsTrigger value='seed'>
+                <Trans ns='vm' i18nKey='detailPage.seed' />
+              </TabsTrigger>
             ) : null}
           </TabsList>
           <VmOverviewTab
@@ -553,7 +600,7 @@ function VmDetailBody({
                     method: 'POST',
                     body: JSON.stringify({ vm_id: id }),
                   }),
-                done: () => toast.success('已解绑'),
+                done: () => toast.success(tVm('vm:detailPage.unbound')),
               })
             }
             onAllocate={() => act('/allocate-proxy')}
@@ -565,7 +612,7 @@ function VmDetailBody({
                     method: 'POST',
                     body: JSON.stringify({ vm_id: id }),
                   }),
-                done: () => toast.success('已绑定'),
+                done: () => toast.success(tVm('vm:detailAccountTab.bound')),
               })
             }
             onProbe={() =>
@@ -575,7 +622,7 @@ function VmDetailBody({
                   api(`/api/panel/proxies/${boundId}/probe`, {
                     method: 'POST',
                   }),
-                done: () => toast.success('探测完成'),
+                done: () => toast.success(tVm('vm:detailPage.probeCompleted')),
               })
             }
             onGeo={() =>
@@ -595,7 +642,11 @@ function VmDetailBody({
                   const where = [geo?.country, geo?.timezone]
                     .filter(Boolean)
                     .join(' · ')
-                  toast.success(where ? `出口位置 ${where}` : '已检测')
+                  toast.success(
+                    where
+                      ? tVm('vm:detailPage.egressLocation', { where: where })
+                      : tVm('vm:detailPage.checked')
+                  )
                 },
               })
             }
@@ -636,7 +687,6 @@ function VmDetailBody({
               <TabsContent value='seed' className='pt-4'>
                 {seed.data ? (
                   <SeedPolicyCard
-                    key={id}
                     seed={seed.data}
                     slot={seedSlot}
                     telemetry={kernel?.telemetry}
@@ -654,7 +704,9 @@ function VmDetailBody({
                   />
                 ) : (
                   <p className='text-sm text-muted-foreground'>
-                    {seed.isError ? '种子策略读取失败' : '读取种子策略…'}
+                    {seed.isError
+                      ? tVm('vm:detailPage.failedToReadSeedPolicy')
+                      : tVm('vm:detailPage.loadingSeedPolicy')}
                   </p>
                 )}
               </TabsContent>
@@ -664,15 +716,19 @@ function VmDetailBody({
         <ConfirmDialog
           open={confirmDel}
           onOpenChange={setConfirmDel}
-          title={`删除 ${id}`}
+          title={tr('vm:sync14008DeleteSlot', { value1: id })}
           desc={
             <>
-              <p>删除槽位不可恢复。</p>
+              <p>{tr('vm:detailPage.deletingASlotCannotBeUndone')}</p>
               <DeleteActiveVmHint target={vm} vms={slotList} />
             </>
           }
-          confirmText={deletePlan.kind === 'switch' ? '切换活跃并删除' : '删除'}
-          cancelBtnText='取消'
+          confirmText={
+            deletePlan.kind === 'switch'
+              ? tr('vm:sync14008SwitchAndDelete')
+              : tr('anthropic:delete')
+          }
+          cancelBtnText={tr('models:cancel')}
           destructive
           disabled={deletePlan.kind === 'blocked'}
           isLoading={remove.isPending}
@@ -688,7 +744,7 @@ function VmDetailBody({
             setConfirmReset(open)
             if (!open) setResetInput('')
           }}
-          title='重建槽位'
+          title={tVm('vm:detailPage.rebuildSlot')}
           desc={
             <>
               <p>
@@ -696,32 +752,42 @@ function VmDetailBody({
                 {id}
               </p>
               <p className='mt-2'>
-                本地槽和集群槽都换当前 kernel、cli-node 与 Go 遥测后的容器。
+                <Trans
+                  ns='vm'
+                  i18nKey='detailPage.localAndClusterSlotsBothReceiveAReplacementContainer'
+                />
               </p>
             </>
           }
-          confirmText={resetMode === 'keep' ? '保留原数据重建' : '重建新特征'}
-          cancelBtnText='取消'
+          confirmText={
+            resetMode === 'keep'
+              ? tVm('vm:detailOpsTab.rebuildWithExistingData')
+              : tVm('vm:detailOpsTab.rebuildWithNewIdentity')
+          }
+          cancelBtnText={tVm('vm:authSchemeEditor.cancel')}
           destructive={resetMode === 'traits'}
           disabled={resetInput.trim() !== id}
           isLoading={resetVm.isPending}
           handleConfirm={() => resetVm.mutate(resetMode)}
         >
           <ChoiceTiles
-            label='重建方式'
+            label={tVm('vm:detailPage.rebuildMethod')}
             value={resetMode}
             onChange={setResetMode}
             choices={[
               {
                 value: 'keep',
-                title: '保留原数据重建',
-                detail: '留下凭证、指纹、主机名和统计，只换容器里的服务。',
+                title: tVm('vm:detailOpsTab.rebuildWithExistingData'),
+                detail: tVm(
+                  'vm:detailPage.keepsCredentialsFingerprintsHostnameAndStatisticsReplacesOnlyContainer'
+                ),
               },
               {
                 value: 'traits',
-                title: '重建新特征',
-                detail:
-                  '清掉凭证和家目录，重新生成主机名、machine-id 和设备特征。',
+                title: tVm('vm:detailOpsTab.rebuildWithNewIdentity'),
+                detail: tVm(
+                  'vm:detailPage.clearsCredentialsAndTheHomeDirectoryThenRegeneratesHostname'
+                ),
               },
             ]}
           />
@@ -730,7 +796,7 @@ function VmDetailBody({
             autoComplete='off'
             spellCheck={false}
             placeholder={id}
-            aria-label='确认 ID'
+            aria-label={tVm('vm:detailPage.confirmID')}
             value={resetInput}
             onChange={(e) => setResetInput(e.target.value)}
             onKeyDown={(e) => {

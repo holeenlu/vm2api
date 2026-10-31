@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type {
   ClusterApiNode,
   ClusterNodePatch,
   ClusterNodeUpdateProbe,
 } from '@/types/panel-cluster'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -40,13 +42,15 @@ export function NodeConfig({
   vmCount,
   dependentCount,
 }: { node: ClusterApiNode } & Counts) {
+  const { t } = useTranslation('cluster')
+
   const [editing, setEditing] = useState<{
     base: ClusterApiNode
     mode: EditMode
   } | null>(null)
   return (
     <section className='space-y-3 border-t pt-4'>
-      <h3 className='text-sm font-medium'>节点配置</h3>
+      <h3 className='text-sm font-medium'>{t('edit.title')}</h3>
       {editing ? (
         <NodeEditForm
           base={editing.base}
@@ -64,7 +68,7 @@ export function NodeConfig({
               variant='outline'
               onClick={() => setEditing({ base: node, mode: 'label' })}
             >
-              编辑名称
+              {t('edit.name')}
             </Button>
             <Button
               size='sm'
@@ -72,13 +76,12 @@ export function NodeConfig({
               disabled={dependentCount > 0}
               onClick={() => setEditing({ base: node, mode: 'connection' })}
             >
-              编辑连接
+              {t('edit.connection')}
             </Button>
           </div>
           {dependentCount > 0 ? (
             <p className='text-xs text-muted-foreground'>
-              {dependentCount}{' '}
-              个节点经由此节点连接，暂不能修改连接配置；名称仍可修改。
+              {t('edit.dependents', { count: dependentCount })}
             </p>
           ) : null}
         </>
@@ -100,13 +103,15 @@ function NodeEditForm({
   mode: EditMode
   onClose: () => void
 } & Counts) {
+  const { t } = useTranslation('cluster')
+
   const qc = useQueryClient()
   // `base` is captured when editing starts. Polling updates `current`, never this draft.
   const [label, setLabel] = useState(base.label)
   const [draft, setDraft] = useState(() => connectionDraft(base))
   const [pending, setPending] = useState<'probe' | 'save' | null>(null)
-  const [error, setError] = useState('')
-  const [blockedError, setBlockedError] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  const [blockedError, setBlockedError] = useState<unknown>(null)
   const [probe, setProbe] = useState<{
     result: ClusterNodeUpdateProbe
     request: ReturnType<NodeEditRequests['begin']>
@@ -141,7 +146,7 @@ function NodeEditForm({
   function invalidate() {
     requests.current.cancel()
     setProbe(null)
-    setError('')
+    setError(null)
     setPending(null)
   }
 
@@ -173,15 +178,15 @@ function NodeEditForm({
   function showError(err: unknown) {
     const code = (err as { code?: string } | null)?.code
     if (code === 'node_edit_conflict' || code === 'node_not_found') {
-      setBlockedError(nodeEditError(err))
-    } else setError(nodeEditError(err))
+      setBlockedError(err)
+    } else setError(err)
   }
 
   async function testConnection() {
     if (blocked || !payload) return
     const request = requests.current.begin()
     setPending('probe')
-    setError('')
+    setError(null)
     setProbe(null)
     try {
       const result = await probeNodeUpdate(base.id, payload, request.signal)
@@ -202,14 +207,18 @@ function NodeEditForm({
       return
     const request = requests.current.begin()
     setPending('save')
-    setError('')
+    setError(null)
     try {
       const saved = await updateClusterNode(base.id, payload, request.signal)
       qc.setQueryData<ClusterApiNode[]>(CLUSTER_NODES_KEY, (nodes) =>
         nodes?.map((node) => (node.id === saved.id ? saved : node))
       )
       if (requests.current.accepts(request)) {
-        toast.success(mode === 'label' ? '节点名称已保存' : '连接配置已保存')
+        toast.success(
+          mode === 'label'
+            ? translate('cluster:edit.nameSaved')
+            : translate('cluster:edit.connectionSaved')
+        )
         onClose()
       }
     } catch (err) {
@@ -230,7 +239,7 @@ function NodeEditForm({
     <div className='space-y-3 rounded-md border p-3'>
       {mode === 'label' ? (
         <div className='space-y-1.5'>
-          <Label htmlFor='node-edit-label'>名称</Label>
+          <Label htmlFor='node-edit-label'>{t('name')}</Label>
           <Input
             id='node-edit-label'
             autoFocus
@@ -242,22 +251,19 @@ function NodeEditForm({
               setLabel(e.target.value)
             }}
           />
-          <p className='text-xs text-muted-foreground'>
-            只更新显示名称，离线也可保存，不会重连。
-          </p>
+          <p className='text-xs text-muted-foreground'>{t('edit.nameHelp')}</p>
         </div>
       ) : (
         <>
           <p className='text-xs text-muted-foreground'>
-            更新同一台主机的连接信息，保留固定指纹与槽位。保存时会再次验证，成功后重连
-            SSH。
+            {t('edit.connectionHelp')}
           </p>
           <fieldset
             disabled={pending === 'save'}
             className='grid gap-3 sm:grid-cols-2'
           >
             <div className='space-y-1.5'>
-              <Label htmlFor='node-edit-host'>主机</Label>
+              <Label htmlFor='node-edit-host'>{t('host')}</Label>
               <Input
                 id='node-edit-host'
                 autoComplete='off'
@@ -267,7 +273,7 @@ function NodeEditForm({
               />
             </div>
             <div className='space-y-1.5'>
-              <Label htmlFor='node-edit-port'>端口</Label>
+              <Label htmlFor='node-edit-port'>{t('port')}</Label>
               <Input
                 id='node-edit-port'
                 inputMode='numeric'
@@ -276,7 +282,7 @@ function NodeEditForm({
               />
             </div>
             <div className='space-y-1.5'>
-              <Label htmlFor='node-edit-user'>SSH 用户</Label>
+              <Label htmlFor='node-edit-user'>{t('edit.sshUser')}</Label>
               <Input
                 id='node-edit-user'
                 autoComplete='off'
@@ -288,13 +294,13 @@ function NodeEditForm({
               {usernameLocked ? (
                 <p className='text-xs text-muted-foreground'>
                   {vmCount === null
-                    ? '槽位信息未加载，暂不能更改用户名。'
-                    : `已有 ${vmCount} 台槽位，用户名与运行目录关联，不能更改。`}
+                    ? t('edit.slotsLoading')
+                    : t('edit.usernameLocked', { count: Number(vmCount) })}
                 </p>
               ) : null}
             </div>
             <div className='space-y-1.5'>
-              <Label htmlFor='node-edit-auth'>认证方式</Label>
+              <Label htmlFor='node-edit-auth'>{t('edit.authentication')}</Label>
               <Select
                 value={draft.authType}
                 onValueChange={(v) =>
@@ -306,8 +312,8 @@ function NodeEditForm({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value='key'>私钥</SelectItem>
-                  <SelectItem value='password'>密码</SelectItem>
+                  <SelectItem value='key'>{t('privateKey')}</SelectItem>
+                  <SelectItem value='password'>{t('password')}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -328,17 +334,17 @@ function NodeEditForm({
                       }))
                     }}
                   />
-                  更换凭证
+                  {t('edit.replaceCredentials')}
                 </label>
               ) : (
                 <p className='text-xs text-muted-foreground'>
-                  切换认证方式需要填写新凭证。
+                  {t('edit.authChangeHelp')}
                 </p>
               )}
               {draft.replaceCredentials || draft.authType !== base.auth_type ? (
                 draft.authType === 'key' ? (
                   <>
-                    <Label htmlFor='node-edit-key'>新私钥</Label>
+                    <Label htmlFor='node-edit-key'>{t('edit.newKey')}</Label>
                     <Textarea
                       id='node-edit-key'
                       autoComplete='off'
@@ -347,7 +353,9 @@ function NodeEditForm({
                       value={draft.privateKey}
                       onChange={(e) => change('privateKey', e.target.value)}
                     />
-                    <Label htmlFor='node-edit-passphrase'>新私钥口令</Label>
+                    <Label htmlFor='node-edit-passphrase'>
+                      {t('edit.newPassphrase')}
+                    </Label>
                     <Input
                       id='node-edit-passphrase'
                       type='password'
@@ -356,12 +364,14 @@ function NodeEditForm({
                       onChange={(e) => change('passphrase', e.target.value)}
                     />
                     <p className='text-xs text-muted-foreground'>
-                      留空表示新私钥没有口令，并清除原口令。
+                      {t('edit.clearPassphrase')}
                     </p>
                   </>
                 ) : (
                   <>
-                    <Label htmlFor='node-edit-password'>新密码</Label>
+                    <Label htmlFor='node-edit-password'>
+                      {t('edit.newPassword')}
+                    </Label>
                     <Input
                       id='node-edit-password'
                       type='password'
@@ -373,28 +383,28 @@ function NodeEditForm({
                 )
               ) : (
                 <p className='text-xs text-muted-foreground'>
-                  保留已保存凭证，不读取或回显密码、私钥。
+                  {t('edit.keepCredentials')}
                 </p>
               )}
             </div>
           </fieldset>
           <p className='text-xs text-muted-foreground'>
-            经由节点保持原配置，本次不支持修改。
+            {t('edit.keepJumpHost')}
           </p>
         </>
       )}
       {blockedError ? (
         <p role='alert' className='text-xs text-red-3'>
-          {blockedError}
+          {nodeEditError(blockedError)}
         </p>
       ) : conflicted ? (
         <p role='alert' className='text-xs text-red-3'>
-          节点配置已被修改，请取消后重新编辑。
+          {t('error.conflict')}
         </p>
       ) : null}
       {error ? (
         <p role='alert' className='text-xs text-red-3'>
-          {error}
+          {nodeEditError(error)}
         </p>
       ) : null}
       {problem && !conflicted ? (
@@ -402,24 +412,26 @@ function NodeEditForm({
       ) : null}
       {probe && verified && !conflicted ? (
         <div className='space-y-1 rounded-md bg-muted/30 p-3 text-xs'>
-          <p>连接验证通过，主机指纹与原记录一致。</p>
+          <p>{t('edit.verified')}</p>
           <p className='font-mono break-all'>
             {probe.result.host_key.alg} {probe.result.host_key.sha256}
           </p>
           <p>
             {probe.result.platform === 'darwin'
-              ? 'macOS 原生节点，不使用 Docker。'
-              : `Docker：${
-                  probe.result.docker.ok
-                    ? '可用'
-                    : `不可用（${probe.result.docker.error || '未响应'}），当前没有槽位，仍可保存。`
-                }`}
+              ? t('edit.macNative')
+              : t('dockerStatus', {
+                  value1: probe.result.docker.ok
+                    ? t('available')
+                    : t('docker.editUnavailable', {
+                        error: probe.result.docker.error || t('noResponse'),
+                      }),
+                })}
           </p>
         </div>
       ) : null}
       <div className='flex flex-wrap justify-end gap-2'>
         <Button size='sm' variant='outline' onClick={close}>
-          {pending === 'save' ? '关闭' : '取消'}
+          {pending === 'save' ? t('close') : t('cancel')}
         </Button>
         {mode === 'connection' ? (
           <Button
@@ -429,7 +441,7 @@ function NodeEditForm({
             loading={pending === 'probe'}
             onClick={() => void testConnection()}
           >
-            测试连接
+            {t('edit.testConnection')}
           </Button>
         ) : null}
         <Button
@@ -438,7 +450,7 @@ function NodeEditForm({
           loading={pending === 'save'}
           onClick={() => void save()}
         >
-          {mode === 'label' ? '保存名称' : '保存并重连'}
+          {mode === 'label' ? t('edit.saveName') : t('edit.saveReconnect')}
         </Button>
       </div>
     </div>

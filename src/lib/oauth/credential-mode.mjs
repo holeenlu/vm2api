@@ -50,8 +50,15 @@ export function canOfficialUsage(raw) {
   return mode === CREDENTIAL_OAUTH || mode === CREDENTIAL_SETUP_TOKEN
 }
 
-export function canCountTokens(raw) {
-  return isAnySetupTokenMode(raw) || isApiKeyMode(raw)
+/** Profile metadata requires an actual profile grant, including converted Setup Tokens. */
+export function canReadAccountProfile(credential = {}) {
+  if (isApiKeyMode(credential.mode || credential.type) || isOfficialSetupTokenMode(credential.mode || credential.type))
+    return false
+  const scopes =
+    Array.isArray(credential.scopes) && credential.scopes.length
+      ? credential.scopes
+      : String(credential.scope || '').split(/\s+/)
+  return scopes.includes('user:profile')
 }
 
 export function canRefreshCredential(raw) {
@@ -161,6 +168,10 @@ export function liveOauthToSetupToken(oauth = {}) {
     email: identity.email,
     account_uuid: identity.account_uuid,
     org_uuid: identity.org_uuid,
+    subscription_type: identity.subscription_type,
+    rate_limit_tier: identity.rate_limit_tier,
+    billing_type: identity.billing_type,
+    subscription_updated_at: oauth.subscription_updated_at,
     scope: scopes.length ? scopes.join(' ') : oauth.scope || null,
     scopes,
     source: 'oauth-to-setup-token',

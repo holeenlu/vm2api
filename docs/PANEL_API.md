@@ -1,24 +1,40 @@
 # 面板 API
 
-基址 `/api/panel`。需要**面板登录会话**或 Master `VM2API_API_KEY`。协议密钥不能调面板。信封 `{ ok, data }` / `{ ok: false, error }`。调用方应从 `data` 取业务体。
+基址 `/api/panel`。需要**面板登录会话**或 Master `TAPMODELS_API_KEY`。协议密钥不能调面板。信封 `{ ok, data }` / `{ ok: false, error }`。调用方应从 `data` 取业务体。
 
-登录：`POST /api/panel/login` `{ username, password }` → token + Cookie `kin_panel_token`（7 天，HttpOnly）。`POST /api/panel/logout` 撤销。`GET /api/panel/me` → `{ user, role, views, capabilities, version }`。`GET/PUT /onboarding` 为首配进度（见「引导」）。
+登录：`POST /api/panel/login` `{ username, password }` → token + Cookie `kin_panel_token`（7 天，HttpOnly）。`POST /api/panel/logout` 撤销。`GET /api/panel/me` → `{ user, display_name, email, role, views, capabilities, version }`。`GET/PUT /onboarding` 为首配进度（见「引导」）。公开品牌接口 `GET /api/panel/site` 不要求登录，仅返回四个品牌字段。
+
+## 个人资料与品牌
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/me/profile` | 个人账号会话读取本人 `username, display_name, email, role, created_at`；不接受目标用户 ID，Master Key 不代表个人账号 |
+| PATCH | `/me/profile` | 仅接受 `display_name`、`email`；名称最多 80 字，邮箱不区分大小写唯一；不修改登录名、角色、资金或授权 |
+| POST | `/me/password` | `{ current_password, new_password }`；校验当前密码，新密码 8–128 位；保留当前会话，撤销该用户其他会话 |
+| GET | `/site` | 公开返回 `{ name, tagline, logo_url, favicon_url }`，不返回其他系统设置 |
+| PUT | `/site` | 仅 super_admin 修改上述四项；保存到 SQLite `settings.site_branding`，图片可用 HTTP(S)、站内路径或 PNG/JPEG/WebP data URL |
+
+联系邮箱仅用于个人资料，不作为登录或密码恢复凭证。名称保存在新增迁移 `044_user_profile.sql` 的 `display_name` 列；原迁移不修改。右上角唯一账号菜单使用页面权限判断，所有角色可管理本人资料；普通用户不显示系统设置、更新或用户管理入口。默认入口为超级管理员 `/overview`、管理员 `/users`、用户 `/keys`；有权限的登录回跳继续生效。安装引导保留 `/welcome`。
 
 管理台前端固定 `credentials: include`。页面与 API **不同源** 时，须在 API 侧配置受信 Origin：`PANEL_CORS_ORIGINS`（空格或逗号分隔，如 `https://panel.example.com`）和/或 `PUBLIC_BASE_URL` 的 origin。匹配时响应回显该 `Origin`、`Access-Control-Allow-Credentials: true` 与 `Vary: Origin`；未列入的 Origin 仍为 `Access-Control-Allow-Origin: *` 且**不带** credentials（浏览器会拒绝跨源 Cookie 登录）。预检与 JSON/SSE 共用同一 methods/headers 列表（含 `PATCH`）。
 
-`/admin/*` 仅 master / admin 角色。恢复备份期间协议口 503。
+`/admin/*` 仅 master / super_admin 角色。恢复备份期间协议口 503。
 
 ## RBAC
 
+角色显示名称统一为 **超级管理员（SA / `super_admin`）**、**管理员（AD / `admin`）**、**用户（U / `user`）**；繁体中文对应「超級管理員／管理員／使用者」。显示文案不改变角色编码或权限。
+
 | 角色 | 页面 | 能力 |
 |------|------|------|
-| `user` | 虚拟机 / 代理池 / 密钥 / 计费 / 日志 | 只管自己的 VM、代理、key；自建配额 `vm_create_quota` 0–100；不能调度平台池 |
-| `super` | 总览 / 集群 / 用量 / 日志 + 虚拟机 | 读 VM + 拨调度 / 清冷却；集群只读节点列表 |
-| `admin` | 全部 | `*`。可管理用户 VM，但 admin/master **未 pin** 的 `/v1` 只打未分配平台池 |
+| `user` | 个人资料 / 分组目录 / 密钥 / 账务 / 使用记录 / 统计 / 套餐 | 本人 Key 与权益、全部本人 Key 的消费汇总；无 VM、代理及上游凭证管理权限 |
+| `admin` | 个人资料 / 用户管理 / 使用记录 / 统计 / 账务 | 仅创建、停用、改密和删除普通 U，查看普通 U 的使用数据与账务；不能提升角色、调整资金或分组授权、管理 VM、代理或平台设置 |
+| `super_admin` | 全部（含分组和套餐） | 资源、商品、用户授权、资金与审计；Master 诊断流量独立标记为平台测试 |
 
-环境变量 `VM2API_ADMIN_USER` / `VM2API_ADMIN_PASSWORD` 只在库里还没有同名用户时灌进第一个 admin；之后以 SQLite `users` 为准，面板「用户」页可增删改、改密码。密码 scrypt。不能删/停用最后一个 admin。
+环境变量 `TAPMODELS_ADMIN_USER` / `TAPMODELS_ADMIN_PASSWORD` 只在库里还没有同名用户时灌进第一个 super_admin；之后以 SQLite `users` 为准，面板「用户」页可增删改、改密码。密码 scrypt。不能删/停用最后一个 super_admin。
 
-`vms/*.json` 的 `owner_user_id` / `origin`（`platform` \| `admin_assigned` \| `user_created`）是属主 SSOT。`PATCH /vms/:id/owner` 仅 admin。自建 VM 不能收回进平台池。
+VM 通过 `group_resources` 多对多关联商业分组，使用稳定的 `vm.id`；空槽也能分组。`owner_user_id` / `origin` 只保留既有私有资源的来源、迁移与平台诊断隔离证据，不再提供客户管理权。旧租户分配接口已删除。
+
+角色编码通过新增 `054_panel_role_names.sql` 一次性迁移：旧 `admin` → `super_admin`、旧 `super` → `admin`；历史迁移保持原样。会话使用数据库当前身份。
 
 ## 引导
 
@@ -26,17 +42,18 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/onboarding` | `{ user, role, status, updated_at, needs_welcome, base_url, steps[{id,done}], done_count, total }`。缺记录 `status=pending`。`needs_welcome = status === 'pending' && (total === 0 \|\| done_count < total)`，前端不要重算。`base_url` 只在设置了 `PUBLIC_BASE_URL` 时返回（去尾 `/`），否则 `null`，前端用浏览器当前 origin。步骤只含 `id`/`done`，文案与链接由前端按 id 渲染。 |
+| GET | `/onboarding` | `{ user, role, status, updated_at, needs_welcome, base_url, steps[{id,done}], done_count, total }`。缺记录 `status=pending`。`needs_welcome = guide_used !== true`，前端不要重算。`base_url` 只在设置了 `PUBLIC_BASE_URL` 时返回（去尾 `/`），否则 `null`，前端用浏览器当前 origin。步骤只含 `id`/`done`，文案与链接由前端按 id 渲染。 |
 | PUT | `/onboarding` | `{ action: "complete" \| "dismiss" \| "reset" }` → 200 同 GET。其它 action 400 `{ ok:false, error:{ code:"invalid_action", message } }`。`complete`/`dismiss` 写入标记；`reset` 删除该用户记录（回到 pending）。 |
 
-步骤按角色裁剪（顺序固定），完成态复用现有列表的属主裁剪（`/vms`、`/proxies`、`/api-keys`、`/request-logs/stats`）：
+步骤按角色裁剪（顺序固定）。客户只检查获授权服务分组、本人 Key 和本人请求：
 
-| id | admin | user | super | 完成条件 |
+| id | super_admin | user | admin | 完成条件 |
 |---|---|---|---|---|
-| `admin_password` | ✓ | | | 环境密码不是默认 `123456`，或 env 管理员已在 `users` 表 |
-| `egress` | ✓ | ✓ | | 可见代理 ≥ 1（`px-local` 计入） |
-| `slot_account` | ✓ | ✓ | | 可见槽 `has_token` ≥ 1 |
-| `schedulable` | ✓ | ✓ | ✓ | 可见槽 `has_token && schedulable` ≥ 1 |
+| `admin_password` | ✓ | | | 当前环境/数据库管理员密码不是已知弱密码 `123456`；新装使用随机密码 |
+| `egress` | ✓ | | | 可见代理 ≥ 1（`px-local` 计入） |
+| `slot_account` | ✓ | | | 可见槽 `has_token` ≥ 1 |
+| `schedulable` | ✓ | | | 可见槽 `has_token && schedulable` ≥ 1 |
+| `service_group` | | ✓ | | 至少一个获授权、启用的商业分组 |
 | `api_key` | ✓ | ✓ | | 可见未删且 `status=active` 的协议密钥 ≥ 1 |
 | `first_request` | ✓ | ✓ | ✓ | 可见 usage_logs 中 ≥ 1 条 2xx |
 
@@ -45,25 +62,32 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/users` | 列表（含 `vm_create_quota`） |
-| POST | `/users` | `{ username, password, role, enabled, vm_create_quota? }` |
-| PATCH | `/users/:id` | 改角色/密码/启用/配额；改密会撤销该用户其它会话 |
-| DELETE | `/users/:id` | 软删除用户并撤销会话；将其 `admin_assigned` VM 收回平台池，保留调度开关与额度冷却；`user_created` VM 保持原归属，不自动转入平台池 |
-| PATCH | `/vms/:id/owner` | admin：`{ user_id }` 分配，`{ user_id: null }` 收回（仅 `admin_assigned`） |
-| GET | `/billing` | 用户计费汇总。`from`/`until`/`group_by=vm|key`。user 隐式只看自己；admin 可 `user_id=` |
+| GET | `/users` | 站长列表：身份、余额、并发/RPM、公开组访问政策 |
+| POST | `/users` | `{ username, password, role, enabled, concurrency?, rpm_limit?, restrict_public_groups?, groups?: [{group_id, rate_multiplier, rpm_override}] }`；username 支持有效邮箱（最长 254 位）或原有 2–32 位用户名，登录与重名判断不区分大小写；用户与分组授权同事务保存 |
+| PATCH | `/users/:id` | 身份、密码、状态、并发/RPM、公开组政策及 `groups`；整次事务更新，不能直接修改余额 |
+| DELETE | `/users/:id` | 软删除、撤销会话和后续调用；不把历史私有 VM 自动转成公共资源 |
+| GET/PUT | `/users/:id/groups` | 授权分组及用户专属倍率 |
+| POST | `/users/:id/balance` | `{ amount, reason, idempotency_key }`，仅站长；整数微美元事务入账 |
+| GET | `/users/:id/balance-history` | 追加式资金流水，含 `user_name` |
+| GET | `/billing` | 本人钱包；站长可按 `user_id` 查询，返回余额、可用额和流水 |
 
-启动时会修复旧版本遗留的已删除用户 VM 归属：仅收回 `admin_assigned`（旧记录未写 `origin` 时按已有归属规则推断），不收回租户自建 VM、停用用户或无用户记录的 VM。修改经 `vms/*.json` 写入并同步到 SQLite，不重启槽位。
+用户名支持完整邮箱（总长最多 254 位、本地部分最多 64 位）或 `^[a-zA-Z][a-zA-Z0-9._-]{1,31}$`；密码 8–128。邮箱登录名不自动修改个人资料联系邮箱；账号创建仍需现有管理权限。客户 VM 自建配额及表单已删除；不再自动回收历史资源。消费汇总使用 `/statistics`、`/usage-logs`，不再复用旧 VM/Key 费用聚合接口。
 
-
-用户名 `^[a-zA-Z][a-zA-Z0-9._-]{1,31}$`，密码 8–128。`vm_create_quota` 整数 0–100，默认 0。
+`concurrency = 0` 表示不限制用户并发，正数上限由该用户全部 API Key 共享（站长自用请求沿用并发豁免）。RPM 同时检查三层：用户 `rpm_limit` 是全部 Key、全部分组共享总上限；分组 `rpm_limit` 是每个用户在本组内共享的上限，用户专属 `rpm_override` 非 null 时替代分组默认值；Key `rpm` 只能进一步收紧。所有数值 0 都表示不限制对应层，不影响其他层。各层采用最近 60 秒已准入请求计数，拒绝请求不增加计数；轮换 Key、增加 Key 均不清空用户/分组计数。5h/1d/7d 限额以 USD 计，是滚动金额窗口，不是请求次数。
 
 ## 总览 / 槽位
+
+### Codex 与通用模型发现
+
+协议入口 `GET /v1/models` 使用协议 API Key，返回通用 `{ object: "list", data: [...] }`，混合组可包含 Claude 与 OpenAI。附加非空 `client_version`（例如 `?client_version=0.156.0`）时返回 Codex 原生 `{ models: [...] }`；先使用同一分组、用户资格、资源和模型白名单过滤，再仅保留 OpenAI GPT 对话模型。Codex HTTP、WebSocket 与本地下载共享此目录，不能包含 Claude；没有 OpenAI 模型时返回空 `models`。两种响应均为 `private, no-store`，不包含凭据。
+
+面板 `GET /api/panel/api-keys/:id/connection` 仍按 Key 所有权授权，返回同源模型 ID/显示名、公开 API 基址及 WebSocket/独立搜索能力。Codex 客户端目录由实际 Key 再次通过协议入口读取，不能用面板会话替代协议 Key。完整说明见 [Codex 接入](CODEX_KEY_CONNECTION.md)。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/dashboard` | 总览：健康、KPI、`proxy_pool`、`ops`（默认近 1h SLA/TTFT）、`billing` |
 | GET | `/vms` | 列表（`has_token`、`cred_status`、`proxy_configured`、`can_import_credential`、`account_tier`、`schedule_level`、`schedule_level_mode`、`worker_credential`、Fable 轨；Claude 行 `seats_used` / `seats_max` / `seats_grace` / `seat_sessions` / `queue_depth` / `conc_waiting` / `inflight`）。`seats_used` 是正在占槽的 client session 数，只含在飞请求和已排在这台 VM 上的后续请求；对话结束即释放，粘性 TTL 不占槽。`seats_grace` 只在重启交接的短窗口里计数；`seat_sessions` 是 `{ index, session_id, state, inflight, held_until }[]`，`state` 为 `active` 或 `held`。响应另带 `pool_queue: { global_queue_depth, queue_max }`。`availability.key` 取值 `ok` / `drain` / `quota` / `cool` / `rest` / `off` / `bad` / `none`，`drain` = 临近闸线（仍接单），`rest` = 工作时段外休息中 |
-| GET | `/pool/stream` | SSE。`event: seats`：`{ seats: { [vmId]: { seats_used, seats_max, seats_grace, queue_depth, conc_waiting, inflight, sessions } }, global_queue_depth, queue_max, ts }`，`sessions` 与列表的 `seat_sessions` 同形；缺席的 VM 表示空闲；每次请求开始/结束都会推。`event: proxy`：`{ proxies: { [vmId]: { id, status, enabled, blocked_reason, latency_ms, last_error, last_probe_at } }, ts }`，每次探测或代理状态变化推送。两类帧都按 250ms 节流，租户只收到自己 VM 的条目 |
+| GET | `/pool/stream` | SSE。`event: seats`：`{ seats: { [vmId]: { seats_used, seats_max, seats_grace, queue_depth, conc_waiting, inflight, sessions } }, global_queue_depth, queue_max, ts }`，`sessions` 与列表的 `seat_sessions` 同形；缺席的 VM 表示空闲；每次请求开始/结束都会推。`event: proxy`：`{ proxies: { [vmId]: { id, status, enabled, blocked_reason, latency_ms, last_error, last_probe_at } }, ts }`，每次探测或代理状态变化推送。两类帧都按 250ms 节流，仅资源管理角色可访问 |
 | GET | `/vms/:id` | 详情 + 调度等级 + 代理健康 + `billing.today/window_5h/window_7d/prev_window_5h/prev_window_7d/window_5h_projection/by_model/usage_stats`（`usage_stats` = 近 30 个上海自然日的按日用量 + 模型 / 入站路径排名，日界同 `billing.today`；`prev_window_*` 与 `window_5h_projection` 见下） + `account.runtime_window` |
 | PATCH | `/vms/:id` | 热改并发/RPM、OpenAI 会话上限、Claude 席位/配额、模型白名单、槽策略、Claude `schedule_level`、`weight`（Codex 选槽权重 1–100，`null` 回默认 1）、`active_hours` 或 `timezone`（不重启槽）。`timezone` 为任意有效 IANA 名称，会钉住该槽（后续绑定不覆盖）；`timezone_follow_proxy: true` 重新跟随已绑代理的出口时区 |
 | POST | `/vms/pool-policy` | 批量槽策略。`{ ids: [...] }` 或 `{ all: true }`，可带 `weight`(1–100) / `schedule_level`(1–10 或 `"auto"`) / `max_concurrency`(1–256) / `max_rpm`(0–1000000) / `max_sessions`(0–256)；`null`（或 `""`）取消钉住：weight 回默认 1、schedule_level 回 auto、上限回 tier / 全局默认，语义与逐槽 PATCH 一致。只写 `vms/*.json`、不重建槽详情，100+ 槽一次调用即可（逐个 `PATCH /vms/:id` 每槽约 4s，并发下发会压住控制面）。返回 `{ updated, missing, failed, items: [{ id, weight, schedule_level, max_concurrency, concurrency_override, max_rpm, max_sessions }] }` |
@@ -74,9 +98,9 @@
 | POST | `/vms/:id/schedulable` | 操作员开关 `{ schedulable }`，不改容器。`false` = 调度关；`true` = 调度开，同时清除不可调度。凭证已失效或吊销时开启返回 409 `credential_unavailable`（先重新导入凭证） |
 | POST | `/vms/:id/cooldown/clear` | 清账号/模型冷却、粘性钉和 `/usage` 429 旗标；GPT 槽同时清除可恢复的 `codex.extra.codex_limited_until`，再重算调度，重新入池 |
 | POST | `/vms/:id/test-chat` | loopback `POST /v1/messages`，master 可钉槽；官方 CC 入站 + 4 块 system。默认 prompt `hello` |
-| GET/PUT/DELETE | `/vms/:id/test-schedule` | 每 VM 一条真实对话定时计划，回 `{ schedule }`。PUT 保存结构化调度 `{ enabled?, frequency, minute?, time?, weekdays?, timezone, model, prompt, max_tokens?, reasoning_effort? }`（`frequency`=`hourly`/`daily`/`weekly`；服务端内部编译五字段 cron，响应不回 `cron` 字符串）。`enabled` 缺省 `false`；Claude 用 `max_tokens`，Codex 用 `reasoning_effort`。GET/PUT 含最近结果、下次运行时间与运行状态；到点 `runVmTestChat` 并计用量；重启恢复计划但不补跑停机错过；删 VM 时清计划。租户可读写自己槽的计划 |
+| GET/PUT/DELETE | `/vms/:id/test-schedule` | 每 VM 一条真实对话定时计划，回 `{ schedule }`。PUT 保存结构化调度 `{ enabled?, frequency, minute?, time?, weekdays?, timezone, model, prompt, max_tokens?, reasoning_effort? }`（`frequency`=`hourly`/`daily`/`weekly`；服务端内部编译五字段 cron，响应不回 `cron` 字符串）。`enabled` 缺省 `false`；Claude 用 `max_tokens`，Codex 用 `reasoning_effort`。GET/PUT 含最近结果、下次运行时间与运行状态；到点 `runVmTestChat` 并计用量；重启恢复计划但不补跑停机错过；删 VM 时清计划。仅获资源维护能力的角色可管理 |
 | GET/PUT | `/test-schedule/default` | 全局默认调度模板（仅调度时间结构）。GET 所有已登录角色可读；**PUT 仅 admin/master**（body `{ schedule: { frequency, … } }`，`schedule: null` 清除） |
-| POST | `/test-schedule/sync` | 覆盖写调度时间：`{ scope: "all" \| "ids", vm_ids?, schedule }`。MVP **只**同步 `frequency`/时刻/星期/分钟/`timezone`，**不同步** prompt、模型、token·effort、`enabled`。无计划槽创建且 `enabled=false`（模型/Prompt 取该槽已有计划或 test-chat 默认 `hello` + 首个可测模型）。租户 `scope=all` 仅自己的槽；逐槽权限同 test-schedule |
+| POST | `/test-schedule/sync` | 覆盖写调度时间：`{ scope: "all" \| "ids", vm_ids?, schedule }`。MVP **只**同步 `frequency`/时刻/星期/分钟/`timezone`，**不同步** prompt、模型、token·effort、`enabled`。无计划槽创建且 `enabled=false`（模型/Prompt 取该槽已有计划或 test-chat 默认 `hello` + 首个可测模型）。逐槽权限同 test-schedule；客户不可访问 |
 | POST | `/vms/:id/oauth/refresh` | 只转发 worker `Ensure`，不回 token |
 | POST | `/vms/:id/oauth/to-setup-token` | 把当前完整 OAuth 活票改成 Setup Token（保留 refresh/过期）。已是 setup-token 则幂等 |
 | POST | `/vms/:id/oauth/generate-auth-url` | PKCE 授权链接；无 SOCKS5 拒绝。`{ flavor: "claude_code" }` 为官方 Claude Code 授权页。`{ flavor: "setup_token" }` 为 inference-only PKCE，不启槽内 CLI |
@@ -162,7 +186,7 @@ Claude PATCH `max_sessions` 返回 400 `claude_max_sessions_forbidden`；OpenAI 
 
 ### Docker 槽可选 CPU 上限
 
-`POST /vms/create`（`runtime_type: "docker"`）可在 `machine` 与 `memory` 同级显式传 `docker_cpus`：`0` 或省略表示不限 CPU（与升级前一致）；`0.01`–`16` 为 CPU 时间硬上限（如 `0.5` 表示最多占用半颗宿主机 CPU 的时间，非独占核）。字符串、非有限数、越界或 KVM 创建携带该字段返回 400 `invalid_machine`。仅当请求体显式带上时才写入 `machine.docker_cpus`；不会把 KVM 的 `machine.vcpus` 隐式转成 Docker 上限。配额在**容器创建或 recreate**（含 `POST /vms/:id/reset`、带 recreate 的 start/reload、看门狗/恢复路径上的重建）时落到本地 `--cpus` 或集群 Engine `HostConfig.NanoCpus`；对已存在容器的普通 start、kernel 重启或控制面重启**不会**在线改限额，且无 `PATCH` 改配额入口。列表/详情回显已保存的 `machine.docker_cpus`。若落盘值损坏或越界，`POST /vms/:id/reload`、恢复/重建相关路径会在触达容器前先拒绝并返回 `invalid_machine`。
+`POST /vms/create`（`runtime_type: "docker"`）可在 `machine` 与 `memory` 同级显式传 `docker_cpus`：`0` 表示明确不限 CPU；省略时，新建 Docker 槽位使用所选 `machine.vcpus`，未选择则使用 `routing.vm.vcpus`（默认 4）；`0.01`–`16` 为 CPU 时间硬上限（如 `0.5` 表示最多占用半颗宿主机 CPU 的时间，非独占核）。字符串、非有限数、越界或 KVM 创建携带该字段返回 400 `invalid_machine`。新建 Docker 槽位始终持久保存 `machine.docker_cpus`，普通创建、供应商创建及新建导入共用该规则；默认内存为 `4g`。KVM 仍只使用 `vcpus`，不写入 Docker 配额。历史槽位若没有 `docker_cpus`，继续保留原运行策略；修改默认值不会隐式调整已有容器。配额在**容器创建或 recreate**（含 `POST /vms/:id/reset`、带 recreate 的 start/reload、看门狗/恢复路径上的重建）时落到本地 `--cpus` 或集群 Engine `HostConfig.NanoCpus`；对已存在容器的普通 start、kernel 重启或控制面重启**不会**在线改限额，且无 `PATCH` 改配额入口。列表/详情回显已保存的 `machine.docker_cpus`。若落盘值损坏或越界，`POST /vms/:id/reload`、恢复/重建相关路径会在触达容器前先拒绝并返回 `invalid_machine`。
 
 `GET /vms/:id` 的 `kernel.rust_health` 来自 wrap `/internal/health`：`reachable`（进程在且 `ready_slots>=1`）、`process_up`、`provider`（cli-hop 为 `local_cli`）、`ready_slots`、`cli_pid`、`worker_version`。Go hop 没有 slot 字段。`reachable=false` 且 `process_up=true` 表示 kernel 在、CLI 槽未就绪。
 
@@ -334,7 +358,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 | DELETE | `/refusal-guards` | 须 `{ "confirm": true }` 清空 |
 | DELETE | `/refusal-device-blocks` | `{ "device_id" }` 解封一条；`{ "confirm": true }` 清空。空 device、短于 8 字符的值不会入库 |
 
-`PUT { enabled }` 写入 SQLite `settings.refusal_guard_enabled`。环境变量 `REFUSAL_GUARD=0` 仍强制关闭。与蒸馏拦截独立：0 注入跳过普通蒸馏针，本缓存仍生效。`count_tokens` 同样在 peek / worker hop 之前拦截。device 取入站 `metadata.user_id.device_id`，否则显式 `device_id` / `x-kin-device-id`，不用 IP、UA 或 API key。仅 admin。
+`PUT { enabled }` 写入 SQLite `settings.refusal_guard_enabled`。环境变量 `REFUSAL_GUARD=0` 仍强制关闭。与蒸馏拦截独立：0 注入跳过普通蒸馏针，本缓存仍生效。device 取入站 `metadata.user_id.device_id`，否则显式 `device_id` / `x-kin-device-id`，不用 IP、UA 或 API key。仅 admin。
 
 ## 决策模型与硬正则
 
@@ -346,7 +370,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 
 三个后端走同一套 `/v1/systemone`。题库存在 `questions`：可增删改，缺省是内置六题（综合、色情、破限、逆向、渗透、网络攻击）。每题都是「是否安全」，高分表示安全，启用的题目一起问，任一题低于阈值就拦。`safety_instruction` 非空时再多问一题自定义要求。`POST /jev-intercept/models` 用地址和 Key（留空则用已存的第一把）请求 `{base}/v1/models`，失败回 502，不会把上游 401 当成面板登出。
 
-内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`，也不含 `system`、`instructions`、`# Environment` 和已闭合的 `<system-reminder>`。决策模型只看这些用户正文；多轮时当前用户句再附在末尾。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
+内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`；决策模型仍看 system。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
 
 账号范围（`account_platform_plans[]`、`account_ids[]`，都可为空）把关卡收窄到部分槽位。每一项是 `平台:套餐`，例如 `claude:max`、`gpt:plus`、`gpt:business`；`none` 是没标注套餐。Claude 的 Max/Pro 与虚拟机列表相同（usage 里有 Fable 就是 Max，盖过落盘的 Pro）。指定账号收槽位 id、邮箱或名称，和勾选取并集，全空 = 所有账号都进关卡。只选了 GPT 套餐时 Claude 仍全部进关卡；选了 Claude 套餐或指定账号后，Claude 在选中槽位后再判，没命中的放行。GPT 一旦有范围就只由范围决定，没有范围时仍看 `openai_platform_enabled`。`GET` / `PUT` 都回 `account_scope.account_platform_plan_options`（带当前槽位数）和槽位清单（每条有 `scope_key`）。旧的 `account_types` 不再参与判断；只写过 `account_plan_types`、还没有 `account_platform_plans` 的配置会收成对应的 GPT 套餐（`none` 同时包含两边的未标注）。
 
@@ -363,31 +387,11 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 | GET | `/request-logs/:request_id` |
 | GET | `/request-logs/:request_id/attempts` |
 
-创建密钥只在响应里明文出现一次。存储为 HMAC 索引。`group_type` 为 `all`（默认，全局可调度）、`anthropic` 或 `openai`。后两个必须带 `allowed_vms`（该平台的 VM id，可多台）。`vm_pool_id` 绑定命名账号池：成员以池为准，不复制到密钥；`allowed_vms` 被清空。池停用、为空或不存在时请求返回 403 `vm_pool_unavailable`，不回落到全局池。改成员或解除绑定对下一次请求生效，包括已有粘性会话。一台槽只属于一个池。缺字段的旧密钥视为 `all`。`GET /api-keys/:id/stats` 是该密钥近 30 天用量：上海日桶、模型分布、VM 分布。不是 VM 的上游额度窗口。
+新建商业 Key 必须绑定 `group_id`，创建、编辑和调用均复核用户资格、分组状态与模型范围。客户身份来自会话，不能转移 Key 属主或指定内部 VM。列表不返回秘密值；保留项目已有的加密恢复、查看和轮换契约，并记录审计。`GET /api-keys/:id/stats` 为该 Key 的历史消费，客户投影删除 VM、上游账号等内部字段。
 
-attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终态。`normal` 摘要；`debug` 另存入站原文及脱敏出站数据。`outbound_body` 仍为最后一次真正 POST 给 worker 的 envelope body，Node → worker 的头为 `worker_envelope_headers`。`outbound_headers_source=cli_final` 表示 `outbound_headers` 来自 cli-node 完成组装、CCH 和长度处理后的最终 fetch 调用边界；不包含底层补的 Host / HTTP/2 伪头，凭证及未知自定义头值已在 CLI 脱敏。每次重试覆盖，最后一次尝试未回传则 source=`unavailable`、headers=null，绝不以 envelope 代替。旧记录没有 source，原值不能视作最终值。最终 HTTP body 字节仍不在日志里。该功能需升级 Node、web 与 cli-node，旧 CLI 不支持回传。`X-Request-ID` 回写。`X-Kin-Debug` / `X-Kin-Log` 可单请求覆盖，但出站数据仅按管理员配置的 debug 采样保存。
+`group_type`、`allowed_vms`、`vm_pool_id` 不再是 Key 的可写持久化授权字段。旧数据由一次性商业范围迁移转换；运行时 VM/API 选择器只消费从当前分组关联推导的范围。未分组、空组或停用组不回落到全局资源。旧 `/vm-pools` CRUD 已删除；分组资源接口见下文。
 
-日志性能（`GET /usage-logs` 为 camelCase，`/request-logs` 与导出为 snake_case）：
-
-| 字段 | 定义 |
-|------|------|
-| `ttftMs` / `first_token_ms` | 请求入口到首个实际生成内容/进度；text、thinking、工具名称/参数均可触发，不把 `message_start`、空块或生命周期元数据当 token。 |
-| `firstByteMs` / `first_byte_ms` | 请求入口到首个上游协议事件的接收时间；独立于 TTFT。内部诊断帧不计。 |
-| `generationMs` / `generation_ms` | 首个上游协议事件到终止生成事件的实测窗口：Claude `message_delta.stop_reason`（缺失时 `message_stop`）、OpenAI `response.completed` / `response.done` / `response.incomplete`；不含随后 HTTP EOF、trailer 与收尾。 |
-| 输出速率 | `outputTokens × 1000 / generationMs`。输出 token 包含推理，窗口也包含不可见推理；不是 `output / (总耗时 − TTFT)`。 |
-| `cacheCreationInputTokens` / `cache_creation_tokens` | 上游明确报告的缓存写入量；未报告时 `null`，明确 0 保留 0。不从未缓存输入、缓存未命中或 `input − cached` 推算。 |
-
-以上是网关观测的流式时序，不是上游模型内部逐 token 的计算时间。迁移 043 之前的记录没有实测输出窗口；同一接收批次内完成、未收到生成内容/进度或流未正常终结时，速率不可测，页面不显示估算 tok/s。详情「总令牌数」=`inputTokens + outputTokens + cacheReadInputTokens + (cacheCreationInputTokens ?? 0)`，输入为不含缓存的互斥口径。OpenAI `reasoning_tokens` 已在 output 内，不能再累加。升级需同时更新 Node / web 和重新构建的 API 内核（SSE flush），无需更新 native CLI payload；历史写入 0 不自动改写为未知。
-
-
-### 账号池
-
-| 方法 | 路径 |
-|------|------|
-| GET/POST | `/vm-pools` |
-| PATCH/DELETE | `/vm-pools/:id` |
-
-仅 admin。POST/PATCH 字段：`name`（1–40）、`enabled`、`vm_ids`（整表替换；省略则不动成员）。槽不存在 400 `vm_pool_vm_unknown`；槽已在别的池 409 `vm_in_other_pool`；重名 409 `vm_pool_name_taken`。仍有密钥绑定时 DELETE 409 `vm_pool_in_use`，不会把这些密钥放开成全局。
+attempts 记录每次选中的 VM/账号、错误域、冷却、提交边界和终态，供获授权运维查询。客户仅见本人安全摘要；原始调试正文仅站长可见。`normal` 摘要；`debug` 另存入站原文及脱敏出站数据。`outbound_body` 仍为最后一次真正 POST 给 worker 的 envelope body，Node → worker 的头为 `worker_envelope_headers`。`outbound_headers_source=cli_final` 表示 `outbound_headers` 来自 cli-node 完成组装、CCH 和长度处理后的最终 fetch 调用边界；不包含底层补的 Accept-Encoding、Host / HTTP/2 伪头，凭证及未知自定义头值已在 CLI 脱敏。每次实际发送的 worker envelope 清除此前快照，本次未回传则 source=`unavailable`、headers=null，绝不以 envelope 代替。旧记录没有 source，原值不能视作最终值。最终 HTTP body 字节仍不在日志里。该功能需升级 Node、web 与 cli-node，旧 CLI 不支持回传。`X-Request-ID` 回写。`X-Kin-Debug` / `X-Kin-Log` 可单请求覆盖，但出站数据仅按管理员配置的 debug 采样保存。`X-Request-ID` 由服务器生成，客户端同名头不作为财务幂等键。付费请求即使日志设为 off，仍持久化结算摘要。
 
 ### 协议字段（对齐 Sub2API usage_logs）
 
@@ -398,7 +402,7 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 | `requested_model` / `upstream_model` / `model_mismatch` | 三态；null = 上游未声明 |
 | `first_token_ms` | 首个业务事件（worker 回传） |
 | `stop_reason` | 流式来自 `message_delta` |
-| 费用列 | 官方价 input/output/cache 5m·1h·read；上海日切 |
+| 费用列 | 站长区分标准计价和客户实扣；客户仅见实扣；账本使用整数微美元 |
 
 `GET /request-logs/stats` 另返回 `window`：SLA、错误率、429/503/529、QPS/TPS、耗时与 TTFT 分位、按模型 `avg_first_token_ms`、`error_collection`。`GET /dashboard.ops` 默认近 1 小时同一形状。
 
@@ -406,9 +410,9 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 
 流式 usage 由 worker SSE 校验器合并后经 trailer 回传，终态 attempt 只记一次。
 
-## API 上游 / Anthropic 控制台（仅 admin）
+## API 上游 / Anthropic 控制台
 
-管理第三方 Anthropic/OpenAI 兼容 API 地址与密钥（供 `/v1/messages` 等推理在 category=`api` 的 managed 密钥上调度），以及 admin 专用 Anthropic 联调页。浏览器不直连上游；出站经控制面 `forwardApi`（可挂池内 SOCKS5）。
+管理员与运维可管理第三方 Anthropic/OpenAI 兼容 API 地址（已有秘密的使用和修改遵循下文凭据边界），供推理使用（供 `/v1/messages` 等推理在 category=`api` 的 managed 密钥上调度），以及 admin 专用 Anthropic 联调页。浏览器不直连上游；出站经控制面 `forwardApi`（可挂池内 SOCKS5）。
 
 ### API 上游 CRUD
 
@@ -424,7 +428,7 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 | POST | `/api-endpoints/fetch-models` | 未保存草稿拉模型：`kind` / `protocol` / `base_url` / `api_key` 等；`key_id` 从库加载已存 key（可不再输入明文）。`proxy_id` 优先于行内 `proxy_url`；body 显式带 `proxy_id`（含空串）时按 id 解析，否则用已存 key 的 `proxy_url` |
 | POST | `/api-endpoints/:id/fetch-models` | 对已保存 endpoint 拉上游 `/v1/models`（可选 `key_id` 指定条目，`apply: false` 只返回不合并） |
 
-列表/详情里每条 key 含 `proxy_id`（池 id，持久化）与 `proxy_url`（解析后的转发地址，不回显账密）。
+admin 响应可包含 `proxy_url`（解析后的转发地址）；super 响应只保留 `proxy_id`、`has_proxy` 等状态，不返回代理 URL 或账密。
 
 ### Anthropic 控制台
 
@@ -432,7 +436,7 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 |------|------|------|
 | POST | `/anthropic/messages` | admin 联调 `POST …/v1/messages`。成功 `{ ok: true, data }`；失败 `{ ok: false, error: { code, message } }` |
 
-**鉴权**：仅 `admin` 角色（含 master API key）；`user` / `super` 403。
+**鉴权**：仅 `super_admin` 角色（含 master API key）；`user` / `admin` 403。
 
 **请求**（JSON，≤64 KiB）：
 
@@ -470,11 +474,11 @@ Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走
 | GET | `/proxies` |
 | POST | `/proxies/import` · `/proxies/probe` · `/proxies/geo` |
 | GET/PUT | `/proxies/config` |
-| PUT | `/proxies/:id` 改 host/port/账密 |
-| POST | `/proxies/:id/enable` · `/disable` · `/bind` · `/unbind` · `/reveal` · `/geo` |
+| PUT | `/proxies/:id` 改 protocol/host/port/账密/名称/状态/有效期/到期回退 |
+| POST | `/proxies/:id/enable` · `/disable` · `/bind` · `/unbind` · `/reveal` · `/geo` · `/probe` · `/quality-check` |
 | DELETE | `/proxies/:id` |
 
-恢复期间协议口 503。每个槽位必须绑定 SOCKS5。`PUT /proxies/config` 的 `disconnect_on_error`（默认 false）：运行时 SOCKS 错误立刻停该槽调度、回写失败并重建 worker；其它健康槽仍可 failover。
+恢复期间协议口 503。每个槽位必须绑定可用代理或显式本地出口。`PUT /proxies/config` 的 `disconnect_on_error`（默认 false）：运行时 SOCKS 错误立刻停该槽调度、回写失败并重建 worker；其它健康槽仍可 failover。
 
 `PUT /proxies/config` 的 `follow_proxy_timezone`（默认 true）：绑定一条代理后，该槽采用出口节点的 IANA 时区（persona `# Environment`、指纹、容器 `TZ`）。操作者在创建时或 `PATCH /vms/:id` 手动指定过时区的槽不受影响。
 
@@ -486,11 +490,11 @@ kin-egress 的 UDP DNS 与 TCP 一致：上游全部不可达或解析失败时�
 
 自定义 URL 必须以小写 `https://` 开头，百分号编码必须有效；域名大小写不受限制。设置会保留原 URL 字符串，不做隐式改写。
 
-`GET /proxies` 和 `GET /proxies/config` 仅向管理员返回 `dns_primary`；租户响应省略该字段（自定义 URL 的路径 / 查询参数可能包含私有令牌），其它配置字段保持不变。
+`GET /proxies` 和 `GET /proxies/config` 仅向管理员返回 `dns_primary`；运维响应省略该字段；用户无代理接口访问权（自定义 URL 的路径 / 查询参数可能包含私有令牌），其它配置字段保持不变。
 
 ### 本地代理（每台 VPS 一条）
 
-本地代理按机器拆分：控制面是 `px-local`，每个集群节点一条 `px-local-<节点 id>`（行上带 `node_id`；管理员另带 `node_name`，租户不返回节点名）。启用了本地代理（`px-local` 存在）后，接入节点时自动建立该节点的行，删除节点时清掉没有绑定的行；升级后首次启动会把仍挂在 `px-local` 上的节点槽迁到各自节点的行，并改写槽位记录里的 `proxy.id`，槽位所在机器的 docker 网络不变。
+本地代理按机器拆分：控制面是 `px-local`，每个集群节点一条 `px-local-<节点 id>`（行上带 `node_id`；管理员另带 `node_name`，运维使用裁剪后的字段）。启用了本地代理（`px-local` 存在）后，接入节点时自动建立该节点的行，删除节点时清掉没有绑定的行；升级后首次启动会把仍挂在 `px-local` 上的节点槽迁到各自节点的行，并改写槽位记录里的 `proxy.id`，槽位所在机器的 docker 网络不变。
 
 - **绑定**：`bind_limit` 按行计，即每台 VPS 各自计数。绑定、创建（`proxy_id`）、导入时传通用的 `px-local` 会落到槽位所在机器的那一行；把别的机器的本地代理绑给槽位返回 `local_proxy_node_mismatch`。自动分配只考虑槽位自己机器的本地代理。
 - **探测**：`px-local` 仍视为直连成功；节点行按该节点的 SSH 链路判定，延迟为链路 RTT。链路不通只把该行标为 `fail`，不会禁用代理或停掉槽位调度（节点健康由集群负责）。
@@ -510,15 +514,31 @@ kin-egress 的 UDP DNS 与 TCP 一致：上游全部不可达或解析失败时�
 
 ### `PUT /proxies/:id`
 
-可改 `host` / `port` / `username` / `password`，**按键是否存在**判定语义：不传该键 = 保持原值；传空串 = 清除（`username: ""` 会连带清掉密码）。合并后走 import 同一套 `socks5Record()` 校验。同时把该行的 `raw` 重写为 `host:port`，清掉导入时可能残留的明文密码。
+支持 `protocol: http | https | socks5 | socks5h`。可改 `host` / `port` / `username` / `password`，**按键是否存在**判定语义：不传该键 = 保持原值；传空串 = 清除（`username: ""` 会连带清掉密码）。合并后走 import 同一套 `proxyRecord()` 校验。同时把该行的 `raw` 重写为 `host:port`，清掉导入时可能残留的明文密码。
 
 另可改 `label`（面板上叫「代理名称」，trim 后最长 64 字，传空串清除，列表响应回显 `label`）。它只影响显示：**只改 `label`** 时不校验地址、不改 `raw`、不重载任何槽位，响应里 `workers` 恒为空数组。名称只存在池里：槽位接口的 `proxy.label` 和授权链接的 `proxy_hint`（`名称 · host:port`）都实时读池，不写进 `vms/<id>.json`。
 
 代理凭据在系统里存三份（池 → `vms/<id>.json` → `worker.json`），所以本端点会对每个已绑槽位回写槽位文件并重载 worker（停调度 → reload → 恢复），reason 记为 `proxy_edit_worker_reload`。单个槽位重载失败不会让请求失败——池已经改了，回滚更乱；失败信息逐槽位放在响应里由运维决定是否重试。
 
-响应 `{ proxy, workers: [{ vm_id, ok, error }] }`。错误：`404 proxy_not_found`、`400 invalid_proxy`、`400 no_editable_fields`、`400 invalid_label`、`400 label_too_long`、`400 password_without_username`（SOCKS5 没有只有密码的认证方式，`socks5Record()` 见用户名为空就丢弃密码，所以这个组合直接拒掉而不是静默存成「仍无账密」）。
+响应 `{ proxy, workers: [{ vm_id, ok, error }] }`。错误：`404 proxy_not_found`、`400 invalid_proxy`、`400 no_editable_fields`、`400 invalid_label`、`400 label_too_long`、`400 password_without_username`（代理认证不接受只有密码，`proxyRecord()` 见用户名为空就丢弃密码，所以这个组合直接拒掉而不是静默存成「仍无账密」）。
 
 **路由顺序**：该路由必须排在 `PUT /proxies/config` 之后（`[^/]+` 也会匹配 `config`，且两者方法相同）。实现里另加了 `(?!config$)` 负向前瞻，把这个顺序依赖写成显式约束。
+
+### 代理协议、连接测试与质量检测
+
+导入支持 HTTP、HTTPS、SOCKS5、SOCKS5H URL；标准字段传 `protocol`。无协议旧行按 SOCKS5 解析。同地址不同协议是不同代理，去重同时比较协议、地址及认证。编辑时省略认证字段保留原值。本地代理只能改显示名称和启停，不能改成远端协议。
+
+`POST /proxies/:id/probe` 通过该出口访问连通性探针，验证真实代理认证/转发，并更新延迟、出口和健康状态。HTTP 200 表示探测执行完成，必须读取 `probe.ok` 判断网络是否正常；手动停用的代理不会因测试成功重新启用。自动健康调度仍使用轻量连接检查。
+
+`POST /proxies/:id/quality-check` 仅站长和运维可用。响应 `report` 包含评分、等级、时间、出口、延迟与五个检测项（基础连通性、OpenAI、Anthropic、Gemini、Grok）。401/405 等预期状态表示目标可达，不代表账号授权或模型可调用。仅发送匿名 GET，不使用供应商 Key/OAuth。单代理不重复检测、全局最多 4 个并发；结果写入 `quality_json`，连接配置改变时清空，拒绝过期异步结果覆盖新配置。
+
+SOCKS5 使用本机 DNS，SOCKS5H 将目标域名交给代理；HTTP/HTTPS 使用 CONNECT，HTTPS 校验代理 TLS 证书。Node 控制面、Go worker 与透明出口共用所选协议。协议失败不会回落本机直连。
+
+### 有效期与到期回退
+
+导入/编辑接受 `expires_at`（ISO 时间或 null）、`fallback_mode: none | proxy | direct`、`backup_proxy_id`。编辑另支持 `enabled` 布尔值。备用配置拒绝自引用、环和不存在的目标。删除备用代理会清除指向它的配置，改为不回退。
+
+到期立即拒绝新授权/选槽；生命周期扫描每 30 秒停用关联 VM 的调度，并按显式选择切换备用代理或 VM 所在服务器的本地出口。绑定容量和节点约束仍有效，目标不可用/满载时保持原绑定及停止调度。运行中槽位切换后重载，失败保持暂停；手动调度状态不被自动覆盖。续期不会自动撤销已经完成的回退。仅更新期限时同步 VM 的期限字段，不重启槽位。
 
 ### `POST /proxies/:id/reveal`
 
@@ -559,14 +579,76 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 | GET | `/cluster/nodes/:id/docker/containers/:cid/logs?tail=` | `{ tty, lines: [{ stream, text }] }`，tail 1–5000 |
 
 - 链路：keepalive 10s × 3；断开后 1s 起指数退避（±20% 抖动，封顶 60s）。**指纹不符 / 认证失败不自动重试**，停在 `error` 等人工重连。
-- 凭证（私钥、口令、密码）存 `cluster_nodes`，设了 `VM2API_DB_SECRET` 即 AES-256-GCM 加密；任何响应都不回传。
+- 凭证（私钥、口令、密码）存 `cluster_nodes`，设了 `TAPMODELS_DB_SECRET` 即 AES-256-GCM 加密；任何响应都不回传。
 - 编辑只接受 `label`、`host`、`port`、`username`、`auth_type`、`password`、`private_key`、`passphrase` 与 `expected_updated_at`。仅传改动字段；版本不匹配返回 `409 node_edit_conflict`，重新读取后再编辑。节点 ID、创建时间、主机指纹和跳板配置不可通过此接口修改。
 - 仅改名无需 SSH 连接，也不重连。SSH 配置保存时服务端会重新验证，不能以先前 probe 成功代替：先使用原指纹建立候选连接，验证成功再保存并接管原链路；失败保留原配置和连接。已有终端和转发连接可能在切换时断开，远端 VM 容器不会被重建。这里只修改控制面保存的连接配置，不修改远端 sshd、密码或 authorized_keys。
 - 省略凭证字段表示保留。切换认证方式必须提供新密码或新私钥，并清理旧方式的凭证；新私钥不继承旧私钥的口令，`passphrase: ""` 表示清空。空密码/空私钥不是“保持不变”，会校验失败；响应不返回凭证。
 - 已有 VM 的节点不能修改登录用户（`node_username_in_use`）。候选连接必须仍能访问现有 VM 容器、挂载目录及匹配的 UID/GID（否则 `node_runtime_mismatch`）；不用于将已有节点迁移到另一台 VPS。被其他节点用作跳板、正在安装 Docker、构建镜像、处理调度请求或有 `withVmLock` 操作（如 VM 重置）尚未完成时拒绝修改连接配置，仍可改名。主机密钥轮换、跳板拓扑修改和 VM 迁移不在此接口范围。
 - 直连通道：远程槽的 kernel / worker 请求默认在节点那一条 SSH 长连接里各开一个通道，长时间零碎流量会让这条连接的拥塞窗口卡在很低的值（实测约 17KB/s），突发的请求正文全部排队。`PUT /direct-link` 后控制面经 SSH 在节点上建 `kin-slot-gate`（宿主网络、只读挂载 `<root>/vms`、监听 `0.0.0.0:<port>`），之后每个槽连接是一条独立的 TLS 1.3 连接。gate 首次启动自签证书（`<root>/gate/tls/`），控制面经已固定主机密钥的 SSH 读取并固定其 SHA-256，指纹不符即不发令牌；每节点随机令牌加密存库，令牌与指纹任何响应都不回传。请求正文紧跟前言发出，不等 gate 应答。gate 只连 `<root>/vms/<vm>/run/{kernel,worker}.sock`，以 `O_PATH|O_NOFOLLOW` 打开，不跟随槽内植入的符号链接。连不上、证书不符或令牌被拒时该节点退回 SSH 30 秒，健康检查 ping 成功即恢复；Docker、终端、健康检查始终走 SSH。**节点防火墙应只对控制面出口 IP 放行该端口**（令牌之外的第二道门）。`direct_link.state`：`ok` 直连、`down` 已退回 SSH（`error` 为原因）、`pending` 尚未检查或尚未固定证书；`gate_error` 为节点端创建失败原因（如节点上还没有槽位镜像）。
-- 本机 Docker 桥：每个节点在 `<data>/cluster/<id>/docker.sock`（0600）监听，`docker -H unix://…/docker.sock ps` 直接操作远端 daemon。数据目录所在文件系统不支持 unix socket（如 WSL `/mnt/*`）时设 `VM2API_CLUSTER_SOCKET_DIR`。
+- 本机 Docker 桥：每个节点在 `<data>/cluster/<id>/docker.sock`（0600）监听，`docker -H unix://…/docker.sock ps` 直接操作远端 daemon。数据目录所在文件系统不支持 unix socket（如 WSL `/mnt/*`）时设 `TAPMODELS_CLUSTER_SOCKET_DIR`。
 
 ## 管理口（master）
 
 常用：`GET/PUT /admin/routing`、`GET /admin/vms`、`POST /admin/vms/probe-all`、`GET /admin/usage/summary`、`GET /admin/vm/oauth`、`POST /admin/vm/oauth/refresh`、`GET/PUT/DELETE /admin/intercept/rules`。`POST /admin/models/refresh` 只读本地策略目录、回完整目录，不 hop 槽位；`GET /v1/models` 同样不 hop，但按密钥 `group_type` 过滤。`GET/POST /admin/vm/claude-code/*` 返回 410。
+
+
+## 中转站运营接口（2026-10-20）
+
+控制台继续使用 /console/#/...（兼容 /cc/#/...）。admin 是站长，super 是运维，user 是 API 客户。前端以 /api/panel/me 的 views/capabilities 显示入口，后端独立校验角色、资源资格和字段。
+
+- /groups：站长商业分组 CRUD；用户只能读取获授权服务；/groups/:id/resources 供站长/运维配置 VM 或上游 API 资源（单组一种后端）。
+- PUT /vms/:id/groups：group_ids 多选，expected_version 必填；POST /vms/groups/batch 支持 add/remove/replace，全批事务。旧 /vms/:id/owner、/vm-pools 已退出。
+- /users/:id/groups：站长分组授权及替代倍率；/users/:id/balance：金额、add/subtract、原因和幂等键；/balance-history 查看资金流水。
+- /api-keys：客户 Key 必须绑定获授权分组；归属由服务端固定，VM/池参数不接受；启停、轮换、IP/CIDR、自限额和期限继续生效。
+- /billing：站长全站或按 user_id，用户固定本人；before + before_id 为资金流水游标。全站视图不再返回 balance/reserved/available 汇总或 pending 请求列表；用户详情与管理员域余额保留。/billing/ledger/:id/reverse 追加幂等冲正；/billing/requests/:id 人工对账接口已移除。充值原因可省略；管理员可从共享域钱包向同域任意普通用户转账。
+- /subscriptions：站长发放、暂停/恢复、撤销；客户查询本人；额度是 UTC 经过时间的滚动 24 小时/7 天/30 天。
+- /users/:id/balance、/users/:id/balance-history：管理员从本人可用余额向普通用户充值，并查询目标余额与流水；转账在同一事务内写入双边流水。
+- /usage-logs、汇总、筛选、/usage-logs/ranking?scope=user|key、统计与导出均以调用用户快照隔离。用户排行仅管理角色可用。排行有 5000 条上限并返回 capped，不冒充完整汇总。
+- 2026-10-31 已移除 /ops、/ops/audit、/ops/migration 三个接口；超级管理员访问返回 404。总览、统计与使用记录的现有接口保持。
+
+协议接口必须使用 API Key，不能用控制台会话免费调用。客户的 /v1/usage 返回本人资金和 Key 使用情况。IP 规则采用直接连接地址，不信任客户端自行填写的 X-Forwarded-For。
+
+计费状态与故障处置、旧数据保留依据见 [交付报告](RELAY_OPERATIONS_DELIVERY.md)。
+
+
+本轮控制台表单、模型默认值与代理交互的详细变更和验收见 [RELAY_OPERATIONS_FEEDBACK.md](RELAY_OPERATIONS_FEEDBACK.md)。账务 `/billing` 和余额历史响应提供 `user_name`；资金归属仍使用稳定 `user_id`，不改写旧账。
+
+
+## 分组专属设置、资源和客户端连接
+
+- `GET /groups`：返回 `capacity`（仅资源角色）和 `usage`（站长全组、普通用户本人；运维不返回资金）。今日/昨日按 Asia/Shanghai，累计取请求当时 `billing_group_id` 的已结算实际扣费。删除售卖价格投影，模型白名单仍为编辑/准入字段。
+- `GET /groups?available_to=<user_id>`：仅站长，列出该用户实际可访问分组和生效倍率，用于为用户创建 Key。
+- `GET /groups/:id/user-overrides`：仅站长，返回用户名、专属倍率与专属 RPM。
+- `PATCH /groups/:id/user-overrides/:user_id`：只更新请求中提供的 `rate_multiplier`、`rpm_limit`，null 清除该项专属值。0 倍率免费、0 RPM 不限制该层；不隐式授予分组权限，也不取消用户总 RPM。
+- `GET /api-endpoints`：上游地址带 `groups`、`groups_version`。`PUT /api-endpoints/:id/groups` 接受 `{group_ids,expected_version}`，站长和运维可用，沿用乐观锁和资源后端一致性检查。
+- `GET /api-keys/:id/connection`：仅站长或所属用户，返回公开 API 地址、平台、该 Key 的模型目录和 WebSocket 可用标记；不返回密钥。`POST /api-keys/:id/reveal` 仍是取回明文与审计的唯一入口。
+- Key `secret_status` 为 `available`、`hash_only` 或 `decrypt_failed`。哈希无法逆推明文；原 Key 成功通过哈希认证时可补回可恢复密文。解密失败不能冒称仅存哈希，不能自动轮换。
+- Docker 自动生成的管理员初始密码及 API/数据库加密密钥保存在数据目录 `runtime-secrets.json`（0600）。部署、备份及迁移须将该文件与数据库一起保护；显式环境变量优先。遗失的旧加密密钥不能由新文件重建。
+
+### API 地址的凭据边界
+
+运维（super）可以新建自带凭据的 API 地址、调整名称/模型/优先级/启停、维护分组关联及使用原连接获取模型。已有凭据的地址、协议、请求头、认证方案和代理变更仅限 admin；拒绝操作返回 403 `endpoint_connection_forbidden`。PATCH 的 `key_id` 必须属于目标端点。
+
+super 的端点响应不包含代理 URL、认证请求头或明文 Key，仅保留 `proxy_id`、`has_proxy` 和 `headers_configured` 等状态。`connection_editable=false` 时客户端应禁用连接配置并从 PATCH 中省略这些字段；省略表示保留，不能把脱敏展示值写回存储。两种获取模型入口都不能把隐藏凭据转发到调用方指定的新目标。
+
+
+### 管理员共享余额与资金权限（2026-10-29）
+
+- `GET /api/panel/users` 的管理员 `balance` 为域共享余额；增加 `shared_balance`、`can_credit`。管理员本人的账号仍通过既有个人入口查看，列表中的同域管理员显示同一余额。
+- `POST /api/panel/users/:id/balance`：超管可给管理员域注资；给普通用户充值必须验证 `parent_user_id` 等于操作者。管理员只能转入自己创建的用户，使用 `amount`、`reason`、`idempotency_key`；管理员不能通过 `operation=subtract` 扣回用户资金。
+- `GET /api/panel/users/:id/balance-history` 的管理员目标返回同域钱包全部流水；`wallet_domain_id` 表示共享钱包，`user_id` 保留原目标/操作身份。用户目标返回本人流水。
+- `GET /api/panel/billing`：管理员默认返回域钱包 `balance/available`，`self` 为同一钱包；域内用户流水仍按原权限列出。超管全站汇总只计每个域一次。普通用户仍只能看本人余额。
+- 资金流水增加 `can_reverse`，仅允许有资金权限的账号冲正可冲正流水；双边转账不提供单边冲正。服务端复核权限，不依赖前端隐藏按钮。
+- 超管无分组 Key 不进入商业钱包扣款；绑定分组的超管 Key 保留实际用量、定价和 Key 额度扣减，但不扣个人钱包。管理员、用户的 Key 按归属账号使用域钱包或个人钱包。
+
+- 普通管理员 `POST /api/panel/api-keys` 的所属账号固定为当前登录账号；省略 `user_id` 或传本人 ID 均可，传其他账号 ID 返回 403。`created_by_user_id` 同样由当前登录身份生成。超级管理员代建契约保持。
+
+## GPT/Codex 调度策略（2026-10-30）
+
+`GET/PUT /api/panel/routing` 的 `codex.scheduling` 支持 `strategy`、`affinity` 与 `smart_weights`；默认 Smart、preferred、系数 1/0.8/1/0.5/0/0。保存携带 `config_revision`，非法策略或系数返回 400。界面入口为设置 → OpenAI → 账号调度。字段、续写 409、单次派发预算及迁移边界见 [GPT/Codex 调度契约](cpr/05-codex-scheduling.md)。
+
+### 账号订阅资料刷新（2026-10-31）
+
+`POST /api/vendor/accounts/:id/profile/refresh` 和 `POST /api/admin/vendors/accounts/:id/profile/refresh` 共用账号资料刷新处理。供应商必须具有 `vendor.resource.manage` 且可写该账号，超级管理员通过原供应商范围解析；归档账号拒绝。成功响应为 `{ ok: true, data: { ok: true, updated_at } }`，不返回凭证或原始 profile。无 profile scope/凭证或并发换号时返回 409；资料查询失败返回 502，保持已有快照。
+
+仅 Claude 且实际授权 `user:profile` 的凭证可使用；通过既有槽内 worker/绑定出口读取，不增加推理或列表轮询请求。授权后、面板手动 OAuth 刷新及既有初装 profile 查询复用资料保存路径。账号列表的 `telemetry` 增加 `subscription_updated_at` 和 `can_refresh_profile`；`subscription_type`、`rate_limit_tier`、`billing_type` 继续仅保存观测到的资料，未知值不冒充套餐。订阅周期及支付工具没有已核实的授权字段，不采集、使用或展示；其他缺失资料同样省略，不显示“未获取”占位，不新增账单接口或卡片数据保存。

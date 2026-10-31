@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
+import { toUsageLogRow } from '../../src/lib/db/repos/usage-logs-view.mjs'
 import { codexBodyToAnthropicMessage } from '../../src/lib/protocol/codex-convert.mjs'
 import { estimateWindow } from '../../src/lib/admin/window-estimate.mjs'
 
@@ -185,6 +186,41 @@ test('billingStats reuses identical panel snapshots but separates account window
     assert.equal(computes, 4)
   } finally {
     db.close()
+  }
+})
+
+test('confirmed quota reset excludes previous spend immediately and preserves lifetime totals', () => {
+  const { db, repo, dir } = freshDb()
+  try {
+    const now = Date.now()
+    const cleared = new Date(now - 30000).toISOString()
+    seed(repo, [
+      {
+        account_id: 'acc-1',
+        vm_id: 'vm-a',
+        created_at: new Date(now - 60000).toISOString(),
+        total_cost: 8,
+        input_tokens: 800,
+      },
+      {
+        account_id: 'acc-1',
+        vm_id: 'vm-a',
+        created_at: new Date(now - 1000).toISOString(),
+        total_cost: 2,
+        input_tokens: 200,
+      },
+    ])
+    const window = { account_id: 'acc-1', vm_id: 'vm-a', reset_7d: new Date(now + 86400000).toISOString() }
+    assert.equal(repo.billingStats({ accountWindows: [window] }).accounts[0].window_7d_cost, 0.003)
+    window.cleared_windows = { '7d': cleared }
+    const after = repo.billingStats({ accountWindows: [window] }).accounts[0]
+    assert.equal(after.window_7d_cost, 0.0006)
+    assert.equal(after.window_7d_tokens, 200)
+    assert.equal(after.window_7d_start, cleared)
+    assert.ok(Math.abs(after.total_cost - 0.003) < 1e-12)
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -397,6 +433,7 @@ test('log coverage follows recorded prunes, not the oldest row or the current re
       coveredSince: repo.logCoverageStart(),
     })
     assert.equal(week.status, 'log_gap')
+    assert.equal(week.total_usd, null)
   } finally {
     db.close()
   }
@@ -477,6 +514,48 @@ test('unpricedModels lists unpriced rows', () => {
     assert.equal(rows.length, 1)
     assert.equal(rows[0].model, 'mystery')
     assert.equal(rows[0].requests, 2)
+  } finally {
+    db.close()
+  }
+})
+
+test('inbound device persists independently of rewritten session and is exposed in log detail', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    seed(repo, [
+      {
+        id: 'device-log',
+        user_id: 'u1',
+        api_key_id: 'k1',
+        inbound_device_id: 'caller-device',
+        session_id: 'caller-session',
+        outbound_session_id: 'rewritten-session',
+      },
+    ])
+    const names = { users: new Map(), keys: new Map(), accounts: new Map(), vms: new Map() }
+    const row = db.prepare("SELECT * FROM usage_logs WHERE id = 'device-log'").get()
+    assert.equal(row.inbound_device_id, 'caller-device')
+    assert.equal(row.outbound_session_id, 'rewritten-session')
+    assert.equal(toUsageLogRow(row, names).inboundDeviceId, 'caller-device')
+    seed(repo, [{ id: 'device-absent', user_id: 'u2', api_key_id: 'k2' }])
+    const absent = db.prepare("SELECT * FROM usage_logs WHERE id = 'device-absent'").get()
+    assert.equal(toUsageLogRow(absent, names).inboundDeviceId, null)
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('new request costs invalidate live billing snapshots before the TTL expires', () => {
+  const { db, repo } = freshDb()
+  try {
+    const first = repo.billingStats()
+    seed(repo, [{ account_id: 'acc-1', vm_id: 'vm-a', input_tokens: 100, output_tokens: 10, total_cost: 0.5 }])
+    const next = repo.billingStats()
+    assert.notEqual(next, first)
+    assert.equal(next.total.requests, 1)
+    assert.ok(next.total.total_cost > 0)
+    assert.equal(repo.billingStats(), next, 'unchanged data still reuses the aggregation')
   } finally {
     db.close()
   }

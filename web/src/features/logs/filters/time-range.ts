@@ -6,15 +6,13 @@
 import {
   addDays,
   differenceInCalendarDays,
-  endOfWeek,
   format,
   isValid,
   parse,
-  startOfWeek,
 } from 'date-fns'
 
-export type QuickPeriod = 'today' | 'yesterday' | 'last7days' | 'last30days'
-export type QuickTimePreset = 'today' | 'this-week'
+export type QuickPeriod =
+  'today' | 'yesterday' | 'last7days' | 'last30days' | 'thisMonth' | 'lastMonth'
 export type DateRangeStrings = { startDate?: string; endDate?: string }
 
 export const QUICK_PERIODS: QuickPeriod[] = [
@@ -22,6 +20,8 @@ export const QUICK_PERIODS: QuickPeriod[] = [
   'yesterday',
   'last7days',
   'last30days',
+  'thisMonth',
+  'lastMonth',
 ]
 
 const DATE_FMT = 'yyyy-MM-dd'
@@ -56,39 +56,6 @@ export function dateWithClockToTimestamp(
   return day.getTime()
 }
 
-export function getDateRangeForPeriod(
-  period: QuickPeriod,
-  now = new Date()
-): Required<DateRangeStrings> {
-  const today = formatDate(now)
-  switch (period) {
-    case 'yesterday': {
-      const y = formatDate(addDays(now, -1))
-      return { startDate: y, endDate: y }
-    }
-    case 'last7days':
-      return { startDate: formatDate(addDays(now, -6)), endDate: today }
-    case 'last30days':
-      return { startDate: formatDate(addDays(now, -29)), endDate: today }
-    default:
-      return { startDate: today, endDate: today }
-  }
-}
-
-export function detectQuickPeriod(
-  startDate: string | undefined,
-  endDate: string | undefined,
-  now = new Date()
-): QuickPeriod | null {
-  if (!startDate || !endDate) return null
-  for (const period of QUICK_PERIODS) {
-    const range = getDateRangeForPeriod(period, now)
-    if (range.startDate === startDate && range.endDate === endDate)
-      return period
-  }
-  return null
-}
-
 /** 按区间天数整体平移（上一周期 / 下一周期）。 */
 export function shiftDateRange(
   range: Required<DateRangeStrings>,
@@ -102,32 +69,4 @@ export function shiftDateRange(
     startDate: formatDate(addDays(start, delta)),
     endDate: formatDate(addDays(end, delta)),
   }
-}
-
-/** 今天 / 本周（周一 ~ 周日，含未来日）→ `[start 00:00:00, end 23:59:59 + 1s)`。 */
-export function getQuickTimeRange(
-  preset: QuickTimePreset,
-  now = new Date()
-): { startTime: number; endTime: number } {
-  const startDay =
-    preset === 'this-week' ? startOfWeek(now, { weekStartsOn: 1 }) : now
-  const endDay =
-    preset === 'this-week' ? endOfWeek(now, { weekStartsOn: 1 }) : now
-  const startTime = dateWithClockToTimestamp(formatDate(startDay), '00:00:00')
-  const endInclusive = dateWithClockToTimestamp(formatDate(endDay), '23:59:59')
-  return { startTime: startTime ?? 0, endTime: (endInclusive ?? 0) + 1000 }
-}
-
-export function detectQuickTimePreset(
-  startTime: number | undefined,
-  endTime: number | undefined,
-  now = new Date()
-): QuickTimePreset | null {
-  if (startTime == null || endTime == null) return null
-  for (const preset of ['today', 'this-week'] as const) {
-    const range = getQuickTimeRange(preset, now)
-    if (range.startTime === startTime && range.endTime === endTime)
-      return preset
-  }
-  return null
 }

@@ -8,6 +8,7 @@ import { kernelFaults } from '../../src/lib/transport/rust-kernel-client.mjs'
 import {
   createSlotBridgeHealer,
   diagnoseSlotServices,
+  powerOnSlot,
   recoverSlot,
   reviveDownSlots,
 } from '../../src/lib/vm/slot-recovery.mjs'
@@ -110,6 +111,62 @@ test('diagnosis reports an expired refresh-failed credential as such', async () 
   assert.equal(d.checks[1].code, 'credential_refresh_failed')
 })
 
+test('power on repairs a legacy proxy cooldown stored only as schedule_disabled_reason', async () => {
+  const vm = {
+    id: 'vm-legacy-proxy-off',
+    status: 'running',
+    schedulable: false,
+    schedule_manual: true,
+    schedule_disabled_reason: 'proxy_cooldown',
+    claude: CRED,
+    proxy: SOCKS,
+  }
+  const root = project([vm])
+  const started = await powerOnSlot({
+    projectRoot: root,
+    id: vm.id,
+    proxyPool: { ensureBoundToVm: () => SOCKS },
+    fillTimezone: async () => {},
+    by: 'recover_ok',
+    ops: {
+      startSlotReady: async () => ({ ok: true, runtime: {} }),
+    },
+  })
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`), 'utf8'))
+  assert.equal(started.ok, true)
+  assert.equal(saved.schedule_off, undefined)
+  assert.equal(saved.schedule_disabled_reason, null)
+  assert.equal(saved.schedulable, true)
+  assert.equal(saved.schedule_manual, false)
+})
+
+test('power on clears a proxy schedule hold before reporting the slot ready', async () => {
+  const vm = {
+    id: 'vm-proxy-hold',
+    status: 'running',
+    schedulable: false,
+    schedule_hold: { reason: 'proxy_cooldown', detail: { tag: 'px-a' } },
+    claude: CRED,
+    proxy: SOCKS,
+  }
+  const root = project([vm])
+  const started = await powerOnSlot({
+    projectRoot: root,
+    id: vm.id,
+    proxyPool: { ensureBoundToVm: () => SOCKS },
+    fillTimezone: async () => {},
+    by: 'recover_ok',
+    ops: {
+      startSlotReady: async () => ({ ok: true, runtime: {} }),
+    },
+  })
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`), 'utf8'))
+  assert.equal(started.ok, true)
+  assert.equal(saved.schedule_hold, undefined)
+  assert.equal(saved.schedule_disabled_reason, null)
+  assert.equal(saved.schedulable, true)
+})
+
 test('Codex kernel: idle only when nothing listens and no child is tracked; other failures stay errors', async () => {
   const vm = { id: 'vm-gpt', status: 'running', platform: 'openai', family: 'codex', proxy: SOCKS }
   const root = project([vm])
@@ -150,12 +207,21 @@ test('Codex kernel probe codes come from the real socket: missing, stale and hun
     (await diagnoseSlotServices(vm, { projectRoot: root, probes })).checks.find((c) => c.id === 'kernel')
 
   assert.equal((await kernel()).code, 'codex_kernel_idle', 'no socket file')
-  // A leftover path nobody listens on refuses the connection, like a socket a killed kernel left.
-  fs.writeFileSync(sock, '')
-  assert.equal((await kernel()).code, 'codex_kernel_idle', 'stale socket path')
+  // Preserve a real socket inode after its listener exits. An ordinary file reports
+  // different connect errors on Linux and macOS and does not model a stale socket.
+  const net = await import('node:net')
+  const stale = net.createServer()
+  await new Promise((resolve) => stale.listen(sock, resolve))
+  fs.renameSync(sock, sock + '.stale')
+  await new Promise((resolve) => stale.close(resolve))
+  fs.renameSync(sock + '.stale', sock)
+  assert.equal(
+    (await kernel()).code,
+    'codex_kernel_idle',
+    'stale socket without a tracked child is restarted on demand',
+  )
   fs.rmSync(sock)
 
-  const net = await import('node:net')
   const hung = net.createServer(() => {})
   await new Promise((resolve) => hung.listen(sock, resolve))
   try {
@@ -234,7 +300,7 @@ function leakyProbes() {
     cluster: () => ({
       slotBridgeStatus: () => ({
         link: { state: 'backoff', error: { code: 'ssh_closed', message: 'connect to 10.0.0.9 as root failed' } },
-        bridge: { alive: false, error: 'listen /var/lib/vm2api/cluster/node-a/docker.sock EACCES' },
+        bridge: { alive: false, error: 'listen /var/lib/tapmodels/cluster/node-a/docker.sock EACCES' },
         relays: null,
       }),
     }),
@@ -265,7 +331,14 @@ test('tenant diagnosis carries codes and numbers but no raw logs, paths, hosts o
   try {
     const d = await diagnoseSlotServices(vm, { projectRoot: root, probes: leakyProbes() })
     const body = JSON.stringify(d)
-    for (const leak of [...SECRETS, '/home/kincli', '/var/lib/vm2api', '10.0.0.9', 'permission denied', 'log_tail']) {
+    for (const leak of [
+      ...SECRETS,
+      '/home/kincli',
+      '/var/lib/tapmodels',
+      '10.0.0.9',
+      'permission denied',
+      'log_tail',
+    ]) {
       assert.equal(body.includes(leak), false, `tenant response leaks ${leak}`)
     }
     const by = Object.fromEntries(d.checks.map((c) => [c.id, c]))
@@ -498,6 +571,57 @@ test('boot revival starts only running-intent slots whose container is down', as
     { id: 'vm-gone', ok: false, code: 'proxy_required' },
   ])
   assert.deepEqual(events, ['hold:vm-exited', 'release:vm-exited', 'hold:vm-gone', 'release:vm-gone'])
+})
+
+test('boot restores running Codex kernels without rebooting containers or changing scheduling', async () => {
+  const restored = []
+  const { events, watchdog } = recorder()
+  const vms = [
+    { id: 'codex-live', platform: 'openai', status: 'running', schedulable: true },
+    { id: 'codex-manual', platform: 'openai', status: 'running', schedulable: false, schedule_manual: true },
+    { id: 'codex-off', platform: 'openai', status: 'stopped' },
+    { id: 'claude-live', platform: 'anthropic', status: 'running' },
+    { id: 'codex-node', platform: 'openai', status: 'running', node_id: 'node-a' },
+  ]
+  const before = structuredClone(vms)
+  const revived = await reviveDownSlots({
+    vms,
+    inspect: async () => ({ exists: true, running: true }),
+    linkReady: () => false,
+    powerOn: async () => assert.fail('a running slot must not be rebooted'),
+    restoreRuntime: async (id) => {
+      restored.push(id)
+      return { ok: true }
+    },
+    watchdog,
+    logger: quiet,
+  })
+  assert.deepEqual(restored, ['codex-live', 'codex-manual'])
+  assert.deepEqual(vms, before)
+  assert.deepEqual(
+    revived,
+    restored.map((id) => ({ id, ok: true, code: null })),
+  )
+  assert.deepEqual(events, ['hold:codex-live', 'release:codex-live', 'hold:codex-manual', 'release:codex-manual'])
+})
+
+test('one failed Codex restoration does not prevent the remaining running kernels from starting', async () => {
+  const { events, watchdog } = recorder()
+  const revived = await reviveDownSlots({
+    vms: ['broken', 'next'].map((id) => ({ id, platform: 'openai', status: 'running' })),
+    inspect: async () => ({ exists: true, running: true }),
+    restoreRuntime: async (id) => {
+      if (id === 'broken') throw Object.assign(new Error('kernel unavailable'), { code: 'bin_missing' })
+      return { ok: false, code: 'health_timeout' }
+    },
+    watchdog,
+    logger: quiet,
+  })
+  assert.deepEqual(revived, [
+    { id: 'broken', ok: false, code: 'bin_missing' },
+    { id: 'next', ok: false, code: 'health_timeout' },
+  ])
+  assert.deepEqual(events, ['hold:broken', 'release:broken', 'hold:next', 'release:next'])
 })
 
 test('bridge healer restarts a dead kin-egress once per interval and per proxy', async () => {

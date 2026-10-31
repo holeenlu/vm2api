@@ -3,10 +3,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { gzipSync, gunzipSync } from 'node:zlib'
 import { tryServeWebDist } from '../../src/lib/http/web-dist.mjs'
 
-function mockRes() {
+function mockRes(method = 'GET') {
   return {
+    req: { method },
     status: 0,
     headers: null,
     body: null,
@@ -20,8 +22,72 @@ function mockRes() {
   }
 }
 
+test('negotiates precompressed assets without changing MIME/cache policy or HEAD behavior', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-gzip-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const dist = path.join(root, 'web', 'dist')
+  fs.mkdirSync(path.join(dist, 'assets'), { recursive: true })
+  const body = 'console.log("panel");\n'.repeat(200)
+  fs.writeFileSync(path.join(dist, 'assets', 'app.js'), body)
+  fs.writeFileSync(path.join(dist, 'assets', 'app.js.gz'), gzipSync(body))
+  fs.writeFileSync(path.join(dist, 'index.html'), '<title>panel</title>')
+  const serve = (encoding, method = 'GET', pathname = '/assets/app.js') => {
+    const res = mockRes(method)
+    res.req.headers = { 'accept-encoding': encoding }
+    assert.equal(tryServeWebDist(res, root, pathname), true)
+    assert.equal(res.headers.vary, 'Accept-Encoding')
+    return res
+  }
+  for (const encoding of ['gzip', 'br, GZIP; q=0.5', '*;q=1', 'gzip, *;q=0']) {
+    const res = serve(encoding)
+    assert.equal(res.headers['content-encoding'], 'gzip')
+    assert.match(res.headers['content-type'], /javascript/)
+    assert.match(res.headers['cache-control'], /immutable/)
+    assert.equal(gunzipSync(res.body).toString(), body)
+    assert.ok(res.body.length < Buffer.byteLength(body))
+    const head = serve(encoding, 'HEAD')
+    assert.deepEqual(head.headers, res.headers)
+    assert.equal(head.body, undefined)
+  }
+  for (const encoding of [undefined, '', 'br', 'gzip;q=0', 'gzip;q=0, *;q=1', 'gzip;q=invalid']) {
+    const res = serve(encoding)
+    assert.equal(res.headers['content-encoding'], undefined)
+    assert.equal(res.body.toString(), body)
+  }
+  const html = serve('gzip', 'GET', '/console')
+  assert.equal(html.headers['content-encoding'], undefined)
+  assert.equal(html.headers['cache-control'], 'no-store')
+  assert.equal(html.body.toString(), '<title>panel</title>')
+})
+
+test('HEAD returns the same static headers as GET without reading file contents', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-head-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const dist = path.join(root, 'web', 'dist')
+  fs.mkdirSync(path.join(dist, 'assets'), { recursive: true })
+  fs.writeFileSync(path.join(dist, 'index.html'), '<!doctype html><title>ok</title>')
+  fs.writeFileSync(path.join(dist, 'assets', 'app.js'), 'console.log(1)')
+  const paths = ['/console', '/console/', '/cc', '/cc/', '/assets/app.js']
+  const gets = paths.map((entry) => {
+    const res = mockRes()
+    assert.equal(tryServeWebDist(res, root, entry), true)
+    return res
+  })
+  t.mock.method(fs, 'readFileSync', () => assert.fail('HEAD must not read file contents'))
+  for (const [index, entry] of paths.entries()) {
+    const res = mockRes('HEAD')
+    assert.equal(tryServeWebDist(res, root, entry), true)
+    assert.equal(res.status, gets[index].status)
+    assert.deepEqual(res.headers, gets[index].headers)
+    assert.equal(res.body, undefined)
+  }
+  for (const entry of ['/assets/missing.js', '/../package.json', '/cc%ZZ']) {
+    assert.equal(tryServeWebDist(mockRes('HEAD'), root, entry), false)
+  }
+})
+
 test('serves Vite index at /console and assets from web/dist', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-'))
   const dist = path.join(root, 'web', 'dist', 'assets')
   fs.mkdirSync(dist, { recursive: true })
   fs.writeFileSync(path.join(root, 'web', 'dist', 'index.html'), '<!doctype html><title>ok</title>')
@@ -40,7 +106,7 @@ test('serves Vite index at /console and assets from web/dist', () => {
 })
 
 test('caches hashed assets forever but never the index or unhashed files', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-cache-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-cache-'))
   const dist = path.join(root, 'web', 'dist')
   fs.mkdirSync(path.join(dist, 'assets'), { recursive: true })
   fs.mkdirSync(path.join(dist, 'model-icons'), { recursive: true })
@@ -62,7 +128,7 @@ test('caches hashed assets forever but never the index or unhashed files', () =>
 })
 
 test('rejects missing dist, traversal, and /health', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-empty-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-empty-'))
   assert.equal(tryServeWebDist(mockRes(), root, '/console'), false)
 
   fs.mkdirSync(path.join(root, 'web', 'dist'), { recursive: true })
@@ -72,7 +138,7 @@ test('rejects missing dist, traversal, and /health', () => {
 })
 
 test('serves the documented /cc entry as the console index', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-web-cc-'))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tapmodels-web-cc-'))
   fs.mkdirSync(path.join(root, 'web', 'dist'), { recursive: true })
   fs.writeFileSync(path.join(root, 'web', 'dist', 'index.html'), '<!doctype html><title>cc</title>')
   for (const entry of ['/cc', '/cc/', '/console', '/console/']) {

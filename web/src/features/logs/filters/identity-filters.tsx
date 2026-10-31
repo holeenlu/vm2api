@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import type { PanelRole } from '@/types/panel-auth'
 import type { UsageLogFilterOptions } from '@/types/panel-usage-logs'
+import { useTranslation } from 'react-i18next'
 import {
   Command,
   CommandEmpty,
@@ -11,18 +13,11 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { SearchSelect } from '@/components/search-select'
+import { canFilterLogUsers } from '../filter-policy'
 import { usageLogSessionSuggestionsQueryOptions } from '../queries'
 import type { LogsFilterState } from '../search'
-import { FilterCombobox } from './filter-combobox'
-
-const ALL = '__all__'
+import { OptionSelect } from './request-filters'
 
 function SessionIdInput({
   value,
@@ -31,6 +26,8 @@ function SessionIdInput({
   value: string | undefined
   onChange: (value: string | undefined) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const [open, setOpen] = useState(false)
   const [term, setTerm] = useState('')
   const draft = value ?? ''
@@ -48,8 +45,9 @@ function SessionIdInput({
     <Popover open={open && draft.trim().length >= 2} onOpenChange={setOpen}>
       <PopoverAnchor asChild>
         <Input
+          aria-label={translate('logs:sessionId')}
           value={draft}
-          placeholder='搜索 Session ID...'
+          placeholder={translate('logs:searchSessionId')}
           onFocus={() => setOpen(true)}
           onChange={(event) => {
             onChange(event.target.value.trim() || undefined)
@@ -66,10 +64,12 @@ function SessionIdInput({
           <CommandList className='max-h-[250px] overflow-y-auto'>
             {suggestions.isFetching && !suggestions.data ? (
               <div className='p-2 text-center text-sm text-muted-foreground'>
-                加载中...
+                {translate('logs:loading')}
               </div>
             ) : (
-              <CommandEmpty>未找到匹配的 Session ID</CommandEmpty>
+              <CommandEmpty>
+                {translate('logs:noMatchingSessions')}
+              </CommandEmpty>
             )}
             <CommandGroup>
               {(suggestions.data ?? []).map((id) => (
@@ -96,32 +96,35 @@ function SessionIdInput({
 }
 
 export function IdentityFilters({
-  isAdmin,
+  role,
   filters,
   options,
   optionsLoading,
   onChange,
 }: {
-  isAdmin: boolean
+  role: PanelRole | undefined
   filters: LogsFilterState
   options: UsageLogFilterOptions | undefined
   optionsLoading: boolean
   onChange: (filters: LogsFilterState) => void
 }) {
+  const { t: translate } = useTranslation('logs')
+
   const keys = (options?.keys ?? []).filter(
     (key) => !filters.userId || key.userId === filters.userId
   )
   return (
-    <div className='grid gap-4 sm:grid-cols-2'>
-      {isAdmin ? (
+    <>
+      {canFilterLogUsers(role, filters.scope) ? (
         <div className='space-y-2'>
-          <Label>用户</Label>
-          <FilterCombobox
+          <Label>{translate('logs:user')}</Label>
+          <SearchSelect
+            label={translate('logs:user')}
             value={filters.userId}
             options={options?.users ?? []}
-            allLabel='全部用户'
-            searchPlaceholder='搜索用户...'
-            emptyLabel='未找到匹配的用户'
+            allLabel={translate('logs:allUsers')}
+            searchPlaceholder={translate('logs:searchUsers')}
+            emptyLabel={translate('logs:noMatchingUsers')}
             loading={optionsLoading}
             onChange={(userId) =>
               onChange({ ...filters, userId, keyId: undefined })
@@ -130,50 +133,75 @@ export function IdentityFilters({
         </div>
       ) : null}
       <div className='space-y-2'>
-        <Label>API 密钥</Label>
-        <Select
-          value={filters.keyId ?? ALL}
-          disabled={optionsLoading}
-          onValueChange={(value) =>
-            onChange({ ...filters, keyId: value === ALL ? undefined : value })
-          }
-        >
-          <SelectTrigger className='w-full'>
-            <SelectValue
-              placeholder={optionsLoading ? '加载中...' : '全部密钥'}
-            />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL}>全部密钥</SelectItem>
-            {keys.map((key) => (
-              <SelectItem key={key.id} value={key.id}>
-                {key.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <Label>{translate('logs:apiKey')}</Label>
+        <SearchSelect
+          value={filters.keyId}
+          options={keys}
+          allLabel={translate('logs:allKeys')}
+          label={translate('logs:apiKey')}
+          searchPlaceholder={translate('logs:searchKeys')}
+          loading={optionsLoading}
+          onChange={(keyId) => onChange({ ...filters, keyId })}
+        />
       </div>
-      {isAdmin ? (
+      <OptionSelect
+        label={translate('logs:model')}
+        allLabel={translate('logs:allModels')}
+        value={filters.model}
+        values={(options?.models ?? []).filter((model) => model.trim())}
+        loading={optionsLoading}
+        onChange={(model) => onChange({ ...filters, model })}
+      />
+      <div className='space-y-2'>
+        <Label>{translate('logs:usageGroup')}</Label>
+        <SearchSelect
+          label={translate('logs:usageGroup')}
+          value={filters.groupId}
+          options={options?.groups ?? []}
+          allLabel={translate('logs:allGroups')}
+          searchPlaceholder={translate('logs:searchUsageGroup')}
+          loading={optionsLoading}
+          onChange={(groupId) => onChange({ ...filters, groupId })}
+        />
+      </div>
+      {role === 'super_admin' ? (
         <div className='space-y-2'>
-          <Label>供应商</Label>
-          <FilterCombobox
+          <Label>{translate('logs:upstreamAccount')}</Label>
+          <SearchSelect
+            label={translate('logs:upstreamAccount')}
+            value={filters.accountId}
+            options={options?.accounts ?? []}
+            allLabel={translate('logs:allAccounts')}
+            searchPlaceholder={translate('logs:searchAccounts')}
+            loading={optionsLoading}
+            onChange={(accountId) => onChange({ ...filters, accountId })}
+          />
+        </div>
+      ) : null}
+      {role === 'super_admin' ? (
+        <div className='space-y-2'>
+          <Label>{translate('logs:slot')}</Label>
+          <SearchSelect
+            label={translate('logs:slot')}
             value={filters.vmId}
             options={options?.vms ?? []}
-            allLabel='全部供应商'
-            searchPlaceholder='搜索供应商...'
-            emptyLabel='未找到匹配的供应商'
+            allLabel={translate('logs:allSlots')}
+            searchPlaceholder={translate('logs:searchSlots')}
+            emptyLabel={translate('logs:noMatchingProviders')}
             loading={optionsLoading}
             onChange={(vmId) => onChange({ ...filters, vmId })}
           />
         </div>
       ) : null}
-      <div className='space-y-2'>
-        <Label>Session ID</Label>
-        <SessionIdInput
-          value={filters.sessionId}
-          onChange={(sessionId) => onChange({ ...filters, sessionId })}
-        />
-      </div>
-    </div>
+      {role === 'super_admin' ? (
+        <div className='space-y-2'>
+          <Label>{translate('logs:sessionId')}</Label>
+          <SessionIdInput
+            value={filters.sessionId}
+            onChange={(sessionId) => onChange({ ...filters, sessionId })}
+          />
+        </div>
+      ) : null}
+    </>
   )
 }

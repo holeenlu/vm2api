@@ -58,6 +58,21 @@ function cacheControl(rel, ext) {
   return 'public, max-age=86400'
 }
 
+function acceptsGzip(header) {
+  const encodings = new Map(
+    String(header || '')
+      .toLowerCase()
+      .split(',')
+      .map((entry) => {
+        const [name, ...params] = entry.trim().split(';')
+        const quality = params.find((param) => param.trim().startsWith('q='))
+        const q = quality == null ? 1 : Number(quality.trim().slice(2))
+        return [name.trim(), Number.isFinite(q) && q > 0 && q <= 1]
+      }),
+  )
+  return encodings.get('gzip') ?? encodings.get('*') ?? false
+}
+
 export function tryServeWebDist(res, projectRoot, pathname) {
   const root = distRoot(projectRoot)
   try {
@@ -73,10 +88,13 @@ export function tryServeWebDist(res, projectRoot, pathname) {
   if (!file) return false
 
   const ext = path.extname(file).toLowerCase()
+  const compressed = acceptsGzip(res.req?.headers?.['accept-encoding']) ? safeFile(root, `${rel}.gz`) : ''
   res.writeHead(200, {
     'content-type': MIME[ext] || 'application/octet-stream',
     'cache-control': cacheControl(rel, ext),
+    vary: 'Accept-Encoding',
+    ...(compressed ? { 'content-encoding': 'gzip' } : {}),
   })
-  res.end(fs.readFileSync(file))
+  res.end(res.req?.method === 'HEAD' ? undefined : fs.readFileSync(compressed || file))
   return true
 }

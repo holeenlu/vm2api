@@ -8,7 +8,8 @@
  * may pass either name.
  */
 
-import { getDb } from '../database.mjs'
+import { getDb, withTransaction } from '../database.mjs'
+import { recordVendorUsage } from '../../vendor/vendor-usage.mjs'
 import { collectErrors, enrichLogRow, excludeErrorClassSql, ingressAuthSql } from '../../admin/error-class.mjs'
 import {
   costColumnsFromUsage,
@@ -45,11 +46,20 @@ function billingStatsCacheKey(accountWindows) {
       reset_5h: win?.reset_5h || null,
       reset_7d: win?.reset_7d || null,
       reset_7d_oi: win?.reset_7d_oi || null,
+      cleared_5h: win?.cleared_windows?.['5h'] || null,
+      cleared_7d: win?.cleared_windows?.['7d'] || null,
+      cleared_fable: win?.cleared_windows?.['7d_oi'] || null,
     }))
     .sort((a, b) =>
       `${a.account_id}\0${a.vm_id}`.localeCompare(`${b.account_id}\0${b.vm_id}`, 'en', { sensitivity: 'case' }),
     )
   return JSON.stringify(normalized)
+}
+
+function billingWindowSince(win, key, duration, fallback, now) {
+  const start = extraWindowSince(win?.[`reset_${key}`], duration, now) ?? Date.parse(fallback)
+  const cleared = Date.parse(win?.cleared_windows?.[key] || '')
+  return Number.isFinite(cleared) && cleared <= now ? Math.max(start, cleared) : start
 }
 
 // Preserve per-row prompt denominators when aligning account quota windows.
@@ -65,6 +75,7 @@ function sumCostBuckets(rows) {
 const SUMMARY_COLUMNS = [
   'id',
   'request_id',
+  'config_revision',
   'created_at',
   'log_mode',
   'method',
@@ -94,6 +105,7 @@ const SUMMARY_COLUMNS = [
   'cache_creation_1h_tokens',
   'requested_model',
   'upstream_model',
+  'response_model',
   'model_mismatch',
   'first_token_ms',
   'first_byte_ms',
@@ -127,6 +139,11 @@ const SUMMARY_COLUMNS = [
   'intercept',
   'jev_state',
   'vm_owner_user_id',
+  'billing_status',
+  'billing_group_id',
+  'subscription_id',
+  'api_key_name',
+  'source',
   'image_model',
   'image_usage',
   'image_input_tokens',
@@ -136,6 +153,8 @@ const SUMMARY_COLUMNS = [
 
 function toRow(rec) {
   return SUMMARY_COLUMNS.map((c) => {
+    if (c === 'billing_status') return rec[c] || 'unmetered'
+    if (c === 'source') return rec[c] || 'protocol'
     if (c === 'created_at') return rec.created_at ?? rec.ts ?? null
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
@@ -356,8 +375,12 @@ export class UsageLogsRepo {
   }
 
   insertSummary(rec) {
-    this._insert.run(...toRow(rec))
-    return rec
+    return withTransaction(this.db, () => {
+      this._insert.run(...toRow(rec))
+      recordVendorUsage(this.db, this._getByRequestId.get(rec.request_id || rec.id))
+      this._billingStatsCache.clear()
+      return rec
+    })
   }
 
   vmOwnerOf(vmId) {
@@ -367,7 +390,14 @@ export class UsageLogsRepo {
 
   /** INSERT OR IGNORE (legacy import path). @returns true when inserted */
   insertSummaryIfAbsent(rec) {
-    return this._insertIfAbsent.run(...toRow(rec)).changes > 0
+    return withTransaction(this.db, () => {
+      const inserted = this._insertIfAbsent.run(...toRow(rec)).changes > 0
+      if (inserted) {
+        recordVendorUsage(this.db, this._getByRequestId.get(rec.request_id || rec.id))
+        this._billingStatsCache.clear()
+      }
+      return inserted
+    })
   }
 
   insertDebug(requestId, ts, record) {
@@ -956,7 +986,7 @@ export class UsageLogsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost,
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost,
              COALESCE(SUM(duration_ms), 0) AS duration_ms_sum,
              SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) AS duration_n
       FROM usage_logs ${cond}
@@ -982,7 +1012,7 @@ export class UsageLogsRepo {
       SELECT ${expr} AS name,
              COUNT(*) AS requests,
              COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0) AS tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost
       FROM usage_logs ${cond}
       GROUP BY name ORDER BY requests DESC, total_cost DESC LIMIT ${limit}
     `)
@@ -1139,8 +1169,8 @@ export class UsageLogsRepo {
     const accounts = accountsTotal.map((a) => {
       const t = todayById.get(keyOf(a)) || emptyCostBucket()
       const win = aligned ? resolveAccountWindow(accountWindows, a) : null
-      const since5 = aligned ? (extraWindowSince(win?.reset_5h, WINDOW_5H_MS, now) ?? Date.parse(fiveHStart)) : null
-      const since7 = aligned ? (extraWindowSince(win?.reset_7d, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)) : null
+      const since5 = aligned ? billingWindowSince(win, '5h', WINDOW_5H_MS, fiveHStart, now) : null
+      const since7 = aligned ? billingWindowSince(win, '7d', WINDOW_7D_MS, sevenDStart, now) : null
       const w = aligned
         ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since5)
         : fiveById.get(keyOf(a)) || emptyCostBucket()
@@ -1148,8 +1178,8 @@ export class UsageLogsRepo {
         ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since7)
         : sevenById.get(keyOf(a)) || emptyCostBucket()
       let window_fable = null
-      if (aligned && win?.reset_7d_oi) {
-        const sinceFable = extraWindowSince(win.reset_7d_oi, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)
+      if (aligned && (win?.reset_7d_oi || win?.cleared_windows?.['7d_oi'])) {
+        const sinceFable = billingWindowSince(win, '7d_oi', WINDOW_7D_MS, sevenDStart, now)
         const fable = bucketEventsSince((eventsByKey.get(keyOf(a)) || []).filter(isFableRow), sinceFable)
         window_fable = {
           cost: Number(fable.total_cost || 0),

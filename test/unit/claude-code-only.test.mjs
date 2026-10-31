@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { isClaudeCodeFamilyRequest } from '../../src/lib/identity/claude-code-only.mjs'
+import { isClaudeCodeFamilyRequest, isClaudeDesktopConnectionProbe } from '../../src/lib/identity/claude-code-only.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
-import { handleUserCountTokens } from '../../src/lib/protocol/user-count-tokens.mjs'
+import { prepareCliHopBody, prepareOutboundEnvelope } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { validatePersonaRoutingPatch } from '../../src/lib/admin/panel-api.mjs'
 import {
   applyCrsUnofficialPersona,
@@ -14,7 +14,7 @@ const CLI_UA = 'claude-cli/2.1.293 (external, cli)'
 const SESSION = '11111111-2222-4333-8444-555555555555'
 const USER_ID = JSON.stringify({ device_id: 'd'.repeat(64), session_id: SESSION })
 const BILLING = 'x-anthropic-billing-header: cc_version=2.1.293.9; cc_entrypoint=cli; cch=ab;'
-// Header set a real 2.1.280 CLI sent on both /v1/messages and count_tokens.
+// Header set a real 2.1.280 CLI sent on /v1/messages.
 const CLI_HEADERS = {
   'user-agent': CLI_UA,
   'x-app': 'cli',
@@ -42,6 +42,12 @@ const THIRD_PARTY_BODY = {
   messages: [{ role: 'user', content: 'hi' }],
 }
 const ON = { compatibility: { claude_code_only: true } }
+// Claude Desktop 4.4212.0 GatewayProvider.probeInference (installed app.asar).
+const DESKTOP_PROBE = {
+  model: 'claude-haiku-4-5',
+  max_tokens: 1,
+  messages: [{ role: 'user', content: '.' }],
+}
 
 const NO_RELAY = { routing: { compatibility: { detect_proxied_official_cc: false } } }
 
@@ -94,17 +100,10 @@ test('local-agent still rejects incomplete headers, inconsistent sessions/builds
   ]) {
     const body = { ...DESKTOP_BODY, system: [...DESKTOP_BODY.system, { type: 'text', text }] }
     assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body), false, text)
-    assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body, { countTokens: true }), false, text)
     assert.equal(isOfficialClaudeCodeTraffic(DESKTOP_HEADERS, body), false, text)
   }
   const tools = [{ type: 'function', function: { name: 'read_file' } }]
   assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, { ...DESKTOP_BODY, tools }), false)
-})
-
-test('local-agent desktop count_tokens follows the existing header-only admission contract', () => {
-  const body = { model: DESKTOP_BODY.model, system: DESKTOP_BODY.system, messages: DESKTOP_BODY.messages }
-  assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body, { countTokens: true }), true)
-  assert.equal(isClaudeCodeFamilyRequest(DESKTOP_HEADERS, body), false)
 })
 
 test('Claude Code family recognition needs the full client fingerprint, not the UA', () => {
@@ -139,15 +138,9 @@ const QUOTA_PROBE = {
   metadata: { user_id: USER_ID },
 }
 
-test('Claude Code family recognition: bodiless calls need the header set, not just the UA', () => {
+test('Claude Code family recognition: quota probes need the header set, not just the UA', () => {
   assert.equal(isClaudeCodeFamilyRequest(CLI_HEADERS, QUOTA_PROBE), true)
   assert.equal(isClaudeCodeFamilyRequest({ 'user-agent': CLI_UA }, QUOTA_PROBE), false)
-
-  const count = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'hi' }] }
-  assert.equal(isClaudeCodeFamilyRequest(CLI_HEADERS, count, { countTokens: true }), true)
-  assert.equal(isClaudeCodeFamilyRequest({ 'user-agent': CLI_UA }, count, { countTokens: true }), false)
-  const ohMyPi = { ...count, system: 'x\ncc_entrypoint=local-agent\n' }
-  assert.equal(isClaudeCodeFamilyRequest(CLI_HEADERS, ohMyPi, { countTokens: true }), false)
 })
 
 test('Claude Code family recognition: max_tokens 1 is not a bypass for arbitrary bodies', () => {
@@ -168,7 +161,7 @@ test('Claude Code family recognition: max_tokens 1 is not a bypass for arbitrary
 
 const REACHED = new Error('reached-scheduler')
 
-function protocolHarness({ routing, body, healthMonitor }) {
+function protocolHarness({ routing, body, healthMonitor, onVmRequest, authAllowed = true, keyGate }) {
   const response = { headersSent: false, on() {}, once() {}, off() {}, write() {}, end() {} }
   const stats = { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 }
   const handler = createHandleProtocol({
@@ -179,7 +172,12 @@ function protocolHarness({ routing, body, healthMonitor }) {
     },
     writeSSEHeaders() {},
     readBody: async () => structuredClone(body),
-    requireAuth: () => true,
+    requireAuth: () => {
+      if (authAllowed) return true
+      response.status = 401
+      response.body = { error: { code: 'invalid_api_key' } }
+      return false
+    },
     cfg: {
       rewrite: { enabled: false },
       intercept: { rules: [] },
@@ -190,14 +188,19 @@ function protocolHarness({ routing, body, healthMonitor }) {
     requestLog: { start: () => ({ request_id: 'cc-only-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: {
+      canAccept: (record) => keyGate || { ok: true, record },
+      acquire: () => ({ ok: true }),
+      release() {},
+    },
     apiScheduler: {
       pick: () => {
         throw REACHED
       },
     },
     failoverRunner: {
-      run: async () => {
+      run: async (request) => {
+        onVmRequest?.(request)
         throw REACHED
       },
     },
@@ -218,8 +221,11 @@ async function runProtocol({
   healthMonitor,
   apiKeyKind = 'managed',
   apiKeyRecord = { category: 'api' },
+  onVmRequest,
+  authAllowed,
+  keyGate,
 }) {
-  const { handler, response } = protocolHarness({ routing, body, healthMonitor })
+  const { handler, response } = protocolHarness({ routing, body, healthMonitor, onVmRequest, authAllowed, keyGate })
   const req = {
     method: 'POST',
     url: '/v1/messages',
@@ -244,6 +250,85 @@ async function runProtocol({
 
 const AXIOS = { 'user-agent': 'axios/1.7' }
 const BLOCKED = { reached: false, status: 403, code: 'claude_code_only' }
+
+test('desktop connection probe admits only the exact fixed request, without claiming official identity', async () => {
+  assert.equal(isClaudeDesktopConnectionProbe(DESKTOP_PROBE), true)
+  assert.equal(isClaudeCodeFamilyRequest(AXIOS, DESKTOP_PROBE), false)
+  assert.equal(isOfficialClaudeCodeTraffic(AXIOS, DESKTOP_PROBE), false)
+  assert.equal((await runProtocol({ routing: ON, body: DESKTOP_PROBE, headers: AXIOS })).reached, true)
+  const variants = [
+    { ...DESKTOP_PROBE, max_tokens: 2 },
+    { ...DESKTOP_PROBE, max_tokens: '1' },
+    { ...DESKTOP_PROBE, messages: [{ role: 'user', content: 'write an essay' }] },
+    { ...DESKTOP_PROBE, messages: [{ role: 'assistant', content: '.' }] },
+    { ...DESKTOP_PROBE, messages: [{ role: 'user', content: [{ type: 'text', text: '.' }] }] },
+    { ...DESKTOP_PROBE, messages: [...DESKTOP_PROBE.messages, { role: 'user', content: 'more' }] },
+    { ...DESKTOP_PROBE, messages: [{ ...DESKTOP_PROBE.messages[0], extra: 'prompt' }] },
+    ...['system', 'tools', 'metadata', 'thinking', 'stream', 'instructions', 'input'].map((key) => ({
+      ...DESKTOP_PROBE,
+      [key]: key === 'stream' ? false : null,
+    })),
+  ]
+  for (const body of variants) {
+    assert.equal(isClaudeDesktopConnectionProbe(body), false, JSON.stringify(body))
+    assert.deepEqual(await runProtocol({ routing: ON, body, headers: AXIOS }), BLOCKED)
+  }
+  for (const protocol of ['openai.chat', 'openai.responses']) {
+    assert.deepEqual(await runProtocol({ routing: ON, body: DESKTOP_PROBE, headers: AXIOS, protocol }), BLOCKED)
+  }
+})
+
+test('desktop connection probe keeps authentication, key limits and group checks', async () => {
+  const request = { routing: ON, body: DESKTOP_PROBE, headers: AXIOS }
+  assert.deepEqual(await runProtocol({ ...request, authAllowed: false }), {
+    reached: false,
+    status: 401,
+    code: 'invalid_api_key',
+  })
+  assert.deepEqual(await runProtocol({ ...request, keyGate: { ok: false, status: 429, code: 'rpm_exceeded' } }), {
+    reached: false,
+    status: 429,
+    code: 'rpm_exceeded',
+  })
+  assert.deepEqual(await runProtocol({ ...request, apiKeyRecord: { category: 'api', group_id: 1 } }), {
+    reached: false,
+    status: 403,
+    code: 'model_forbidden',
+  })
+})
+
+test('desktop connection probe uses real inference with one token despite cache and output floor settings', async () => {
+  let canonical
+  const routing = { compatibility: { ...ON.compatibility, min_max_tokens: { enabled: true, value: 4096 } } }
+  const result = await runProtocol({
+    routing,
+    body: DESKTOP_PROBE,
+    headers: AXIOS,
+    apiKeyRecord: { category: 'oauth' },
+    healthMonitor: {
+      getConfig: () => ({ match: { prompts: ['.'], max_tokens: 32 } }),
+      decide: () => {
+        throw new Error('connection probe must not use health cache')
+      },
+    },
+    onVmRequest: (request) => {
+      canonical = request.canonicalBody
+    },
+  })
+  assert.equal(result.reached, true)
+  assert.equal(canonical.max_tokens, 1)
+  assert.equal(prepareCliHopBody(canonical, { routing }).max_tokens, 1)
+  assert.equal(
+    prepareOutboundEnvelope({
+      canonicalBody: canonical,
+      inbound: DESKTOP_PROBE,
+      identity: { deviceId: 'd'.repeat(64), sessionId: SESSION },
+      unofficial: true,
+      routing,
+    }).body.max_tokens,
+    1,
+  )
+})
 
 test('switch on: third-party Claude requests are 403 before any account is picked', async () => {
   assert.deepEqual(await runProtocol({ routing: ON, body: THIRD_PARTY_BODY, headers: AXIOS }), BLOCKED)
@@ -318,49 +403,6 @@ test('switch on: GPT models are never gated', async () => {
     protocol: 'openai.responses',
   }).catch(() => ({ code: null }))
   assert.notEqual(result.code, 'claude_code_only')
-})
-
-function countTokensDeps(routing, model) {
-  const seen = { peeked: 0 }
-  return {
-    seen,
-    deps: {
-      json: (_res, status, body) => {
-        seen.status = status
-        seen.body = body
-      },
-      requireAuth: () => true,
-      readBody: async () => ({ model, messages: [{ role: 'user', content: 'hi' }] }),
-      cfg: { limits: { max_body_bytes: 4096 } },
-      stickyRouter: { extractPoolKey: () => null },
-      getRoutingConfig: () => routing,
-      getPoolScheduler: () => ({
-        peekAccount: async () => {
-          seen.peeked++
-          return { ok: true, vmId: 'vm-01', accountId: 'a', vm: { credential_mode: 'setup-token' }, exec: {} }
-        },
-      }),
-      countTokensViaWorker: async () => ({ ok: true, status: 200, body: { input_tokens: 5 } }),
-    },
-  }
-}
-
-test('count_tokens: switch on blocks third-party Claude, admits the CLI and GPT models', async () => {
-  for (const headers of [AXIOS, { 'user-agent': CLI_UA }]) {
-    const third = countTokensDeps(ON, 'claude-sonnet-5')
-    await handleUserCountTokens({ headers }, {}, third.deps)
-    assert.equal(third.seen.status, 403)
-    assert.equal(third.seen.body.error.code, 'claude_code_only')
-    assert.equal(third.seen.peeked, 0)
-  }
-
-  const cli = countTokensDeps(ON, 'claude-sonnet-5')
-  await handleUserCountTokens({ headers: CLI_HEADERS }, {}, cli.deps)
-  assert.equal(cli.seen.status, 200)
-
-  const gpt = countTokensDeps(ON, 'gpt-5.5')
-  await handleUserCountTokens({ headers: AXIOS }, {}, gpt.deps)
-  assert.equal(gpt.seen.peeked, 1)
 })
 
 test('routing patch rejects a non-boolean claude_code_only', () => {

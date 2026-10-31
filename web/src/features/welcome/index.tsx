@@ -1,32 +1,27 @@
 /**
- * Public console landing. Layout and palette follow the newapi web/default
- * home page (floating header, gradient hero with API demo, bento features,
- * three steps, CTA); tokens are scoped by `.welcome-theme` so the console
- * keeps its own theme. After sign-in the live setup checklist sits under the hero.
+ * Public TapModels marketing landing page. The authenticated setup checklist
+ * remains available below the public content after sign-in.
  */
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearch } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
+import { useBranding } from '@/context/branding-provider'
 import { meQueryOptions } from '@/features/auth/queries'
-import { WelcomeCapabilities } from './capabilities'
 import { WelcomeChecklist } from './checklist'
-import { WelcomeClientSnippets } from './client-snippets'
-import { WelcomeCta, WelcomeFooter } from './cta'
-import { WelcomeHero } from './hero'
+import { MarketingHome } from './marketing-home'
 import { WelcomeModuleGuide } from './module-guide'
 import { onboardingQueryOptions } from './queries'
-import { WelcomeQuickStart } from './quick-start'
 import { scrollToSection } from './scroll'
-import { WelcomeStats } from './stats'
-import { WelcomeTopBar } from './top-bar'
 import { WelcomeUsageMode } from './usage-mode'
 
 export function WelcomePage() {
   const search = useSearch({ from: '/welcome' })
   const token = useAuthStore((s) => s.token)
-  const username = useAuthStore((s) => s.user)
   const signedIn = Boolean(token)
+  const brand = useBranding()
+  const { t } = useTranslation('welcome')
 
   const onboarding = useQuery(onboardingQueryOptions(signedIn))
   const me = useQuery(meQueryOptions(signedIn))
@@ -43,13 +38,12 @@ export function WelcomePage() {
     (onboarding.data?.base_url || '').replace(/\/$/, '') || location.origin
 
   return (
-    <div className='welcome-theme min-h-svh overflow-x-hidden bg-background text-foreground'>
-      <WelcomeTopBar signedIn={signedIn} username={username} />
+    <div className='min-h-svh bg-background text-foreground'>
       <main>
-        <WelcomeHero signedIn={signedIn} baseUrl={base} />
+        <MarketingHome signedIn={signedIn} baseUrl={base} />
         {signedIn && onboarding.data ? (
           <>
-            {me.data?.role === 'admin' ? (
+            {me.data?.role === 'super_admin' ? (
               <WelcomeUsageMode profile={onboarding.data.profile ?? null} />
             ) : null}
             <WelcomeChecklist
@@ -59,13 +53,10 @@ export function WelcomePage() {
             <WelcomeModuleGuide views={me.data?.views} />
           </>
         ) : null}
-        <WelcomeStats />
-        <WelcomeCapabilities />
-        <WelcomeQuickStart />
-        <WelcomeClientSnippets baseUrl={base} />
-        <WelcomeCta signedIn={signedIn} />
       </main>
-      <WelcomeFooter />
+      <footer className='border-t bg-background px-4 py-6 text-center text-xs text-muted-foreground sm:px-6'>
+        © 2026 {brand.name}. {t('welcome:marketingFooter')}
+      </footer>
     </div>
   )
 }

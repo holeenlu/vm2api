@@ -7,8 +7,8 @@ import {
 } from '../../src/lib/vm/local-proxy-nodes.mjs'
 
 test('canRevealClusterNodes is admin/super only', () => {
-  assert.equal(canRevealClusterNodes('admin'), true)
-  assert.equal(canRevealClusterNodes('super'), true)
+  assert.equal(canRevealClusterNodes('super_admin'), true)
+  assert.equal(canRevealClusterNodes('admin'), false)
   assert.equal(canRevealClusterNodes('user'), false)
   assert.equal(canRevealClusterNodes(undefined), false)
 })
@@ -59,14 +59,14 @@ test('annotatePublicLocalProxy redacts node names and other tenants for user', (
 
 test('localProxyNodeFields omits node_name for tenants', () => {
   const nodes = [{ id: 'node-a', label: '东京-01' }]
-  assert.deepEqual(localProxyNodeFields({ node_id: 'node-a' }, { role: 'admin', nodes }), {
+  assert.deepEqual(localProxyNodeFields({ node_id: 'node-a' }, { role: 'super_admin', nodes }), {
     node_id: 'node-a',
     node_name: '东京-01',
   })
   assert.deepEqual(localProxyNodeFields({ node_id: 'node-a' }, { role: 'user', nodes }), {
     node_id: 'node-a',
   })
-  assert.deepEqual(localProxyNodeFields({}, { role: 'admin', nodes }), {
+  assert.deepEqual(localProxyNodeFields({}, { role: 'super_admin', nodes }), {
     node_id: null,
     node_name: null,
   })
