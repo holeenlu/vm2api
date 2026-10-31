@@ -1,5 +1,7 @@
 import { Link } from '@tanstack/react-router'
+import { t } from '@/i18n'
 import { Menu } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,6 +21,7 @@ type TopNavProps = React.HTMLAttributes<HTMLElement> & {
 }
 
 export function TopNav({ className, links, ...props }: TopNavProps) {
+  useTranslation('common')
   return (
     <>
       <DropdownMenu modal={false}>
@@ -29,7 +32,7 @@ export function TopNav({ className, links, ...props }: TopNavProps) {
             className={cn('md:size-7 lg:hidden', className)}
           >
             <Menu />
-            <span className='sr-only'>Toggle navigation menu</span>
+            <span className='sr-only'>{t('common:toggleNavigation')}</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent side='bottom' align='start'>

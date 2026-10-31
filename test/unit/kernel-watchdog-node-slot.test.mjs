@@ -19,7 +19,7 @@ test('node slot is probed on its relay even when the record lost the runtime soc
   assert.equal(probed.runtime.worker_socket, '/relay/node-a/slots/slot-a1/worker.sock')
   assert.equal(probed.runtime.type, 'docker')
   assert.equal(vm.runtime.kernel_socket, undefined, 'the listed record is not mutated')
-  const local = { id: 'slot-local', runtime: { kernel_socket: '/opt/vm2api/vms/slot-local/run/kernel.sock' } }
+  const local = { id: 'slot-local', runtime: { kernel_socket: '/opt/tapmodels/vms/slot-local/run/kernel.sock' } }
   assert.equal(watchdogProbeVm(local, { relayPaths: RELAY, exists: () => false }), local)
 })
 
@@ -38,11 +38,11 @@ test('a running node slot without a relay is never restarted because a local pat
   let now = 0
   const wd = createKernelWatchdog({
     listTargets: () => [{ id: 'slot-b1', node_id: 'node-b', status: 'running', runtime: { type: 'docker' } }],
-    homeDirFor: (vm) => `/opt/vm2api/vms/${vm.id}/cli-home`,
+    homeDirFor: (vm) => `/opt/tapmodels/vms/${vm.id}/cli-home`,
     probeVm: (vm) => watchdogProbeVm(vm, { relayPaths: RELAY, exists: () => false }),
     health: async (exec) => {
       probed.push(exec.vm.runtime?.kernel_socket)
-      return { ok: false, error: 'connect ENOENT /opt/vm2api/vms/slot-b1/run/kernel.sock' }
+      return { ok: false, error: 'connect ENOENT /opt/tapmodels/vms/slot-b1/run/kernel.sock' }
     },
     observeRuntime: async () => ({ state: 'running' }),
     ensure: async (exec) => {
@@ -66,7 +66,7 @@ test('a node slot that answers on its relay is left alone', async () => {
   let now = 0
   const wd = createKernelWatchdog({
     listTargets: () => [{ id: 'slot-b2', node_id: 'node-b', status: 'running', runtime: { type: 'docker' } }],
-    homeDirFor: (vm) => `/opt/vm2api/vms/${vm.id}/cli-home`,
+    homeDirFor: (vm) => `/opt/tapmodels/vms/${vm.id}/cli-home`,
     probeVm: (vm) => watchdogProbeVm(vm, { relayPaths: RELAY, exists: () => true }),
     health: async (exec) => {
       sockets.push(exec.vm.runtime.kernel_socket)
@@ -95,7 +95,7 @@ test('a genuinely dead remote kernel behind a live relay keeps the bounded L4/L5
   const wd = createKernelWatchdog({
     config: { restart_backoff_sec: [60, 300, 900], restart_window_sec: 3600 },
     listTargets: () => [{ id: 'slot-a1', node_id: 'node-a', status: 'running', runtime: { type: 'docker' } }],
-    homeDirFor: (vm) => `/opt/vm2api/vms/${vm.id}/cli-home`,
+    homeDirFor: (vm) => `/opt/tapmodels/vms/${vm.id}/cli-home`,
     probeVm: (vm) => watchdogProbeVm(vm, { relayPaths: RELAY, exists: () => true }),
     health: async () => null,
     observeRuntime: async () => ({ state: 'running' }),
@@ -123,7 +123,7 @@ test('a dead remote kernel whose node link is down is not restarted', async () =
   let now = 0
   const wd = createKernelWatchdog({
     listTargets: () => [{ id: 'slot-a2', node_id: 'node-a', status: 'running', runtime: { type: 'docker' } }],
-    homeDirFor: (vm) => `/opt/vm2api/vms/${vm.id}/cli-home`,
+    homeDirFor: (vm) => `/opt/tapmodels/vms/${vm.id}/cli-home`,
     probeVm: (vm) => watchdogProbeVm(vm, { relayPaths: RELAY, exists: () => true }),
     health: async () => null,
     observeRuntime: async () => ({ state: 'unknown' }),
@@ -147,7 +147,7 @@ test('a node slot gets a relay-sized health timeout; a local slot keeps 800ms', 
       { id: 'slot-a1', node_id: 'node-a', status: 'running', runtime: { type: 'docker' } },
       { id: 'slot-local', status: 'running', runtime: { type: 'docker', kernel_socket: '/k.sock' } },
     ],
-    homeDirFor: (vm) => `/opt/vm2api/vms/${vm.id}/cli-home`,
+    homeDirFor: (vm) => `/opt/tapmodels/vms/${vm.id}/cli-home`,
     probeVm: (vm) => (vm.node_id ? watchdogProbeVm(vm, { relayPaths: RELAY, exists: () => true }) : vm),
     health: async (exec, opts) => {
       timeouts[exec.vmId] = opts.timeoutMs

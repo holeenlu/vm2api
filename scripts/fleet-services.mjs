@@ -12,23 +12,39 @@
  */
 import fs from 'node:fs/promises'
 import http from 'node:http'
+import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
-const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api').replace(/\/+$/, '')
-const concurrency = Number(process.argv[3] || 4)
+const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/tapmodels').replace(/\/+$/, '')
+const concurrency = Number(process.argv[3] || process.env.KIN_FLEET_CONCURRENCY || 6)
 const port = String(process.env.PORT || '8787')
 const base = String(process.env.KIN_AUTO_SYNC_BASE || `http://127.0.0.1:${port}`).replace(/\/+$/, '')
-const envKey = String(process.env.VM2API_API_KEY || process.env.KIN_API_KEY || '').trim()
+const envKey = String(process.env.TAPMODELS_API_KEY || process.env.KIN_API_KEY || '').trim()
 const linkWaitMs = Number(process.env.KIN_FLEET_LINK_WAIT_MS || 120_000)
 const pollMs = Number(process.env.KIN_FLEET_POLL_MS || 2_000)
 // Node image builds stream the payload over SSH; fetch would give up after undici's 300 s header timeout.
 const SYNC_TIMEOUT_MS = 30 * 60_000
+const statusFile = path.join(root, '.tapmodels-upgrade-status')
+
+async function writeStatus(phase, progress, message) {
+  const tmp = `${statusFile}.tmp.${process.pid}`
+  try {
+    await fs.writeFile(
+      tmp,
+      `phase=${phase}\nprogress=${progress}\nmessage=${message}\nupdated_at=${new Date().toISOString()}\n`,
+      'utf8',
+    )
+    await fs.rename(tmp, statusFile)
+  } catch {
+    await fs.rm(tmp, { force: true }).catch(() => undefined)
+  }
+}
 
 async function apiKey() {
   if (envKey) return envKey
   try {
     const text = await fs.readFile(`${root}/.env`, 'utf8')
-    const line = text.split(/\r?\n/).find((entry) => /^(?:VM2API_API_KEY|KIN_API_KEY)=/.test(entry))
+    const line = text.split(/\r?\n/).find((entry) => /^(?:TAPMODELS_API_KEY|KIN_API_KEY)=/.test(entry))
     return line
       ? line
           .slice(line.indexOf('=') + 1)
@@ -140,18 +156,41 @@ if (!key) {
 }
 
 try {
+  await writeStatus('waiting_links', 83, '正在等待集群节点连接恢复')
   const nodeIds = await slotNodeIds(key)
   if (nodeIds.length) {
     const offline = await waitNodeLinks(key, nodeIds)
     // Slots on these nodes fail below with node_not_ready; the rest still update.
     if (offline.length) console.warn(`[fleet-services] node link not ready: ${offline.join(', ')}`)
   }
-  const kernels = summarizeKernelSync(
-    dataOf(
-      '/api/panel/wrap-cli/sync',
-      await call(key, 'POST', '/api/panel/wrap-cli/sync', { restart: true }, SYNC_TIMEOUT_MS),
-    ),
-  )
+  await writeStatus('checking_payload', 86, '正在检查 kernel 和 CLI 是否需要同步')
+  const inspectionResponse = await call(key, 'POST', '/api/panel/wrap-cli/sync', { restart: false }, SYNC_TIMEOUT_MS)
+  let kernels
+  if (inspectionResponse.status >= 200 && inspectionResponse.status < 300 && inspectionResponse.json?.ok !== false) {
+    const inspection = dataOf('/api/panel/wrap-cli/sync', inspectionResponse)
+    if (inspection.changed_count === 0) {
+      kernels = { ...summarizeKernelSync(inspection), skipped: true, reason: 'unchanged' }
+      await writeStatus('telemetry', 90, 'kernel 和 CLI 未变化，跳过槽位重启，正在同步必要遥测')
+    } else {
+      await writeStatus('syncing_payload', 88, '检测到资源变化，正在同步 kernel 和 CLI')
+      kernels = summarizeKernelSync(
+        dataOf(
+          '/api/panel/wrap-cli/sync',
+          await call(key, 'POST', '/api/panel/wrap-cli/sync', { restart: true }, SYNC_TIMEOUT_MS),
+        ),
+      )
+    }
+  } else {
+    // A failed read-only check is inconclusive; preserve the safe full-sync path.
+    await writeStatus('syncing_payload', 88, '资源检查失败，正在执行完整槽位同步')
+    kernels = summarizeKernelSync(
+      dataOf(
+        '/api/panel/wrap-cli/sync',
+        await call(key, 'POST', '/api/panel/wrap-cli/sync', { restart: true }, SYNC_TIMEOUT_MS),
+      ),
+    )
+  }
+  await writeStatus('telemetry', 92, `正在并发同步槽位遥测（并发 ${concurrency}）`)
   const report = dataOf(
     '/api/panel/vms/fleet-update',
     await call(key, 'POST', '/api/panel/vms/fleet-update', { action: 'telemetry', concurrency }, SYNC_TIMEOUT_MS),
@@ -165,6 +204,7 @@ try {
     }
   }
   if (!kernels.ok || report.failed_count) process.exit(1)
+  await writeStatus('completed', 98, '槽位资源和遥测同步完成')
 } catch (error) {
   console.error(`[fleet-services] ${error?.message || error}`)
   process.exit(1)

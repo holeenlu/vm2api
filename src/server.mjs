@@ -1,5 +1,7 @@
+import { RelayBilling } from './lib/admin/relay-billing.mjs'
+import { migrateRelayScopes } from './lib/admin/relay-migration.mjs'
 /**
- * vm2api — Node control plane.
+ * tapmodels — Node control plane.
  * Inference data plane: one long-lived Go slot worker per VM
  * (slot SOCKS5 + OAuth owner + SSE terminal validation).
  * The gateway converts protocols, schedules the account pool with bounded
@@ -22,6 +24,8 @@ import {
 } from './lib/core/security.mjs'
 import { loadModelPolicy } from './lib/protocol/model-policy.mjs'
 import { gatewayModelCatalog } from './lib/protocol/models.mjs'
+import { keyModelCatalog } from './lib/protocol/key-models.mjs'
+import { codexModelCatalog } from './lib/protocol/codex-catalog.mjs'
 import {
   createCredentialRefreshMonitor,
   normalizeCredentialRefreshConfig,
@@ -29,6 +33,7 @@ import {
 import { createKernelWatchdog, normalizeKernelWatchdogConfig } from './lib/transport/kernel-watchdog.mjs'
 import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
+import { createVendorVmProvisioner } from './lib/vendor/vendor-vm-provisioner.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
 import { createUsageProbeMonitor, normalizeUsageProbeConfig } from './lib/oauth/usage-probe-monitor.mjs'
@@ -44,7 +49,7 @@ import { StickyRouter } from './lib/pool/sticky-router.mjs'
 import { AccountQuota } from './lib/pool/account-quota.mjs'
 import { normalizeTiers } from './lib/pool/quota-tiers.mjs'
 import { ApiKeyStore } from './lib/admin/api-keys.mjs'
-import { keyScopeFromRequest } from './lib/admin/key-scope.mjs'
+import { keyScopeFromRequest, groupScopeDenial } from './lib/admin/key-scope.mjs'
 import { GroupsRepo } from './lib/db/repos/groups-repo.mjs'
 import { SettingsRepo } from './lib/db/repos/settings-repo.mjs'
 import { ApiEndpointStore } from './lib/admin/api-endpoints.mjs'
@@ -55,6 +60,7 @@ import { PanelUserStore } from './lib/admin/panel-users.mjs'
 import { RequestLogStore } from './lib/admin/request-log.mjs'
 import {
   bindVmProxy,
+  vmHasSchedulableCredential,
   listVms,
   getVm,
   getActiveVmId,
@@ -68,6 +74,7 @@ import { HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
+import { ensureSlotInferenceRuntime, reloadSlotReady } from './lib/vm/slot-runtime.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
@@ -99,10 +106,11 @@ import { createRespond, parseRequestUrl } from './lib/http/respond.mjs'
 import { corsHeadersForRequest } from './lib/http/cors.mjs'
 import { isConsoleEntry, tryServeWebDist } from './lib/http/web-dist.mjs'
 import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
+import { createRuntimeSnapshot } from './lib/core/runtime-snapshot.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
-import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
+import { handleUserUsage } from './lib/protocol/user-usage.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
 
 const FEATURES = [
@@ -124,15 +132,15 @@ const LIMITATIONS = {
   claude_session: 'sticky commits only after a terminally verified response',
   kernel: 'one Docker container and one long-lived Go worker per slot; not a KVM guest',
   workspace: 'client only; VM/Claude-CLI inference has been removed',
-  forward: 'Rust kernel uses slot egress (SOCKS5 or local) with no Go hop',
-  oauth: 'the Go slot worker Refresher.Ensure is the sole refresh manager and uses the same slot SOCKS5',
+  forward: 'Rust kernel uses slot egress (configured proxy or local) with no Go hop',
+  oauth: 'the Go slot worker Refresher.Ensure is the sole refresh manager and uses the same slot proxy',
   realtime_stream:
     'account failover stops after the first downstream business event; verified mode buffers to message_stop',
 }
 
 const cfg = loadConfig()
 if (!getPanelAdmin().password) {
-  throw new Error('VM2API_ADMIN_PASSWORD must be set; insecure default panel credentials are disabled')
+  throw new Error('TAPMODELS_ADMIN_PASSWORD must be set; insecure default panel credentials are disabled')
 }
 fs.mkdirSync(cfg.paths.captures, { recursive: true })
 
@@ -164,10 +172,6 @@ if (vmSync.upserted || vmSync.rebuilt) {
 if (vmSync.proxy_cli_repaired) {
   console.log(`[vm] repaired proxy_cli_enabled on ${vmSync.proxy_cli_repaired} slot(s)`)
 }
-if (vmSync.reclaimed_vm_ids.length) {
-  console.log(`[vm] reclaimed ${vmSync.reclaimed_vm_ids.length} slot(s) assigned to deleted users`)
-}
-
 // --- P3 sticky + quota ---
 
 const routingConfigPath = routingConfigFile(cfg.paths.project)
@@ -180,6 +184,7 @@ let catalogMonitor = null
 let notifyMonitor = null
 
 let routingConfig = {}
+let runtimeSnapshot = null
 
 let stickyRouter
 let accountQuota
@@ -202,6 +207,12 @@ const routingRt = createRoutingRuntime({
   setRoutingConfig: (v) => {
     routingConfig = v
   },
+  get runtimeSnapshot() {
+    return runtimeSnapshot
+  },
+  getConfigRevision: () => new SettingsRepo().getConfigRevision(),
+  advanceConfigRevision: (expectedRevision) => new SettingsRepo().advanceConfigRevision(expectedRevision),
+  publishRuntimeSnapshot: (nextRouting, revision) => runtimeSnapshot?.publish(nextRouting, revision),
   cfg,
   routingConfigPath,
   get requestLog() {
@@ -278,6 +289,7 @@ const {
   inheritVmScheduling,
   applyVmQuotaOverride,
   migrateLegacyOpenAIPolicies,
+  reloadAccountErrorProtection,
 } = routingRt
 
 routingConfig = loadRoutingConfig()
@@ -290,6 +302,10 @@ routingConfig.usage_probe = normalizeUsageProbeConfig(routingConfig.usage_probe)
 routingConfig.notify = normalizeNotifyConfig(routingConfig.notify)
 routingConfig.tiers = normalizeTiers(routingConfig.tiers, routingConfig.quota, routingConfig.concurrency)
 syncTierDefaultsIntoRouting()
+runtimeSnapshot = createRuntimeSnapshot({
+  routingConfig,
+  configRevision: new SettingsRepo().getConfigRevision(),
+})
 stickyRouter = new StickyRouter({ dataDir, config: routingConfig })
 accountQuota = new AccountQuota({
   dataDir,
@@ -316,9 +332,13 @@ try {
 } catch (e) {
   console.warn('[panel-users] bootstrap failed', e?.message || e)
 }
+migrateRelayScopes(apiKeyStore.db, listVms(cfg.paths.project), apiEndpointStore.listRaw())
 attachPanelAuth({
   authenticate: (username, password) => panelUsers.authenticate(username, password),
-  lookupRole: (username) => panelUsers.getByUsername(username)?.role || null,
+  lookupRole: (username) => {
+    const user = panelUsers.getByUsername(username)
+    return user?.enabled ? user.role : null
+  },
 })
 requestLog = new RequestLogStore({
   dataDir: cfg.paths.data,
@@ -364,6 +384,20 @@ proxyPool = new ProxyPool({
   },
   onDisconnectVm: (vmId, reason, proxyId) => {
     setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
+  },
+  onRebindVm: async (vmId, proxy) => {
+    const vm = getVm(cfg.paths.project, vmId)
+    if (!vm || !proxy) throw new Error('proxy_expiry_vm_missing')
+    const hold = 'proxy_expiry_rebind'
+    setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: hold })
+    bindVmProxy(cfg.paths.project, vmId, proxy)
+    if (process.env.KIN_CRS_MOCK !== '1' && ['running', 'paused'].includes(vm.status)) {
+      const reloaded = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
+        routing: routingConfig,
+      })
+      if (!reloaded.ok) throw new Error('proxy_expiry_reload_failed')
+    }
+    clearScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: hold })
   },
   // Lifts only the hold this proxy put on the slot (受限); 调度关 / 不可调度 stay.
   onEnableVm: (vmId, _reason, proxyId) => {
@@ -532,7 +566,8 @@ usageProbeMonitor = createUsageProbeMonitor({
       poolScheduler.syncQuotaSchedule(vm, account)
     } catch {}
   },
-  probeOne: (vm) => panel.buildProbeOne({ cfg, accountQuota, id: vm.id, routingConfig }),
+  probeOne: (vm, { readOnly = false } = {}) =>
+    panel.buildProbeOne({ cfg, accountQuota, id: vm.id, routingConfig, probeEntitlement: !readOnly }),
 })
 catalogMonitor = createCatalogMonitor({
   projectRoot: cfg.paths.project,
@@ -568,6 +603,7 @@ backupService.onRestored((db) => {
     store.rebind(db)
   }
   groupsRepo = new GroupsRepo(db)
+  migrateRelayScopes(db, listVms(cfg.paths.project), apiEndpointStore.listRaw())
   apiScheduler.reload(apiEndpointStore.listRaw())
 
   routingConfig = loadRoutingConfig()
@@ -580,6 +616,7 @@ backupService.onRestored((db) => {
   routingConfig.notify = normalizeNotifyConfig(routingConfig.notify)
   routingConfig.tiers = normalizeTiers(routingConfig.tiers, routingConfig.quota, routingConfig.concurrency)
   syncTierDefaultsIntoRouting()
+  runtimeSnapshot?.publish(routingConfig, new SettingsRepo().getConfigRevision())
 
   stickyRouter.reloadConfig(routingConfig)
   accountQuota.reloadConfig(routingConfig)
@@ -697,7 +734,9 @@ function rejectAuth(req, res, error) {
 
 function requireAuth(req, res) {
   req.presentedApiKey = extractApiKey(req)
-  const token = extractPanelToken(req) || req.presentedApiKey
+  const token = /^\/(api\/panel|admin)(\/|$)/.test(String(req.url || ''))
+    ? extractPanelToken(req) || req.presentedApiKey
+    : req.presentedApiKey || extractPanelToken(req)
   if (!token) {
     return rejectAuth(
       req,
@@ -713,6 +752,17 @@ function requireAuth(req, res) {
   // Panel session
   const session = verifyPanelSession(token)
   if (session) {
+    if (!/^\/(api\/panel|api\/vendor|api\/admin\/vendors|admin)(\/|$)/.test(String(req.url || '')))
+      return rejectAuth(
+        req,
+        res,
+        makeError({
+          type: ErrorType.PERMISSION,
+          code: 'api_key_required',
+          message: '推理接口必须使用 API Key，控制台会话不能调用',
+          status: 403,
+        }),
+      )
     if (!allowRate('panel:' + session.user)) {
       return rejectAuth(
         req,
@@ -726,10 +776,9 @@ function requireAuth(req, res) {
       )
     }
     req.panelUser = session.user
-    req.panelRole = session.role || panelUsers.getByUsername(session.user)?.role || 'user'
+    req.panelRole = panelUsers.getByUsername(session.user)?.role || 'user'
     const rec = panelUsers.getByUsername(session.user)
     req.panelUserId = rec?.id || null
-    req.panelVmCreateQuota = rec?.vm_create_quota ?? 0
     return true
   }
   // Master env API key — unlimited admin
@@ -747,7 +796,7 @@ function requireAuth(req, res) {
       )
     }
     req.apiKeyKind = 'master'
-    req.panelRole = 'admin'
+    req.panelRole = 'super_admin'
     req.panelUser = 'master'
     return true
   }
@@ -766,7 +815,9 @@ function requireAuth(req, res) {
       }),
     )
   }
-  const gate = apiKeyStore.canAccept(managed.record)
+  const gate = apiKeyStore.permitsIp(managed.record, req.socket?.remoteAddress)
+    ? apiKeyStore.canAccept(managed.record)
+    : { ok: false, code: 'ip_not_allowed', message: '来源 IP 不在允许范围', status: 403 }
   if (!gate.ok) {
     const type =
       gate.status === 429
@@ -837,12 +888,14 @@ const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
   requestLog,
   stickyRouter,
   accountQuota,
+  refreshQuotaAfterRequest: (vmId, headers) => usageProbeMonitor?.refreshAfterRequest(vmId, headers),
   apiKeyStore,
   apiScheduler,
   apiEndpointStore,
   stats,
   routingConfigPath,
   getRoutingConfig: () => routingConfig,
+  getRuntimeSnapshot: () => runtimeSnapshot,
   get routingConfig() {
     return routingConfig
   },
@@ -947,6 +1000,12 @@ const handlePanel = createPanelHandler({
   readRawBody,
   requireAuth,
   cfg,
+  vendorVmProvisioner: createVendorVmProvisioner({
+    cfg,
+    get routingConfig() {
+      return routingConfig
+    },
+  }),
   routingConfigPath,
   get routingConfig() {
     return routingConfig
@@ -954,6 +1013,11 @@ const handlePanel = createPanelHandler({
   set routingConfig(v) {
     routingConfig = v
   },
+  get runtimeSnapshot() {
+    return runtimeSnapshot
+  },
+  getConfigRevision: () => new SettingsRepo().getConfigRevision(),
+  publishRuntimeSnapshot: (nextRouting, revision) => runtimeSnapshot?.publish(nextRouting, revision),
   stickyRouter,
   accountQuota,
   get poolScheduler() {
@@ -999,6 +1063,7 @@ const handlePanel = createPanelHandler({
   applyVmMaxSessions,
   inheritVmScheduling,
   applyVmQuotaOverride,
+  reloadAccountErrorProtection,
   initPoolRuntime,
   poolSchedulerConfig,
   commitImportedOauth,
@@ -1045,14 +1110,26 @@ const server = http.createServer(async (req, res) => {
       )
     }
 
-    if (p.startsWith('/admin') || p.startsWith('/api/panel')) {
+    if (
+      p.startsWith('/admin') ||
+      p.startsWith('/api/panel') ||
+      p.startsWith('/api/vendor') ||
+      p.startsWith('/api/admin/vendors')
+    ) {
       const handled = await handlePanel(req, res, url)
       if (handled !== false) return
     }
 
-    if (req.method === 'GET' && tryServeWebDist(res, cfg.paths.project, p)) return
-    if (req.method === 'GET' && isConsoleEntry(p)) {
-      return json(res, 404, { error: { message: 'console not found; run pnpm -C web build' } })
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/') {
+      res.writeHead(307, { location: '/console/', 'cache-control': 'no-store' })
+      return res.end()
+    }
+
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      if (tryServeWebDist(res, cfg.paths.project, p)) return
+      if (isConsoleEntry(p)) {
+        return json(res, 404, { error: { message: 'console not found; run pnpm -C web build' } })
+      }
     }
 
     // CLIProxyAPI-style liveness: no auth, no inference.
@@ -1064,10 +1141,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { status: 'ok' })
     }
 
-    if (req.method === 'GET' && (p === '/' || p === '/health')) {
+    if (req.method === 'GET' && p === '/health') {
       return json(res, 200, {
         status: 'ok',
-        service: 'vm2api',
+        service: 'tapmodels',
         base_url: cfg.base_url,
         rewrite: cfg.rewrite.enabled ? 'on' : 'off',
         intercept_rules: cfg.intercept.rules.length,
@@ -1105,10 +1182,17 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/v1/models') {
       if (!requireAuth(req, res)) return
-      if (resolveInferenceBackend(req) === 'api') {
-        return json(res, 200, apiScheduler.catalog())
-      }
-      const result = await fetchWorkerModels({ groupType: keyScopeFromRequest(req).group_type })
+      const scope = keyScopeFromRequest(req)
+      const denial = groupScopeDenial(scope)
+      if (denial) return json(res, 403, { error: denial })
+      const result = keyModelCatalog({
+        scope,
+        api: resolveInferenceBackend(req) === 'api',
+        apiScheduler,
+        projectRoot: cfg.paths.project,
+      })
+      res.setHeader('Cache-Control', 'private, no-store')
+      if (url.searchParams.get('client_version')) return json(res, 200, codexModelCatalog(result))
       return json(res, 200, result)
     }
     if (req.method === 'POST' && p === '/admin/models/refresh') {
@@ -1117,6 +1201,18 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, result)
     }
     if (req.method === 'GET' && p === '/v1/usage') {
+      if (!requireAuth(req, res)) return
+      if (req.apiKeyRecord?.group_id) {
+        const key = req.apiKeyRecord
+        const billing = new RelayBilling(apiKeyStore.db)
+        return json(res, 200, {
+          unit: 'USD',
+          ...billing.balance(key.user_id),
+          group_id: key.group_id,
+          key: { id: key.id, spent: key.quota_used, requests: key.quota_requests_used },
+          subscriptions: billing.subscriptions(key.user_id),
+        })
+      }
       return await handleUserUsage(req, res, {
         json,
         requireAuth,
@@ -1291,6 +1387,13 @@ if (process.env.KIN_CRS_MOCK !== '1') {
   syncLocalSlotRestartPolicies(listVms(cfg.paths.project))
 }
 await bootApiKernel(cfg)
+server.keepAliveTimeout = 120_000
+server.headersTimeout = 125_000
+// Request-body inactivity is enforced by readBody/readRawBody with the
+// configured KIN_REQUEST_BODY_TIMEOUT_MS value. Do not retain Node's default
+// 300s whole-request deadline: it conflates slow uploads with long inference.
+server.requestTimeout = 0
+server.timeout = 0
 
 server.listen(cfg.port, cfg.host, () => {
   try {
@@ -1314,10 +1417,15 @@ server.listen(cfg.port, cfg.host, () => {
     console.warn('[kernel-watchdog] start failed', e?.message || e)
   }
   // Proxy slots do not auto-start with Docker: boot restores egress before starting recorded-running slots.
+  // Also restore host-side Codex kernels lost with the old control plane.
   if (process.env.KIN_CRS_MOCK !== '1' && normalizeKernelWatchdogConfig(routingConfig.kernel_watchdog).enabled) {
-    reviveDownSlots({ vms: listVms(cfg.paths.project), powerOn: bootSlot, watchdog: kernelWatchdog }).catch((e) =>
-      console.warn('[slot-revive] boot pass failed', e?.message || e),
-    )
+    reviveDownSlots({
+      vms: listVms(cfg.paths.project),
+      powerOn: bootSlot,
+      restoreRuntime: (id) =>
+        ensureSlotInferenceRuntime(getVm(cfg.paths.project, id), cfg.paths.project, { routing: routingConfig }),
+      watchdog: kernelWatchdog,
+    }).catch((e) => console.warn('[slot-revive] boot pass failed', e?.message || e))
   }
   try {
     cliNodeGuard?.start?.({ immediate: true })
@@ -1359,7 +1467,7 @@ server.listen(cfg.port, cfg.host, () => {
   }
   console.log(
     JSON.stringify({
-      event: 'vm2api-started',
+      event: 'tapmodels-started',
       port: boundPort,
       base_url: cfg.base_url,
       active_vm: getActiveVmId(cfg.paths.project),

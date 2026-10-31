@@ -1,11 +1,15 @@
 <div align="center">
 
-# vm2api
+# tapmodels
+
+基于 [dofastted/vm2api](https://github.com/dofastted/vm2api) 的定制版本；源码与 Release 仓库仍为 [holeenlu/vm2api](https://github.com/holeenlu/vm2api)。
+
+全部定制功能、破坏性变更和升级说明见 [定制版 Release Note](docs/CUSTOMIZATION_RELEASE_NOTES.md)；[逐文件清单](docs/CUSTOMIZATION_FILE_INDEX.md) 对应最新上游之上的单一定制提交。
 
 ### 完全隔离的虚拟机级 AI 订阅转 API 生产网关
 **Next-Generation Fully Isolated VM-Level AI Subscription-to-API Gateway**
 
-[![Release](https://img.shields.io/badge/Release-v1.3.133-blue.svg?style=for-the-badge&logo=github)](https://github.com/dofastted/vm2api/releases)
+[![Release](https://img.shields.io/github/v/release/holeenlu/vm2api?style=for-the-badge&logo=github)](https://github.com/holeenlu/vm2api/releases)
 [![License](https://img.shields.io/badge/License-Noncommercial-amber.svg?style=for-the-badge)](LICENSE)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-Clean%20Verified-00C853?style=for-the-badge&logo=shield)](docs/benchmarks/README.md)
 [![Cluster](https://img.shields.io/badge/Cluster-Multi--VPS%20Ready-7928CA?style=for-the-badge&logo=docker)](docs/DEPLOY.md)
@@ -13,7 +17,7 @@
 <p align="center">
   <a href="#-简体中文"><b>🇨🇳 简体中文</b></a> •
   <a href="#-english"><b>🇬🇧 English</b></a> •
-  <a href="https://vm2api.fkcodex.com/zh/"><b>📖 入门文档</b></a> •
+  <a href="docs/README.md"><b>📖 入门文档</b></a> •
   <a href="docs/技术路线.md"><b>🗺️ 技术路线</b></a> •
   <a href="docs/DEPLOY.md"><b>🚀 部署指南</b></a> •
   <a href="docs/benchmarks/README.md"><b>📊 干净度基准</b></a> •
@@ -22,20 +26,20 @@
 
 ---
 
-<img src="docs/images/brand-hero.png" alt="vm2api Hero Banner" width="100%" style="border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);" />
+<img src="docs/images/tapmodels-hero.svg" alt="tapmodels Hero Banner" width="100%" style="border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);" />
 
 <br/>
 
 <a href="https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme"><img src="docs/images/sponsor-proxylane.png" alt="ProxyLane（赞助商）" width="100%" /></a>
 
-**赞助商**：[ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme) AI 账号专用的原生静态住宅 IP，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。一个槽位绑一个 IP：把 SOCKS5 `host:port:user:pass` 粘贴到「代理池」→「添加代理」即可。首次购买使用优惠码 `VM2API30` 享 7 折。
+**原上游赞助信息**：[ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme) AI 账号专用的原生静态住宅 IP，Scamalytics 低欺诈评分，每个 IP 独享，不限流量，$3.90 起。一个槽位绑一个 IP：把 SOCKS5 `host:port:user:pass` 粘贴到「代理池」→「添加代理」即可。首次购买使用优惠码 `VM2API30` 享 7 折。
 
 </div>
 
 <br/>
 
 > [!NOTE]
-> **vm2api** 专为高可靠 AI 订阅转化为生产级标准 API 设计。摒弃传统的简单 HTTP 逆向与易被封禁的公用代理方案，采用**全隔离虚拟机/容器环境 + 官方真实客户端进程常驻 + 真实硬件指纹拟真 + 单槽单独立网络出口 + 进槽前封控拦截**，实现真正稳定、长效、高并发的订阅转 API 基础设施。
+> **tapmodels** 专为高可靠 AI 订阅转化为生产级标准 API 设计。摒弃传统的简单 HTTP 逆向与易被封禁的公用代理方案，采用**全隔离虚拟机/容器环境 + 官方真实客户端进程常驻 + 真实硬件指纹拟真 + 单槽单独立网络出口 + 进槽前封控拦截**，实现真正稳定、长效、高并发的订阅转 API 基础设施。
 
 ---
 
@@ -64,7 +68,7 @@
 
 ## 💡 项目概览
 
-在当今大模型服务中，直接使用第三方逆向脚本或共享代理极易触发风控导致封号、降权与服务中断。**vm2api** 是业界领先的虚拟机级 API 转换中继系统：
+在当今大模型服务中，直接使用第三方逆向脚本或共享代理极易触发风控导致封号、降权与服务中断。**tapmodels** 是业界领先的虚拟机级 API 转换中继系统：
 
 - **支持平台**：全面支持 **Anthropic (Claude Pro / Team / Enterprise / Max)** 以及 **OpenAI (ChatGPT / Codex)** 订阅转标准 API。
 - **真实载体**：Anthropic 采用官方客户端在隔离 VM / 容器内运行**真实系统进程**，而非第三方伪造 HTTP 模拟。
@@ -74,10 +78,10 @@
 
 ## 🆕 近期更新
 
-对照 **1.3.133**。自 1.3.122 起，调用方能直接碰到的变化如下。明细和升级注意见 [CHANGELOG.md](CHANGELOG.md)，操作说明见 [入门文档](https://vm2api.fkcodex.com/zh/)。
+对照 **1.3.133**。自 1.3.122 起，调用方能直接碰到的变化如下。明细和升级注意见 [CHANGELOG.md](CHANGELOG.md)，操作说明见 [入门文档](docs/README.md)。
 
 - **遥测**只认种子里的 `telemetry_disabled === false`。虚拟机页的遥测开关与这项一致，默认开时显示为开；非必要流量和 DNT 跟着它走，不能单独拨。
-- **入门文档**放在控制台左上角 GitHub 右侧，打开 [vm2api.fkcodex.com/zh](https://vm2api.fkcodex.com/zh/)。
+- **入门文档**放在控制台左上角 GitHub 右侧，打开 [tapmodels 文档](docs/README.md)。
 - **封控拦截**收成管理台「风险审计」。进槽前按蒸馏 → 硬正则 → 拒答缓存 → 决策模型依次拦，过关才出站。见 [下文](#3️⃣-封控拦截与风险审计) 与 [docs/RISK.md](docs/RISK.md)。
 - **本地代理**是槽位所在 VPS 的出口，不是控制面自己的网卡。集群节点上，控制面代发的换票、刷新、测试对话和地理检测也从该节点出去；节点没连上就失败，不改走控制面直连。
 - **模型**页改为卡片矩阵。`claude-haiku-5-5` 的默认上下文、`max_tokens` 和输出上限是 100K；已经改过的管理员值不会被重置。
@@ -90,11 +94,10 @@
 ## 🛡️ 九大核心特性（特色防封与拟真矩阵）
 
 <div align="center">
-  <img src="docs/images/vm2api-security-distill.jpg" alt="Security & Distillation Protection" width="95%" style="border-radius: 10px; margin: 12px 0;" />
 </div>
 
 ### 0️⃣ 独家 0 提示词注入机制 & 改写引擎
-- **无感透传，告别 System 篡改**：传统中继依赖向 Prompt 注入大段系统人设与假装指令，不仅消耗高昂 Token，还极易引发模型“自我认知混乱”并被上游识别封号。vm2api 身份在凭证层即对齐官方形态，**做到真正 0 提示词注入（Zero Prompt Injection）**。
+- **无感透传，告别 System 篡改**：传统中继依赖向 Prompt 注入大段系统人设与假装指令，不仅消耗高昂 Token，还极易引发模型“自我认知混乱”并被上游识别封号。tapmodels 身份在凭证层即对齐官方形态，**做到真正 0 提示词注入（Zero Prompt Injection）**。
 - **改写引擎与模板定制**：提供从 `zero`（完全零注入）、`official`、`official_full` 到自定义改写模板的灵活切换，满足特殊上下文场景需求。
 - **提供公开 Benchmarks**：随仓库公开提供干净度测试套件与判定报告，杜绝官方内置工具及泄露痕迹，供所有人测试与对比检验。
 
@@ -109,7 +112,7 @@
 - **全生命周期槽位状态机与健康监控**：实时追踪槽位调度状态（在池调度、5h/7d 冷却保护、调用关闭、凭证失效）。支持优先级分级路由（高优先级 VIP 槽位专属调度）、单槽独立成本流水统计与一键额度全槽健康探测。
 
 <div align="center">
-  <img src="docs/images/console-vms.png" alt="vm2api 虚拟机槽位管理与官方进程运行实机看板" width="95%" style="border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 6px 24px rgba(0,0,0,0.4);" />
+  <img src="docs/images/console-vms.png" alt="tapmodels 虚拟机槽位管理与官方进程运行实机看板" width="95%" style="border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 6px 24px rgba(0,0,0,0.4);" />
   <br/>
   <sub><i>线上生产环境实机运行脱敏截图：Claude / GPT 多槽位舰队状态、20 路并发承载、5h/7d 官方配额窗口追踪与实时成本流水</i></sub>
 </div>
@@ -117,12 +120,11 @@
 ---
 
 <div align="center">
-  <img src="docs/images/vm2api-vm-hardware-network.jpg" alt="VM Hardware & Network Isolation" width="95%" style="border-radius: 10px; margin: 12px 0;" />
 </div>
 
 ### 3️⃣ 封控拦截与风险审计
 
-进槽之前，`/v1` 和 `count_tokens` 先过管理台「风险审计」（`/console/#/risk`）。命中即返回错误，不选槽、不打上游。顺序不能调：
+进槽之前，`/v1` 先过管理台「风险审计」（`/console/#/risk`）。命中即返回错误，不选槽、不打上游。顺序不能调：
 
 | 顺序 | 关 | 拦住什么 | 结果 |
 |:---|:---|:---|:---|
@@ -148,7 +150,6 @@
 ---
 
 <div align="center">
-  <img src="docs/images/vm2api-04-telemetry.png" alt="Official Telemetry" width="85%" style="border-radius: 10px; margin: 12px 0;" />
 </div>
 
 ### 6️⃣ 官方遥测（Telemetry）可控开关
@@ -169,7 +170,7 @@
 
 ## 📊 干净度基准评测（Benchmarks）
 
-vm2api 严格遵循行业最严苛的**纯净度基准**。入站请求不泄露官方 CLI 身份、不外漏任何未授权的系统提示词与内部内置工具。
+tapmodels 严格遵循行业最严苛的**纯净度基准**。入站请求不泄露官方 CLI 身份、不外漏任何未授权的系统提示词与内部内置工具。
 
 | 评测项 | 题目说明 | 判定 | 特性说明 |
 |:---|:---|:---:|:---|
@@ -193,10 +194,10 @@ vm2api 严格遵循行业最严苛的**纯净度基准**。入站请求不泄露
 
 ```bash
 # 生产环境一键拉取并安装
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash
 
 # 以后更新
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
 ```
 
 ARM64（aarch64）主机用同一条命令，脚本自动选择 `-arm64` 控制面镜像并准备 QEMU；实验性支持，见 [docs/ARM64.md](docs/ARM64.md)。
@@ -204,12 +205,12 @@ ARM64（aarch64）主机用同一条命令，脚本自动选择 `-arm64` 控制�
 ### 2. 手动 Docker Compose 启动
 
 ```bash
-mkdir -p /opt/vm2api && cd /opt/vm2api
-curl -sSLO https://raw.githubusercontent.com/dofastted/vm2api/main/docker-compose.yml
-curl -sSL -o .env https://raw.githubusercontent.com/dofastted/vm2api/main/.env.example
+mkdir -p /opt/tapmodels && cd /opt/tapmodels
+curl -sSLO https://raw.githubusercontent.com/holeenlu/vm2api/main/docker-compose.yml
+curl -sSL -o .env https://raw.githubusercontent.com/holeenlu/vm2api/main/.env.example
 chmod 600 .env
 
-# 按需修改 .env 中的关键变量（VM2API_API_KEY, VM2API_ADMIN_PASSWORD, VM2API_DB_SECRET）
+# 按需修改 .env 中的关键变量（TAPMODELS_API_KEY, TAPMODELS_ADMIN_PASSWORD, TAPMODELS_DB_SECRET）
 docker compose pull && docker compose up -d
 ```
 
@@ -217,7 +218,7 @@ docker compose pull && docker compose up -d
 
 服务启动后，系统暴露统一服务端口（默认 `8787`）：
 
-- **可视化管理面板**：`http://<您的IP>:8787/console`（默认账号：`admin` / 密码：`123456` 或自定义环境变量）
+- **可视化管理面板**：`http://<您的IP>:8787/console`（账号默认 `admin`；初始密码由安装流程随机生成并私密保存，或通过 `TAPMODELS_ADMIN_PASSWORD` 指定，见 [部署说明](docs/DEPLOY.md)）
 - **服务健康探活**：`GET http://<您的IP>:8787/health`
 - **Anthropic 协议调用**：`POST http://<您的IP>:8787/v1/messages`
 - **OpenAI 兼容协议**：`POST http://<您的IP>:8787/v1/chat/completions`
@@ -225,7 +226,7 @@ docker compose pull && docker compose up -d
 ```bash
 # 调用示例（以 Anthropic 原生接口为例）
 curl -sS http://127.0.0.1:8787/v1/messages \
-  -H "Authorization: Bearer $VM2API_API_KEY" \
+  -H "Authorization: Bearer $TAPMODELS_API_KEY" \
   -H "content-type: application/json" \
   -d '{
     "model": "claude-sonnet-5-5",
@@ -238,7 +239,7 @@ curl -sS http://127.0.0.1:8787/v1/messages \
 
 ## 🔌 接口与协议兼容
 
-vm2api 内置全栈自适应网关，原生支持以下所有主流生态：
+tapmodels 内置全栈自适应网关，原生支持以下所有主流生态：
 
 | 协议入口 | 对应标准 | 兼容客户端与场景 |
 |:---|:---|:---|
@@ -253,7 +254,7 @@ vm2api 内置全栈自适应网关，原生支持以下所有主流生态：
 
 # 🇬🇧 English
 
-> **Sponsor**: [ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme_en) native static residential ISP IPs built for AI accounts: low Scamalytics fraud scores, a dedicated IP with unlimited traffic, from $3.90. Bind one IP per slot: paste the SOCKS5 line `host:port:user:pass` into 代理池 → 添加代理 (Proxy pool → Add proxy). Code `VM2API30` gives 30% off your first purchase.
+> **Upstream sponsor**: [ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme_en) native static residential ISP IPs built for AI accounts: low Scamalytics fraud scores, a dedicated IP with unlimited traffic, from $3.90. Bind one IP per slot: paste the SOCKS5 line `host:port:user:pass` into 代理池 → 添加代理 (Proxy pool → Add proxy). Code `VM2API30` gives 30% off your first purchase.
 
 ## Table of Contents
 - [💡 Overview](#-overview)
@@ -277,7 +278,7 @@ vm2api 内置全栈自适应网关，原生支持以下所有主流生态：
 
 ## 💡 Overview
 
-Traditional methods of converting AI subscriptions into API endpoints via simple reverse proxies frequently result in immediate account suspensions, stealth downgrades, and token corruption. **vm2api** is an enterprise-grade virtual machine gateway designed for ultra-reliable subscription-to-API infrastructure:
+Traditional methods of converting AI subscriptions into API endpoints via simple reverse proxies frequently result in immediate account suspensions, stealth downgrades, and token corruption. **tapmodels** is an enterprise-grade virtual machine gateway designed for ultra-reliable subscription-to-API infrastructure:
 
 - **Universal Support**: Seamlessly converts **Anthropic (Claude Pro / Team / Enterprise / Max)** and **OpenAI (ChatGPT / Codex)** subscriptions into robust standard APIs.
 - **Genuine Client Process**: Runs the **authentic official Claude Code CLI system process** inside an isolated VM / container instance instead of fragile HTTP emulation.
@@ -290,7 +291,7 @@ Traditional methods of converting AI subscriptions into API endpoints via simple
 Since 1.3.122, the caller-visible changes are:
 
 - **Telemetry** reads only `telemetry_disabled === false`. The VM switch matches that bit and is on for the default; nonessential traffic and DNT follow it.
-- **Intro docs** sit to the right of GitHub in the console sidebar and open [vm2api.fkcodex.com/zh](https://vm2api.fkcodex.com/zh/).
+- **Intro docs** sit to the right of GitHub in the console sidebar and open [tapmodels 文档](docs/README.md).
 - **Risk gates** run before a slot is chosen: distill, hard regex, refusal cache, decision model, then egress. See [below](#3️⃣-pre-hop-risk-gates) and [docs/RISK.md](docs/RISK.md).
 - **Local proxy** is the VPS that owns the slot. On a cluster node, ticket refresh, test chat, and geo also leave through that node. A disconnected node fails instead of falling back to the control plane.
 - **Models** are a card matrix. Haiku 5.5 defaults to a 100K context and output cap; an admin override is kept.
@@ -298,14 +299,14 @@ Since 1.3.122, the caller-visible changes are:
 - **Stream idle** defaults to 180 seconds under retry settings. Long tool arguments can be streamed.
 - **cli-node** local delivery is now 2.1.303: `share/wrap-cli/cli-node`, 27,932,800 bytes after UPX, SHA256 `ae120fa09a61d6ba7afa3bb57e8e389a0183c4d2026957607143d9b39562c421`. Built from `bbadf5d4`. The payload and live slots are unchanged.
 
-Details: [CHANGELOG.md](CHANGELOG.md). Guide: [vm2api.fkcodex.com/zh](https://vm2api.fkcodex.com/zh/).
+Details: [CHANGELOG.md](CHANGELOG.md). Guide: [tapmodels 文档](docs/README.md).
 
 ---
 
 ## 🛡️ 9 Core Pillars (Anti-Ban & Emulation Matrix)
 
 ### 0️⃣ Zero Prompt Injection Engine
-- **No System Prompt Tampering**: Unlike ordinary proxies that tamper with the system prompt and poison model identity, vm2api aligns credentials at the protocol layer as a genuine Console client.
+- **No System Prompt Tampering**: Unlike ordinary proxies that tamper with the system prompt and poison model identity, tapmodels aligns credentials at the protocol layer as a genuine Console client.
 - **Customizable Layouts**: Switch effortlessly between `zero` (pure zero-injection), `official`, `official_full`, and tailored templates.
 - **Transparent Benchmarks**: Built-in benchmark suite guarantees no leaking of internal CLI tools or hidden instructions.
 
@@ -320,14 +321,14 @@ Details: [CHANGELOG.md](CHANGELOG.md). Guide: [vm2api.fkcodex.com/zh](https://vm
 - **Full Slot Lifecycle & Health Observability**: Visual real-time tracking of slot states (In-Pool, Cooldown Guard, Suspended, Token Expired), multi-tier priority routing, and real-time per-slot financial cost accounting.
 
 <div align="center">
-  <img src="docs/images/console-vms.png" alt="vm2api VM Slot Management & Process Forwarding Live Dashboard" width="95%" style="border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 6px 24px rgba(0,0,0,0.4);" />
+  <img src="docs/images/console-vms.png" alt="tapmodels VM Slot Management & Process Forwarding Live Dashboard" width="95%" style="border-radius: 10px; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 6px 24px rgba(0,0,0,0.4);" />
   <br/>
   <sub><i>Production live dashboard: Multi-slot fleet status, 20-concurrency subagent scheduling, 5h/7d quota window telemetry, and cost accounting (sanitized).</i></sub>
 </div>
 
 ### 3️⃣ Pre-hop risk gates
 
-`/v1` and `count_tokens` pass the console **Risk** page (`/console/#/risk`) before any slot is chosen. A hit returns an error and does not spend upstream quota. The order is fixed:
+`/v1` pass the console **Risk** page (`/console/#/risk`) before any slot is chosen. A hit returns an error and does not spend upstream quota. The order is fixed:
 
 | Order | Gate | What it stops | Result |
 |:---|:---|:---|:---|
@@ -381,7 +382,7 @@ Open a hit and read the body. A false positive means tighten that gate, not dele
 
 ```bash
 # Recommended one-line installation on Ubuntu 24.04 LTS
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/holeenlu/vm2api/main/deploy/install.sh | sudo bash
 ```
 
 After deployment, access:
@@ -393,19 +394,19 @@ After deployment, access:
 
 ## 🐞 问题反馈 / Issue Reporting
 
-提交 Issue 前请阅读 [ISSUE_GUIDE.md](ISSUE_GUIDE.md)，按“版本 → 复现路线 → 环境（VPS / 代理）→ VM 与请求日志 → 源码定位（可选）→ 脱敏”收集信息，再用 [Bug 报告表单](https://github.com/dofastted/vm2api/issues/new/choose) 提交。
+提交 Issue 前请阅读 [ISSUE_GUIDE.md](ISSUE_GUIDE.md)，按“版本 → 复现路线 → 环境（VPS / 代理）→ VM 与请求日志 → 源码定位（可选）→ 脱敏”收集信息，再用 [Bug 报告表单](https://github.com/holeenlu/vm2api/issues/new/choose) 提交。
 
 Before opening an issue, follow [ISSUE_GUIDE.md](ISSUE_GUIDE.md): version, reproduction steps, host/proxy environment, VM and request logs, optional source pointers — and redact all secrets.
 
 <p align="center">
-  <img src="docs/images/issue-flow.svg" alt="vm2api Issue Reporting Roadmap" width="90%" />
+  <img src="docs/images/issue-flow.svg" alt="tapmodels Issue Reporting Roadmap" width="90%" />
 </p>
 
 ---
 
 ## 💬 交流与赞助支持 / Community & Sponsorship
 
-开源与持续维护离不开社区大家的支持与反馈。如果您觉得 **vm2api** 为您的业务或学习带来了实质帮助， 交流群或请作者喝杯咖啡！
+开源与持续维护离不开社区大家的支持与反馈。如果您觉得 **tapmodels** 为您的业务或学习带来了实质帮助， 交流群或请作者喝杯咖啡！
 
 <div align="center">
   <table style="border-collapse: separate; border-spacing: 20px; background: transparent;">
@@ -438,4 +439,4 @@ Before opening an issue, follow [ISSUE_GUIDE.md](ISSUE_GUIDE.md): version, repro
 
 - **个人与非商用**：本仓库遵循 [Noncommercial License](LICENSE)，仅供个人学习、技术研究与个人自建使用。
 - **商业使用授权**：任何将本项目用于商业运营（包括对外付费 API、作为转售云服务基础组件、公司内部营利用途等）**必须事先取得作者正式书面授权**。授权联系请洽 [Telegram @VM2API](https://t.me/VM2API)。
-- **免责声明**：vm2api 为独立的开源实验项目，与 Anthropic PBC 或 OpenAI 无任何直接关联。相关商标权属均归其对应公司所有。
+- **免责声明**：tapmodels 为独立的开源实验项目，与 Anthropic PBC 或 OpenAI 无任何直接关联。相关商标权属均归其对应公司所有。

@@ -1,3 +1,5 @@
+import { canReplayCodex } from './codex-replay.mjs'
+import { vendorRuntimeBlock } from '../vendor/vendor-runtime-policy.mjs'
 /**
  * GPT slot pool. The Claude pool scheduler never sees these VMs (`evaluateSlotGate`
  * returns `codex_vm`). A Codex hop picks here, then failovers on
@@ -11,7 +13,7 @@ import {
   hasSpendableCodexCredits,
 } from '../protocol/codex-usage.mjs'
 import { isLeftoverQuotaScheduleOff, isQuotaWindowReason } from './availability.mjs'
-import { orderOpenAIAccounts } from './openai-account-selector.mjs'
+import { smartScore, orderOpenAIAccounts } from './openai-account-selector.mjs'
 import { expiresAtToMs } from '../oauth/oauth-credentials.mjs'
 import {
   bumpOpenAICursor,
@@ -28,7 +30,7 @@ import { effectiveOpenAIPolicy, evaluateOpenAIQuotaGate, normalizeOpenAIQuotaPol
 const HARD_UNAVAILABLE = new Set(['dead', 'error', 'disabled'])
 
 export function isCodexSlotReady(vm, now = Date.now()) {
-  if (!vm || !isCodexVm(vm)) return false
+  if (!vm || !isCodexVm(vm) || vendorRuntimeBlock(vm)) return false
   if (proxyBlockedReason(vm.proxy)) return false
   if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
   if (!vm.has_token) return false
@@ -143,36 +145,34 @@ export function pickCodexSlots(vms, { pin = null, now = Date.now(), quotaPolicy 
   }
 }
 
-function quotaRemainingRank(vm) {
-  const u5 = Number(vm?.utilization_5h)
-  const u7 = Number(vm?.utilization_7d)
-  let used = null
-  if (Number.isFinite(u5) || Number.isFinite(u7)) {
-    used = Math.max(Number.isFinite(u5) ? u5 : 0, Number.isFinite(u7) ? u7 : 0)
-  } else {
-    const limits = normalizeCodexLimits(extraToCodexSnapshot(extraFromSummary(vm)))
-    const p5 = Number(limits.used_5h_percent)
-    const p7 = Number(limits.used_7d_percent)
-    if (Number.isFinite(p5) || Number.isFinite(p7)) {
-      used = Math.max(Number.isFinite(p5) ? p5 / 100 : 0, Number.isFinite(p7) ? p7 / 100 : 0)
-    }
-  }
-  if (used == null) return null
-  return Math.round((1 - Math.min(1, Math.max(0, used))) * 10_000)
+function quotaRemainingRank(vm, now = Date.now()) {
+  const extra = extraFromSummary(vm)
+  const values = ['5h', '7d'].flatMap((window) => {
+    const reset = extra[`codex_${window}_reset_at`] ?? vm?.[`reset_${window}`]
+    const resetAt = typeof reset === 'number' ? (reset < 1e12 ? reset * 1000 : reset) : Date.parse(reset || '')
+    if (Number.isFinite(resetAt) && resetAt <= now) return []
+    const percent = extra[`codex_${window}_used_percent`]
+    const raw = percent ?? vm?.[`utilization_${window}`]
+    if (raw == null || raw === '' || typeof raw === 'boolean') return []
+    const used = Number(raw) / (percent != null ? 100 : 1)
+    return Number.isFinite(used) && used >= 0 && used <= 1 ? [used] : []
+  })
+  return values.length ? Math.round((1 - Math.max(...values)) * 10_000) : null
 }
 
-function quotaResetAt(vm) {
+function quotaResetAt(vm, now = Date.now()) {
   const extra = extraFromSummary(vm)
   const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
   const resets = [limits.reset_5h_at, limits.reset_7d_at, vm?.reset_5h, vm?.reset_7d]
     .map((value) => Date.parse(value || ''))
-    .filter((value) => Number.isFinite(value))
+    .filter((value) => Number.isFinite(value) && value > now)
   if (!resets.length) return null
   return Math.min(...resets)
 }
 
 export function codexAccountStatus(vm, now = Date.now(), policy = null) {
   if (!vm || !isCodexVm(vm)) return 'error'
+  if (vendorRuntimeBlock(vm)) return 'disabled'
   if (proxyBlockedReason(vm.proxy)) return 'disabled'
   if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return 'disabled'
   const status = String(vm.status || '').toLowerCase()
@@ -204,8 +204,8 @@ export function codexAccountCandidate(vm, now = Date.now(), signals = null, poli
     status: codexAccountStatus(vm, now, policy),
     inFlight: runtime.inFlight || 0,
     lastStartedAt: runtime.lastStartedAt ?? null,
-    quotaResetAt: quotaResetAt(vm),
-    quotaRemainingRank: quotaRemainingRank(vm),
+    quotaResetAt: quotaResetAt(vm, now),
+    quotaRemainingRank: quotaRemainingRank(vm, now),
     failureRateBps: runtime.failureRateBps || 0,
     firstOutputLatencyMs: runtime.firstOutputLatencyMs ?? null,
   }
@@ -223,6 +223,9 @@ export function codexAccountCandidate(vm, now = Date.now(), signals = null, poli
  * (quota, credential, operator, model); `resting` when it is outside its
  * working window (back tomorrow, but not for this request); a busy home is
  * still `live`.
+ *
+ * `resourcePriorities` is the key group's `vm id → priority` map; lower runs
+ * first inside the same weight band. Absent for keys without a group.
  */
 export function orderCodexSessionSlots(
   vms,
@@ -239,6 +242,10 @@ export function orderCodexSessionSlots(
     roundRobinCursor = null,
     model = null,
     excluded = null,
+    resourcePriorities = null,
+    affinity = 'preferred',
+    smartWeights = undefined,
+    protectionUntil = null,
   } = {},
 ) {
   const list = Array.isArray(vms) ? vms : []
@@ -251,6 +258,7 @@ export function orderCodexSessionSlots(
     return { ...picked, sticky: false, boundState: boundResting ? 'resting' : undefined, candidates: [] }
   }
   const pool = picked.ids.filter((id) => !excluded?.has(id))
+  const frozen = new Map(pool.map((id) => [id, protectionUntil?.(id) || 0]))
   if (!pool.length)
     return { error: 'candidates_exhausted', ids: [], ready: [], parked: [], sticky: false, candidates: [] }
   if (pin) {
@@ -262,7 +270,10 @@ export function orderCodexSessionSlots(
     }
   }
   const home =
-    boundVmId && pool.includes(boundVmId) && codexAccountStatus(byId.get(boundVmId), now, policy) === 'normal'
+    boundVmId &&
+    pool.includes(boundVmId) &&
+    codexAccountStatus(byId.get(boundVmId), now, policy) === 'normal' &&
+    !(frozen.get(boundVmId) > now)
       ? boundVmId
       : null
   const boundState = boundVmId
@@ -281,29 +292,40 @@ export function orderCodexSessionSlots(
     if (!cap) return true
     return sessionLimit.canAccept(id, sessionKey, { max: cap, idleMin, now }).ok !== false
   }
-  const ids = pool.filter(accepts)
+  const ids = pool.filter((id) => accepts(id) && (affinity !== 'strict' || !home || id === home))
   if (!ids.length) {
     return { error: 'session_window_full', ids: [], ready: [], parked: [], sticky: false, boundState, candidates: [] }
   }
   const cursor = roundRobinCursor == null ? readOpenAICursor() : roundRobinCursor
-  const candidates = ids.map((id) => codexAccountCandidate(byId.get(id), now, null, policy))
+  const candidates = ids.map((id) => ({
+    ...codexAccountCandidate(byId.get(id), now, null, policy),
+    groupPriority: resourcePriorities?.[id] ?? null,
+    ...(frozen.get(id) > now ? { status: 'cooldown', protectionUntil: frozen.get(id) } : {}),
+  }))
   const ordered = orderOpenAIAccounts(candidates, {
     strategy,
     now,
     requestIntervalMs,
-    preferredAccountId: home && ids.includes(home) ? home : null,
+    preferredAccountId: affinity !== 'relaxed' && home && ids.includes(home) ? home : null,
     preferredOverridesWeight: true,
     roundRobinCursor: cursor,
+    smartWeights,
   })
   if (!ordered.ids.length) {
     const statuses = ids.map((id) => codexAccountStatus(byId.get(id), now, policy))
     const quotaExhausted = statuses.length > 0 && statuses.every((status) => status === 'quota_exhausted')
-    const retryAt = quotaExhausted ? null : rpmRetryAt(candidates, now) || holdRetryAt(candidates, now)
+    const retryAt = quotaExhausted
+      ? null
+      : rpmRetryAt(candidates, now) ||
+        holdRetryAt(candidates, now) ||
+        [...frozen.values()].filter((t) => t > now).sort((a, b) => a - b)[0] ||
+        null
     return {
       error: quotaExhausted ? 'quota_exhausted' : 'capacity_unavailable',
       retryAt,
       // Accounts a waiter may use once a seat frees; scopes its wake-up.
       waitIds: ids,
+      waitScores: Object.fromEntries(candidates.map((c) => [c.id, smartScore(c, undefined, smartWeights, now)])),
       ids: [],
       ready: [],
       parked: picked.parked || [],
@@ -364,8 +386,18 @@ function withModelAllowed(picked, byId, model) {
   }
 }
 
-export function isCodexFailoverError(result) {
+export function isCodexOverloadError(result = {}) {
   if (!result || result.ok === true || result.committed === true) return false
+  const status = Number(result.status) || 0
+  const code = String(result.body?.error?.code || result.error_code || '')
+  const type = String(result.body?.error?.type || result.body?.type || '')
+  const message = String(result.body?.error?.message || result.body?.message || result.error || '')
+  if (![502, 503, 529].includes(status)) return false
+  return /overload|server_is_overloaded|servers are currently overloaded/i.test(`${code} ${type} ${message}`)
+}
+
+export function isCodexFailoverError(result) {
+  if (!canReplayCodex(result)) return false
   const status = Number(result.status) || 0
   const code = String(result.body?.error?.code || result.error_code || '')
   const message = String(result.body?.error?.message || result.error || '')
@@ -384,6 +416,7 @@ export function isCodexFailoverError(result) {
   // refused committed hops and anything that has written to the client.
   if (status === 408) return true
   // The kernel may be busy/cooling down even while the gateway has a seat.
+  if (isCodexOverloadError(result)) return true
   if (status === 503 && (code === 'no_capacity' || code === 'overloaded' || /server_error|provider_error/i.test(code)))
     return true
   if (status === 502 && /upstream_transport|worker_transport|transport/i.test(code)) return true

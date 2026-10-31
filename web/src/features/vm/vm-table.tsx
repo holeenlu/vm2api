@@ -1,12 +1,13 @@
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { credTypeLabel, credTypeOf } from '@/lib/cred-type'
 import { usedPctOf } from '@/lib/format'
-import { isCodexVm, platformLabel } from '@/lib/vm-kind'
+import { cn } from '@/lib/utils'
+import { isCodexVm, platformLabel, platformLabelOf } from '@/lib/vm-kind'
 import { claudeTier, fleetGroup, vmCredDead, vmFailedAt } from '@/lib/vm-status'
 import { vmCacheHitPct, vmTotalCost, vmWindowCosts } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
-import { PlatformChip } from '@/components/platform-chip'
 import { zoneOf, type VmZoneFilter } from '@/features/vm/vm-rack-model'
 
 export { VmTable } from './vm-list-table'
@@ -125,6 +126,8 @@ export function KindFilterChips({
   kind: VmKindFilter
   onChange: (kind: VmKindFilter) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   let claude = 0
   let openai = 0
   for (const vm of vms) {
@@ -132,27 +135,40 @@ export function KindFilterChips({
     else claude += 1
   }
   const chips = [
-    ['claude', 'claude', claude, '筛选 Claude'],
-    ['gpt', 'codex', openai, '筛选 OpenAI'],
+    ['claude', 'claude', claude, tVm('vm:vmTable.filterClaude')],
+    ['gpt', 'codex', openai, tVm('vm:vmTable.filterOpenAI')],
   ] as const
   return (
-    <>
+    <div
+      role='group'
+      aria-label={tVm('vm:vmTable.platformFilter')}
+      className='inline-flex shrink-0 items-center gap-1 rounded-lg border bg-muted/40 p-1'
+    >
       {chips.map(([key, chipKind, n, label]) => (
         <Button
           key={key}
           size='sm'
-          variant={kind === key ? 'default' : 'outline'}
+          variant={kind === key ? 'default' : 'ghost'}
           aria-pressed={kind === key}
           aria-label={label}
           title={label}
-          className='cursor-pointer gap-1.5 transition-colors duration-200'
+          className='min-w-24 cursor-pointer gap-2 rounded-md transition-colors duration-200'
           onClick={() => onChange(kind === key ? 'all' : key)}
         >
-          <PlatformChip kind={chipKind} />
-          <span className='tabular-nums'>{n}</span>
+          <span className='font-medium'>{platformLabelOf(chipKind)}</span>
+          <span
+            className={cn(
+              'min-w-5 rounded px-1.5 py-0.5 text-xs tabular-nums',
+              kind === key
+                ? 'bg-foreground/10 text-primary-foreground'
+                : 'bg-muted text-muted-foreground'
+            )}
+          >
+            {n}
+          </span>
         </Button>
       ))}
-    </>
+    </div>
   )
 }
 

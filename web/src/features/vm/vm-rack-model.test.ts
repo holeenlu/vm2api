@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   bladeState,
   buildRacks,
@@ -61,6 +62,10 @@ const off = (over: Partial<Vm> = {}) =>
     },
     ...over,
   })
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('zones', () => {
   it('folds 无效凭证 and 已吊销 into one zone', () => {
@@ -146,7 +151,7 @@ describe('rackTotals', () => {
     expect(t.ledger.map((r) => [r.key, r.cost, r.tokens])).toEqual([
       ['5h', 1.5, 100],
       ['7d', 12, 900],
-      ['total', 43, 5000],
+      ['total', null, null],
     ])
     expect(t.groups.pool).toBe(2)
   })

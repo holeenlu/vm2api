@@ -102,7 +102,9 @@ export function createImportCommit(ctx) {
       org_uuid: identity.org_uuid || existing.claude?.org_uuid || null,
       subscription_type:
         identity.subscription_type || normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
-      account_tier: normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
+      ...(identity.rate_limit_tier ? { rate_limit_tier: identity.rate_limit_tier } : {}),
+      ...(identity.billing_type ? { billing_type: identity.billing_type } : {}),
+      account_tier: identity.subscription_type || normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
       scopes: Array.isArray(oauth.scopes)
         ? oauth.scopes
         : String(oauth.scope || '')

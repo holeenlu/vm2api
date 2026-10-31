@@ -23,6 +23,61 @@ export const LOGS_QUERY_KEY = ['panel', 'request-logs'] as const
 export const USAGE_LOGS_QUERY_KEY = ['panel', 'usage-logs'] as const
 export const USAGE_LOGS_BATCH_SIZE = 50
 
+function recordOf(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
+/**
+ * Keep the log page renderable while an older control plane or a proxy returns
+ * the legacy `items` shape, an extra `data` envelope, or an incomplete empty
+ * response. Query functions should expose the current camelCase contract to
+ * components regardless of which compatible response shape was received.
+ */
+export function normalizeUsageLogsBatchResult(
+  payload: unknown
+): UsageLogsBatchResult {
+  let value = recordOf(payload)
+  if (value.data && typeof value.data === 'object') value = recordOf(value.data)
+  const logs = Array.isArray(value.logs)
+    ? value.logs
+    : Array.isArray(value.items)
+      ? value.items
+      : []
+  const cursor = value.nextCursor ?? value.next_cursor
+  const nextCursor =
+    cursor && typeof cursor === 'object' && !Array.isArray(cursor)
+      ? {
+          createdAt: String(
+            (cursor as Record<string, unknown>).createdAt ??
+              (cursor as Record<string, unknown>).created_at ??
+              ''
+          ),
+          id: String((cursor as Record<string, unknown>).id ?? ''),
+        }
+      : null
+  return {
+    logs,
+    nextCursor: nextCursor?.createdAt && nextCursor.id ? nextCursor : null,
+    hasMore: value.hasMore === true || value.has_more === true,
+  }
+}
+
+export function normalizeActiveSessionsData(
+  payload: unknown
+): ActiveSessionsData {
+  let value = recordOf(payload)
+  if (value.data && typeof value.data === 'object') value = recordOf(value.data)
+  const sessions = Array.isArray(value.sessions) ? value.sessions : []
+  const minutes = Number(value.minutes)
+  const total = Number(value.total)
+  return {
+    minutes: Number.isFinite(minutes) ? minutes : 5,
+    total: Number.isFinite(total) ? total : sessions.length,
+    sessions,
+  }
+}
+
 export function requestLogQueryOptions(id: string, enabled = true) {
   return queryOptions({
     queryKey: ['panel', 'request-log', id] as const,
@@ -71,14 +126,17 @@ export function usageLogsBatchQueryOptions({
 }) {
   return infiniteQueryOptions({
     queryKey: [...USAGE_LOGS_QUERY_KEY, 'batch', filters] as const,
-    queryFn: ({ pageParam }) => {
+    queryFn: async ({ pageParam, signal }) => {
       const qs = usageLogFiltersQuery(filters)
       qs.set('limit', String(USAGE_LOGS_BATCH_SIZE))
       if (pageParam) {
         qs.set('cursor_created_at', pageParam.createdAt)
         qs.set('cursor_id', pageParam.id)
       }
-      return api<UsageLogsBatchResult>(`/api/panel/usage-logs?${qs}`)
+      const payload = await api<unknown>(`/api/panel/usage-logs?${qs}`, {
+        signal,
+      })
+      return normalizeUsageLogsBatchResult(payload)
     },
     initialPageParam: null as UsageLogCursor | null,
     getNextPageParam: (last) =>
@@ -125,9 +183,11 @@ export function usageLogSessionSuggestionsQueryOptions(q: string) {
 export function activeSessionsQueryOptions() {
   return queryOptions({
     queryKey: [...USAGE_LOGS_QUERY_KEY, 'active-sessions'] as const,
-    queryFn: () =>
-      api<ActiveSessionsData>(
-        '/api/panel/usage-logs/active-sessions?minutes=5&limit=50'
+    queryFn: async () =>
+      normalizeActiveSessionsData(
+        await api<unknown>(
+          '/api/panel/usage-logs/active-sessions?minutes=5&limit=50'
+        )
       ),
     refetchInterval: 5000,
   })

@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import type { UsageLogFilters } from '@/types/panel-usage-logs'
 import { BarChart3 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { formatCurrency, formatTokenAmount } from '@/lib/usage-format'
 import { Skeleton } from '@/components/ui/skeleton'
 import { usageLogsSummaryQueryOptions } from './queries'
@@ -14,6 +16,8 @@ function Tile({
   value: string
   rows?: [string, string][]
 }) {
+  useTranslation('logs')
+
   return (
     <div className='rounded-lg border border-border/50 bg-card/20 p-4'>
       <div className='mb-1 text-sm text-muted-foreground'>{label}</div>
@@ -32,11 +36,18 @@ function Tile({
   )
 }
 
+function numberOf(value: unknown): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
 /**
  * 当前筛选下的聚合（hub `UsageLogsStatsPanel`）。屏蔽非 auth 类或钻取错误类时
  * 后端只聚合最近 5000 条命中行，所以文案不宣称「全部」。
  */
 export function UsageLogsStatsPanel({ filters }: { filters: UsageLogFilters }) {
+  const { t: translate } = useTranslation('logs')
+
   const { data, isLoading, error } = useQuery(
     usageLogsSummaryQueryOptions(filters)
   )
@@ -50,10 +61,10 @@ export function UsageLogsStatsPanel({ filters }: { filters: UsageLogFilters }) {
           </div>
           <div className='space-y-1'>
             <div className='text-sm leading-none font-semibold text-foreground'>
-              统计汇总
+              {translate('logs:statistics')}
             </div>
             <p className='hidden text-xs leading-relaxed text-muted-foreground sm:block'>
-              当前筛选条件下的聚合统计
+              {translate('logs:statisticsHint')}
             </p>
           </div>
         </div>
@@ -72,39 +83,62 @@ export function UsageLogsStatsPanel({ filters }: { filters: UsageLogFilters }) {
             </div>
           ) : error || !data ? (
             <div className='py-4 text-center text-destructive'>
-              {error instanceof Error ? error.message : '加载失败'}
+              {error instanceof Error
+                ? error.message
+                : translate('logs:loadFailed')}
             </div>
           ) : (
             <div className='grid gap-4 md:grid-cols-4'>
               <Tile
-                label='总请求数'
-                value={data.totalRequests.toLocaleString()}
+                label={translate('logs:totalRequests')}
+                value={numberOf(data.totalRequests).toLocaleString(i18n.language)}
                 rows={[
-                  ['成功', data.successRequests.toLocaleString()],
-                  ['失败', data.errorRequests.toLocaleString()],
+                  [
+                    translate('logs:success'),
+                    numberOf(data.successRequests).toLocaleString(i18n.language),
+                  ],
+                  [
+                    translate('logs:failure'),
+                    numberOf(data.errorRequests).toLocaleString(i18n.language),
+                  ],
                 ]}
               />
               <Tile
-                label='总消耗金额'
+                label={translate('logs:totalSpending')}
                 value={formatCurrency(data.totalActualCost)}
-                rows={[['官方价', formatCurrency(data.totalCost)]]}
-              />
-              <Tile
-                label='总 Token 数'
-                value={formatTokenAmount(data.totalTokens)}
                 rows={[
-                  ['输入', formatTokenAmount(data.totalInputTokens)],
-                  ['输出', formatTokenAmount(data.totalOutputTokens)],
+                  [translate('logs:listPrice'), formatCurrency(data.totalCost)],
                 ]}
               />
               <Tile
-                label='缓存 Token'
+                label={translate('logs:totalTokens')}
+                value={formatTokenAmount(numberOf(data.totalTokens))}
+                rows={[
+                  [
+                    translate('logs:input'),
+                    formatTokenAmount(numberOf(data.totalInputTokens)),
+                  ],
+                  [
+                    translate('logs:output'),
+                    formatTokenAmount(numberOf(data.totalOutputTokens)),
+                  ],
+                ]}
+              />
+              <Tile
+                label={translate('logs:cacheTokens')}
                 value={formatTokenAmount(
-                  data.totalCacheCreationTokens + data.totalCacheReadTokens
+                  numberOf(data.totalCacheCreationTokens) +
+                    numberOf(data.totalCacheReadTokens)
                 )}
                 rows={[
-                  ['写入', formatTokenAmount(data.totalCacheCreationTokens)],
-                  ['读取', formatTokenAmount(data.totalCacheReadTokens)],
+                  [
+                    translate('logs:write'),
+                    formatTokenAmount(numberOf(data.totalCacheCreationTokens)),
+                  ],
+                  [
+                    translate('logs:read'),
+                    formatTokenAmount(numberOf(data.totalCacheReadTokens)),
+                  ],
                 ]}
               />
             </div>

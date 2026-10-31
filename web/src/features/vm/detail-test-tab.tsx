@@ -1,4 +1,6 @@
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { type CredType, credTypeLabel } from '@/lib/cred-type'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,8 +15,9 @@ import {
 } from '@/components/ui/select'
 import { TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { SearchSelect } from '@/components/search-select'
 import {
-  DATAPLANE_HINT,
+  dataplaneHint,
   HOP_TRANSPORT_LABEL,
   dataplaneLabel,
 } from '@/features/vm/dataplane-contract'
@@ -45,15 +48,47 @@ type VmTestTabProps = {
 }
 
 const CODEX_EFFORTS = [
-  { id: 'none', label: 'none' },
-  { id: 'low', label: 'low' },
-  { id: 'medium', label: 'medium' },
-  { id: 'high', label: 'high' },
-  { id: 'xhigh', label: 'xhigh' },
-  { id: 'max', label: 'max' },
+  {
+    id: 'none',
+    get label() {
+      return tVm('vm:reasoning.none')
+    },
+  },
+  {
+    id: 'low',
+    get label() {
+      return tVm('vm:reasoning.low')
+    },
+  },
+  {
+    id: 'medium',
+    get label() {
+      return tVm('vm:reasoning.medium')
+    },
+  },
+  {
+    id: 'high',
+    get label() {
+      return tVm('vm:reasoning.high')
+    },
+  },
+  {
+    id: 'xhigh',
+    get label() {
+      return tVm('vm:reasoning.xhigh')
+    },
+  },
+  {
+    id: 'max',
+    get label() {
+      return tVm('vm:reasoning.max')
+    },
+  },
 ] as const
 
 export function VmTestTab(props: VmTestTabProps) {
+  useTranslation('vm')
+
   return (
     <TabsContent value='test' className='space-y-3 pt-4'>
       <VmTestPanel {...props} className='max-w-lg' />
@@ -63,6 +98,8 @@ export function VmTestTab(props: VmTestTabProps) {
 
 /** 不依赖 Tabs 上下文的测试面板，详情页 Tab 与弹窗共用。 */
 export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
+  const { t: tVm } = useTranslation('vm')
+
   const {
     vm,
     models,
@@ -90,43 +127,52 @@ export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
     <>
       <Card className={props.className}>
         <CardHeader className='pb-2'>
-          <CardTitle className='text-sm'>发一条测试对话</CardTitle>
+          <CardTitle className='text-sm'>
+            <Trans ns='vm' i18nKey='detailTestTab.sendATestMessage' />
+          </CardTitle>
         </CardHeader>
         <CardContent className='space-y-3 pt-0'>
           <div className='space-y-1.5'>
-            <Label>模型</Label>
-            <Select
+            <Label>
+              <Trans ns='vm' i18nKey='detailCostByModel.model' />
+            </Label>
+            <SearchSelect
+              label={tVm('vm:detailTestTab.testModel')}
               value={model || models[0]?.id || ''}
-              onValueChange={onModelChange}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder='选择模型' />
-              </SelectTrigger>
-              <SelectContent>
-                {models.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.label || m.display_name || m.id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              options={models.map((m) => ({
+                id: m.id,
+                name: m.label || m.display_name || m.id,
+              }))}
+              searchPlaceholder={tVm('vm:detailTestTab.searchTestModels')}
+              onChange={(id) => onModelChange(id || '')}
+            />
           </div>
           <div className='space-y-1.5'>
-            <Label>Prompt</Label>
+            <Label>
+              <Trans ns='vm' i18nKey='labels.prompt' />
+            </Label>
             <Textarea
               value={prompt}
               onChange={(event) => onPromptChange(event.target.value)}
             />
           </div>
           <div className='space-y-1.5'>
-            <Label>{isCodex ? '思考档位' : '思考预算'}</Label>
+            <Label>
+              {isCodex
+                ? tVm('vm:detailTestTab.reasoningLevel')
+                : tVm('vm:detailTestTab.reasoningBudget')}
+            </Label>
             {isCodex ? (
               <Select
                 value={reasoningEffort}
                 onValueChange={onReasoningEffortChange}
               >
                 <SelectTrigger className='w-40'>
-                  <SelectValue placeholder='medium' />
+                  <SelectValue
+                    placeholder={
+                      /* i18n-exempt "medium" -- Literal reasoning effort value accepted by the model API. */ 'medium'
+                    }
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   {CODEX_EFFORTS.map((item) => (
@@ -155,31 +201,41 @@ export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
             )}
           </div>
           <div className='space-y-1'>
-            <Label>凭证</Label>
+            <Label>
+              <Trans ns='vm' i18nKey='detailTestTab.credentials' />
+            </Label>
             <p className='text-xs text-muted-foreground'>
               {isCodex
                 ? 'GPT OAuth · Codex kernel / OpenAI Responses'
                 : credType === 'none'
-                  ? '无凭证 · 测试会被拒绝，请先导入凭证'
-                  : `${credTypeLabel(credType)}${
-                      credType === 'setup-token' || credType === 'apikey'
-                        ? ' · 按 inference 入站，不走官方 Claude Code 四门'
-                        : ' · 官方 Claude Code 入站'
-                    }`}
+                  ? tVm(
+                      'vm:detailTestTab.noCredentialsImportCredentialsBeforeTesting'
+                    )
+                  : tVm('vm:detailTestTab.summary', {
+                      value1: credTypeLabel(credType),
+                      value2:
+                        credType === 'setup-token' || credType === 'apikey'
+                          ? tVm(
+                              'vm:detailTestTab.inferenceEntryBypassesTheFourOfficialClaudeCodeGates'
+                            )
+                          : tVm('vm:detailTestTab.officialClaudeCodeEntry'),
+                    })}
             </p>
           </div>
           {isCodex ? null : (
             <div className='space-y-1'>
-              <Label>内核</Label>
+              <Label>
+                <Trans ns='vm' i18nKey='detailStatusBoard.kernel' />
+              </Label>
               <p className='text-xs text-muted-foreground'>
                 {HOP_TRANSPORT_LABEL} · {dataplaneLabel(dataplane)}。
-                {DATAPLANE_HINT}
+                {dataplaneHint()}
               </p>
             </div>
           )}
           <div className='flex gap-2'>
             <Button onClick={onTest} disabled={running} loading={running}>
-              开始测试
+              <Trans ns='vm' i18nKey='detailTestTab.startTest' />
             </Button>
             {canRefreshModels ? (
               <Button
@@ -187,7 +243,7 @@ export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
                 onClick={onRefreshModels}
                 loading={modelsRefreshing}
               >
-                刷新列表
+                <Trans ns='vm' i18nKey='detailTestTab.refreshList' />
               </Button>
             ) : null}
           </div>

@@ -49,8 +49,8 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='native-cli-smoke-') as directory:
         root = Path(directory)
-        template = Path('/opt/vm2api/image-wrap-cli')
-        native = Path('/opt/vm2api/image-native-cli')
+        template = Path('/opt/tapmodels/image-wrap-cli')
+        native = Path('/opt/tapmodels/image-native-cli')
         home = root / 'home'
         kin = home / '.kin'
         shutil.copytree(template, kin)
