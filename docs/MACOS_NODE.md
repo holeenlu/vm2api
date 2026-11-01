@@ -39,8 +39,8 @@ payload/darwin-arm64/
 | --- | --- |
 | 架构 | `arm64` |
 | launchd | 存在 `gui/<uid>` 域（用户已登录） |
-| 槽位目录 | `~/.vm2api/vms` 可写（0700） |
-| 套接字 | `~/.vm2api/vms/<id>/run/kernel.sock` 不超过 macOS 的 103 字节上限 |
+| 槽位目录 | `~/.tapmodels/vms` 可写（0700） |
+| 套接字 | `~/.tapmodels/vms/<id>/run/kernel.sock` 不超过 macOS 的 103 字节上限 |
 | 产物 | darwin/arm64 四个文件齐全 |
 | 磁盘、内存、休眠 | 只提示 |
 
@@ -49,13 +49,13 @@ payload/darwin-arm64/
 ## 节点上的布局
 
 ```
-~/.vm2api/native/<digest>/        kin-kernel、cli-node、cc-node、kin-worker（按内容哈希，多个槽共用）
-~/.vm2api/vms/<id>/cli-home       槽位进程的 HOME
-~/.vm2api/vms/<id>/claude         CLAUDE_CONFIG_DIR（凭证、设置）
-~/.vm2api/vms/<id>/run            kernel.json、worker.json、令牌、kernel/worker 套接字
-~/.vm2api/vms/<id>/logs           kernel.log、telemetry.log（超过 8 MiB 时启动截留最后 1 MiB）
-~/.vm2api/vms/<id>/tmp            TMPDIR
-~/.vm2api/vms/<id>/launchd        com.vm2api.slot.<id>.kernel.plist / .telemetry.plist
+~/.tapmodels/native/<digest>/        kin-kernel、cli-node、cc-node、kin-worker（按内容哈希，多个槽共用）
+~/.tapmodels/vms/<id>/cli-home       槽位进程的 HOME
+~/.tapmodels/vms/<id>/claude         CLAUDE_CONFIG_DIR（凭证、设置）
+~/.tapmodels/vms/<id>/run            kernel.json、worker.json、令牌、kernel/worker 套接字
+~/.tapmodels/vms/<id>/logs           kernel.log、telemetry.log（超过 8 MiB 时启动截留最后 1 MiB）
+~/.tapmodels/vms/<id>/tmp            TMPDIR
+~/.tapmodels/vms/<id>/launchd        com.vm2api.slot.<id>.kernel.plist / .telemetry.plist
 ```
 
 plist 放在槽位目录里，不放 `~/Library/LaunchAgents`，避免登录时 launchd 自己再加载一份。kernel.json 里的套接字、

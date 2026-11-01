@@ -60,13 +60,13 @@ test('JEV actual panel route enforces roles, sanitization and pagination', async
   }
   assert.equal((await request(null)).status, 401)
   passed.push('unauthenticated rejected')
-  for (const role of ['user', 'super']) {
+  for (const role of ['user', 'admin']) {
     assert.equal((await request({ panelUser: 'isolated-user', panelRole: role })).status, 403)
     passed.push(role + ' cannot read global ledger')
   }
   assert.equal((await request({ apiKeyKind: 'managed' })).status, 403)
   passed.push('managed protocol credential cannot read panel')
-  const admin = { panelUser: 'isolated-admin', panelRole: 'admin' }
+  const admin = { panelUser: 'isolated-admin', panelRole: 'super_admin' }
   const result = await request(admin)
   assert.equal(result.status, 200)
   assert.equal(result.body.ok, true)

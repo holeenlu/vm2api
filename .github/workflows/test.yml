@@ -1,5 +1,4 @@
-# PR/main gate against the production baseline: deploy/payload.json pins the
-# exact ELFs running live, so CI only checks source and the pinned bytes.
+# PR/main gate: Node + Go + linux/amd64 payloads + web. No ARM64 builds.
 name: ci
 
 on:
@@ -7,6 +6,20 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      preview_artifact:
+        description: 'Same-run artifact containing a prepared candidate bundle; empty checks the normal checkout'
+        type: string
+        default: ''
+      preview_sha:
+        description: 'Exact candidate commit produced by trusted preparation'
+        type: string
+        default: ''
+      preview_source:
+        description: 'Frozen upstream parent of the customization candidate'
+        type: string
+        default: ''
 
 # Only PR runs supersede each other; every main push keeps its own verdict so
 # it is visible when main turned red and when it recovered.
@@ -18,22 +31,264 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 2
+    outputs:
+      pr_base_sha: ${{ steps.pr_base.outputs.pr_base_sha }}
+      unit: ${{ steps.select.outputs.unit }}
+      worker: ${{ steps.select.outputs.worker }}
+      kernel: ${{ steps.select.outputs.kernel }}
+      web: ${{ steps.select.outputs.web }}
+      contracts: ${{ steps.select.outputs.contracts }}
+      unit_files: ${{ steps.select.outputs.unit_files }}
+      full_unit: ${{ steps.select.outputs.full_unit }}
+      unit_payload: ${{ steps.select.outputs.unit_payload }}
+      tooling: ${{ steps.select.outputs.tooling }}
+      go_modules: ${{ steps.select.outputs.go_modules }}
+      go_changes: ${{ steps.select.outputs.go_changes }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: merge current base
+          persist-credentials: false
+      - name: Freeze and merge current PR base
+        id: pr_base
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
+        run: python3 scripts/upstream-sync/ci_plan.py merge-pr-base
+      - name: Select checks from actual delivery trees
+        id: select
+        env:
+          PREVIEW_ARTIFACT: ${{ inputs.preview_artifact }}
+          PR_BASE_SHA: ${{ steps.pr_base.outputs.pr_base_sha }}
+        run: python3 scripts/upstream-sync/ci_plan.py
+
+  unit:
+    needs: plan
+    if: needs.plan.outputs.unit == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+      - name: Merge frozen PR base
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ needs.plan.outputs.pr_base_sha }}
+        run: python3 scripts/upstream-sync/ci_plan.py merge-pr-base
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-go@v7
+        if: needs.plan.outputs.unit_payload == 'true'
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: worker/go.sum
+      - run: npm ci
+      - name: Panel HTTP regression (unit files run in the unit suite)
+        if: needs.plan.outputs.full_unit == 'true'
+        run: node --test test/e2e/panel-users.e2e.test.mjs
+      - name: Upstream preview safety and Git integration tests
+        if: needs.plan.outputs.tooling == 'true'
+        run: python3 -m unittest discover -s test/upstream_sync -v
+      - name: Release planning and publication contracts
+        if: needs.plan.outputs.tooling == 'true'
+        run: python3 -m unittest discover -s test/release -v
+      - name: format-check
+        run: npx biome format
+      - name: syntax-check Node source and scripts
         run: |
-          # refs/pull/<n>/merge keeps the base from the PR's last push and a
-          # re-run reuses it; merge today's base so a re-run tests against it.
-          git fetch --no-tags origin "$BASE_REF"
-          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
+      - name: slot payloads and egress helper used by the unit tests
+        if: needs.plan.outputs.unit_payload == 'true'
+        run: |
+          npm run fetch:payload
+          npm run build:egress
+      - name: native official_303 and CCH regression
+        if: needs.plan.outputs.unit_payload == 'true'
+        env:
+          KIN_303_KERNEL: ${{ github.workspace }}/bin/kin-kernel
+          KIN_303_CLI: ${{ github.workspace }}/share/wrap-cli/cli-node
+        run: node --test test/e2e/official-303.e2e.test.mjs
+      - name: Selected isolated Node tests
+        env:
+          UNIT_FILES: ${{ needs.plan.outputs.unit_files }}
+        run: python3 scripts/upstream-sync/ci_plan.py run-unit
+      - name: ARM64 host preparation and rollback tests
+        if: needs.plan.outputs.tooling == 'true'
+        run: python3 -m unittest discover -s test/deploy -v
+      - name: Native CLI packaging unit tests
+        if: needs.plan.outputs.tooling == 'true'
+        run: python3 -m unittest discover -s test/deploy -p test_native_cli.py -v
+
+  worker:
+    needs: plan
+    if: needs.plan.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+      - name: Merge frozen PR base
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ needs.plan.outputs.pr_base_sha }}
+        run: python3 scripts/upstream-sync/ci_plan.py merge-pr-base
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            worker/go.sum
+            api-kernel/go.sum
+      - name: Check selected Go modules and dependent packages
+        env:
+          GO_MODULES: ${{ needs.plan.outputs.go_modules }}
+          GO_CHANGES: ${{ needs.plan.outputs.go_changes }}
+        run: python3 scripts/upstream-sync/ci_plan.py run-go
+
+  kernel:
+    needs: plan
+    if: needs.plan.outputs.kernel == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+      - name: Merge frozen PR base
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ needs.plan.outputs.pr_base_sha }}
+        run: python3 scripts/upstream-sync/ci_plan.py merge-pr-base
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: pinned linux amd64 payload ELFs
+        run: |
+          node scripts/fetch-payload.mjs
+          node scripts/fetch-payload.mjs --check
+          for b in bin/kin-kernel bin/kin-codex-kernel bin/kin-oauth-auth share/wrap-cli/kin-kernel.bin share/wrap-cli/cli-node share/wrap-cli/cc-node share/crag/kin-kernel; do
+            file "$b" | grep -q 'ELF 64-bit LSB .*x86-64'
+          done
+
+  web:
+    needs: plan
+    if: needs.plan.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+      - name: Merge frozen PR base
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ needs.plan.outputs.pr_base_sha }}
+        run: python3 scripts/upstream-sync/ci_plan.py merge-pr-base
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+          cache: true
+          cache_dependency_path: web/pnpm-lock.yaml
+      - name: install and verify
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm format:check
+          pnpm test
+          pnpm build
+
+  contracts:
+    needs: plan
+    if: needs.plan.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      RELAY_ACCEPTANCE_URL: ''
+      RELAY_ACCEPTANCE_KEY: ''
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          persist-credentials: false
+      - name: Merge frozen PR base
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ needs.plan.outputs.pr_base_sha }}
+        run: python3 scripts/upstream-sync/ci_plan.py merge-pr-base
+      - name: Download prepared upstream candidate
+        if: inputs.preview_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.preview_artifact }}
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Check out the exact prepared candidate
+        if: inputs.preview_artifact != ''
+        env:
+          PREVIEW_SHA: ${{ inputs.preview_sha }}
+          PREVIEW_SOURCE: ${{ inputs.preview_source }}
+        run: python3 scripts/upstream-sync/preview.py restore --bundle "$RUNNER_TEMP/upstream-candidate/candidate.bundle" --sha "$PREVIEW_SHA" --source "$PREVIEW_SOURCE"
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -42,50 +297,52 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25.x'
-          cache-dependency-path: |
-            worker/go.sum
-            api-kernel/go.sum
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10
-          cache: true
-          cache_dependency_path: web/pnpm-lock.yaml
+          cache-dependency-path: api-kernel/go.sum
       - run: npm ci
-      - name: format and syntax
+      - name: Build isolated API kernel for contract tests
+        working-directory: api-kernel
         run: |
-          npx biome format
-          test -z "$(gofmt -l worker api-kernel)" || { gofmt -l worker api-kernel; exit 1; }
-          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
-      - name: pinned payload
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/kin-api-kernel-contracts" ./cmd/kin-api-kernel
+          echo "KIN_API_KERNEL_BIN=$RUNNER_TEMP/kin-api-kernel-contracts" >> "$GITHUB_ENV"
+      - name: Commercial authorization, settlement and native model catalog contracts
         run: |
-          node scripts/fetch-payload.mjs
-          node scripts/fetch-payload.mjs --check
-      - name: native CLI packaging unit tests
-        run: python3 -m unittest discover -s test/deploy -p test_native_cli.py -v
-      - run: npm run test:unit
-      - name: go vet and test
-        run: |
-          (cd worker && go vet ./... && go test ./...)
-          (cd api-kernel && go vet ./... && go test ./...)
-      - name: web
-        working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm format:check
-          pnpm test
-          pnpm build
+          node --import ./test/fixtures/kin-computer-test-env.mjs --test \
+            test/e2e/relay-operations.e2e.test.mjs \
+            test/e2e/relay-refinements.e2e.test.mjs \
+            test/e2e/codex-key-catalog.e2e.test.mjs
 
   arm64-native-cli:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: prepare pinned x86 kernel emulation
+      - name: Prepare pinned x86 kernel emulation
         run: python3 deploy/prepare-arm64.py
-      - name: build native ARM control plane
-        run: docker build -f deploy/Dockerfile.arm64-control -t vm2api-native-cli-ci .
-      - name: offline large-body, concurrency and cancel regression
+      - name: Build native ARM control plane
+        run: docker build -f deploy/Dockerfile.arm64-control -t tapmodels-native-cli-ci .
+      - name: Offline large-body, concurrency and cancel regression
         run: |
           docker run --network none --cpus 2 --memory 3g --pids-limit 256 \
             --entrypoint python3 -v "$PWD/test/deploy/smoke_native_cli.py:/smoke.py:ro" \
-            vm2api-native-cli-ci /smoke.py
+            tapmodels-native-cli-ci /smoke.py
+
+  result:
+    if: always()
+    needs: [plan, unit, worker, kernel, web, contracts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every selected check to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          assert needs['plan']['result'] == 'success', 'CI selection failed'
+          for job in ('unit', 'worker', 'kernel', 'web', 'contracts'):
+              selected = needs['plan']['outputs'].get(job)
+              assert selected in ('true', 'false'), f'{job}: missing selection'
+              expected = 'success' if selected == 'true' else 'skipped'
+              assert needs[job]['result'] == expected, f'{job}: {needs[job]["result"]}'
+          PYTHON

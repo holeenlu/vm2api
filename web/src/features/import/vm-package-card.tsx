@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { t } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -20,7 +22,7 @@ function progressOf(result: ImportResult | null, busy: boolean, tick: number) {
   if (busy) {
     return {
       value: Math.min(88, 12 + tick),
-      label: '正在创建虚拟机',
+      label: t('import:creatingVm'),
       detail: '',
     }
   }
@@ -30,14 +32,14 @@ function progressOf(result: ImportResult | null, busy: boolean, tick: number) {
   const probed = !!result.probe?.ok
   const value = probed ? 100 : installed ? 75 : started ? 50 : 25
   const label = !started
-    ? `已创建 ${result.vm.id}，启动未完成`
+    ? t('import:createdNotStarted', { id: result.vm.id })
     : !installed
-      ? `${result.vm.id} 已启动，初装未排队`
+      ? t('import:startedNotQueued', { id: result.vm.id })
       : !probed
-        ? `${result.vm.id} 初装已排队，探测未完成`
-        : `${result.vm.id} 已创建`
+        ? t('import:queuedNotProbed', { id: result.vm.id })
+        : t('import:created', { id: result.vm.id })
   const detail = result.renamed_from
-    ? `${result.renamed_from} 已占用，落到 ${result.vm.id}`
+    ? t('import:renamed', { original: result.renamed_from, id: result.vm.id })
     : result.start_error ||
       result.probe?.error ||
       result.official_cc_bootstrap?.reason ||
@@ -46,10 +48,15 @@ function progressOf(result: ImportResult | null, busy: boolean, tick: number) {
 }
 
 export function VmPackageImportCard() {
+  const { t } = useTranslation('import')
+
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [text, setText] = useState('')
-  const [parseError, setParseError] = useState('')
+  const [errorKey, setErrorKey] = useState<'invalidJson' | 'readFailed' | null>(
+    null
+  )
+  const parseError = errorKey ? t('import:' + errorKey) : ''
   const [result, setResult] = useState<ImportResult | null>(null)
   const [tick, setTick] = useState(0)
 
@@ -64,12 +71,12 @@ export function VmPackageImportCard() {
       const id = data?.vm?.id
       toast.success(
         data?.renamed_from
-          ? `${data.renamed_from} 已占用，已创建 ${id}`
-          : `已创建 ${id || '虚拟机'}`
+          ? t('import:createdRenamed', { original: data.renamed_from, id: id })
+          : t('import:created', { id: id || t('import:virtualMachine') })
       )
       await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
     },
-    onError: (e: Error) => toast.error(e.message || '导入失败'),
+    onError: (e: Error) => toast.error(e.message || t('import:importFailed')),
   })
 
   const busy = importPackage.isPending
@@ -84,10 +91,10 @@ export function VmPackageImportCard() {
     try {
       parsed = JSON.parse(text)
     } catch {
-      setParseError('JSON 无效，请检查格式后重试')
+      setErrorKey('invalidJson')
       return
     }
-    setParseError('')
+    setErrorKey(null)
     setTick(0)
     setResult(null)
     importPackage.mutate(parsed)
@@ -105,19 +112,18 @@ export function VmPackageImportCard() {
   return (
     <div className='space-y-4'>
       <p className='max-w-[62ch] text-sm leading-relaxed text-muted-foreground'>
-        用一份 JSON 创建虚拟机。带了 SOCKS5 就建代理并绑定。id
-        被占用时顺延到下一个空号。
+        {t('import:packageHelp')}
       </p>
       <Textarea
         className='h-56 font-mono text-[13px] leading-relaxed'
         spellCheck={false}
         value={text}
         disabled={busy}
-        aria-label='虚拟机包 JSON'
-        placeholder='把 vm2api-vm-package 贴在这里'
+        aria-label={t('import:packageJson')}
+        placeholder={t('import:packagePlaceholder')}
         onChange={(e) => {
           setText(e.target.value)
-          if (parseError) setParseError('')
+          if (parseError) setErrorKey(null)
         }}
       />
       {parseError ? (
@@ -157,10 +163,10 @@ export function VmPackageImportCard() {
               .text()
               .then((raw) => {
                 setText(raw)
-                setParseError('')
+                setErrorKey(null)
                 setResult(null)
               })
-              .catch(() => setParseError('读取文件失败'))
+              .catch(() => setErrorKey('readFailed'))
           }}
         />
         <Button
@@ -169,10 +175,10 @@ export function VmPackageImportCard() {
           disabled={busy}
           onClick={() => fileRef.current?.click()}
         >
-          选择文件
+          {t('import:chooseFile')}
         </Button>
         <Button size='sm' disabled={!text.trim() || busy} onClick={submit}>
-          {busy ? '创建中…' : '创建虚拟机'}
+          {busy ? t('import:creating') : t('import:createVm')}
         </Button>
       </div>
     </div>

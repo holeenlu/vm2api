@@ -259,6 +259,7 @@ export function createSseJsonBridge() {
   let terminal = null
   let responseId = null
   let output = null
+  const completedOutput = new Map()
 
   function takeData() {
     if (!dataLines.length) return null
@@ -273,6 +274,17 @@ export function createSseJsonBridge() {
     const id = parsed.response?.id
     if (typeof id === 'string' && id) responseId = id
     if (Array.isArray(parsed.response?.output)) output = parsed.response.output
+    // Preserve completed items for continuation when the terminal frame omits
+    // its output array. Never replay unfinished output_item.added placeholders.
+    if (
+      type === 'response.output_item.done' &&
+      Number.isInteger(parsed.output_index) &&
+      parsed.output_index >= 0 &&
+      parsed.item &&
+      typeof parsed.item === 'object' &&
+      !Array.isArray(parsed.item)
+    )
+      completedOutput.set(parsed.output_index, parsed.item)
     if (type === 'response.completed') terminal = 'completed'
     else if (type === 'response.failed') terminal = 'failed'
     else if (type === 'response.incomplete') terminal = 'incomplete'
@@ -325,7 +337,13 @@ export function createSseJsonBridge() {
     },
     snapshot() {
       if (!responseId) return null
-      return { id: responseId, output: Array.isArray(output) ? output : [] }
+      return {
+        id: responseId,
+        output:
+          Array.isArray(output) && output.length
+            ? output
+            : [...completedOutput.entries()].sort(([a], [b]) => a - b).map(([, item]) => item),
+      }
     },
   }
 }
@@ -351,7 +369,6 @@ function createProtocolReq(upgradeReq, body) {
   req.panelUser = upgradeReq.panelUser
   req.panelRole = upgradeReq.panelRole
   req.panelUserId = upgradeReq.panelUserId
-  req.panelVmCreateQuota = upgradeReq.panelVmCreateQuota
   req.abort = () => {
     if (req.aborted) return
     req.aborted = true

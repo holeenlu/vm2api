@@ -181,3 +181,59 @@ test('liveOauthToSetupToken keeps flattened identity', () => {
   assert.equal(out.account_uuid, 'acct-live')
   assert.equal(out.org_uuid, 'org-live')
 })
+
+test('account display metadata retains observed billing and rate tier without credentials', () => {
+  const identity = flattenOauthIdentity({
+    account: { email_address: 'plan@example.test', billing_type: 'apple_subscription' },
+    organization: { rate_limit_tier: 'default_claude_max_20x' },
+    access_token: 'secret',
+  })
+  assert.equal(identity.rate_limit_tier, 'default_claude_max_20x')
+  assert.equal(identity.billing_type, 'apple_subscription')
+  assert.equal(identity.subscription_type, 'max')
+  assert.equal('access_token' in identity, false)
+})
+
+test('profile nesting and token camelCase fields keep their values; billing never becomes a plan', () => {
+  const nested = flattenOauthIdentity({
+    profile: {
+      account: { uuid: 'acct-profile', email_address: 'name@privaterelay.appleid.com' },
+      organization: {
+        uuid: 'org-profile',
+        billing_type: 'apple_subscription',
+        rate_limit_tier: 'default_claude_max_5x',
+      },
+    },
+  })
+  assert.equal(nested.email, 'name@privaterelay.appleid.com')
+  assert.equal(nested.billing_type, 'apple_subscription')
+  assert.equal(nested.rate_limit_tier, 'default_claude_max_5x')
+  const camel = flattenOauthIdentity({ billingType: 'stripe_subscription', rateLimitTier: 'tier' })
+  assert.equal(camel.billing_type, 'stripe_subscription')
+  assert.equal(camel.rate_limit_tier, 'tier')
+  assert.equal(camel.subscription_type, null)
+  assert.equal(
+    flattenOauthIdentity({ oauth_account: { billing_type: 'google_subscription' } }).billing_type,
+    'google_subscription',
+  )
+  assert.equal(
+    flattenOauthIdentity({ account: { display_name: 'Claude Max', email_address: 'apple@privaterelay.appleid.com' } })
+      .subscription_type,
+    null,
+  )
+  assert.equal(flattenOauthIdentity({ billing_type: { card: 'secret' } }).billing_type, undefined)
+})
+
+test('unknown imported subscriptions are not labeled Pro or inherited from the previous account', () => {
+  const { importedCredentialFromOauth } = createImportCommit({})
+  const credential = importedCredentialFromOauth(
+    { type: 'setup-token', access_token: 'new' },
+    {
+      claude: { account_uuid: 'old', org_uuid: 'old-org', account_tier: 'max', billing_type: 'apple_subscription' },
+    },
+  )
+  assert.equal(credential.account_uuid, null)
+  assert.equal(credential.org_uuid, null)
+  assert.equal(credential.subscription_type, null)
+  assert.equal(credential.billing_type, undefined)
+})

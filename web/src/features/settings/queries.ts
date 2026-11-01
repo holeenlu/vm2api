@@ -1,4 +1,4 @@
-import { queryOptions } from '@tanstack/react-query'
+import { queryOptions, type QueryClient } from '@tanstack/react-query'
 import type { BackupsPayload, NotifyStatus } from '@/types/panel-routing'
 import { api } from '@/lib/api'
 
@@ -19,7 +19,7 @@ export type ReleaseStatus = {
   latest: string | null
   latest_tag: string | null
   update_available: boolean | null
-  check_status: 'ok' | 'failed'
+  check_status: 'ok' | 'failed' | 'not_checked'
   html_url: string
   published_at: string | null
   name: string | null
@@ -39,6 +39,10 @@ export type ReleaseStatus = {
     target: string
     exit_code: number | null
     log_command: string
+    phase?: string | null
+    progress?: number | null
+    message?: string | null
+    updated_at?: string | null
   }
 }
 
@@ -76,11 +80,41 @@ export function backupConfigQueryOptions() {
   })
 }
 
-export function versionQueryOptions() {
+export function versionQueryOptions(upgradeTarget: string | null = null) {
   return queryOptions({
     queryKey: ['panel', 'version'] as const,
-    queryFn: () => api<ReleaseStatus>('/api/panel/version'),
+    queryFn: ({ signal }) =>
+      api<ReleaseStatus>('/api/panel/version?status=1', {
+        cache: 'no-store',
+        signal,
+      }),
+    // Only a user-requested upgrade polls. Mount/focus/reconnect and cache
+    // invalidation must not initiate a release check in an idle console.
+    enabled: (query) =>
+      !!upgradeTarget || query.state.data?.upgrade?.state === 'running',
+    refetchInterval: (query) =>
+      upgradeTarget || query.state.data?.upgrade?.state === 'running'
+        ? 2000
+        : false,
     staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  })
+}
+
+export async function refreshVersionStatus(client: QueryClient) {
+  const options = versionQueryOptions()
+  // Cancel background status reads so an older response cannot replace this check.
+  await client.cancelQueries({ queryKey: options.queryKey })
+  return client.fetchQuery({
+    ...options,
+    queryFn: ({ signal }) =>
+      api<ReleaseStatus>('/api/panel/version?force=1', {
+        cache: 'no-store',
+        signal,
+      }),
+    staleTime: 0,
   })
 }
 

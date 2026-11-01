@@ -5,6 +5,7 @@ import {
   orderCodexSessionSlots,
   isCodexSlotParked,
   isCodexFailoverError,
+  isCodexOverloadError,
   evaluateCodexQuotaSchedule,
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { SessionLimitRegistry } from '../../src/lib/pool/session-limit.mjs'
@@ -94,18 +95,34 @@ test('capped 5h window parks the slot', () => {
   )
 })
 
+test('OpenAI server overload errors fail over before reaching the client', () => {
+  for (const result of [
+    { ok: false, status: 503, body: { error: { type: 'server_error', code: 'server_is_overloaded' } } },
+    {
+      ok: false,
+      status: 502,
+      replaySafe: true,
+      body: { error: { message: 'Our servers are currently overloaded. Please try again later.' } },
+    },
+  ]) {
+    assert.equal(isCodexOverloadError(result), true)
+    assert.equal(isCodexFailoverError(result), true)
+  }
+  assert.equal(isCodexOverloadError({ ok: false, status: 503, body: { error: { code: 'server_error' } } }), false)
+})
+
 test('429 and usage_limit_reached fail over; committed hops do not', () => {
   assert.equal(isCodexFailoverError({ ok: false, status: 429, committed: false }), true)
   assert.equal(isCodexFailoverError({ ok: false, status: 502, body: { error: { code: 'usage_limit_reached' } } }), true)
-  assert.equal(isCodexFailoverError({ ok: false, status: 500, body: { error: { code: 'server_error' } } }), true)
-  assert.equal(isCodexFailoverError({ ok: false, status: 502, body: { error: { code: 'provider_error' } } }), true)
+  assert.equal(isCodexFailoverError({ ok: false, status: 500, body: { error: { code: 'server_error' } } }), false)
+  assert.equal(isCodexFailoverError({ ok: false, status: 502, body: { error: { code: 'provider_error' } } }), false)
   assert.equal(
     isCodexFailoverError({ ok: false, status: 400, body: { error: { code: 'invalid_request_error' } } }),
     false,
   )
-  assert.equal(isCodexFailoverError({ ok: false, transportError: true, status: 0 }), true)
+  assert.equal(isCodexFailoverError({ ok: false, transportError: true, status: 0 }), false)
   assert.equal(isCodexFailoverError({ ok: false, status: 429, committed: true }), false)
-  assert.equal(isCodexFailoverError({ ok: false, status: 502, body: { error: { code: 'upstream_transport' } } }), true)
+  assert.equal(isCodexFailoverError({ ok: false, status: 502, body: { error: { code: 'upstream_transport' } } }), false)
   assert.equal(
     isCodexFailoverError({
       ok: false,
@@ -124,7 +141,7 @@ test('429 and usage_limit_reached fail over; committed hops do not', () => {
   )
   assert.equal(
     isCodexFailoverError({ ok: false, status: 503, committed: false, body: { error: { code: 'server_error' } } }),
-    true,
+    false,
   )
   assert.equal(
     isCodexFailoverError({ ok: false, status: 503, committed: false, body: { error: { code: 'overloaded' } } }),
@@ -303,14 +320,20 @@ test('GPT wait queue wakes FIFO on release and caps at 100 waiters', async () =>
   assert.equal(rt.OPENAI_MAX_WAITERS, 100)
   const deadline = Date.now() + 5000
   const order = []
-  const first = rt.waitForOpenAICapacity({ deadline }).then((r) => order.push(['a', r.woken]))
-  const second = rt.waitForOpenAICapacity({ deadline }).then((r) => order.push(['b', r.woken]))
   const lease = rt.tryAcquireOpenAISlot('vm-a')
+  const first = rt.waitForOpenAICapacity({ deadline }).then((r) => {
+    order.push(['a', r.woken])
+    return r
+  })
+  const second = rt.waitForOpenAICapacity({ deadline }).then((r) => {
+    r.ticket?.releaseTurn()
+    return order.push(['b', r.woken])
+  })
   lease.release()
-  await first
+  const firstTurn = await first
   assert.deepEqual(order, [['a', true]])
   lease.release()
-  rt.tryAcquireOpenAISlot('vm-a').release()
+  rt.tryAcquireOpenAISlot('vm-a', { ticket: firstTurn.ticket }).release()
   await second
   assert.deepEqual(order, [
     ['a', true],
@@ -333,9 +356,10 @@ test('GPT wait queue wakes the oldest waiter for the freed account', async () =>
   rt.resetOpenAIAccountRuntime()
   const deadline = Date.now() + 5000
   const order = []
+  const heldA = rt.tryAcquireOpenAISlot('vm-a')
   const onlyB = rt.waitForOpenAICapacity({ deadline, accounts: ['vm-b'] }).then((r) => order.push(['b', r.accountId]))
   const onlyA = rt.waitForOpenAICapacity({ deadline, accounts: ['vm-a'] }).then((r) => order.push(['a', r.accountId]))
-  rt.tryAcquireOpenAISlot('vm-a').release()
+  heldA.release()
   await onlyA
   assert.deepEqual(order, [['a', 'vm-a']])
   assert.equal(rt.openAIWaiterCount(), 1)
@@ -357,6 +381,7 @@ test('GPT wait queue re-parks a woken waiter at the head past the cap', async ()
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const deadline = Date.now() + 5000
+  const held = rt.tryAcquireOpenAISlot('vm-a')
   const parked = Array.from({ length: rt.OPENAI_MAX_WAITERS }, (_, i) =>
     rt.waitForOpenAICapacity({ deadline }).then((r) => ({ i, ...r })),
   )
@@ -365,8 +390,10 @@ test('GPT wait queue re-parks a woken waiter at the head past the cap', async ()
     .waitForOpenAICapacity({ deadline, accounts: ['vm-a'], front: true })
     .then((r) => ({ i: 'again', ...r }))
   assert.equal(rt.openAIWaiterCount(), rt.OPENAI_MAX_WAITERS + 1)
-  rt.tryAcquireOpenAISlot('vm-a').release()
-  assert.deepEqual(await again, { i: 'again', woken: true, accountId: 'vm-a' })
+  held.release()
+  const { ticket, ...woken } = await again
+  assert.deepEqual(woken, { i: 'again', woken: true, accountId: 'vm-a' })
+  ticket.releaseTurn()
   rt.resetOpenAIAccountRuntime()
   await Promise.all(parked)
 })

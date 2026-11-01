@@ -92,12 +92,13 @@ export function updateClusterNode(
 
 /**
  * 放置预检。服务端是 POST（要实际 SSH 过去跑检查），但语义是只读观测，
- * 按 节点 + 内核 缓存成 query；不自动轮询，由调用方手动 refetch。
+ * 按 节点 + 内核 + 运行时 + 单槽内存缓存成 query；不自动轮询，由调用方手动 refetch。
  */
 export function nodePreflightQueryOptions(
   nodeId: string,
   kernel: string,
-  runtimeType: RuntimeType = 'docker'
+  runtimeType: RuntimeType = 'docker',
+  memory?: string
 ) {
   return queryOptions({
     queryKey: [
@@ -107,11 +108,12 @@ export function nodePreflightQueryOptions(
       'preflight',
       kernel,
       runtimeType,
+      memory || null,
     ] as const,
     queryFn: () =>
       api<NodePreflight>(
         `${nodePath(nodeId)}/preflight`,
-        jsonBody({ kernel, runtime_type: runtimeType })
+        jsonBody({ kernel, runtime_type: runtimeType, memory })
       ),
     enabled: !!nodeId && !!kernel,
     staleTime: 0,

@@ -57,6 +57,11 @@ for (const location of ['system', 'tools', 'messages']) {
     const out = prepareCliHopBody(input, { cacheTtl: '1h' })
     assert.deepEqual(markers(out), [block.cache_control])
     if (location === 'messages') assert.deepEqual(out.messages[0], input.messages[0])
+    else if (location === 'tools')
+      assert.deepEqual(
+        out.tools,
+        input.tools.map((tool) => ({ ...tool, eager_input_streaming: true })),
+      )
     else assert.deepEqual(out[location], input[location])
     validateCacheBreakpoints(out)
   })

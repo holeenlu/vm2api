@@ -70,7 +70,7 @@ export function validateCodexModelMappingTarget(target) {
     return {
       ok: false,
       code: 'model_disabled',
-      message: `model mapping target '${id}' is disabled by gateway GPT model policy`,
+      message: `model mapping target '${id}' is disabled by the model service policy`,
     }
   }
   return { ok: true, target: id }

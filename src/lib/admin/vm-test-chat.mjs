@@ -879,7 +879,7 @@ export async function runVmTestChat(opts = {}) {
   if (!apiKey) {
     return done({
       ok: false,
-      error: { code: 'missing_api_key', message: 'gateway master key missing' },
+      error: { code: 'missing_api_key', message: 'service master key missing' },
       log,
       duration_ms: 0,
     })

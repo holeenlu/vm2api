@@ -219,7 +219,7 @@ test('5h rejected is limited, not unavailable', () => {
   assert.equal(st.text, '5h 限制')
 })
 
-test('weekly split regular half full is 普通限制', () => {
+test('high total weekly usage does not create a regular-model partition restriction', () => {
   const st = credStatusFromQuota(
     true,
     {
@@ -228,16 +228,16 @@ test('weekly split regular half full is 普通限制', () => {
       status_5h: 'allowed',
       status_7d: 'allowed',
       last_probe: usageOk,
-      weekly_split: { enabled: true, mode: 'fable_only' },
+      weekly_split: { enabled: true, fable_share: 0.5, fable_blocked: false },
     },
     null,
     extrasLive,
   )
-  assert.equal(st.key, 'quota')
-  assert.equal(st.text, '普通限制')
+  assert.equal(st.key, 'ok')
+  assert.equal(st.text, '可用')
 })
 
-test('weekly split fable half full does not mark the account as 限制', () => {
+test('Fable usage ceiling does not mark the whole account as limited', () => {
   const st = credStatusFromQuota(
     true,
     {
@@ -246,7 +246,7 @@ test('weekly split fable half full does not mark the account as 限制', () => {
       status_5h: 'allowed',
       status_7d: 'allowed',
       last_probe: usageOk,
-      weekly_split: { enabled: true, mode: 'regular_only' },
+      weekly_split: { enabled: true, fable_share: 0.5, fable_blocked: true },
     },
     null,
     extrasLive,
@@ -306,14 +306,14 @@ test('fable cooldown does not mark the account as 限制', () => {
   assert.equal(st.text, '可用')
 })
 
-test('weekly split off does not use mode', () => {
+test('disabled Fable ceiling does not affect whole-account status', () => {
   const st = credStatusFromQuota(
     true,
     {
       utilization_5h: 0.1,
       status_5h: 'allowed',
       last_probe: usageOk,
-      weekly_split: { enabled: false, mode: 'fable_only' },
+      weekly_split: { enabled: false, fable_blocked: false },
     },
     null,
     extrasLive,

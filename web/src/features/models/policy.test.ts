@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { catalogFacts } from './policy'
+
+const originalLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(originalLanguage)
+})
 
 describe('catalogFacts', () => {
   it('reports 未同步 instead of seed constants', () => {

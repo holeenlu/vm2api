@@ -60,7 +60,7 @@ export async function startSlotReady(vm, projectRoot, opts = {}) {
     if (!kernel.ok) return kernel
     return { ok: true, engine: 'codex', docker: boot, kernel }
   }
-  const boot = await startSlot(vm, projectRoot, opts)
+  const boot = await (opts.ops?.startSlot || startSlot)(vm, projectRoot, opts)
   if (!boot?.ok) return boot
   persistNodeRuntime(vm, projectRoot, boot)
   return attachInferenceRuntime(boot, vm, projectRoot, opts)

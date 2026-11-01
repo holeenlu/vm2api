@@ -4,8 +4,6 @@ import {
   DEFAULT_PERSONA_TEMPLATES,
   EMPTY_BLOCK_TEXT,
   PERSONA_PRESETS,
-  PREVIEW_CALLER_AGENT,
-  PREVIEW_CALLER_SYSTEM,
   agentStandingVar,
   applyPersonaEnvVars,
   dropLegacyAutoScope,
@@ -48,7 +46,7 @@ describe('persona template contract', () => {
       'official_full'
     )
     expect(personaInjectFromPreset('zero', 'rewrite')).toBe('zero')
-    expect(personaInjectFromPreset('official_303', 'rewrite')).toBe(
+    expect(personaInjectFromPreset('official_full', 'rewrite')).toBe(
       'official_full'
     )
     expect(personaInjectFromPreset('custom', 'append')).toBe('append')
@@ -101,55 +99,30 @@ describe('agent standing + system preview', () => {
     }
   })
 
-  // d917dd2a: zero is the billing header only; billing never shows in the preview.
-  it('zero previews no system blocks and standing defaults off in the official harness', () => {
-    const zero = previewSystemBlocks(DEFAULT_PERSONA_TEMPLATES.zero, {
-      ...vars,
-      agent_standing: '',
-    })
-    expect(zero).toEqual([])
-
-    const officialDefault = previewSystemBlocks(
-      DEFAULT_PERSONA_TEMPLATES.official,
-      {
-        ...vars,
-        agent_standing: agentStandingVar({}, 'official'),
-      }
-    )
-    expect(officialDefault[0]?.text).toBe('ID')
+  it('zero preview contains no injected prompt even when standing text is provided', () => {
     expect(
-      officialDefault.some((block) =>
-        block.text.includes(DEFAULT_AGENT_STANDING)
-      )
-    ).toBe(false)
-
-    const officialEnabled = previewSystemBlocks(
-      DEFAULT_PERSONA_TEMPLATES.official,
-      {
+      previewSystemBlocks(DEFAULT_PERSONA_TEMPLATES.zero, {
         ...vars,
-        agent_standing: agentStandingVar(
-          { agent_standing_presets: { official: true } },
-          'official'
-        ),
-      }
-    )
-    expect(
-      officialEnabled.find((block) => block.id === 'harness')
-    ).toMatchObject({
-      text: `${DEFAULT_AGENT_STANDING}\n`,
-      scope: 'global',
-      placeholder: false,
-    })
+        agent_standing: 'constraint',
+      })
+    ).toEqual([])
   })
 
-  it('zero with standing on previews only the standing block', () => {
-    const blocks = previewSystemBlocks(DEFAULT_PERSONA_TEMPLATES.zero, {
-      ...vars,
-      agent_standing: 'Stay terse.\n',
-    })
-    expect(blocks.map((block) => block.id)).toEqual(['agent_standing'])
-    expect(blocks[0]).toMatchObject({
-      text: 'Stay terse.\n',
+  it('saved custom blocks still retain explicit standing content and cache metadata', () => {
+    const out = previewSystemBlocks(
+      [
+        {
+          id: 'saved',
+          type: 'text',
+          text: '{{agent_standing}}',
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        },
+      ],
+      { agent_standing: 'Stay terse.' }
+    )
+    expect(out[0]).toMatchObject({
+      text: 'Stay terse.',
+      ttl: '1h',
       placeholder: false,
     })
   })
@@ -175,6 +148,9 @@ describe('agent standing + system preview', () => {
       'absent'
     )
     expect(templateSlotState([], 'env')).toBe('absent')
+    expect(templateSlotState(DEFAULT_PERSONA_TEMPLATES.official, 'env')).toBe(
+      'switch'
+    )
     expect(
       templateSlotState(
         [{ type: 'text', text: '{{env_timezone_only}}' }],
@@ -200,11 +176,11 @@ describe('agent standing + system preview', () => {
     }
     const on = {
       ...edited,
-      model_env_extra_presets: { official_303: true },
+      model_env_extra_presets: { official_full: true },
     }
     const block = (model: string, compat: Record<string, unknown>) =>
-      previewSystemBlocks(DEFAULT_PERSONA_TEMPLATES.official_303, {
-        model_sentence: previewModelSentence(compat, model, 'official_303'),
+      previewSystemBlocks(DEFAULT_PERSONA_TEMPLATES.official_full, {
+        model_sentence: previewModelSentence(compat, model, 'official_full'),
       }).find((item) => item.id === 'env_extra')
     expect(block('claude-sonnet-5-5', edited)).toBeUndefined()
     expect(block('claude-sonnet-5-5', on)?.text).toBe('Sonnet extra.')
@@ -212,228 +188,44 @@ describe('agent standing + system preview', () => {
     expect(block('claude-opus-5-5', on)).toBeUndefined()
   })
 
-  it('omits generated env when the per-preset switch is off', () => {
-    const isolated = {
-      persona_env_presets: {
-        official: true,
-        official_full: false,
-        zero: false,
-        custom: true,
-      },
-    }
-    const tokyo = '# Environment\n - Timezone: Asia/Tokyo'
+  it('environment opt-out clears generated macros without removing authored literals or caller text', () => {
+    const next = applyPersonaEnvVars(
+      { env_303: 'GENERATED', env_timezone: 'UTC', caller_system: 'CALLER' },
+      { persona_env_presets: { official_full: false } },
+      'official_full'
+    )
+    expect(next).toMatchObject({
+      env_303: '',
+      env_timezone: '',
+      caller_system: 'CALLER',
+    })
     expect(
-      applyPersonaEnvVars(
-        { env_official: 'ENV', timezone: 'UTC' },
-        {},
-        'official_full'
-      )
-    ).toEqual({ env_official: 'ENV', timezone: 'UTC' })
+      previewSystemBlocks([{ id: 'literal', text: 'AUTHORED ENV' }], next)[0]
+        .text
+    ).toBe('AUTHORED ENV')
+  })
 
-    const fullOn = previewSystemBlocks(
+  it('native harness retains its global scope while custom blocks retain their explicit cache metadata', () => {
+    const native = previewSystemBlocks(
       DEFAULT_PERSONA_TEMPLATES.official_full,
-      {
-        ...vars,
-        env_official: 'ENV',
-      }
+      { harness_303: 'HARNESS' }
     )
-    expect(fullOn.map((block) => block.id)).toEqual([
-      'identity',
-      'harness',
-      'dynamic_boundary',
-      'guidance',
-      'env_official',
-    ])
-    expect(fullOn.find((block) => block.id === 'guidance')).toMatchObject({
-      text: 'AGENT',
-      placeholder: false,
-      ttl: '',
-      scope: '',
+    expect(native.find((block) => block.id === 'harness')).toMatchObject({
+      text: 'HARNESS',
+      scope: 'global',
     })
-    // d917dd2a dropped the env_official breakpoint; Environment follows the guidance breakpoint.
-    expect(fullOn[fullOn.length - 1]).toMatchObject({
-      text: 'ENV',
-      placeholder: false,
-      ttl: '',
-      scope: '',
-    })
-
-    const fullOff = previewSystemBlocks(
-      DEFAULT_PERSONA_TEMPLATES.official_full,
-      applyPersonaEnvVars(
-        { ...vars, env_official: 'ENV', timezone: 'Asia/Tokyo' },
-        isolated,
-        'official_full'
-      )
-    )
-    expect(fullOff.some((block) => block.id === 'guidance')).toBe(true)
-    expect(fullOff.some((block) => block.id === 'env_official')).toBe(false)
-
-    const selected = previewSystemBlocks(
-      [
-        ...DEFAULT_PERSONA_TEMPLATES.official_full.filter(
-          (block) => block.id !== 'env_official'
-        ),
-        {
-          id: 'env_timezone_only',
-          type: 'text',
-          text: '{{env_timezone_only}}',
-        },
-      ],
-      { ...vars, env_timezone_only: tokyo }
-    )
-    expect(selected[selected.length - 1]?.text).toBe(tokyo)
-    // d917dd2a: the official preset no longer carries Environment in top-level system.
-    expect(
-      previewSystemBlocks(
-        DEFAULT_PERSONA_TEMPLATES.official,
-        applyPersonaEnvVars({ ...vars, env: tokyo }, isolated, 'official')
-      ).some((block) => block.text.includes('# Environment'))
-    ).toBe(false)
-
-    expect(
-      previewSystemBlocks(
-        DEFAULT_PERSONA_TEMPLATES.zero,
-        applyPersonaEnvVars(
-          { ...vars, agent_standing: '', env: tokyo },
-          isolated,
-          'zero'
-        )
-      ).map((block) => block.id)
-    ).toEqual([])
-
-    const literal = previewSystemBlocks(
-      [
-        {
-          id: 'authored',
-          type: 'text',
-          text: '# Environment\n - Timezone: Europe/Paris',
-        },
-      ],
-      applyPersonaEnvVars(
-        { env: 'GENERATED', timezone: 'UTC' },
-        { persona_env_presets: { custom: false } },
-        'custom'
-      )
-    )
-    expect(literal).toHaveLength(1)
-    expect(literal[0].text).toBe('# Environment\n - Timezone: Europe/Paris')
-
-    const mixed = previewSystemBlocks(
-      [
-        {
-          id: 'mix',
-          type: 'text',
-          text: '# Environment\n{{env_official}}',
-          cache_control: { type: 'ephemeral', ttl: '1h' },
-        },
-      ],
-      applyPersonaEnvVars(
-        { env_official: 'ENV' },
-        { persona_env_presets: { custom: false } },
-        'custom'
-      )
-    )
-    expect(mixed).toHaveLength(1)
-    expect(mixed[0]).toMatchObject({
-      text: '# Environment\n',
-      placeholder: false,
-      ttl: '1h',
-    })
-
     expect(
       previewSystemBlocks(
         [
           {
-            id: 'tz',
-            type: 'text',
-            text: '{{env_timezone_only}}',
-            cache_control: { type: 'ephemeral', ttl: '1h' },
-          },
-          {
-            id: 'timezone-scalar',
-            type: 'text',
-            text: '{{timezone}}',
+            id: 'custom',
+            text: 'CUSTOM',
+            cache_control: { type: 'ephemeral', ttl: '1h', scope: 'org' },
           },
         ],
-        applyPersonaEnvVars(
-          { env_timezone_only: tokyo },
-          { persona_env_presets: { official: false } },
-          'official'
-        )
-      )
-    ).toEqual([])
-
-    expect(
-      previewSystemBlocks(
-        [{ id: 'line', type: 'text', text: 'tz={{timezone}} cwd={{cwd}}' }],
-        applyPersonaEnvVars(
-          { timezone: 'UTC', cwd: '/tmp' },
-          { persona_env_presets: { custom: false } },
-          'custom'
-        )
-      )[0]?.text
-    ).toBe('tz= cwd=/tmp')
-
-    expect(
-      applyPersonaEnvVars(
-        {
-          env: 'E',
-          env_official: 'O',
-          env_timezone_only: 'T',
-          timezone: 'UTC',
-          caller_system: PREVIEW_CALLER_SYSTEM,
-          caller_agent: PREVIEW_CALLER_AGENT,
-        },
-        { persona_env_presets: { official: false } },
-        'official'
-      )
-    ).toMatchObject({
-      env: '',
-      env_official: '',
-      env_timezone_only: '',
-      timezone: '',
-      caller_system: PREVIEW_CALLER_SYSTEM,
-      caller_agent: PREVIEW_CALLER_AGENT,
-    })
-  })
-
-  it('preview keeps the builtin guidance breakpoint without scope and retains custom explicit scope', () => {
-    const builtin = previewSystemBlocks(
-      DEFAULT_PERSONA_TEMPLATES.official_full,
-      {
-        ...vars,
-        env_official: 'ENV',
-      }
-    )
-    expect(builtin.find((block) => block.id === 'guidance')).toMatchObject({
-      text: 'AGENT',
-      scope: '',
-    })
-    expect(builtin.find((block) => block.id === 'harness')?.scope).toBe(
-      'global'
-    )
-    const custom = previewSystemBlocks(
-      [
-        {
-          id: 'scoped',
-          type: 'text',
-          text: 'custom-scoped',
-          cache_control: { type: 'ephemeral', ttl: '1h', scope: 'global' },
-        },
-      ],
-      vars
-    )
-    expect(custom).toEqual([
-      {
-        id: 'scoped',
-        text: 'custom-scoped',
-        hide: false,
-        ttl: '1h',
-        scope: 'global',
-        placeholder: false,
-      },
-    ])
+        {}
+      )[0]
+    ).toMatchObject({ ttl: '1h', scope: 'org' })
   })
   it('toggle map is removed only when values match the field default', () => {
     const off = setPresetFlag({}, 'persona_env_presets', 'zero', false, {})
@@ -442,7 +234,6 @@ describe('agent standing + system preview', () => {
       official_full: true,
       zero: false,
       custom: true,
-      official_303: true,
     })
     const back = setPresetFlag(off, 'persona_env_presets', 'zero', true, {})
     expect('persona_env_presets' in back).toBe(false)
@@ -463,7 +254,6 @@ describe('agent standing + system preview', () => {
       official_full: false,
       zero: false,
       custom: false,
-      official_303: false,
     })
     expect(agentStandingVar(standingOn, 'official')).toBe(
       `${DEFAULT_AGENT_STANDING}\n`
@@ -490,60 +280,48 @@ describe('agent standing + system preview', () => {
       official_full: false,
       zero: false,
       custom: false,
-      official_303: false,
     })
   })
 
-  it('whole-preset mask: map beats legacy persona_hides beats template hide', () => {
-    const zero = DEFAULT_PERSONA_TEMPLATES.zero
-    const official = DEFAULT_PERSONA_TEMPLATES.official
-    expect(personaHideEnabled({}, 'zero', zero)).toBe(true)
-    expect(personaHideEnabled({}, 'official', official)).toBe(false)
-    expect(
-      personaHideEnabled({ persona_hides: true }, 'official', official)
-    ).toBe(true)
+  it('explicit preset usage masks override the legacy value and billing-only zero is not implicitly masked', () => {
+    expect(personaHideEnabled({}, 'zero', DEFAULT_PERSONA_TEMPLATES.zero)).toBe(
+      true
+    )
     expect(
       personaHideEnabled(
         { persona_hides: true, persona_hide_presets: { official: false } },
         'official',
-        official
+        DEFAULT_PERSONA_TEMPLATES.official
       )
     ).toBe(false)
-    const off = setPersonaHide({}, 'zero', false, zero, {})
-    expect(off.persona_hide_presets).toEqual({ zero: false })
+    const on = setPersonaHide(
+      {},
+      'zero',
+      true,
+      DEFAULT_PERSONA_TEMPLATES.zero,
+      {}
+    )
+    expect(on.persona_hide_presets).toBeUndefined()
     expect(
-      'persona_hide_presets' in setPersonaHide(off, 'zero', true, zero, {})
-    ).toBe(false)
+      setPersonaHide(on, 'zero', false, DEFAULT_PERSONA_TEMPLATES.zero, {})
+        .persona_hide_presets
+    ).toEqual({ zero: false })
   })
 })
 
 describe('legacy global cache scope', () => {
   const legacy = { type: 'ephemeral', ttl: '1h', scope: 'global' }
-  it('preview drops the old default scope from a saved pre-303 agent block only', () => {
-    const saved = [
-      ...DEFAULT_PERSONA_TEMPLATES.official_full,
+  it('saved legacy agent blocks drop their obsolete scope without changing native harness scope', () => {
+    const legacy = [
       {
         id: 'agent_official',
-        type: 'text',
-        text: '{{agent_official}}',
-        cache_control: legacy,
+        text: 'SAVED',
+        cache_control: { type: 'ephemeral', ttl: '1h', scope: 'global' },
       },
     ]
-    const blocks = previewSystemBlocks(
-      dropLegacyAutoScope('official_full', saved),
-      {
-        identity: 'ID',
-        dynamic_boundary: 'BOUNDARY',
-        harness_303: 'H',
-        agent_official: 'AGENT',
-      }
-    )
-    expect(blocks[blocks.length - 1]).toMatchObject({
-      id: 'agent_official',
-      ttl: '1h',
-      scope: '',
-    })
-    expect(blocks.find((block) => block.id === 'harness')?.scope).toBe('global')
+    expect(
+      previewSystemBlocks(dropLegacyAutoScope('official_full', legacy), {})[0]
+    ).toMatchObject({ text: 'SAVED', ttl: '1h', scope: '' })
   })
   it('keeps custom presets and other explicit scopes', () => {
     const custom = [

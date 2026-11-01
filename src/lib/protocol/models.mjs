@@ -295,7 +295,7 @@ export function validateOfficialModel(model) {
     return {
       ok: false,
       error: {
-        message: 'model is required. Use a model from the gateway model catalog.',
+        message: 'model is required. Use a model from the model catalog.',
         type: 'invalid_request_error',
         code: 'model_required',
       },
@@ -328,7 +328,7 @@ export function validateOfficialModel(model) {
         return {
           ok: false,
           error: {
-            message: `model '${m}' is disabled by gateway model policy.`,
+            message: `model '${m}' is disabled by the model service policy.`,
             type: 'invalid_request_error',
             code: 'model_disabled',
             param: 'model',
@@ -345,7 +345,7 @@ export function validateOfficialModel(model) {
   return {
     ok: false,
     error: {
-      message: `model '${m}' is not recognized by the gateway model catalog. Request rejected; no hop.`,
+      message: `model '${m}' is not recognized by the model catalog. Request rejected; no hop.`,
       type: 'invalid_request_error',
       code: 'model_not_supported',
       param: 'model',

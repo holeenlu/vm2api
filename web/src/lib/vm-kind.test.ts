@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   catalogForVm,
   indexVms,
@@ -12,6 +13,11 @@ import {
   slotCredentialLabel,
   vmKindOf,
 } from '@/lib/vm-kind'
+
+// Keep the existing Chinese UI assertions independent of the host locale.
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('vmKindOf', () => {
   it('defaults unmarked slots to Claude', () => {

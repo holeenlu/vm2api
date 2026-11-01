@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { RotateCcw } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -11,6 +12,8 @@ import { Field } from '@/features/vm/detail-section-primitives'
 
 /** 详情状态板里的 Claude 单元熔断行：状态、连续失败次数、恢复时间、手动重置。 */
 export function CircuitField({ vm, now: pageNow }: { vm: Vm; now: number }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   // 熔断窗口通常只有几十秒，页面 30s 心跳太粗；打开期间单独按秒走。
   const open = vm.circuit?.state === 'open'
@@ -23,7 +26,7 @@ export function CircuitField({ vm, now: pageNow }: { vm: Vm; now: number }) {
         body: JSON.stringify({}),
       }),
     onSuccess: async () => {
-      toast.success('熔断已重置')
+      toast.success(tVm('vm:detailCircuitField.circuitBreakerReset'))
       await qc.invalidateQueries({ queryKey: ['panel', 'vms'] })
       await qc.invalidateQueries({ queryKey: ['panel', 'vm', vm.id] })
     },
@@ -40,17 +43,29 @@ export function CircuitField({ vm, now: pageNow }: { vm: Vm; now: number }) {
     : c.state === 'open'
       ? 'text-[color:var(--status-bad)]'
       : 'text-[color:var(--status-caution)]'
-  const label = !c ? '关闭' : c.state === 'open' ? '熔断中' : '半开 · 等待探测'
+  const label = !c
+    ? tVm('vm:detailCircuitField.off')
+    : c.state === 'open'
+      ? tVm('vm:detailCircuitField.circuitOpen')
+      : tVm('vm:detailCircuitField.halfOpenAwaitingProbe')
   return (
-    <Field label='熔断' compact>
+    <Field label={tVm('vm:detailCircuitField.circuitBreaker')} compact>
       <div className='flex flex-wrap items-center gap-x-2 gap-y-1'>
         <span className={cn('font-medium', tone)}>{label}</span>
         <span className='text-xs text-muted-foreground tabular-nums'>
-          连续 5xx {failures}/{threshold}
+          <Trans
+            ns='vm'
+            i18nKey='detailCircuitField.consecutive5xx'
+            values={{ failures: failures, threshold: threshold }}
+          />
         </span>
         {c?.state === 'open' ? (
           <span className='text-xs text-muted-foreground tabular-nums'>
-            {Math.max(1, Math.ceil(c.left / 1000))}s 后放行探测
+            <Trans
+              ns='vm'
+              i18nKey='detailCircuitField.probeAllowedInS'
+              values={{ value: Math.max(1, Math.ceil(c.left / 1000)) }}
+            />
           </span>
         ) : null}
         {c ? (
@@ -61,8 +76,11 @@ export function CircuitField({ vm, now: pageNow }: { vm: Vm; now: number }) {
             disabled={reset.isPending}
             onClick={() => reset.mutate()}
           >
-            <RotateCcw className='size-3' />
-            重置
+            <Trans
+              ns='vm'
+              i18nKey='detailCircuitField.reset'
+              components={{ part0: <RotateCcw className='size-3' /> }}
+            />
           </Button>
         ) : null}
       </div>

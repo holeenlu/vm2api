@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 
 export type VmKind = 'claude' | 'codex'
@@ -77,7 +78,9 @@ export function slotCredentialLabel(
 ): string {
   const email = String(vm?.email || '').trim()
   if (email) return compact ? email.split('@')[0] : email
-  return vm?.has_token || vm?.has_refresh ? '已导入账号 · 邮箱未知' : '空槽'
+  return vm?.has_token || vm?.has_refresh
+    ? t('lib:slot.importedEmailUnknown')
+    : t('lib:slot.empty')
 }
 
 export function slotAccountLabel(
@@ -92,7 +95,7 @@ export function slotAccountLabel(
   const email = String(vm?.email || fallback?.email || '').trim()
   if (email) return email
   const id = String(fallback?.vmId || vm?.id || '').trim()
-  return id || fallback?.emptyLabel || '未绑定账号'
+  return id || fallback?.emptyLabel || t('lib:slot.unbound')
 }
 
 /** `vm-01` without an email is unbound. A custom slot id is the name and stays visible. */
@@ -104,8 +107,8 @@ export function slotNameLabel(vm?: {
   const name = String(vm?.name || vm?.id || '').trim()
   const email = String(vm?.email || '').trim()
   if (email || (name && !/^vm-\d+$/i.test(String(vm?.id || '').trim())))
-    return name || '未绑定账号'
-  return '未绑定账号'
+    return name || t('lib:slot.unbound')
+  return t('lib:slot.unbound')
 }
 
 /** 卡片 / 表格用：本地段优先，域名过长只留尾标。完整地址走 title。 */
