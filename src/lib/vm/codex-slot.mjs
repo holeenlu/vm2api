@@ -315,7 +315,11 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
   else delete vm.codex.extra.codex_limited_until
 }
 
-export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredits, credits, planType } = {}) {
+export function persistCodexQuotaSnapshot(
+  projectRoot,
+  vmId,
+  { extra, resetCredits, credits, planType, clearedWindows } = {},
+) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   let vm
@@ -326,6 +330,7 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   }
   if (!vm || typeof vm !== 'object') return null
   vm.codex = vm.codex && typeof vm.codex === 'object' ? { ...vm.codex } : {}
+  if (clearedWindows) vm.codex.cleared_windows = { ...(vm.codex.cleared_windows || {}), ...clearedWindows }
   if (extra && typeof extra === 'object') {
     vm.codex.extra = { ...(vm.codex.extra || {}), ...extra }
     vm.codex.usage = buildCodexUsageView(extraToCodexSnapshot(vm.codex.extra))
@@ -361,6 +366,7 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
   const extra = vm.codex?.extra || vm.codex_extra || {}
   // extra is the source of truth; the stored view is only a fallback for slots without extra.
   const usage = buildCodexUsageView(Object.keys(extra).length ? extraToCodexSnapshot(extra) : vm.codex?.usage || {})
+  usage.quota.cleared_windows = vm.codex?.cleared_windows || null
   const hasAccess = !!(first.access_token || vm.codex?.has_access)
   const hasRefresh = !!(first.refresh_token || vm.codex?.has_refresh)
   return {

@@ -466,7 +466,7 @@ for (const subscriptionType of [undefined, 'pro']) {
 
 test('slotUidGidFromHomeDir maps numeric and named slot homes', () => {
   assert.deepEqual(slotUidGidFromHomeDir('/opt/kin-gateway-rust/vms/vm-03/cli-home'), { uid: 10003, gid: 987 })
-  assert.deepEqual(slotUidGidFromHomeDir('/opt/vm2api/vms/claude-ios-145/cli-home'), { uid: 10001, gid: 987 })
+  assert.deepEqual(slotUidGidFromHomeDir('/opt/tapmodels/vms/claude-ios-145/cli-home'), { uid: 10001, gid: 987 })
   assert.deepEqual(slotUidGidFromHomeDir('/opt/kin-gateway/vms/bloat-ranges-3hicloudcom/cli-home'), {
     uid: 10001,
     gid: 987,
@@ -615,4 +615,64 @@ test('clearRecoverableVmCooldown keeps Codex park when grant is dead', () => {
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(vm.temp_unschedulable_reason, 'oauth_revoked')
   assert.equal(vm.codex.extra.codex_limited_until, until)
+})
+
+test('observed plan metadata survives refresh and is cleared when the account changes', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-metadata-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, 'vm.json')
+  fs.writeFileSync(file, JSON.stringify({ id: 'vm-plan', claude: { account_uuid: 'one' } }))
+  persistOauthToVm(file, {
+    access_token: 'synthetic',
+    account_uuid: 'one',
+    subscription_type: 'max',
+    rate_limit_tier: 'default_claude_max_20x',
+    billing_type: 'apple_subscription',
+  })
+  let vm = persistOauthToVm(file, { access_token: 'synthetic-refreshed', account_uuid: 'one' })
+  assert.equal(vm.claude.rate_limit_tier, 'default_claude_max_20x')
+  assert.equal(vm.claude.billing_type, 'apple_subscription')
+  vm = persistOauthToVm(file, { access_token: 'synthetic-other', account_uuid: 'two' })
+  assert.equal(vm.claude.billing_type, undefined)
+  assert.equal(vm.claude.rate_limit_tier, undefined)
+})
+
+test('worker mirrors cannot erase a cached profile with an absent or older credential plan', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'profile-mirror-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, 'vm.json')
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      id: 'vm-profile',
+      claude: {
+        account_uuid: 'one',
+        org_uuid: 'org-one',
+        subscription_type: 'max',
+        subscription_updated_at: '2026-10-31T00:00:00Z',
+        billing_type: 'apple_subscription',
+      },
+    }),
+  )
+  for (const subscription_type of [null, 'pro']) {
+    const vm = persistOauthToVm(file, {
+      access_token: 'rotated',
+      account_uuid: 'one',
+      source: 'go-slot-worker',
+      subscription_type,
+    })
+    assert.equal(vm.claude.subscription_type, 'max')
+    assert.equal(vm.claude.billing_type, 'apple_subscription')
+  }
+  const replaced = persistOauthToVm(
+    file,
+    { access_token: 'unknown-new-account', type: 'setup-token' },
+    { operatorImport: true },
+  )
+  assert.equal(replaced.claude.subscription_type, undefined)
+  assert.equal(replaced.claude.billing_type, undefined)
+  assert.equal(replaced.claude.subscription_updated_at, undefined)
+  assert.equal(replaced.claude.account_uuid, undefined)
+  assert.equal(replaced.claude.org_uuid, undefined)
+  assert.equal(replaced.claude.scope, 'user:inference')
 })

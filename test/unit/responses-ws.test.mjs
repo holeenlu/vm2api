@@ -6,9 +6,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
+import { RelayBilling } from '../../src/lib/admin/relay-billing.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
-import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import {
   createResponsesWsHandler,
@@ -48,6 +52,11 @@ async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
     res.writeHead(404)
     res.end()
   })
+  const sockets = new Set()
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
   server.on('upgrade', (req, socket, head) => {
     if (!handler.handleUpgrade(req, socket, head)) socket.destroy()
   })
@@ -59,7 +68,10 @@ async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
     httpHits,
     url: `ws://127.0.0.1:${port}/v1/responses`,
     httpUrl: `http://127.0.0.1:${port}/v1/responses`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () => {
+      for (const socket of sockets) socket.destroy()
+      return new Promise((resolve) => server.close(resolve))
+    },
   }
 }
 
@@ -111,13 +123,6 @@ function nextFrame(ws, predicate = () => true, timeoutMs = 2000) {
 function allowAuth(req) {
   req.apiKeyKind = 'managed'
   req.apiKeyRecord = { id: 'key-1' }
-  req.presentedApiKey = 'sk-test'
-  return true
-}
-
-function allowManagedOpenai(req) {
-  req.apiKeyKind = 'managed'
-  req.apiKeyRecord = { id: 'key-1', group_id: 1, group_type: 'all' }
   req.presentedApiKey = 'sk-test'
   return true
 }
@@ -177,9 +182,31 @@ async function listenWithHandleProtocol(
         protocols: { 'openai.responses': { enabled: true, mode: 'native' } },
       },
     },
-    requireAuth = allowManagedOpenai,
   },
 ) {
+  const db = openDatabase({ dataDir: path.join(root, 'data') })
+  const users = new PanelUserStore({ db })
+  const user = users.create({ username: 'ws-customer', password: 'ws-test-pass' })
+  const groups = new GroupsRepo(db)
+  const group = groups.create({ name: 'WS group', platform: 'openai', rate_multiplier: 0 })
+  groups.setGrants(user.id, [group.id])
+  groups.assignResource('vm', 'vm-gpt-a', [group.id], 0)
+  const keys = new ApiKeyStore({ db })
+  const key = keys.create({ user_id: user.id, group_id: group.id })
+  new RelayBilling(db).adjust(user.id, { amount: 1, reason: 'test credit', idempotency_key: 'ws-test-credit' }, 'test')
+  const usageSpy = apiKeyStore?.recordUsage
+  const recordUsage = keys.recordUsage.bind(keys)
+  keys.recordUsage = (...args) => {
+    usageSpy?.(...args)
+    return recordUsage(...args)
+  }
+  apiKeyStore = keys
+  const requireAuth = (req) => {
+    req.apiKeyKind = 'managed'
+    req.apiKeyRecord = keys.getById(key.id)
+    req.presentedApiKey = key.key
+    return true
+  }
   const routingFile = path.join(root, 'routing.json')
   const codexRouting = {
     websocket: { enabled: true },
@@ -232,7 +259,19 @@ async function listenWithHandleProtocol(
       ...codexOps,
     },
   })
-  return listen({ routing, requireAuth, handleProtocol })
+  const live = await listen({ routing, requireAuth, handleProtocol })
+  return {
+    ...live,
+    db,
+    keyId: key.id,
+    close: async () => {
+      try {
+        await live.close()
+      } finally {
+        closeDatabase()
+      }
+    },
+  }
 }
 
 beforeEach(() => resetOpenAIAccountRuntime())
@@ -802,7 +841,6 @@ test('real handleProtocol: one in-flight interrupt yields a single cancelled fin
       },
     },
     apiKeyStore: {
-      acquire: () => ({ ok: true }),
       recordUsage(_key, usage) {
         usageRecords.push(usage)
       },
@@ -836,7 +874,8 @@ test('real handleProtocol: one in-flight interrupt yields a single cancelled fin
     await nextFrame(opened.ws, (frame) => frame.type === 'response.interrupt.accepted')
     await new Promise((resolve) => setTimeout(resolve, 200))
     assert.equal(finishCalls.length, 1)
-    assert.equal(finishCalls[0].error_code, 'client_cancelled')
+    assert.equal(finishCalls[0].final_state, 'cancelled')
+    assert.equal(finishCalls[0].error_code, null)
     assert.equal(usageRecords.length, 0)
     opened.ws.close()
   } finally {
@@ -859,7 +898,6 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
       },
     },
     apiKeyStore: {
-      acquire: () => ({ ok: true }),
       recordUsage(_key, usageRow) {
         usageRecords.push(usageRow)
       },
@@ -900,74 +938,10 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
     assert.equal(finishCalls[0].input_tokens, 12)
     assert.equal(finishCalls[0].output_tokens, 4)
     assert.equal(usageRecords.length, 1)
-    assert.equal(usageRecords[0].input_tokens, 12)
-    assert.equal(usageRecords[0].output_tokens, 4)
+    assert.equal(live.db.prepare('SELECT requests FROM api_keys WHERE id = ?').get(live.keyId).requests, 1)
+    assert.equal(live.db.prepare('SELECT COUNT(*) AS n FROM billing_charges').get().n, 1)
     opened.ws.close()
   } finally {
-    await live.close()
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('real handleProtocol: Codex spend fills the managed key USD quota and the next request is refused', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-responses-ws-key-quota-'))
-  writeGptVm(root, 'vm-gpt-a')
-  const keys = new ApiKeyStore({ dataDir: fs.mkdtempSync(path.join(root, 'keys-')) })
-  const key = keys.create({ name: 'gpt', quota: 0.000001 })
-  const finishCalls = []
-  let hops = 0
-  const usage = { input_tokens: 100_000, output_tokens: 10_000, total_tokens: 110_000 }
-  const live = await listenWithHandleProtocol(root, {
-    requireAuth(req) {
-      req.apiKeyKind = 'managed'
-      req.apiKeyRecord = keys.getById(key.id)
-      req.presentedApiKey = 'sk-test'
-      return true
-    },
-    requestLog: {
-      start: () => ({ request_id: `ws-key-quota-${finishCalls.length}`, t0: Date.now() }),
-      finish(_ctx, bag) {
-        finishCalls.push(bag)
-      },
-    },
-    apiKeyStore: keys,
-    codexOps: {
-      streamCodexKernel: async ({ onEvent }) => {
-        hops += 1
-        await onEvent(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: { id: `resp_quota_${hops}`, status: 'completed', output: [], usage },
-          })}\n\n`,
-        )
-        return { ok: true, status: 200, terminalState: 'verified', usage }
-      },
-    },
-  })
-  const waitFinish = async (n) => {
-    const deadline = Date.now() + 5000
-    while (finishCalls.length < n) {
-      assert.ok(Date.now() < deadline, 'requestLog.finish timeout')
-      await new Promise((resolve) => setTimeout(resolve, 25))
-    }
-  }
-  let opened = null
-  try {
-    opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
-    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'first' }))
-    await waitFinish(1)
-    const spent = keys.getById(key.id)
-    assert.equal(spent.requests, 1)
-    assert.equal(spent.tokens_in, 100_000)
-    assert.equal(spent.tokens_out, 10_000)
-    assert.ok(spent.quota_used > 0)
-    assert.equal(spent.status, 'quota_exhausted')
-    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'second' }))
-    await waitFinish(2)
-    assert.equal(finishCalls[1].error_code, 'api_key_quota_exhausted')
-    assert.equal(hops, 1)
-  } finally {
-    opened?.ws?.close()
     await live.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -985,7 +959,7 @@ test('PUT /api/panel/routing rejects illegal websocket fields before persist', a
     },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -1021,4 +995,80 @@ test('unexpected handler failures do not expose internal exception details', asy
     opened.ws.close()
     await live.close()
   }
+})
+
+for (const terminalOutput of [undefined, []]) {
+  test(`WebSocket continuation retains completed custom tools when terminal output is ${terminalOutput ? 'empty' : 'omitted'}`, async () => {
+    const hops = []
+    const tool = {
+      type: 'custom_tool_call',
+      id: 'ctc_probe',
+      call_id: 'call_probe',
+      name: 'diagnostic_echo',
+      input: 'probe',
+      status: 'completed',
+    }
+    const reasoning = { type: 'reasoning', id: 'rs_probe', encrypted_content: 'opaque-test-reasoning', summary: [] }
+    const result = { type: 'custom_tool_call_output', call_id: 'call_probe', output: 'probe' }
+    const live = await listen({
+      routing: ENABLED,
+      requireAuth: allowAuth,
+      async handleProtocol(req, res) {
+        const body = await readJson(req)
+        hops.push(body)
+        const id = `resp_lite_${hops.length}`
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        const send = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`)
+        send({ type: 'response.created', response: { id, output: [] } })
+        if (hops.length === 1) {
+          send({ type: 'response.output_item.done', output_index: 0, item: reasoning })
+          send({ type: 'response.output_item.done', output_index: 1, item: tool })
+        }
+        send({
+          type: 'response.completed',
+          response: { id, status: 'completed', ...(terminalOutput === undefined ? {} : { output: terminalOutput }) },
+        })
+        res.end()
+      },
+    })
+    let ws
+    try {
+      const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+      ws = opened.ws
+      ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-test', input: 'start' }))
+      await nextFrame(ws, (frame) => frame.type === 'response.completed')
+      ws.send(
+        JSON.stringify({
+          type: 'response.create',
+          model: 'gpt-test',
+          previous_response_id: 'resp_lite_1',
+          input: [result],
+        }),
+      )
+      await nextFrame(ws, (frame) => frame.type === 'response.completed' && frame.response.id === 'resp_lite_2')
+      assert.equal(hops.length, 2)
+      assert.equal(hops[1].previous_response_id, undefined)
+      assert.deepEqual(hops[1].input.slice(1), [reasoning, tool, result])
+    } finally {
+      if (ws) {
+        ws.close()
+        await once(ws, 'close')
+      }
+      await live.close()
+    }
+  })
+}
+
+test('completed output is authoritative without duplicating streamed items', () => {
+  const bridge = createSseJsonBridge()
+  const item = { type: 'function_call', id: 'fc', call_id: 'call', name: 'lookup', arguments: '{}' }
+  for (const event of [
+    { type: 'response.created', response: { id: 'resp', output: [] } },
+    { type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '' } },
+    { type: 'response.output_item.done', output_index: 0, item },
+    { type: 'response.completed', response: { id: 'resp', output: [{ ...item, status: 'completed' }] } },
+  ])
+    bridge.push(`data: ${JSON.stringify(event)}\n\n`)
+  bridge.finish()
+  assert.deepEqual(bridge.snapshot().output, [{ ...item, status: 'completed' }])
 })

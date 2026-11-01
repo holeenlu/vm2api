@@ -36,3 +36,12 @@ export function sessionIdForLog(value) {
   const s = String(value ?? '').trim()
   return s ? s.slice(0, SESSION_ID_MAX) : null
 }
+
+/** Codex upstream_model is the outbound/billing model, not the response echo.
+ * Legacy non-Codex writers already record the response in upstream_model.
+ * Keep that fallback until those retained rows/writers use response_model.
+ */
+export function responseModelForLog(row) {
+  const raw = row.response_model ?? (row.via === 'codex-kernel' ? null : row.upstream_model)
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}

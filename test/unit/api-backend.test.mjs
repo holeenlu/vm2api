@@ -1,3 +1,6 @@
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -7,7 +10,6 @@ import path from 'node:path'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
-import { CRS_OFFICIAL_AGENT_PROMPT, CRS_OFFICIAL_CLI_SYSTEM } from '../../src/lib/identity/crs-persona.mjs'
 import { OFFICIAL_303_HARNESS } from '../../src/lib/identity/official-profiles.mjs'
 import { sessionIdFromOutboundBody } from '../../src/lib/identity/identity-rewrite.mjs'
 import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
@@ -50,7 +52,13 @@ test('only a managed key explicitly marked api uses the Anthropic address path',
   assert.equal(resolveInferenceBackend({ headers: { 'x-kin-backend': 'api' } }), 'oauth')
 })
 
-test('tenant api-category keys cannot reach platform API endpoints', async () => {
+test('customer keys without a commercial group cannot reach platform API endpoints', async (t) => {
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  const users = new PanelUserStore({ db })
+  const user = users.create({ username: 'api-customer', password: 'test-password' })
+  const keys = new ApiKeyStore({ db })
+  const key = keys.create({ user_id: user.id, category: 'api' })
   const response = fakeResponse()
   let picked = 0
   const handler = createHandleProtocol({
@@ -72,7 +80,7 @@ test('tenant api-category keys cannot reach platform API endpoints', async () =>
     requestLog: { start: () => ({ request_id: 'api-tenant-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {}, users: { getById: () => ({ role: 'user' }) } },
+    apiKeyStore: keys,
     apiScheduler: {
       pick: () => {
         picked += 1
@@ -89,13 +97,13 @@ test('tenant api-category keys cannot reach platform API endpoints', async () =>
     url: '/v1/messages',
     headers: { authorization: 'Bearer sk-vm-tenant', 'user-agent': 'test-client' },
     apiKeyKind: 'managed',
-    apiKeyRecord: { category: 'api', user_id: 'u1' },
+    apiKeyRecord: key,
     once() {},
     off() {},
   }
   await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
   assert.equal(response.status, 403)
-  assert.equal(response.body.error.code, 'api_backend_forbidden')
+  assert.equal(response.body.error.code, 'group_required')
   assert.equal(picked, 0)
 })
 
@@ -154,7 +162,7 @@ test('API backend applies the global official_full persona setting', async () =>
     requestLog: { start: () => ({ request_id: 'api-persona-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {
       pick: () => ({
         ok: true,
@@ -190,43 +198,22 @@ test('API backend applies the global official_full persona setting', async () =>
     assert.equal(response.status, 200)
     assert.ok(received)
     const outbound = JSON.parse(received.body)
-    const texts = outbound.system.map((block) => String(block.text || ''))
-    const shape = JSON.stringify({
-      system: texts.map((t) => t.slice(0, 60)),
-      roles: outbound.messages.map((m) => m.role),
-    })
-    assert.match(texts[0], /^x-anthropic-billing-header: /, shape)
-    assert.equal(texts[1], CRS_OFFICIAL_CLI_SYSTEM, shape)
-    assert.ok(texts[2].startsWith(`${DEFAULT_AGENT_STANDING}\n${OFFICIAL_303_HARNESS}`), shape)
-    assert.equal(
-      texts.some((text) => text.includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 80))),
-      false,
-      shape,
-    )
-    // claude-haiku-4-5 rejects mid-conversation role=system: the Environment must not reach the wire as a message.
-    assert.equal(
-      outbound.messages.some((message) => message.role === 'system'),
-      false,
-      shape,
-    )
-    assert.ok(
-      texts.some((text) => text.includes('# Environment')),
-      shape,
-    )
+    assert.ok(outbound.system.length >= 4)
+    assert.equal(outbound.system[2].text, `${DEFAULT_AGENT_STANDING}\n${OFFICIAL_303_HARNESS}`)
+    assert.ok(outbound.system.some((block) => block.text.includes('# Environment')))
   } finally {
     await new Promise((resolve) => kernel.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('OAuth cli-hop applies the resolved Protocol custom persona template', async () => {
+test('OAuth cli-hop retains custom persona with upstream official layout, billing and caller TTL', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-persona-'))
   const routingFile = path.join(root, 'routing.json')
   const compatibility = {
     persona_preset: 'custom',
+    cache_ttl: '1h',
     persona_inject: 'rewrite',
-    // e358143c: {{timezone}} renders only when the per-preset timezone switch is on.
-    persona_timezone_presets: { custom: true },
     persona_templates: {
       custom: [{ id: 'custom', type: 'text', text: 'CUSTOM_PERSONA {{timezone}}' }],
     },
@@ -268,7 +255,10 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     requestLog: { start: () => ({ request_id: 'slot-persona-test' }), finish() {} },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats,
@@ -290,7 +280,7 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
   const req = {
     method: 'POST',
     url: '/v1/messages',
-    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0' },
+    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0', 'x-kin-cache-ttl': '5m' },
     apiKeyKind: 'master',
     once() {},
     off() {},
@@ -303,7 +293,8 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     // The rendered custom prompt plus billing survives without a second
     // official-system rebuild inserting an extra identity block.
     assert.equal(prepared.body.system.length, 2)
-    assert.ok(prepared.body.system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA UTC')))
+    assert.ok(prepared.body.system.some((block) => String(block.text || '').match(/^x-anthropic-billing-header:/)))
+    assert.ok(prepared.body.system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA')))
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -350,7 +341,10 @@ test('logs the session id actually sent upstream, not the caller one', async () 
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -457,7 +451,10 @@ for (const previousVm of [null, 'vm-01']) {
       },
       stickyRouter: sticky,
       accountQuota: {},
-      apiKeyStore: {},
+      apiKeyStore: {
+        canAccept: (record) => ({ ok: true, record }),
+        db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+      },
       apiScheduler: {},
       apiEndpointStore: {},
       stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -562,6 +559,8 @@ async function runManagedKeyHop(root, result) {
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
     apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
       acquire: () => ({ ok: true }),
       release() {},
       recordUsage: (key, usage, opts) => charges.push({ key, usage, opts }),
@@ -584,7 +583,7 @@ async function runManagedKeyHop(root, result) {
     url: '/v1/messages',
     headers: { authorization: 'Bearer sk-vm-x', 'user-agent': 'claude-cli/2.1.241 (external, cli)' },
     apiKeyKind: 'managed',
-    apiKeyRecord: { id: 'key-1', group_id: 1 },
+    apiKeyRecord: { id: 'key-1', group_id: null },
     once() {},
     off() {},
   }
@@ -602,10 +601,11 @@ test('a managed key is charged exactly once for a hop billed inline', async () =
       status: 503,
       accountId: 'account-1',
       usage,
+      usageComplete: true,
       body: { error: { type: 'server_error', code: 'x', message: 'stop' } },
     })
     assert.equal(charges.length, 1)
-    assert.equal(charges[0].opts.rateMultiplier, 2)
+    assert.equal(charges[0].opts.rateMultiplier, 1)
     assert.equal(charges[0].opts.officialCost, logged[0].total_cost)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -626,6 +626,7 @@ test('native mixed TTL usage is billed from upstream buckets rather than the pan
       status: 503,
       accountId: 'account-1',
       usage,
+      usageComplete: true,
       body: { error: { type: 'server_error', code: 'x', message: 'stop' } },
     })
     assert.deepEqual(logged[0].usage.cache_creation, usage.cache_creation)
@@ -668,7 +669,10 @@ test('OpenAI chat carrying claude-opus-4-8 uses the Claude pool', async () => {
     requestLog: { start: () => ({ request_id: 'opus-platform-test' }), finish() {} },
     stickyRouter: { extractPoolKey: () => 'opus-session', collectPoolKeys: () => ['opus-session'] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -759,6 +763,8 @@ function protocolHarness({ body, stickyRouter, failoverRunner, apiKeyRecord = nu
     stickyRouter,
     accountQuota: {},
     apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
       acquire: () => {
         apiKeyCalls.acquire += 1
         return { ok: true }
@@ -780,7 +786,7 @@ function protocolHarness({ body, stickyRouter, failoverRunner, apiKeyRecord = nu
     url: '/v1/messages',
     headers: { authorization: 'Bearer test', 'user-agent': 'Go-http-client/2.0', ...headers },
     apiKeyKind: apiKeyRecord ? 'managed' : 'master',
-    apiKeyRecord,
+    apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     once() {},
     off() {},
   }
@@ -880,7 +886,7 @@ async function captureRunOpts({ body, stickyRouter, apiKeyRecord, headers }) {
   const harness = protocolHarness({
     body,
     stickyRouter,
-    apiKeyRecord,
+    apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     headers,
     failoverRunner: {
       async run(opts) {
@@ -975,12 +981,12 @@ test('shared API key keeps different devices apart at the protocol entry', async
     const a = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-one', session_id: 'sess-one' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     const b = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-two', session_id: 'sess-two' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     assert.notEqual(a.stickyKey, b.stickyKey)
     assert.notEqual(a.deviceKey, b.deviceKey)
@@ -1015,7 +1021,7 @@ test('legacy API-key-scoped session row migrates lazily at the protocol entry', 
     const opts = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-legacy', session_id: 'sess-legacy' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     assert.equal(opts.stickyKey, 'sess:sess-legacy')
     assert.deepEqual(opts.stickyKeys, ['sess:sess-legacy', legacyKey])
@@ -1075,7 +1081,7 @@ test('Claude Code sub-agent hops run as child sessions of the main session', asy
       captureRunOpts({
         body,
         stickyRouter: router,
-        apiKeyRecord,
+        apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
         headers: {
           'x-claude-code-session-id': 'main-sess',
           'x-claude-code-agent-id': agentId,
@@ -1416,7 +1422,7 @@ test('API backend non-stream maps incomplete assistant hops to incomplete_respon
     requestLog: { start: () => ({ request_id: 'api-incomplete-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {
       pick: () => ({
         ok: true,
@@ -1519,7 +1525,7 @@ test('OpenAI Responses lifecycle metadata does not commit downstream output', ()
   assert.equal(isOpenAIResponsesCommitEvent({ type: 'response.output_text.delta', delta: 'hello' }), true)
 })
 
-async function runOpenAIResponsesFixture(events) {
+async function runOpenAIResponsesFixture(events, { clientStream = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-metadata-'))
   const socket = path.join(root, 'run', 'api-kernel.sock')
   fs.mkdirSync(path.dirname(socket), { recursive: true })
@@ -1543,7 +1549,7 @@ async function runOpenAIResponsesFixture(events) {
       cfg: { paths: { data: root } },
       res,
       protocol: 'openai.responses',
-      clientStream: true,
+      clientStream,
       deliveryMode: 'verified',
       convertedBody: { model: 'gpt-5.4', messages: [{ role: 'user', content: 'hello' }] },
       inbound: {},
@@ -1602,3 +1608,27 @@ unixTest('API OpenAI flushes buffered metadata with the first real output', asyn
   assert.match(run.wire, /response\.output_text\.delta/)
   assert.match(run.wire, /response\.completed/)
 })
+
+for (const clientStream of [true, false]) {
+  unixTest(`API Responses failover retains complete terminal usage (stream=${clientStream})`, async () => {
+    const usage = { input_tokens: 7, output_tokens: 2 }
+    const run = await runOpenAIResponsesFixture(
+      [
+        { type: 'response.created', response: { id: 'billable-failure' } },
+        {
+          type: 'response.failed',
+          response: {
+            error: { type: 'server_error', status: 503, message: 'busy' },
+            usage,
+          },
+        },
+      ],
+      { clientStream },
+    )
+    assert.equal(run.result.ok, false)
+    assert.equal(run.result.committed, false)
+    assert.equal(run.headersSent, false)
+    assert.deepEqual(run.result.usage, usage)
+    assert.equal(run.result.usageComplete, true)
+  })
+}

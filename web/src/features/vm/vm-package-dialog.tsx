@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
+import { systemDateTime } from '@/lib/system-time'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -17,9 +20,7 @@ import { vmQueryOptions } from '@/features/vm/queries'
 import { PackageFacts } from '@/features/vm/vm-package-view'
 
 function packageFilename(id: string) {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  const stamp = systemDateTime().replace(/[-:T]/g, '')
   return `vm-package-${id || 'slot'}-${stamp}.json`
 }
 
@@ -41,9 +42,11 @@ export function VmPackageButton({
   vmId: string
   className?: string
 }) {
+  useTranslation('vm')
+
   const me = useQuery(meQueryOptions())
   const [open, setOpen] = useState(false)
-  if (me.data?.role !== 'admin') return null
+  if (me.data?.role !== 'super_admin') return null
   return (
     <>
       <Button
@@ -52,7 +55,10 @@ export function VmPackageButton({
         className={className}
         onClick={() => setOpen(true)}
       >
-        完整虚拟机信息
+        <Trans
+          ns='vm'
+          i18nKey='vmPackageDialog.completeVirtualMachineInformation'
+        />
       </Button>
       <VmPackageDialog vmId={vmId} open={open} onOpenChange={setOpen} />
     </>
@@ -68,12 +74,14 @@ export function VmPackageDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [text, setText] = useState('')
   const [parseError, setParseError] = useState('')
   const pack = useQuery({
-    queryKey: ['panel', 'vm-package', vmId] as const,
+    queryKey: panelQueryKeys.vmPackage(vmId),
     queryFn: () =>
       api<Record<string, unknown>>(
         `/api/panel/vms/${encodeURIComponent(vmId)}/package`
@@ -94,12 +102,13 @@ export function VmPackageDialog({
         body: JSON.stringify(body),
       }),
     onSuccess: async () => {
-      toast.success('已覆写此槽')
+      toast.success(tVm('vm:vmPackageDialog.slotOverwritten'))
       await qc.invalidateQueries({ queryKey: vmQueryOptions(vmId).queryKey })
-      qc.removeQueries({ queryKey: ['panel', 'vm-package', vmId] })
+      qc.removeQueries({ queryKey: panelQueryKeys.vmPackage(vmId) })
       onOpenChange(false)
     },
-    onError: (e: Error) => toast.error(e.message || '覆写失败'),
+    onError: (e: Error) =>
+      toast.error(e.message || tVm('vm:vmPackageDialog.overwriteFailed')),
   })
 
   const submit = () => {
@@ -107,7 +116,7 @@ export function VmPackageDialog({
     try {
       parsed = JSON.parse(text)
     } catch {
-      setParseError('JSON 无效，请检查格式后重试')
+      setParseError('vm:credentialEditor.invalidJSONCheckTheFormatAndTryAgain')
       return
     }
     setParseError('')
@@ -129,26 +138,35 @@ export function VmPackageDialog({
       <DialogContent className='gap-5 sm:max-w-4xl'>
         <DialogHeader>
           <DialogTitle className='text-xl tracking-tight'>
-            完整虚拟机信息
+            <Trans
+              ns='vm'
+              i18nKey='vmPackageDialog.completeVirtualMachineInformation'
+            />
           </DialogTitle>
           <DialogDescription className='max-w-[68ch]'>
-            {vmId} 的完成体。下载带走这份
-            JSON。导入只填入窗口，覆写才替换这一台的特征、出口和凭证，不改 id。
+            <Trans
+              ns='vm'
+              i18nKey='vmPackageDialog.completePackageForDownloadTheJSONToExportIt'
+              values={{ vmId: vmId }}
+            />
           </DialogDescription>
         </DialogHeader>
         {pack.isLoading ? (
           <p className='py-8 text-center text-sm text-muted-foreground'>
-            读取中…
+            <Trans ns='vm' i18nKey='credentialEditor.loading' />
           </p>
         ) : pack.error ? (
           <p className='py-8 text-center text-sm text-destructive'>
-            {(pack.error as Error).message || '读取打包数据失败'}
+            {(pack.error as Error).message ||
+              tVm('vm:vmPackageDialog.failedToReadPackageData')}
           </p>
         ) : (
           <div className='grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)]'>
             <div className='rounded-xl border bg-card p-4'>
               {parseError ? (
-                <p className='text-xs text-destructive'>{parseError}</p>
+                <p className='text-xs text-destructive'>
+                  {parseError.startsWith('vm:') ? tVm(parseError) : parseError}
+                </p>
               ) : (
                 <PackageFacts text={text} className='sm:grid-cols-1' />
               )}
@@ -159,14 +177,17 @@ export function VmPackageDialog({
                 spellCheck={false}
                 value={text}
                 disabled={busy}
-                aria-label='虚拟机包 JSON'
+                aria-label={tVm('vm:vmPackageDialog.virtualMachinePackageJSON')}
                 onChange={(e) => {
                   setText(e.target.value)
                   if (parseError) setParseError('')
                 }}
               />
               <p className='text-xs text-muted-foreground'>
-                含明文凭证和代理密码，只在这个窗口里出现。
+                <Trans
+                  ns='vm'
+                  i18nKey='vmPackageDialog.containsPlaintextCredentialsAndProxyPasswordsShownOnlyIn'
+                />
               </p>
             </div>
           </div>
@@ -188,7 +209,9 @@ export function VmPackageDialog({
                     setText(raw)
                     setParseError('')
                   })
-                  .catch(() => setParseError('读取文件失败'))
+                  .catch(() =>
+                    setParseError('vm:vmPackageDialog.fileReadFailed')
+                  )
               }}
             />
             <Button
@@ -197,7 +220,7 @@ export function VmPackageDialog({
               disabled={!text || busy}
               onClick={() => downloadJson(packageFilename(vmId), text)}
             >
-              下载
+              <Trans ns='vm' i18nKey='vmPackageDialog.download' />
             </Button>
             <Button
               size='sm'
@@ -205,7 +228,7 @@ export function VmPackageDialog({
               disabled={busy || !!pack.error}
               onClick={() => fileRef.current?.click()}
             >
-              导入
+              <Trans ns='vm' i18nKey='credentialPanel.import' />
             </Button>
             <Button
               size='sm'
@@ -214,11 +237,15 @@ export function VmPackageDialog({
               onClick={() => {
                 navigator.clipboard
                   .writeText(text)
-                  .then(() => toast.success('已复制到剪贴板'))
-                  .catch(() => toast.error('复制失败'))
+                  .then(() =>
+                    toast.success(tVm('vm:credentialEditor.copiedToClipboard'))
+                  )
+                  .catch(() =>
+                    toast.error(tVm('vm:credentialEditor.copyFailed'))
+                  )
               }}
             >
-              复制
+              <Trans ns='vm' i18nKey='credentialEditor.copy' />
             </Button>
           </div>
           <div className='flex gap-2'>
@@ -228,10 +255,12 @@ export function VmPackageDialog({
               disabled={busy}
               onClick={() => onOpenChange(false)}
             >
-              取消
+              <Trans ns='vm' i18nKey='authSchemeEditor.cancel' />
             </Button>
             <Button size='sm' disabled={!text || busy} onClick={submit}>
-              {busy ? '覆写中…' : '覆写此槽'}
+              {busy
+                ? tVm('vm:vmPackageDialog.overwriting')
+                : tVm('vm:vmPackageDialog.overwriteThisSlot')}
             </Button>
           </div>
         </DialogFooter>

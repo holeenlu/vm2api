@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Activity, AlertCircle, Circle, XCircle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   Tooltip,
@@ -25,6 +26,8 @@ const NAME_COLOR: Record<string, string> = {
 
 /** 终端风格的近 5 分钟活跃会话（hub LiveSessionsPanel）。点一行跳到按该会话过滤的日志。 */
 export function LiveSessionsPanel({ className }: { className?: string }) {
+  const { t } = useTranslation('statistics')
+
   const navigate = useNavigate()
   const query = useQuery(activeSessionsQueryOptions(5, 12))
   const sessions = query.data?.sessions ?? []
@@ -53,7 +56,7 @@ export function LiveSessionsPanel({ className }: { className?: string }) {
         <div className='flex items-center gap-2'>
           <Activity className='h-3.5 w-3.5 text-slate-500 dark:text-muted-foreground' />
           <span className='font-mono text-xs font-medium tracking-wider text-slate-700 uppercase dark:text-foreground/80'>
-            活跃 Session
+            {t('statistics:activeSessions')}
           </span>
         </div>
         <div className='flex gap-1.5'>
@@ -68,17 +71,17 @@ export function LiveSessionsPanel({ className }: { className?: string }) {
           <div className='flex h-full items-center justify-center text-muted-foreground'>
             <div className='flex items-center gap-2'>
               <div className='h-2 w-2 animate-pulse rounded-full bg-primary' />
-              <span>加载中...</span>
+              <span>{t('statistics:loading')}</span>
             </div>
           </div>
         ) : query.error && !query.data ? (
           <div className='flex h-full items-center justify-center text-destructive'>
-            加载失败
+            {t('statistics:loadFailed')}
           </div>
         ) : sessions.length === 0 ? (
           <div className='flex h-full flex-col items-center justify-center gap-2 text-muted-foreground'>
             <AlertCircle className='h-5 w-5 opacity-50' />
-            <span className='text-xs'>暂无活跃 Session</span>
+            <span className='text-xs'>{t('statistics:noActiveSessions')}</span>
           </div>
         ) : (
           <TooltipProvider delayDuration={300}>
@@ -122,7 +125,9 @@ export function LiveSessionsPanel({ className }: { className?: string }) {
                       NAME_COLOR[status.label]
                     )}
                   >
-                    {session.userName || session.keyName || '未知'}
+                    {session.userName ||
+                      session.keyName ||
+                      t('statistics:unknown')}
                   </span>
                   <span className='mx-1 flex-1 border-b border-dashed border-border/50 dark:border-white/10' />
                   <Tooltip>
@@ -134,7 +139,7 @@ export function LiveSessionsPanel({ className }: { className?: string }) {
                           status.label === 'IDLE' && 'font-normal'
                         )}
                       >
-                        {status.label}
+                        {status.text}
                       </span>
                     </TooltipTrigger>
                     <TooltipContent side='left' className='max-w-[200px]'>
@@ -154,7 +159,7 @@ export function LiveSessionsPanel({ className }: { className?: string }) {
           onClick={() => navigate({ to: '/logs' })}
           className='flex cursor-pointer items-center justify-center gap-1 border-t border-slate-200 bg-slate-100/50 p-2 text-xs text-slate-600 transition-colors hover:text-slate-900 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-muted-foreground dark:hover:text-foreground'
         >
-          <span>查看全部</span>
+          <span>{t('statistics:viewAll')}</span>
           <span className='font-medium text-primary'>({total})</span>
         </button>
       ) : null}

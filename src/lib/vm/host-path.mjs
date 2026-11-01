@@ -3,13 +3,13 @@
  *
  * Slots are created through `/var/run/docker.sock`, i.e. by the **host** engine,
  * so every `-v` source must be a path the host can resolve. Inside the control
- * plane those paths are container paths (`/opt/vm2api/...`). Without translation
+ * plane those paths are container paths (`/opt/tapmodels/...`). Without translation
  * the deployment only works when the install dir happens to have the exact same
  * path on the host — that is why the install dir used to be pinned to
- * `/opt/vm2api`.
+ * `/opt/tapmodels`.
  *
  * Resolution order:
- *   1. `VM2API_HOST_ROOT` / `KIN_HOST_ROOT` — explicit host path of KIN_PROJECT_ROOT.
+ *   1. `TAPMODELS_HOST_ROOT` / `KIN_HOST_ROOT` — explicit host path of KIN_PROJECT_ROOT.
  *   2. `docker inspect <self>` mounts — exact per-mount `Source`; also correct for
  *      named volumes (`/var/lib/docker/volumes/<vol>/_data`).
  *   3. identity — native (non-container) deploy, host path == container path.
@@ -109,9 +109,9 @@ export function discoverSelfMounts({
   const root = projectRoot ? path.resolve(projectRoot) : ''
   const candidates = [
     ...names,
-    String(process.env.VM2API_CONTAINER_NAME || '').trim(),
+    String(process.env.TAPMODELS_CONTAINER_NAME || '').trim(),
     selfHostname(),
-    'vm2api',
+    'tapmodels',
   ].filter(Boolean)
   const seen = new Set()
   for (const name of candidates) {
@@ -127,7 +127,7 @@ export function discoverSelfMounts({
 export function hostMapEntries({ projectRoot, env = process.env, dockerJson, sockPath } = {}) {
   const root = path.resolve(projectRoot || env.KIN_PROJECT_ROOT || process.cwd())
   if (cache && cache.root === root) return cache.entries
-  const hostRoot = String(env.VM2API_HOST_ROOT || env.KIN_HOST_ROOT || '').trim()
+  const hostRoot = String(env.TAPMODELS_HOST_ROOT || env.KIN_HOST_ROOT || '').trim()
   const mounts = discoverSelfMounts({ projectRoot: root, dockerJson, sockPath })
   const entries = buildHostMap({ projectRoot: root, hostRoot, mounts })
   cache = { root, entries }

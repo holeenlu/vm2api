@@ -10,6 +10,7 @@ import type {
 } from '@/types/panel-usage-logs'
 import { api } from '@/lib/api'
 import { usageLogFiltersQuery } from '@/features/logs/search'
+import { panelQueryKeys } from '@/lib/query-keys'
 
 export type GateRow = {
   by: string
@@ -35,7 +36,7 @@ const LIVE = { refetchInterval: 30_000, refetchOnWindowFocus: false } as const
 
 export function gateStatsQueryOptions() {
   return queryOptions({
-    queryKey: ['panel', 'protocol-entry'] as const,
+    queryKey: panelQueryKeys.protocolEntry(),
     queryFn: () => api<GateStats>('/api/panel/protocol-entry'),
     ...LIVE,
   })
@@ -50,7 +51,7 @@ export type RiskFeed = { rows: UsageLogRow[]; more: boolean }
  */
 export function riskFeedQueryOptions(since: string | undefined) {
   return queryOptions({
-    queryKey: ['panel', 'risk-feed', since] as const,
+    queryKey: panelQueryKeys.riskFeed(since),
     queryFn: async (): Promise<RiskFeed> => {
       const pull = (errorClass: string) => {
         const qs = usageLogFiltersQuery({ errorClass, startTime: since })
@@ -74,21 +75,21 @@ export function riskFeedQueryOptions(since: string | undefined) {
 
 export function distillQueryOptions() {
   return queryOptions({
-    queryKey: ['panel', 'distill'] as const,
+    queryKey: panelQueryKeys.distill(),
     queryFn: () => api<DistillRules>('/api/panel/distill'),
   })
 }
 
 export function refusalGuardsQueryOptions() {
   return queryOptions({
-    queryKey: ['panel', 'refusal-guards'] as const,
+    queryKey: panelQueryKeys.refusalGuards(),
     queryFn: () => api<RefusalGuardConfig>('/api/panel/refusal-guards'),
   })
 }
 
 export function jevInterceptQueryOptions() {
   return queryOptions({
-    queryKey: ['panel', 'jev-intercept'] as const,
+    queryKey: panelQueryKeys.jevIntercept(),
     queryFn: () => api<JevInterceptConfig>('/api/panel/jev-intercept'),
   })
 }
