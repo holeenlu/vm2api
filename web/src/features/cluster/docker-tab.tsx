@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type {
   ClusterApiNode,
   DockerContainer,
@@ -8,8 +9,10 @@ import type {
   DockerLogs,
 } from '@/types/panel-cluster'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -32,13 +35,34 @@ import {
 } from '@/features/cluster/queries'
 import { vmsListQueryOptions } from '@/features/vm/queries'
 
-const STATE_TONE: Record<string, { key: string; cls: string; text: string }> = {
-  running: { key: 'ok', cls: 'ok', text: '运行中' },
-  restarting: { key: 'caution', cls: 'caution', text: '重启中' },
-  paused: { key: 'caution', cls: 'caution', text: '已暂停' },
-  created: { key: 'none', cls: 'none', text: '已创建' },
-  exited: { key: 'off', cls: 'off', text: '已停止' },
-  dead: { key: 'bad', cls: 'bad', text: '异常' },
+function getStateTones(): Record<
+  string,
+  { key: string; cls: string; text: string }
+> {
+  return {
+    running: { key: 'ok', cls: 'ok', text: translate('cluster:state.running') },
+    restarting: {
+      key: 'caution',
+      cls: 'caution',
+      text: translate('cluster:state.restarting'),
+    },
+    paused: {
+      key: 'caution',
+      cls: 'caution',
+      text: translate('cluster:state.paused'),
+    },
+    created: {
+      key: 'none',
+      cls: 'none',
+      text: translate('cluster:state.created'),
+    },
+    exited: {
+      key: 'off',
+      cls: 'off',
+      text: translate('cluster:state.stopped'),
+    },
+    dead: { key: 'bad', cls: 'bad', text: translate('cluster:state.error') },
+  }
 }
 
 /** 与节点槽位容器名一致：`vm-14` → `kin-14`。 */
@@ -55,8 +79,8 @@ function absentSlotRow(vm: Vm): DockerContainer & { absent: true } {
     state: 'created',
     status:
       vm.status === 'running'
-        ? '记录为运行，节点上没有容器'
-        : '槽位已登记，容器未创建',
+        ? translate('cluster:docker.missingRunning')
+        : translate('cluster:docker.notCreated'),
     created_at: typeof vm.created_at === 'string' ? vm.created_at : null,
     ports: [],
     managed: true,
@@ -66,6 +90,8 @@ function absentSlotRow(vm: Vm): DockerContainer & { absent: true } {
   }
 }
 export function DockerTab({ node }: { node: ClusterApiNode }) {
+  const { t } = useTranslation('cluster')
+
   const qc = useQueryClient()
   const ready = node.link.state === 'ready'
   const dockerOk = ready && node.health?.docker.ok === true
@@ -76,7 +102,7 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
   const base = `/api/panel/cluster/nodes/${node.id}/docker`
   const refresh = () =>
-    qc.invalidateQueries({ queryKey: ['panel', 'cluster', node.id, 'docker'] })
+    qc.invalidateQueries({ queryKey: panelQueryKeys.clusterDocker(node.id) })
 
   const action = useMutation({
     mutationFn: ({ id, act }: { id: string; act: string }) =>
@@ -100,16 +126,14 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
 
   if (node.platform === 'darwin') {
     return (
-      <p className='text-sm text-muted-foreground'>
-        macOS 原生节点不使用 Docker：槽位以 SSH 用户的 launchd 服务运行。
-      </p>
+      <p className='text-sm text-muted-foreground'>{t('docker.macNative')}</p>
     )
   }
 
   if (!ready) {
     return (
       <p className='text-sm text-muted-foreground'>
-        节点未连接，Docker 不可操作。
+        {t('docker.disconnected')}
       </p>
     )
   }
@@ -119,23 +143,34 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
     return (
       <div className='space-y-3 text-sm'>
         <p className='text-muted-foreground'>
-          远端 Docker 不可用：{node.health?.docker.error || '检测中'}
+          {t('docker.unavailable', {
+            value1: node.health?.docker.error || t('docker.checking'),
+          })}
         </p>
         <Button
           onClick={() => install.mutate()}
           disabled={install.isPending || job?.status === 'running'}
         >
-          {job?.status === 'running' ? '安装中…' : '安装 Docker'}
+          {job?.status === 'running'
+            ? t('docker.installing')
+            : t('docker.install')}
         </Button>
         <p className='text-xs text-muted-foreground'>
-          走 get.docker.com，并把 {node.username} 加入 docker
-          组；完成后自动重连。非 root 用户需要免密 sudo。
+          {t('docker.installDescription', { value1: node.username })}
         </p>
         {job ? (
           <pre className='max-h-64 overflow-auto rounded-md border bg-muted/30 p-2 text-[11px] whitespace-pre-wrap'>
             {job.status === 'running'
               ? job.log || '…'
-              : `${job.status === 'done' ? '完成' : `失败（exit ${job.exit_code ?? '—'}）`}\n${job.log}`}
+              : t('docker.hostInfo', {
+                  value1:
+                    job.status === 'done'
+                      ? t('docker.installDone')
+                      : t('docker.installFailed', {
+                          code: job.exit_code ?? '—',
+                        }),
+                  value2: job.log,
+                })}
           </pre>
         ) : null}
       </div>
@@ -174,7 +209,10 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
             : '—'}
         </span>
         <span>
-          运行 {info.data?.running ?? '—'} / {info.data?.containers ?? '—'}
+          {t('docker.runningCount', {
+            value1: info.data?.running ?? '—',
+            value2: info.data?.containers ?? '—',
+          })}
         </span>
       </div>
 
@@ -184,11 +222,19 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
         <table className='w-full min-w-[640px] text-sm'>
           <thead className='bg-muted/30 text-[11px] text-muted-foreground'>
             <tr>
-              <th className='px-3 py-1.5 text-left font-medium'>容器</th>
-              <th className='px-3 py-1.5 text-left font-medium'>镜像</th>
-              <th className='px-3 py-1.5 text-left font-medium'>状态</th>
-              <th className='px-3 py-1.5 text-left font-medium'>端口</th>
-              <th className='px-3 py-1.5 text-right font-medium'>操作</th>
+              <th className='px-3 py-1.5 text-left font-medium'>
+                {t('containers')}
+              </th>
+              <th className='px-3 py-1.5 text-left font-medium'>
+                {t('image')}
+              </th>
+              <th className='px-3 py-1.5 text-left font-medium'>
+                {t('status')}
+              </th>
+              <th className='px-3 py-1.5 text-left font-medium'>{t('port')}</th>
+              <th className='px-3 py-1.5 text-right font-medium'>
+                {t('actions')}
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -199,10 +245,10 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                   className='px-3 py-6 text-center text-xs text-muted-foreground'
                 >
                   {containers.isLoading
-                    ? '加载中…'
+                    ? t('loading')
                     : containers.error
                       ? containers.error.message
-                      : '还没有容器'}
+                      : t('docker.empty')}
                 </td>
               </tr>
             ) : (
@@ -221,7 +267,9 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                         </span>
                         {c.vm_id ? (
                           <span className='rounded-[4px] border border-border/70 px-1 text-[10px] leading-4 font-normal text-muted-foreground'>
-                            {c.role === 'egress' ? `${c.vm_id} 出口` : c.vm_id}
+                            {c.role === 'egress'
+                              ? t('docker.egress', { value1: c.vm_id })
+                              : c.vm_id}
                           </span>
                         ) : null}
                       </div>
@@ -234,7 +282,7 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                       <div className='flex items-center gap-1.5'>
                         <StatusMark
                           tone={
-                            STATE_TONE[c.state] || {
+                            getStateTones()[c.state] || {
                               key: 'none',
                               cls: 'none',
                               text: c.state,
@@ -252,7 +300,7 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                     <td className='px-3 py-1.5 text-right whitespace-nowrap'>
                       {absent ? (
                         <span className='text-[11px] text-muted-foreground'>
-                          无容器
+                          {t('docker.noContainer')}
                         </span>
                       ) : (
                         <>
@@ -269,10 +317,10 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                               onClick={() => action.mutate({ id: c.id, act })}
                             >
                               {act === 'stop'
-                                ? '停止'
+                                ? t('stop')
                                 : act === 'restart'
-                                  ? '重启'
-                                  : '启动'}
+                                  ? t('restart')
+                                  : t('start')}
                             </Button>
                           ))}
                           <Button
@@ -283,7 +331,7 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                               setLogsFor(logsFor === c.id ? null : c.id)
                             }
                           >
-                            日志
+                            {t('logs')}
                           </Button>
                           <Button
                             size='sm'
@@ -292,7 +340,7 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
                             disabled={busy}
                             onClick={() => setRemoveTarget(c.id)}
                           >
-                            删除
+                            {t('delete')}
                           </Button>
                         </>
                       )}
@@ -312,10 +360,10 @@ export function DockerTab({ node }: { node: ClusterApiNode }) {
         onOpenChange={(open) => {
           if (!open) setRemoveTarget(null)
         }}
-        title='删除容器'
-        desc='强制删除容器及其匿名卷，远端立即生效。'
-        confirmText='删除'
-        cancelBtnText='取消'
+        title={t('docker.deleteTitle')}
+        desc={t('docker.deleteDescription')}
+        confirmText={t('delete')}
+        cancelBtnText={t('cancel')}
         destructive
         handleConfirm={() => {
           if (!removeTarget) return
@@ -335,6 +383,8 @@ function CreateContainerForm({
   base: string
   onCreated: () => void
 }) {
+  const { t } = useTranslation('cluster')
+
   const [image, setImage] = useState('')
   const [name, setName] = useState('')
   const [ports, setPorts] = useState('')
@@ -361,7 +411,7 @@ function CreateContainerForm({
         } satisfies DockerContainerInput)
       ),
     onSuccess: () => {
-      toast.success('容器已创建并启动')
+      toast.success(t('docker.created'))
       setImage('')
       setName('')
       setPorts('')
@@ -374,7 +424,7 @@ function CreateContainerForm({
   return (
     <div className='grid grid-cols-12 gap-2 rounded-md border p-3'>
       <div className='col-span-12 space-y-1 sm:col-span-4'>
-        <Label className='text-xs'>镜像</Label>
+        <Label className='text-xs'>{t('image')}</Label>
         <Input
           placeholder='nginx:alpine'
           spellCheck={false}
@@ -383,16 +433,16 @@ function CreateContainerForm({
         />
       </div>
       <div className='col-span-6 space-y-1 sm:col-span-3'>
-        <Label className='text-xs'>名称</Label>
+        <Label className='text-xs'>{t('name')}</Label>
         <Input
-          placeholder='可选'
+          placeholder={t('optional')}
           spellCheck={false}
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
       </div>
       <div className='col-span-6 space-y-1 sm:col-span-3'>
-        <Label className='text-xs'>端口</Label>
+        <Label className='text-xs'>{t('port')}</Label>
         <Input
           placeholder='8080:80, 8443:443'
           spellCheck={false}
@@ -401,7 +451,7 @@ function CreateContainerForm({
         />
       </div>
       <div className='col-span-12 space-y-1 sm:col-span-2'>
-        <Label className='text-xs'>重启</Label>
+        <Label className='text-xs'>{t('restart')}</Label>
         <Select
           value={restart}
           onValueChange={(v) => setRestart(v as typeof restart)}
@@ -410,17 +460,29 @@ function CreateContainerForm({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value='unless-stopped'>unless-stopped</SelectItem>
-            <SelectItem value='always'>always</SelectItem>
-            <SelectItem value='on-failure'>on-failure</SelectItem>
-            <SelectItem value='no'>no</SelectItem>
+            <SelectItem value='unless-stopped'>
+              {/* i18n-exempt "unless-stopped" -- Docker restart policy wire value; must match Docker API spelling. */}
+              unless-stopped
+            </SelectItem>
+            <SelectItem value='always'>
+              {/* i18n-exempt "always" -- Docker restart policy wire value; must match Docker API spelling. */}
+              always
+            </SelectItem>
+            <SelectItem value='on-failure'>
+              {/* i18n-exempt "on-failure" -- Docker restart policy wire value; must match Docker API spelling. */}
+              on-failure
+            </SelectItem>
+            <SelectItem value='no'>
+              {/* i18n-exempt "no" -- Docker restart policy wire value; must match Docker API spelling. */}
+              no
+            </SelectItem>
           </SelectContent>
         </Select>
       </div>
       <div className='col-span-12 space-y-1 sm:col-span-10'>
-        <Label className='text-xs'>环境变量</Label>
+        <Label className='text-xs'>{t('docker.environment')}</Label>
         <Textarea
-          placeholder={'KEY=value，每行一个'}
+          placeholder={t('docker.environmentHint')}
           spellCheck={false}
           className='h-16 font-mono text-[11px]'
           value={env}
@@ -433,7 +495,7 @@ function CreateContainerForm({
           disabled={!image.trim() || create.isPending}
           onClick={() => create.mutate()}
         >
-          {create.isPending ? '创建中…' : '创建并启动'}
+          {create.isPending ? t('docker.creating') : t('docker.createStart')}
         </Button>
       </div>
     </div>
@@ -441,8 +503,10 @@ function CreateContainerForm({
 }
 
 function ContainerLogs({ base, id }: { base: string; id: string }) {
+  const { t } = useTranslation('cluster')
+
   const logs = useQuery({
-    queryKey: ['panel', 'cluster', base, 'logs', id] as const,
+    queryKey: panelQueryKeys.clusterLogs(base, id),
     queryFn: () =>
       api<DockerLogs>(
         `${base}/containers/${encodeURIComponent(id)}/logs?tail=300`
@@ -454,11 +518,11 @@ function ContainerLogs({ base, id }: { base: string; id: string }) {
   return (
     <div className='space-y-1'>
       <div className='text-xs text-muted-foreground'>
-        日志 · {id.slice(0, 12)} · 最近 300 行
+        {t('docker.logsTitle', { value1: id.slice(0, 12) })}
       </div>
       <pre className='max-h-72 overflow-auto rounded-md border bg-[#0b0d10] p-2 font-mono text-[11px] text-neutral-200'>
         {logs.isLoading
-          ? '加载中…'
+          ? t('loading')
           : logs.error
             ? logs.error.message
             : (logs.data?.lines || []).map((line, i) => (

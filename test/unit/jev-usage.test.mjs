@@ -131,7 +131,7 @@ test('the additive migration preserves old schema/data and permits old-version r
   fs.mkdirSync(migrationDir)
   const original = path.resolve(import.meta.dirname, '../../src/lib/db/migrations')
   for (const name of fs.readdirSync(original))
-    if (name.endsWith('.sql') && name !== '045_jev_usage.sql')
+    if (name.endsWith('.sql') && name !== '052_jev_usage.sql')
       fs.copyFileSync(path.join(original, name), path.join(migrationDir, name))
   const file = path.join(dir, 'kin.db')
   let db
@@ -161,7 +161,7 @@ test('the additive migration preserves old schema/data and permits old-version r
   assert.deepEqual(afterSchema, beforeSchema)
   assert.deepEqual(db.prepare('SELECT * FROM settings').all(), beforeSettings)
   assert.deepEqual(
-    db.prepare("SELECT * FROM schema_migrations WHERE name <> '045_jev_usage.sql' ORDER BY name").all(),
+    db.prepare("SELECT * FROM schema_migrations WHERE name <> '052_jev_usage.sql' ORDER BY name").all(),
     beforeMigrations,
   )
   const started = db.prepare('SELECT started_at FROM jev_usage_meta').get().started_at

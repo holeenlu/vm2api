@@ -1,4 +1,5 @@
 import type { PolicyPrice } from '@/types/panel-pricing'
+import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { ModelVendorIcon } from '@/components/model-vendor-icon'
@@ -24,20 +25,14 @@ export function ImageToolSection({
   pricing,
   onToggle,
 }: Props) {
+  const { t } = useTranslation('models')
   if (!models.length) return null
   return (
     <section className='space-y-3 rounded-2xl border border-border/70 bg-card p-4 shadow-sm'>
       <div className='max-w-3xl space-y-1'>
-        <h3 className='font-semibold'>图像模型</h3>
+        <h3 className='font-semibold'>{t('models:imageModels')}</h3>
         <p className='text-sm leading-6 text-muted-foreground'>
-          两种用法：<span className='font-mono'>/v1/images/generations</span>、
-          <span className='font-mono'>/v1/images/edits</span> 的{' '}
-          <span className='font-mono'>model</span>，或 Responses{' '}
-          <span className='font-mono'>image_generation</span> 工具的{' '}
-          <span className='font-mono'>model</span>。启用后列入{' '}
-          <span className='font-mono'>/v1/models</span>
-          ；停用后带该模型的请求在网关本地被拒绝。Free 套餐账号不接 Images
-          端点。
+          {t('models:imageHelp')}
         </p>
       </div>
       <div className='grid gap-3 md:grid-cols-2'>
@@ -55,11 +50,15 @@ export function ImageToolSection({
               <div className='min-w-0 flex-1 space-y-2'>
                 <div className='flex flex-wrap items-center gap-2'>
                   <h4 className='truncate font-semibold'>{m.display_name}</h4>
-                  <Badge variant='outline'>图像</Badge>
+                  <Badge variant='outline'>{t('models:image')}</Badge>
                   {m.upstream_default ? (
-                    <Badge variant='secondary'>上游默认</Badge>
+                    <Badge variant='secondary'>
+                      {t('models:upstreamDefault')}
+                    </Badge>
                   ) : null}
-                  {on ? null : <Badge variant='outline'>停用</Badge>}
+                  {on ? null : (
+                    <Badge variant='outline'>{t('models:disabled')}</Badge>
+                  )}
                 </div>
                 <p className='truncate font-mono text-[11px] text-muted-foreground'>
                   {m.id}
@@ -67,17 +66,17 @@ export function ImageToolSection({
                 </p>
                 <div className='space-y-1'>
                   <Fact
-                    label='文本 input / cached / output'
+                    label={t('models:textRates')}
                     value={`${fmtOpenaiRates(price?.effective)} / 1M`}
                     mono
                   />
                   <Fact
-                    label='图像 token input / cached / output'
+                    label={t('models:imageRates')}
                     value={`${fmtImageRates(price?.effective)} / 1M`}
                     mono
                   />
                   <Fact
-                    label='价格来源'
+                    label={t('models:priceSource')}
                     value={priceSourceLabel(price?.source)}
                   />
                 </div>
@@ -86,10 +85,10 @@ export function ImageToolSection({
                 <Switch
                   checked={on}
                   onCheckedChange={(next) => onToggle(m.id, next)}
-                  aria-label={`启用 ${m.display_name}`}
+                  aria-label={t('models:enableModel', { name: m.display_name })}
                 />
                 <span className='text-xs text-muted-foreground'>
-                  {on ? '启用' : '停用'}
+                  {on ? t('models:enabled') : t('models:disabled')}
                 </span>
               </div>
             </div>

@@ -69,6 +69,35 @@ test('parseCodexModelCatalog uses official slug/display_name and drops luna-wm',
   assert.deepEqual(parseChatgptModelIds({ models: [{ slug: 'gpt-5.6' }] }), ['gpt-5.6'])
 })
 
+test('catalog sync preserves full native messages and tool metadata without credentials or routing headers', () => {
+  const row = parseCodexModelCatalog({
+    models: [
+      {
+        slug: 'gpt-6.1-sol',
+        display_name: 'GPT',
+        context_window: 1050000,
+        default_reasoning_level: 'high',
+        supported_reasoning_levels: [{ effort: 'high', description: 'High' }],
+        model_messages: { instructions_template: 'native instructions', approvals: { shell: 'never' } },
+        api_key: 'must-not-leak',
+        headers: { Authorization: 'Bearer private' },
+        service_tiers: [{ id: 'priority', name: 'Fast', description: 'Faster' }],
+        comp_hash: '3000',
+        guardian: { shell: [] },
+      },
+    ],
+  })[0]
+  assert.equal(row.codex_metadata.context_window, 500000)
+  assert.equal(row.codex_metadata.default_reasoning_level, 'high')
+  assert.equal(row.codex_metadata.model_messages.instructions_template, 'native instructions')
+  assert.deepEqual(row.codex_metadata.model_messages.approvals, { shell: 'never' })
+  assert.deepEqual(row.codex_metadata.service_tiers, [{ id: 'priority', name: 'Fast', description: 'Faster' }])
+  assert.equal(row.codex_metadata.comp_hash, '3000')
+  assert.equal(row.codex_metadata.headers, undefined)
+  assert.equal(row.codex_metadata.api_key, undefined)
+  assert.deepEqual(row.codex_metadata.guardian, { shell: [] })
+})
+
 test('fetchChatgptModelCatalog hits /codex/models and does not treat 401 as success', async () => {
   const calls = []
   const ok = await fetchChatgptModelCatalog({

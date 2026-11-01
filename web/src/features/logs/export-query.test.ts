@@ -67,3 +67,19 @@ describe('log export query', () => {
     expect(errors.has('session_id')).toBe(false)
   })
 })
+
+it('keeps errors tab and personal scope in exports', () => {
+  const current = exportQuery(
+    base,
+    { scope: 'mine', accountId: 'a1', groupId: '2' },
+    [],
+    true
+  )
+  expect(current.get('errors_only')).toBe('1')
+  expect(current.get('account_id')).toBe('a1')
+  expect(current.get('group_id')).toBe('2')
+  expect(current.get('scope')).toBe('mine')
+  expect(
+    exportQuery({ ...base, scope: 'all' }, { scope: 'mine' }, []).get('scope')
+  ).toBe('mine')
+})

@@ -193,7 +193,7 @@ export function buildCreateSpec(input = {}) {
       ...(env.length ? { Env: env } : {}),
       ...(cmd.length ? { Cmd: cmd } : {}),
       ExposedPorts: exposed,
-      Labels: { 'vm2api.cluster': '1' },
+      Labels: { 'tapmodels.cluster': '1' },
       HostConfig: {
         PortBindings: bindings,
         RestartPolicy: { Name: restart },
@@ -217,7 +217,7 @@ function containerView(c) {
           `${p.IP && p.IP !== '0.0.0.0' && p.IP !== '::' ? `${p.IP}:` : ''}${p.PublicPort}:${p.PrivatePort}/${p.Type}`,
       )
       .filter((v, i, all) => all.indexOf(v) === i),
-    managed: c.Labels?.['vm2api.cluster'] === '1',
+    managed: c.Labels?.['tapmodels.cluster'] === '1',
     // A slot and its exit share this id: kin-02 (slot) / kin-02-egress (egress).
     vm_id: c.Labels?.['kin.vm.id'] || c.Labels?.['kin.egress.vm'] || null,
     role: c.Labels?.['kin.vm.id'] ? 'slot' : c.Labels?.['kin.egress'] === '1' ? 'egress' : null,

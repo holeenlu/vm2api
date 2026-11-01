@@ -1,3 +1,5 @@
+import { t } from '@/i18n'
+
 export type Pass1mMode = 'true' | 'false' | 'inherit'
 export type BetaFilter = 'all' | 'pass' | 'strip' | 'inherit'
 export type CatalogMode =
@@ -185,7 +187,7 @@ export function fastAliasState(m: ModelEntry): {
       alias,
       enabled: false,
       available: false,
-      reason: '实际目录模型使用此 ID',
+      reason: t('models:fastAliasIdCollision'),
     }
   }
   if (!hasPriorityTier(m)) {
@@ -193,7 +195,7 @@ export function fastAliasState(m: ModelEntry): {
       alias,
       enabled: m.expose_fast === true,
       available: false,
-      reason: '上游目录未声明 priority 档位',
+      reason: t('models:fastAliasPriorityMissing'),
     }
   }
   if (m.enabled === false) {
@@ -201,7 +203,7 @@ export function fastAliasState(m: ModelEntry): {
       alias,
       enabled: m.expose_fast === true,
       available: false,
-      reason: '先启用基模型',
+      reason: t('models:fastAliasBaseDisabled'),
     }
   }
   return { alias, enabled: m.expose_fast === true, available: true, reason: '' }
@@ -237,8 +239,8 @@ export function thinkingPolicyLabel(m: ModelEntry): string {
     (caps.supports_adaptive ? 'passthrough' : 'convert_to_enabled')
   if (en === 'convert_to_adaptive') return 'enabled→adaptive'
   if (ad === 'convert_to_enabled') return 'adaptive→enabled'
-  if (en === 'strip' || ad === 'strip') return '剥离'
-  return '透传'
+  if (en === 'strip' || ad === 'strip') return t('models:strip')
+  return t('models:passthrough')
 }
 
 export function filterModels(
@@ -309,16 +311,19 @@ function fmtTokens(n: number): string {
   return String(n)
 }
 
-const MODALITY_LABEL: Record<string, string> = { text: '文本', image: '图像' }
+const MODALITY_LABEL: Record<string, string> = {
+  text: 'models:text',
+  image: 'models:image',
+}
 const VISIBILITY_LABEL: Record<string, string> = {
-  list: '列出',
-  hide: '隐藏',
-  none: '不列出',
+  list: 'models:listed',
+  hide: 'models:hidden',
+  none: 'models:unlisted',
 }
 
 function yesNo(v: boolean | undefined): string {
   if (v === undefined) return '—'
-  return v ? '支持' : '不支持'
+  return v ? t('models:supported') : t('models:unsupported')
 }
 
 export type CatalogFacts = {
@@ -341,7 +346,7 @@ export type CatalogFacts = {
 export function catalogFacts(m: ModelEntry): CatalogFacts {
   const c = m.catalog
   if (!c) {
-    const none = '未同步'
+    const none = t('models:notSynced')
     return {
       synced: false,
       context: none,
@@ -359,7 +364,7 @@ export function catalogFacts(m: ModelEntry): CatalogFacts {
     }
   }
   const levels = c.supported_reasoning_levels || []
-  const noTiers = c.service_tiers ? '无' : '—'
+  const noTiers = c.service_tiers ? t('models:none') : '—'
   return {
     synced: true,
     context: c.context_window ? fmtTokens(c.context_window) : '—',
@@ -375,12 +380,16 @@ export function catalogFacts(m: ModelEntry): CatalogFacts {
           .join(' / ')
       : noTiers,
     input: c.input_modalities?.length
-      ? c.input_modalities.map((x) => MODALITY_LABEL[x] || x).join(' / ')
+      ? c.input_modalities
+          .map((x) => (MODALITY_LABEL[x] ? t(MODALITY_LABEL[x]) : x))
+          .join(' / ')
       : '—',
     search: yesNo(c.supports_search_tool),
     parallel: yesNo(c.supports_parallel_tool_calls),
     visibility: c.visibility
-      ? VISIBILITY_LABEL[c.visibility] || c.visibility
+      ? VISIBILITY_LABEL[c.visibility]
+        ? t(VISIBILITY_LABEL[c.visibility])
+        : c.visibility
       : '—',
     description: c.description || '',
     syncedAt: c.synced_at || '',
