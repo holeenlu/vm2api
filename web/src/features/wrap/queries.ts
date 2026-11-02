@@ -1,5 +1,6 @@
 import { queryOptions } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 
 export type WrapSampleMeta = {
   source?: string
@@ -59,7 +60,7 @@ export type WrapRepairReport = {
 
 export function wrapSampleQueryOptions() {
   return queryOptions({
-    queryKey: ['panel', 'wrap-cli'] as const,
+    queryKey: panelQueryKeys.wrapCli(),
     queryFn: () => api<WrapSample>('/api/panel/wrap-cli'),
   })
 }

@@ -198,14 +198,23 @@ export function applyMigrations(db, { migrationsDir } = {}) {
         .sort()
     : []
 
-  const appliedRows = db.prepare('SELECT version, checksum FROM schema_migrations').all()
+  const appliedRows = db.prepare('SELECT version, name, checksum FROM schema_migrations').all()
   const applied = new Map(appliedRows.map((r) => [r.version, r.checksum]))
   const historical001Accepted = reconcileHistorical001ProxySchema(db, applied.get('001'))
   const insert = db.prepare('INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)')
 
+  // Published customization branches can allocate the same numeric prefix.
+  // Keep their SQL files and historical ledger rows distinct by filename.
+  const counts = new Map()
+  for (const file of files) {
+    const prefix = file.split('_')[0]
+    counts.set(prefix, (counts.get(prefix) || 0) + 1)
+  }
   const results = []
   for (const file of files) {
-    const version = file.split('_')[0]
+    const prefix = file.split('_')[0]
+    const previous = appliedRows.find((row) => row.name === file)
+    const version = previous?.version || (counts.get(prefix) > 1 ? file.replace(/\.sql$/, '') : prefix)
     const sql = fs.readFileSync(path.join(dir, file), 'utf8')
     const { canonical: checksum, variants } = migrationChecksums(sql)
     if (applied.has(version)) {

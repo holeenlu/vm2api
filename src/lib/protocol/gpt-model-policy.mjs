@@ -3,7 +3,7 @@
  * Live ids from ChatGPT sync; seed is empty-catalog fallback.
  */
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
-import { isGptSeriesId, isSyncableGptCatalogId } from './gpt-ids.mjs'
+import { gptContextWindowOverride, isGptSeriesId, isSyncableGptCatalogId } from './gpt-ids.mjs'
 import { IMAGE_TOOL_MODELS, canonicalImageToolModel } from './image-tool-models.mjs'
 
 const SETTINGS_KEY = 'gpt_model_policy'
@@ -19,18 +19,32 @@ const CAP_GPT = {
   supports_context_management: false,
 }
 
-function entry(id, extra = {}) {
+function applyContextWindow(id, row) {
+  const context = gptContextWindowOverride(id)
+  if (!context) return row
   return {
+    ...row,
+    capabilities: { ...row.capabilities, context_window: context, supports_1m: false },
+    ...(row.codex_metadata ? { codex_metadata: { ...row.codex_metadata, context_window: context } } : {}),
+  }
+}
+
+function entry(id, extra = {}) {
+  return applyContextWindow(id, {
     id,
     display_name: extra.display_name || extra.label || id,
     family: 'codex',
     enabled: extra.enabled !== false,
     sort: extra.sort || 80,
-    capabilities: extra.capabilities || { ...CAP_GPT },
+    capabilities: extra.capabilities || {
+      ...CAP_GPT,
+      ...(id.startsWith('gpt-6') ? { context_window: 1050000, supports_1m: true, supports_effort: true } : {}),
+    },
     params: extra.params || { max_tokens_default: 16384, max_tokens_cap: 128000 },
     aliases: extra.aliases || [],
     expose_fast: extra.expose_fast === true,
-  }
+    ...(extra.codex_metadata ? { codex_metadata: extra.codex_metadata } : {}),
+  })
 }
 
 function bareModelId(model) {
@@ -66,9 +80,7 @@ export function resolveGptFastAlias(model) {
   const baseId = alias.replace(/-fast$/i, '')
   const baseIdExact = exactPolicyModelId(baseId)
   const base = baseIdExact ? policy.models?.[baseIdExact] : null
-  if (!baseIdExact || !base) {
-    return { kind: 'unavailable', alias, reason: 'base_missing' }
-  }
+  if (!baseIdExact || !base) return { kind: 'unavailable', alias, reason: 'base_missing' }
   if (base.enabled === false) return { kind: 'unavailable', alias, reason: 'base_disabled', base: baseIdExact }
   if (base.expose_fast !== true) return { kind: 'unavailable', alias, reason: 'not_exposed', base: baseIdExact }
   if (!hasPriorityTier(base)) return { kind: 'unavailable', alias, reason: 'priority_missing', base: baseIdExact }
@@ -125,13 +137,13 @@ function normalizeImageTools(raw, base = null) {
 export function seedGptPolicy() {
   const models = {}
   for (const [id, extra] of [
-    ['gpt-6-sol', { display_name: 'GPT-6 Sol', sort: 70 }],
-    ['gpt-6-luna', { display_name: 'GPT-6 Luna', sort: 71 }],
-    ['gpt-5.6', { display_name: 'GPT-5.6', sort: 76 }],
-    ['gpt-5.5', { display_name: 'GPT-5.5', sort: 77 }],
-    ['gpt-5.4', { display_name: 'GPT-5.4', sort: 80, aliases: ['codex'] }],
-    ['gpt-5.4-mini', { display_name: 'GPT-5.4 Mini', sort: 81 }],
-    ['gpt-5.3-codex', { display_name: 'GPT-5.3 Codex', sort: 82 }],
+    ['gpt-6.1-sol', { display_name: 'GPT-6.1 Sol', sort: 1, aliases: ['codex'] }],
+    ['gpt-6-astra', { display_name: 'GPT-6 Astra', sort: 2 }],
+    ['gpt-6-luna', { display_name: 'GPT-6 Luna', sort: 3 }],
+    ['gpt-6-sol', { display_name: 'GPT-6 Sol', sort: 4 }],
+    ['gpt-5.6-sol', { display_name: 'GPT-5.6 Sol', sort: 10 }],
+    ['gpt-5.6-terra', { display_name: 'GPT-5.6 Terra', sort: 11 }],
+    ['gpt-5.6-luna', { display_name: 'GPT-5.6 Luna', sort: 12 }],
   ]) {
     models[id] = entry(id, extra)
   }
@@ -163,20 +175,13 @@ export function loadGptModelPolicy({ force = false } = {}) {
     if (stored && typeof stored === 'object' && stored.models && typeof stored.models === 'object') {
       const live = stored.source === 'codex' && Object.keys(stored.models).length
       policy = {
-        ...(live ? stored : { ...seedGptPolicy(), ...stored, models: { ...seedGptPolicy().models, ...stored.models } }),
+        ...(live
+          ? stored
+          : stored.source === 'seed'
+            ? seedGptPolicy()
+            : { ...seedGptPolicy(), ...stored, models: { ...seedGptPolicy().models, ...stored.models } }),
         platform: 'openai',
       }
-      policy.models = Object.fromEntries(
-        Object.entries(policy.models || {}).map(([id, row]) => [
-          id,
-          {
-            ...(row && typeof row === 'object' ? row : {}),
-            id,
-            family: 'codex',
-            expose_fast: row?.expose_fast === true,
-          },
-        ]),
-      )
       policy.image_tools = normalizeImageTools(stored.image_tools)
       policy.source = policy.source || 'settings'
     } else {
@@ -186,6 +191,17 @@ export function loadGptModelPolicy({ force = false } = {}) {
   } catch {
     policy = seedGptPolicy()
   }
+  policy.models = Object.fromEntries(
+    Object.entries(policy.models).map(([id, row]) => [
+      id,
+      applyContextWindow(id, {
+        ...(row && typeof row === 'object' ? row : {}),
+        id,
+        family: 'codex',
+        expose_fast: row?.expose_fast === true,
+      }),
+    ]),
+  )
   loaded = true
   return policy
 }
@@ -204,13 +220,13 @@ export function saveGptModelPolicy(next) {
       // Catalog facts come from the upstream sync only; a stale panel draft must not overwrite them.
       const { catalog: _drop, ...edits } = row
       const catalog = policy.models?.[id]?.catalog
-      models[id] = {
+      models[id] = applyContextWindow(id, {
         ...models[id],
         ...edits,
         id,
         family: 'codex',
         expose_fast: typeof edits.expose_fast === 'boolean' ? edits.expose_fast : models[id]?.expose_fast === true,
-      }
+      })
       if (catalog) models[id].catalog = catalog
     }
   }
@@ -294,6 +310,7 @@ export function syncGptIdsIntoPolicy(ids = [], { displayNameOf = null } = {}) {
     live.push({
       id,
       display_name: String((typeof item === 'object' && item?.display_name) || '').trim(),
+      codex_metadata: typeof item === 'object' ? item.codex_metadata : undefined,
       catalog: typeof item === 'object' && item?.catalog && typeof item.catalog === 'object' ? item.catalog : null,
     })
   }
@@ -310,6 +327,7 @@ export function syncGptIdsIntoPolicy(ids = [], { displayNameOf = null } = {}) {
       display_name: row.display_name || prev?.display_name || displayNameOf?.(row.id) || row.id,
       enabled: prev ? prev.enabled !== false : false,
       source: 'codex',
+      codex_metadata: row.codex_metadata || prev?.codex_metadata,
     })
     // Upstream catalog facts replace the previous snapshot; a sync without them keeps it.
     const catalog = row.catalog ? { ...row.catalog, synced_at: new Date().toISOString() } : prev?.catalog

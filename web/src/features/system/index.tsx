@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { VIEW_TITLES } from '@/config/nav'
+import { t } from '@/i18n'
 import type { Dashboard } from '@/types/panel-overview'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api, patchVm } from '@/lib/api'
 import { protocolPersonaSaveToast } from '@/lib/persona-template'
@@ -24,12 +25,14 @@ type RoutingSaveResult = {
 
 function followError(message: string) {
   if (/config_missing|kernel_start_failed|wrap_cli_missing/i.test(message)) {
-    return '内核文件缺失，先到内核页拉取 wrap/crag 二进制再同步'
+    return t('system:kernelMissing')
   }
   return message
 }
 
 export function SystemPromptPage() {
+  const { t } = useTranslation('system')
+
   const routing = useQuery(routingQueryOptions())
   const qc = useQueryClient()
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -65,17 +68,22 @@ export function SystemPromptPage() {
         inherited = follow.changed
         if (follow.errors.length) {
           toast.error(
-            `已保存，${follow.errors.length} 个槽位未跟随：${follow.errors
-              .slice(0, 3)
-              .map((item) => `${item.id} ${followError(item.message)}`)
-              .join('；')}`
+            t('system:followFailedCount', {
+              count: follow.errors.length,
+              errors: follow.errors
+                .slice(0, 3)
+                .map((item) => item.id + ' ' + followError(item.message))
+                .join('; '),
+            })
           )
         }
       } catch (error) {
         toast.error(
-          `已保存，槽位未跟随全局：${followError(
-            error instanceof Error ? error.message : String(error)
-          )}`
+          t('system:followFailed', {
+            error: followError(
+              error instanceof Error ? error.message : String(error)
+            ),
+          })
         )
       }
       toast.success(
@@ -118,7 +126,7 @@ export function SystemPromptPage() {
   })
 
   return (
-    <PageHeader title={VIEW_TITLES.system}>
+    <PageHeader title={t('system:title')}>
       <div className={cn(dirty && 'pb-16')}>
         <QueryGate
           loading={routing.isLoading}

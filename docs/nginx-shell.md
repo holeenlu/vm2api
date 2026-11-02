@@ -13,6 +13,8 @@
 
 ## 正确反代
 
+推荐用 `map $http_upgrade` 决定 `Connection`，一个 `location /` 就同时覆盖 HTTP、SSE 和这两条 shell 路径，不会有「漏了一条」的问题；配置见 [DEPLOY.md](DEPLOY.md) 的「反代」。下面是沿用 `Connection ""` 旧配置时的写法。
+
 shell 的 `location` 必须写在会设置 `Connection ""` 的 `location /` 或 `location /api/` **前面**。`Connection ""` 会剥掉 `Upgrade`，后面的 Node 收不到 101。
 
 只有 Node、没有前门时，`proxy_pass` 指 Node（Compose 默认 `:8787`）：
@@ -83,7 +85,7 @@ nginx -T 2>/dev/null | grep -n shell
 「连不上」和「页面没加载」不是同一件事。
 
 ```bash
-# 控制台入口。应有 <title>vm2api</title> 和 id="root"
+# 控制台入口。应有 <title>tapmodels</title> 和 id="root"
 curl -sk -o /dev/null -w '%{http_code}\n' https://<域名>/
 
 # 终端脚本。文件名以线上 index 的引用为准，应 200，Content-Type 含 javascript

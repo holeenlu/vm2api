@@ -99,6 +99,9 @@ export async function runGuestOAuthAuthService(
   const context = await prepare({ exec, projectRoot, routing, timeoutMs })
   const { host, configDir, home } = context
   exec = context.exec
+  // Local egress uses the host default route. Remote egress still needs its
+  // bound proxy URL because the helper itself owns the outbound hop.
+  const guestProxyUrl = isLocalEgressProxy(exec.vm.proxy) ? '' : boundProxyUrl(exec.vm.proxy)
   // The approved Linux cutover must not change macOS non-telemetry behavior.
   // This is an explicit native-host path, never a Linux execution fallback.
   if (host.native) return runNative(payload)
@@ -153,7 +156,7 @@ export async function runGuestOAuthAuthService(
       stdin:
         JSON.stringify({
           ...payload,
-          proxy_url: isLocalEgressProxy(exec.vm.proxy) ? '' : boundProxyUrl(exec.vm.proxy),
+          proxy_url: guestProxyUrl,
         }) + '\n',
     })
     if (result?.timed_out) throw fail('oauth_auth_timeout', 'Target VM OAuth helper timed out')

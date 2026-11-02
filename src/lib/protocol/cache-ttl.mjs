@@ -113,16 +113,6 @@ export function validateCacheBreakpoints(body) {
   check(body)
 }
 
-/** Only call for a rewritten native body: every surviving marker is Node-owned. */
-export function fillMissingCacheTtl(body, ttl = DEFAULT_CACHE_TTL) {
-  const target = normalizeCacheTtl(ttl)
-  return walkCacheNodes(body, (node) => {
-    const control = node?.cache_control
-    if (!control || control.type !== 'ephemeral' || control.ttl != null) return node
-    return { ...node, cache_control: { ...control, ttl: target } }
-  })
-}
-
 const CACHE_TTL_MS = Object.freeze({ '5m': 5 * 60_000, '1h': 60 * 60_000 })
 const CONVERSATION_TTL_LIMIT = 10_000
 const conversationTtls = new Map()
