@@ -17,8 +17,8 @@ import {
 import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { callerAutoCompactWindow, defaultSeedPolicy, sanitizeInboundBody } from '../../src/lib/protocol/seed-policy.mjs'
 import { extractOpenaiUsage } from '../../src/lib/protocol/openai-usage.mjs'
-import { callRustKernel, rustKernelHealth } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { callCodexKernel, streamCodexKernel } from '../../src/lib/transport/codex-kernel-client.mjs'
+import { callRustKernel, rustKernelHealth } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { forwardApi, readApiJson } from '../../src/lib/transport/api-kernel-client.mjs'
 
 test('restoreUncommittedHop keeps a structured upstream code', () => {
@@ -159,8 +159,7 @@ test('cli-hop envelope keeps role=system turns that the VM betas do not declare'
     identity: null,
     cliHop: true,
   })
-  // 9ecee337: mid-conversation-system is GA in 2.1.303; role=system stays without the beta.
-  assert.ok(!out.body.betas.includes('mid-conversation-system-2026-04-07'))
+  assert.equal(out.body.betas.includes('mid-conversation-system-2026-04-07'), false)
   assert.deepEqual(
     out.body.messages.map((message) => message.role),
     ['user', 'system', 'assistant', 'user'],
@@ -306,6 +305,7 @@ unixTest('callGoWorker sends envelope over authenticated Unix socket', async () 
     })
     assert.equal(result.ok, true)
     assert.equal(result.terminalState, 'verified')
+    assert.equal(result.sendState, 'sent')
     assert.equal(result.body.content[0].text, 'ok')
   } finally {
     await fx.close()
@@ -461,6 +461,43 @@ unixTest('callGoWorker marks null TTL as client-owned cache breakpoints', async 
   }
 })
 
+unixTest('callGoWorker keeps body-too-large failures in not_sent state', async () => {
+  const fx = await fixture(async (_req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'unexpected' }] }))
+  })
+  try {
+    const result = await callGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-test', messages: [{ role: 'user', content: 'too large' }] },
+      maxRequestBytes: 1,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 413)
+    assert.equal(result.sendState, 'not_sent')
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('callGoWorker marks a written socket failure ambiguous', async () => {
+  const fx = await fixture((req) => {
+    req.resume()
+    req.once('end', () => req.socket.destroy())
+  })
+  try {
+    const result = await callGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-test', messages: [{ role: 'user', content: 'hello' }] },
+      timeoutMs: 1000,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.sendState, 'ambiguous')
+  } finally {
+    await fx.close()
+  }
+})
+
 unixTest('streamGoWorker accepts message_stop before delayed EOF', async () => {
   const fx = await fixture((req, res) => {
     res.setHeader('content-type', 'text/event-stream')
@@ -480,6 +517,7 @@ unixTest('streamGoWorker accepts message_stop before delayed EOF', async () => {
     assert.equal(result.ok, true)
     assert.equal(result.terminalState, 'verified')
     assert.equal(result.committed, true)
+    assert.equal(result.sendState, 'sent')
     assert.ok(lines.some((line) => line.includes('message_stop')))
   } finally {
     await fx.close()
@@ -1126,6 +1164,7 @@ unixTest('streamGoWorker scrapes usage from SSE when trailers are missing', asyn
       body: { model: 'claude-sonnet-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
       onEvent: () => {},
     })
+    assert.equal(result.usageComplete, true)
     assert.equal(result.usage.input_tokens, 80)
     assert.equal(result.usage.output_tokens, 6)
     assert.equal(result.usage.cache_read_input_tokens, 20)
@@ -1157,6 +1196,7 @@ unixTest('streamGoWorker merges SSE cache details into a totals-only usage trail
       body: { model: 'gpt-5.4', stream: true, input: [] },
       onEvent: () => {},
     })
+    assert.equal(result.usageComplete, true)
     assert.equal(result.usage.input_tokens, 120)
     assert.equal(result.usage.output_tokens, 9)
     assert.equal(result.usage.input_tokens_details.cached_tokens, 8)
@@ -1267,6 +1307,42 @@ test('workerHealth fails closed when socket is absent', async () => {
   assert.equal(result.ok, false)
 })
 
+unixTest('cancelled VM streams preserve final usage evidence but never finalize initial counters', async () => {
+  for (const complete of [false, true]) {
+    const observed = gate()
+    const fx = await fixture(async (req, res) => {
+      if (req.url === '/internal/v1/cancel') return res.end('{"ok":true}')
+      res.setHeader('content-type', 'text/event-stream')
+      writeData(res, { type: 'message_start', message: { usage: { input_tokens: 100, output_tokens: 0 } } })
+      writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'answer' } })
+      if (complete)
+        writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 25 } })
+      await observed.ready
+    })
+    try {
+      const controller = new AbortController()
+      const pending = streamGoWorker({
+        exec: fx.exec,
+        signal: controller.signal,
+        timeoutMs: 1000,
+        body: { model: 'claude-sonnet-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+        onEvent(line) {
+          if (String(line).includes(complete ? 'message_delta' : 'text_delta')) observed.release()
+        },
+      })
+      await observed.ready
+      controller.abort()
+      const result = await pending
+      assert.equal(result.body.error.code, 'client_cancelled')
+      assert.equal(result.usageComplete, complete)
+      assert.equal(result.usage.input_tokens, 100)
+      assert.equal(result.usage.output_tokens, complete ? 25 : 0)
+    } finally {
+      await fx.close()
+    }
+  }
+})
+
 for (const call of [callGoWorker, streamGoWorker]) {
   unixTest(`${call.name} maps plain-text kernel 413 without losing structured errors`, async () => {
     for (const structured of [false, true]) {
@@ -1313,6 +1389,7 @@ for (const call of [callGoWorker, streamGoWorker]) {
       assert.equal(oversized.body.error.code, 'body_too_large')
       assert.equal(oversized.body.error.details.retryable, false)
       assert.equal(oversized.transportError, false)
+      assert.equal(oversized.sendState, 'not_sent')
       assert.equal(requests, 0)
       const exact = await call({ exec: fx.exec, envelope, maxRequestBytes: bytes })
       assert.equal(exact.status, 400)
@@ -1370,6 +1447,90 @@ unixTest('Codex clients enforce the panel limit on their serialized envelope', a
       assert.equal(result.transportError, false)
     }
     assert.equal(requests, 0)
+  } finally {
+    await fx.close()
+  }
+})
+
+for (const terminal of ['message_stop', 'error']) {
+  unixTest(`streamGoWorker observes an EOF ${terminal} after visible output`, async () => {
+    const fx = await fixture((req, res) => {
+      req.resume()
+      res.setHeader('content-type', 'text/event-stream')
+      writeData(res, { type: 'message_start', message: { type: 'message', role: 'assistant', content: [] } })
+      writeData(res, { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+      writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hello' } })
+      res.end(
+        `data: ${JSON.stringify(
+          terminal === 'message_stop'
+            ? { type: terminal }
+            : {
+                type: terminal,
+                error: { type: 'rate_limit_error', code: 'rate_limit_error', status: 429, message: 'limited' },
+              },
+        )}`,
+      )
+    })
+    try {
+      const result = await streamGoWorker({ exec: fx.exec, envelope: { body: { input: 'hi' } }, onEvent() {} })
+      assert.equal(result.committed, true)
+      assert.equal(result.sendState, 'sent')
+      if (terminal === 'message_stop') {
+        assert.equal(result.ok, true)
+        assert.equal(result.sawMessageStop, true)
+        assert.equal(result.terminalState, 'verified')
+        assert.equal(result.body.content[0].text, 'hello')
+      } else {
+        assert.equal(result.ok, false)
+        assert.equal(result.explicitFailure, true)
+        assert.equal(result.terminalEventSeen, true)
+        assert.equal(result.body.error.code, 'rate_limit_error')
+        assert.equal(result.body.error.status, 429)
+      }
+    } finally {
+      await fx.close()
+    }
+  })
+}
+
+unixTest('streamGoWorker keeps observed usage when a nullable trailer adds nested detail', async () => {
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.writeHead(200, { 'content-type': 'text/event-stream', trailer: 'x-usage' })
+    writeData(res, {
+      type: 'message_start',
+      message: {
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        usage: {
+          input_tokens: 80,
+          output_tokens: 0,
+          input_tokens_details: { cached_tokens: 20 },
+          cache_creation: { ephemeral_5m_input_tokens: 4 },
+        },
+      },
+    })
+    writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 6 } })
+    writeData(res, { type: 'message_stop' })
+    res.addTrailers({
+      'x-usage': JSON.stringify({
+        input_tokens: null,
+        output_tokens: null,
+        input_tokens_details: { cached_tokens: null, cache_write_tokens: 3 },
+        cache_creation: { ephemeral_5m_input_tokens: null, ephemeral_1h_input_tokens: 2 },
+      }),
+    })
+    res.end()
+  })
+  try {
+    const result = await streamGoWorker({ exec: fx.exec, envelope: { body: { input: 'hi' } }, onEvent() {} })
+    assert.equal(result.ok, true)
+    assert.equal(result.usageComplete, true)
+    assert.equal(result.usage.input_tokens, 80)
+    assert.equal(result.usage.output_tokens, 6)
+    assert.deepEqual(result.usage.input_tokens_details, { cached_tokens: 20, cache_write_tokens: 3 })
+    assert.deepEqual(result.usage.cache_creation, { ephemeral_5m_input_tokens: 4, ephemeral_1h_input_tokens: 2 })
   } finally {
     await fx.close()
   }

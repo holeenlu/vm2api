@@ -20,10 +20,11 @@ import crypto from 'node:crypto'
 import { redactSecrets } from '../core/security.mjs'
 import { resolveStoreDb } from '../db/database.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
+import { UsageStatsWorker } from './usage-stats-worker.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
 import { disjointOpenaiUsage } from '../protocol/openai-usage.mjs'
-import { REASONING_EFFORTS, sessionIdForLog } from '../protocol/log-fields.mjs'
+import { REASONING_EFFORTS, sessionIdForLog, responseModelForLog } from '../protocol/log-fields.mjs'
 
 /** Persist the token a client actually sent — only for failed ingress auth. */
 export function presentedApiKeyForLog(token) {
@@ -370,8 +371,7 @@ export function resolveLogMode(envMode, req) {
 }
 
 export function newRequestId(req) {
-  const incoming = String(req?.headers?.['x-request-id'] || '').trim()
-  if (incoming && incoming.length <= 128) return incoming
+  // Server-owned identity prevents caller collisions across accounting and diagnostics.
   return crypto.randomUUID()
 }
 
@@ -389,6 +389,8 @@ export class RequestLogStore {
     this.dataDir = dataDir || path.join(process.cwd(), 'data')
     this.db = resolveStoreDb({ db, dataDir: this.dataDir })
     this.repo = new UsageLogsRepo(this.db)
+    this._statistics = null
+    this._statisticsPaused = false
     this.root = path.join(this.dataDir, 'request-logs')
     this.mode = MODES.has(String(mode).toLowerCase()) ? String(mode).toLowerCase() : 'normal'
     this.maxDebugBodyChars = Number.isFinite(maxDebugBodyChars) ? maxDebugBodyChars : 200000
@@ -435,6 +437,8 @@ export class RequestLogStore {
 
   /** Re-bind to a fresh DB connection (after backup restore). */
   rebind(db) {
+    void this._statistics?.close()
+    this._statistics = null
     this.db = db
     this.repo = new UsageLogsRepo(db)
     this._mem = []
@@ -514,7 +518,18 @@ export class RequestLogStore {
    * Write debug full record when mode===debug.
    */
   finish(ctx, extra = {}) {
-    if (!ctx || ctx.mode === 'off') return null
+    if (!ctx) return null
+    if (ctx.mode === 'off') {
+      const supplier =
+        extra.vm_id &&
+        this.db
+          .prepare(
+            "SELECT 1 FROM vendor_resources WHERE resource_type='vm' AND json_extract(config_json,'$.runtime_vm_id')=?",
+          )
+          .get(extra.vm_id)
+      if (!supplier) return null
+      ctx = { ...ctx, mode: 'normal', capture_outbound: false, headers: null }
+    }
     const duration_ms = Math.max(0, Date.now() - (ctx.t0 || Date.now()))
     const usage = normalizeUsage(disjointOpenaiUsage(extra.usage || {}) || {})
     const breakdown = cacheCreationBreakdown(usage)
@@ -540,6 +555,10 @@ export class RequestLogStore {
     const summary = {
       id: 'log_' + crypto.randomBytes(6).toString('hex'),
       request_id: ctx.request_id,
+      config_revision:
+        Number.isSafeInteger(Number(extra.config_revision)) && Number(extra.config_revision) > 0
+          ? Number(extra.config_revision)
+          : null,
       ts: new Date().toISOString(),
       log_mode: ctx.mode,
       method: ctx.method,
@@ -570,7 +589,8 @@ export class RequestLogStore {
       web_search_requests: webSearch,
       requested_model: extra.requested_model || extra.model || null,
       upstream_model: extra.upstream_model || null,
-      model_mismatch: modelMismatch(extra.requested_model || extra.model, extra.upstream_model),
+      response_model: responseModelForLog(extra),
+      model_mismatch: modelMismatch(extra.requested_model || extra.model, responseModelForLog(extra)),
       first_token_ms: extra.first_token_ms ?? null,
       first_byte_ms: extra.first_byte_ms ?? null,
       generation_ms: extra.generation_ms ?? null,
@@ -592,6 +612,11 @@ export class RequestLogStore {
       image_output_tokens: imageTokenCount(extra.image_usage?.output_tokens),
       // sub2api ownership + billing columns
       user_id: extra.user_id ?? null,
+      billing_status: extra.billing_status || 'unmetered',
+      billing_group_id: extra.billing_group_id ?? extra.group_id ?? null,
+      subscription_id: extra.subscription_id || null,
+      api_key_name: extra.api_key_name || null,
+      source: extra.api_key_kind === 'master' ? 'platform' : 'protocol',
       vm_owner_user_id: this.repo.vmOwnerOf(extra.vm_id),
       group_id: extra.group_id ?? 1,
       rate_multiplier: Number.isFinite(Number(extra.rate_multiplier)) ? Number(extra.rate_multiplier) : 1,
@@ -600,14 +625,18 @@ export class RequestLogStore {
     }
     // sub2api actual_cost: official cost × group rate multiplier (0 is a valid rate)
     if (summary.total_cost != null) {
-      summary.actual_cost = extra.actual_cost ?? summary.total_cost * summary.rate_multiplier
+      summary.actual_cost = Object.hasOwn(extra, 'actual_cost')
+        ? extra.actual_cost
+        : summary.total_cost * summary.rate_multiplier
     }
     const classified = classifyRequestError(summary)
     if (classified?.error_class) summary.error_class = classified.error_class
 
     try {
       this.repo.insertSummaryIfAbsent(summary)
-    } catch {}
+    } catch (error) {
+      if (extra.strict) throw error
+    }
     if (this.jsonlMirror) this._appendJsonl(summary)
     this._mem.push(summary)
     if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
@@ -709,8 +738,21 @@ export class RequestLogStore {
     return this.repo.hasSuccessfulRequest(opts)
   }
 
-  billingStats(opts = {}) {
-    return this.repo.billingStats(opts)
+  async billingStats(opts = {}) {
+    if (this._statisticsPaused) throw new Error('billing statistics are paused')
+    this._statistics ??= new UsageStatsWorker(this.db)
+    return this._statistics.billingStats(opts)
+  }
+
+  async pauseStatistics() {
+    this._statisticsPaused = true
+    const statistics = this._statistics
+    this._statistics = null
+    await statistics?.close()
+  }
+
+  resumeStatistics() {
+    this._statisticsPaused = false
   }
 
   ownerBilling(opts = {}) {

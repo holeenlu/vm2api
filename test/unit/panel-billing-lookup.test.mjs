@@ -3,7 +3,126 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildUsage, buildVmList, indexBillingAccounts, lookupBilling } from '../../src/lib/admin/panel-api.mjs'
+import {
+  buildUsage,
+  buildVmList,
+  buildVmDetail,
+  indexBillingAccounts,
+  lookupBilling,
+  quotaFromAccount,
+} from '../../src/lib/admin/panel-api.mjs'
+import { createDatabase } from '../../src/lib/db/database.mjs'
+import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
+import { resetOpenaiQuota } from '../../src/lib/oauth/openai-quota.mjs'
+import { persistCodexUsage } from '../../src/lib/vm/vm-registry.mjs'
+import { costColumnsFromUsage } from '../../src/lib/admin/pricing.mjs'
+
+for (const resetKind of ['unchanged', 'missing', 'elapsed']) {
+  test(`Codex reset clears panel billing with ${resetKind} reset timestamps and preserves history`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-reset-billing-'))
+    const db = createDatabase({ dbPath: path.join(root, 'logs.db') })
+    t.after(() => {
+      db.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    })
+    const vmId = 'vm-codex-01'
+    const now = Date.now()
+    const reset =
+      resetKind === 'missing' ? null : Math.floor((now + (resetKind === 'elapsed' ? -30000 : 3600000)) / 1000)
+    fs.mkdirSync(path.join(root, 'vms', vmId), { recursive: true })
+    fs.writeFileSync(
+      path.join(root, 'vms', `${vmId}.json`),
+      JSON.stringify({
+        id: vmId,
+        platform: 'openai',
+        family: 'codex',
+        codex: {
+          has_access: true,
+          chatgpt_account_id: 'acc-1',
+          extra: {
+            codex_5h_used_percent: 90,
+            codex_7d_used_percent: 80,
+            codex_5h_reset_at: reset,
+            codex_7d_reset_at: reset,
+          },
+        },
+      }),
+    )
+    fs.writeFileSync(
+      path.join(root, 'vms', vmId, 'codex-credentials.json'),
+      JSON.stringify({
+        accounts: [{ access_token: 'test-token', chatgpt_account_id: 'acc-1' }],
+      }),
+    )
+    const repo = new UsageLogsRepo(db)
+    const insert = (id, at, tokens) =>
+      repo.insertSummary({
+        id,
+        request_id: id,
+        created_at: new Date(at).toISOString(),
+        log_mode: 'normal',
+        method: 'POST',
+        path: '/v1/responses',
+        status: 200,
+        model: 'gpt-5',
+        account_id: 'acc-1',
+        vm_id: vmId,
+        input_tokens: tokens,
+        ...costColumnsFromUsage({ input_tokens: tokens }, 'gpt-5'),
+      })
+    // The elapsed reset is before this request, so all three cases initially include it.
+    insert('before', now - 10000, 1000)
+    const args = {
+      cfg: { paths: { project: root } },
+      accountQuota: { config: {}, snapshot: () => ({ accounts: [{ account_id: 'acc-1', vm_id: vmId }] }) },
+      requestLog: repo,
+    }
+    const before = (await buildUsage(args)).data.billing.accounts[0]
+    assert.equal(before.window_5h_tokens, 1000)
+    assert.ok(before.window_5h_cost > 0)
+    const result = await resetOpenaiQuota({
+      projectRoot: root,
+      vmId,
+      fetchImpl: async (url) => ({
+        status: 200,
+        json: async () =>
+          String(url).endsWith('/consume')
+            ? { code: 'ok', windows_reset: 2 }
+            : String(url).endsWith('/usage')
+              ? {
+                  rate_limit: {
+                    primary_window: { used_percent: 0, limit_window_seconds: 18000, reset_at: reset },
+                    secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: reset },
+                  },
+                  rate_limit_reset_credits: { available_count: 0 },
+                }
+              : { available_count: 0 },
+      }),
+    })
+    assert.equal(result.ok, true)
+    const after = (await buildUsage(args)).data.billing.accounts[0]
+    assert.equal(after.window_5h_cost, 0)
+    assert.equal(after.window_5h_tokens, 0)
+    assert.equal(after.window_7d_cost, 0)
+    assert.equal(after.total_cost, before.total_cost)
+    const listed = (await buildVmList(args)).data.items[0]
+    assert.equal(listed.window_5h_cost, 0)
+    assert.equal(listed.window_5h_tokens, 0)
+    const detail = (await buildVmDetail({ ...args, id: vmId })).data
+    assert.equal(detail.vm.window_5h_cost, 0)
+    assert.equal(detail.vm.window_5h_tokens, 0)
+    assert.equal(detail.billing.window_5h.total_cost, 0)
+    // The normal inference write must retain the persisted reset boundary.
+    persistCodexUsage(root, vmId, { extra: { codex_5h_used_percent: 1 } })
+    insert('after', Date.now(), 200)
+    const resumed = (await buildUsage(args)).data.billing.accounts[0]
+    assert.equal(resumed.window_5h_tokens, 200)
+    assert.equal(resumed.window_7d_tokens, 200)
+    assert.ok(resumed.window_5h_cost > 0)
+    assert.ok(resumed.total_cost > resumed.window_5h_cost)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM usage_logs').get().n, 2)
+  })
+}
 
 test('billing index keeps UUID row when leftover vm-id account is empty', () => {
   const leftover = {
@@ -30,7 +149,7 @@ test('billing index keeps UUID row when leftover vm-id account is empty', () => 
   assert.equal(lookupBilling(index, { id: 'vm-50' }), real)
 })
 
-test('billing rows of an older account on a reused slot keep their own email', (t) => {
+test('billing rows of an older account on a reused slot keep their own email', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-billing-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const billing = {
@@ -48,13 +167,46 @@ test('billing rows of an older account on a reused slot keep their own email', (
       ],
     }),
   }
-  const usage = buildUsage({
+  const usage = await buildUsage({
     accountQuota,
     cfg: { paths: { project: root } },
     requestLog: { billingStats: () => billing },
   })
   const emails = usage.data.billing.accounts.map((row) => row.email)
   assert.deepEqual(emails, ['old@example.com', 'new@example.com', 'three@example.com'])
+})
+
+test('usage estimates require billing coverage of the same quota window', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-billing-coverage-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const now = Date.now()
+  const start = new Date(now - 3600000).toISOString()
+  const reset = new Date(now + 4 * 3600000).toISOString()
+  const accountQuota = {
+    snapshot: () => ({
+      accounts: [
+        { account_id: 'account', unified: { headers: { '5h': { utilization: 0.4, reset, status: 'allowed' } } } },
+      ],
+    }),
+  }
+  const billing = {
+    log_coverage_start: start,
+    accounts: [{ account_id: 'account', window_5h_cost: 12, window_5h_tokens: 3000000, window_5h_start: start }],
+  }
+  const readEstimate = async () =>
+    (
+      await buildUsage({
+        accountQuota,
+        cfg: { paths: { project: root } },
+        requestLog: { billingStats: () => billing },
+      })
+    ).data.accounts[0].estimate_5h
+
+  assert.equal((await readEstimate()).status, 'ok')
+  assert.equal((await readEstimate()).total_usd, 30)
+  billing.log_coverage_start = new Date(now).toISOString()
+  assert.equal((await readEstimate()).status, 'log_gap')
+  assert.equal((await readEstimate()).total_usd, null)
 })
 
 test('VM list carries lifetime tokens from the same billing row as total_cost', async (t) => {
@@ -95,12 +247,12 @@ test('VM list carries lifetime tokens from the same billing row as total_cost', 
   assert.equal(byId['vm-08'].total_tokens, 0)
 })
 
-test('usage rows of a deleted VM are not listed', (t) => {
+test('usage rows of a deleted VM are not listed', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-usage-deleted-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   fs.writeFileSync(path.join(root, 'vms', 'vm-02.json'), JSON.stringify({ id: 'vm-02' }))
-  const usage = buildUsage({
+  const usage = await buildUsage({
     accountQuota: {
       snapshot: () => ({
         accounts: [
@@ -122,7 +274,7 @@ test('usage rows of a deleted VM are not listed', (t) => {
   assert.equal(usage.data.billing.accounts[0].email, 'three@example.com')
 })
 
-test('GPT usage row without pool email takes slot email', (t) => {
+test('GPT usage row without pool email takes slot email', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-gpt-usage-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
@@ -137,7 +289,7 @@ test('GPT usage row without pool email takes slot email', (t) => {
       codex: { email: 'lemeryvorhees@gmail.com' },
     }),
   )
-  const usage = buildUsage({
+  const usage = await buildUsage({
     accountQuota: {
       snapshot: () => ({
         accounts: [{ account_id: 'vm-codex-01', vm_id: 'vm-codex-01', email: null }],
@@ -153,4 +305,27 @@ test('GPT usage row without pool email takes slot email', (t) => {
   const row = usage.data.accounts.find((a) => a.vm_id === 'vm-codex-01')
   assert.equal(row?.email, 'lemeryvorhees@gmail.com')
   assert.equal(row?.total_cost, 139.87)
+})
+
+test('fresh live headers supersede an older official rejected display per window', () => {
+  const official = {
+    utilization: 1,
+    status: 'rejected',
+    reset: '2099-01-02T00:00:00Z',
+    sampled_at: '2030-01-01T00:00:00Z',
+  }
+  const live = {
+    utilization: 0.25,
+    status: 'allowed',
+    reset: '2099-01-02T00:00:00Z',
+    sampled_at: '2030-01-01T00:00:01Z',
+  }
+  const q = quotaFromAccount({ unified: { official: { '5h': official, '7d': official }, headers: { '5h': live } } })
+  assert.equal(q.utilization_5h, 0.25)
+  assert.equal(q.status_5h, 'allowed')
+  assert.equal(q.utilization_7d, 1)
+  const historical = quotaFromAccount({
+    unified: { official: { '5h': { ...official, sampled_at: undefined } }, headers: { '5h': live } },
+  })
+  assert.equal(historical.utilization_5h, 1)
 })

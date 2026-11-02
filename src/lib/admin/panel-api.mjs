@@ -19,6 +19,7 @@ import {
   persistAccountTier,
   isCodexVm,
   migrateVmSchedule,
+  clearLegacyProxyScheduleOff,
 } from '../vm/vm-registry.mjs'
 import { clearRecoverableVmCooldown, markVmRefreshError } from '../oauth/oauth-credentials.mjs'
 import {
@@ -39,7 +40,7 @@ import { filterVmsForPanel } from './resource-owner.mjs'
 import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../pool/weekly-split.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { pickScheduleFields } from '../pool/schedule-state.mjs'
-import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
+import { proxyFamily, normalizeProxyHost } from '../vm/proxy-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
@@ -105,7 +106,7 @@ export function ok(data, meta) {
 }
 
 /** Start/create `allocated_proxy` must never carry SOCKS credentials. */
-export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'admin', nodes = [] } = {}) {
+export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'super_admin', nodes = [] } = {}) {
   if (!bound) return null
   const raw = bound.id && proxyPool?.state?.proxies?.find((p) => p.id === bound.id)
   let view =
@@ -337,6 +338,7 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
   try {
     clearRecoverableVmCooldown(vmPath)
   } catch {}
+  const legacyProxyScheduleOff = clearLegacyProxyScheduleOff(cfg.paths.project, vm.id)
   const live = getVm(cfg.paths.project, vm.id) || vm
   try {
     poolScheduler?.syncQuotaSchedule?.(live, acc)
@@ -357,6 +359,7 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
     runtime_cleared: runtimeCleared,
     usage_flag_cleared: usageFlagCleared,
     headers_refreshed: headersRefreshed,
+    legacy_proxy_schedule_off_cleared: !!legacyProxyScheduleOff?.schedulable,
   })
 }
 
@@ -647,7 +650,7 @@ export async function buildDashboard({
       liveById,
       projectRoot: cfg.paths.project,
       clusterNodes,
-      role: 'admin',
+      role: 'super_admin',
     }),
   )
   const snap = accountQuota.snapshot()
@@ -673,19 +676,13 @@ export async function buildDashboard({
 
   const billing = stampVmBilling(
     vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), snap.accounts || [])
-      } catch {
-        return null
-      }
-    })(),
+    attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms), snap.accounts || []),
   )
 
   return ok({
     health: {
       status: 'ok',
-      service: 'vm2api',
+      service: 'tapmodels',
       rewrite: cfg.rewrite?.enabled ? 'on' : 'off',
       base_url: cfg.base_url,
     },
@@ -757,9 +754,10 @@ export async function buildVmList({
   poolScheduler = null,
   proxyPool = null,
   ownerUserId = null,
-  role = 'admin',
+  role = 'super_admin',
   requestLog = null,
   clusterNodes = [],
+  db = null,
 } = {}) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
@@ -769,6 +767,7 @@ export async function buildVmList({
   const poolSnap = snapshotPool(proxyPool)
   const listed = filterVmsForPanel(listVms(cfg.paths.project, routingConfig), { role, userId: ownerUserId })
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
+  const vendorByVmId = role === 'super_admin' ? vmVendorMetadata(db || proxyPool?.db, listed) : null
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
@@ -778,6 +777,7 @@ export async function buildVmList({
       projectRoot: cfg.paths.project,
       clusterNodes,
       role,
+      vendorByVmId,
     }),
   )
   const accounts = (() => {
@@ -787,16 +787,7 @@ export async function buildVmList({
       return []
     }
   })()
-  stampVmBilling(
-    vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
-      } catch {
-        return null
-      }
-    })(),
-  )
+  stampVmBilling(vms, attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms), accounts))
   return ok({
     items: vms,
     active_vm: active,
@@ -820,7 +811,7 @@ export async function buildVmDetail({
   kernelHealth = null,
   slotProcessStatus = readSlotProcessStatus,
   clusterNodes = [],
-  role = 'admin',
+  role = 'super_admin',
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -848,13 +839,7 @@ export async function buildVmDetail({
     role,
   })
   const acc = findAccount(accountQuota, summary)
-  const billing = (() => {
-    try {
-      return panelBillingStats(requestLog, accountQuota, [summary])
-    } catch {
-      return null
-    }
-  })()
+  const billing = await panelBillingStats(requestLog, accountQuota, [summary])
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
   const gpt = isCodexVm(vm)
   applyCostFields(summary, cost, { coveredSince: billing?.log_coverage_start })
@@ -900,7 +885,7 @@ export async function buildVmDetail({
     account: acc
       ? {
           account_id: acc.account_id,
-          ...quotaFromAccount(acc, accountQuota?.config),
+          ...quotaFromAccount(acc, accountQuota?.quotaConfigFor?.(acc) ?? accountQuota?.config),
           inflight: acc.inflight,
           max_concurrency: acc.max_concurrency,
           rpm: acc.rpm || 0,
@@ -1026,10 +1011,11 @@ function claudeResetFail(result) {
   )
 }
 
-export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
+export async function buildClaudeResetQuery({ cfg, id, accountQuota, transport, now } = {}) {
   const result = await queryClaudeResetCredits({
     projectRoot: cfg.paths.project,
     vmId: id,
+    accountQuota,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
   })
@@ -1041,10 +1027,11 @@ export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
   })
 }
 
-export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, transport, now } = {}) {
+export async function buildClaudeResetRedeem({ cfg, id, accountQuota, idempotencyKey, transport, now } = {}) {
   const result = await redeemClaudeResetCredit({
     projectRoot: cfg.paths.project,
     vmId: id,
+    accountQuota,
     idempotencyKey,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
@@ -1097,6 +1084,7 @@ export async function buildProbeOne({
   usageCache = null,
   hop = true,
   fableProbe = probeFableEntitlement,
+  probeEntitlement = true,
   routingConfig = {},
 } = {}) {
   const vm = getVm(cfg.paths.project, id)
@@ -1176,11 +1164,13 @@ export async function buildProbeOne({
   const acc = accountQuota.repo.get(accountId)
   const q = quotaFromAccount(acc)
   const storedTier = vm.claude?.account_tier || acc?.unified?.account_tier || q.account_tier || null
-  const includeFable = shouldProbeFable({
-    fable: q.fable || acc?.unified?.fable || {},
-    quota: { ...acc?.unified, ...q },
-    storedTier,
-  })
+  const includeFable =
+    probeEntitlement &&
+    shouldProbeFable({
+      fable: q.fable || acc?.unified?.fable || {},
+      quota: { ...acc?.unified, ...q },
+      storedTier,
+    })
   const cache = usageCache || getUsageCache()
   if (force) cache.clear(accountId)
   const skipHop = !shouldHopOfficialUsage(acc?.unified, { hop, force })
@@ -1206,7 +1196,12 @@ export async function buildProbeOne({
     } catch {}
   }
   if (!skipHop) accountQuota.ingestOAuthUsage(accountId, result)
-  if (isSetupTokenMode(credentialModeOfVm(vm)) && (force || includeFable) && !result.usage_scope_missing) {
+  if (
+    probeEntitlement &&
+    isSetupTokenMode(credentialModeOfVm(vm)) &&
+    (force || includeFable) &&
+    !result.usage_scope_missing
+  ) {
     try {
       await applyFableProbeResult(accountQuota, accountId, await fableProbe({ exec, timeoutMs: 20000 }))
     } catch {}
@@ -1354,22 +1349,16 @@ export async function buildProbeAll({ cfg, accountQuota, hop = true, force = tru
   return ok({ items, total: items.length })
 }
 
-export function buildUsage({ accountQuota, cfg, requestLog = null }) {
+export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
   const snap = accountQuota.snapshot()
   const listed = listVms(cfg?.paths?.project)
-  const billing = (() => {
-    try {
-      return panelBillingStats(requestLog, accountQuota, listed)
-    } catch {
-      return null
-    }
-  })()
+  const billing = await panelBillingStats(requestLog, accountQuota, listed)
   const costByKey = indexBillingAccounts(billing)
   const listedById = new Map(listed.map((vm) => [vm.id, vm]))
   const accounts = liveAccounts(snap.accounts, listed).map((a) => {
     const cost = lookupBilling(costByKey, a)
     const vm = a.vm_id ? getVm(cfg?.paths?.project, a.vm_id) : null
-    const quota = quotaFromAccount(a, accountQuota?.config)
+    const quota = quotaFromAccount(a, accountQuota?.quotaConfigFor?.(a) ?? accountQuota?.config)
     const codexVm = vm && isCodexVm(vm) ? listedById.get(vm.id) || vm : null
     return {
       account_id: a.account_id,
@@ -1536,13 +1525,7 @@ export async function snapshotAccountPool({
   })()
   const billing = stampVmBilling(
     vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
-      } catch {
-        return null
-      }
-    })(),
+    attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms), accounts),
   )
   let today = null
   try {
@@ -1591,8 +1574,13 @@ export function quotaFromAccount(acc, quotaConfig) {
   const extra = u.extra_usage || null
   const o5 = u.official?.['5h'] || u['5h'] || {}
   const o7 = u.official?.['7d'] || u['7d'] || {}
-  const o5Limited = isOfficialWindowLimited(o5)
-  const o7Limited = isOfficialWindowLimited(o7)
+  const newerHeader = (key, official) => {
+    const headerAt = Date.parse(u.headers?.[key]?.sampled_at || '')
+    const officialAt = Date.parse(official.sampled_at || '')
+    return Number.isFinite(headerAt) && Number.isFinite(officialAt) && headerAt > officialAt
+  }
+  const o5Limited = isOfficialWindowLimited(o5) && !newerHeader('5h', o5)
+  const o7Limited = isOfficialWindowLimited(o7) && !newerHeader('7d', o7)
   const effectiveU5 = o5Limited
     ? 1.0
     : listed.utilization_5h != null
@@ -1618,7 +1606,8 @@ export function quotaFromAccount(acc, quotaConfig) {
     reset_5h: listed.reset_5h || o5.reset || null,
     reset_7d: listed.reset_7d || o7.reset || null,
     reset_7d_sonnet: sonnet.reset || null,
-    reset_7d_oi: oi.reset || listed.reset_7d_oi || null,
+    reset_7d_oi: oi.reset || listed.reset_7d_oi || fable?.reset || fable?.reset_at || null,
+    cleared_windows: u.cleared_windows || null,
     status_5h: effectiveStatus5,
     status_7d: effectiveStatus7,
     status_7d_sonnet: sonnet.status || null,
@@ -1636,9 +1625,8 @@ export function quotaFromAccount(acc, quotaConfig) {
     computeWeeklySplit({
       enabled: cfg.enabled,
       fable_share: cfg.fable_share,
-      utilization_7d: q.utilization_7d,
       utilization_7d_oi: q.utilization_7d_oi,
-      status_7d_oi: q.status_7d_oi,
+      reset_7d_oi: q.reset_7d_oi,
     }),
   )
   if (split) q.weekly_split = split
@@ -1735,7 +1723,7 @@ function canImportCredential(v, hit) {
   return !!(base.url || (base.host && base.port) || v.proxy_id)
 }
 
-function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
+function mergeVmProxy(v, poolSnap, { role = 'super_admin', nodes = [] } = {}) {
   const hit = poolProxyForVm(v, poolSnap)
   const base = v.proxy || {}
   const configured = proxyConfigured(v, hit)
@@ -1744,7 +1732,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   }
   const proxy = {
     id: hit?.id || base.id || v.proxy_id || null,
-    host: normalizeSocksHost(hit?.host || base.host) || hit?.host || base.host || null,
+    host: normalizeProxyHost(hit?.host || base.host) || hit?.host || base.host || null,
     port: hit?.port ?? base.port ?? null,
     label: hit?.label || null,
     scheme: hit?.scheme || base.scheme || (isLocalEgressId(hit?.id) || isLocalEgressId(base.id) ? 'local' : 'socks5'),
@@ -1752,7 +1740,7 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
     status: hit?.status ?? null,
     enabled: hit?.enabled ?? null,
     blocked_reason: hit ? hit.blocked_reason || null : proxyBlockedReason(base),
-    address_family: hit?.address_family || socksProxyFamily(base) || null,
+    address_family: hit?.address_family || proxyFamily(base) || null,
     latency_ms: hit?.latency_ms ?? null,
     last_error: hit?.last_error || null,
     last_probe_at: hit?.last_probe_at || null,
@@ -1766,6 +1754,39 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
     proxy,
     proxy_configured: true,
     can_import_credential: canImportCredential(v, hit),
+  }
+}
+
+function vmVendorMetadata(db, vms) {
+  if (!db?.prepare || !Array.isArray(vms) || !vms.length) return new Map()
+  const ids = vms.map((v) => String(v.id)).filter(Boolean)
+  if (!ids.length) return new Map()
+  try {
+    const rows = db
+      .prepare(`
+        SELECT json_extract(r.config_json, '$.runtime_vm_id') AS runtime_vm_id,
+               r.vendor_id,
+               v.name AS vendor_name
+        FROM vendor_resources r
+        JOIN vendors v ON v.id = r.vendor_id AND v.deleted_at IS NULL
+        WHERE r.resource_type='vm'
+          AND r.status <> 'archived'
+          AND json_extract(r.config_json, '$.runtime_vm_id') IN (${ids.map(() => '?').join(',')})
+        ORDER BY r.created_at DESC, r.id DESC
+      `)
+      .all(...ids)
+    const out = new Map()
+    for (const row of rows) {
+      const id = String(row.runtime_vm_id || '')
+      if (!id || out.has(id)) continue
+      out.set(id, {
+        vendor_id: row.vendor_id || null,
+        vendor_name: row.vendor_name || null,
+      })
+    }
+    return out
+  } catch {
+    return new Map()
   }
 }
 
@@ -1813,7 +1834,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const u5 = mergedQuota.utilization_5h
   const u7 = mergedQuota.utilization_7d
   const merged = mergeVmProxy(v, extras.poolSnap || null, {
-    role: extras.role || 'admin',
+    role: extras.role || 'super_admin',
     nodes: extras.clusterNodes || [],
   })
   const expiresAt = normalizePanelExpiresAt(v.expires_at, workerCred?.expires_at)
@@ -1946,6 +1967,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     sessions: isCodex ? { active: codexSessions?.active, max: codexSessions?.max } : null,
   })
   return {
+    groups: v.groups || [],
+    groups_version: v.groups_version || 0,
     id: v.id,
     name: v.name,
     status: v.status,
@@ -1963,8 +1986,14 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     region: v.region || null,
     node_id: v.node_id || null,
     owner_user_id: v.owner_user_id || null,
+    ...(extras.vendorByVmId instanceof Map
+      ? {
+          vendor_id: extras.vendorByVmId.get(String(v.id))?.vendor_id || null,
+          vendor_name: extras.vendorByVmId.get(String(v.id))?.vendor_name || null,
+        }
+      : {}),
     origin: v.origin || null,
-    ...(canRevealClusterNodes(extras.role || 'admin') && v.node_id
+    ...(canRevealClusterNodes(extras.role || 'super_admin') && v.node_id
       ? { node_name: nodeNameOf(extras.clusterNodes, v.node_id) }
       : {}),
     timezone: v.timezone || null,
@@ -2387,12 +2416,17 @@ function billingWindowOf(accountId, vmId, vm, q) {
     reset_5h: (codex ? codexQuota.reset_5h : q.reset_5h) || vm.reset_5h || null,
     reset_7d: (codex ? codexQuota.reset_7d : q.reset_7d) || vm.reset_7d || null,
     reset_7d_oi: codex ? null : q.reset_7d_oi || vm.reset_7d_oi || null,
+    cleared_windows: (codex ? codexQuota.cleared_windows : q.cleared_windows) || null,
   }
 }
 
-function panelBillingStats(requestLog, accountQuota, vms) {
+async function panelBillingStats(requestLog, accountQuota, vms) {
   if (!requestLog?.billingStats) return null
-  return requestLog.billingStats({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+  try {
+    return await requestLog.billingStats({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+  } catch {
+    return null
+  }
 }
 
 function stampVmBilling(vms, billing) {

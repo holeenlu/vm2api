@@ -39,6 +39,8 @@ function seed(db, rows) {
       model: 'claude-sonnet-4',
       status: 200,
       vm_id: 'vm-a',
+      actual_cost: r.total_cost ?? null,
+      user_id: r.api_key_id === 'k1' ? 'u1' : r.api_key_id === 'k2' ? 'u2' : null,
       ...r,
     }
     repo.insertSummary(rec)
@@ -111,7 +113,7 @@ test('JS-filtered paging hands back the scan cursor instead of ending early', ()
   assert.ok(seen.every((r) => r.errorClass === 'timeout'))
 })
 
-test('user owner scope keeps only own key / own user rows and ignores other tenants', () => {
+test('caller snapshot excludes unattributed rows even when their current key is owned', () => {
   const db = freshDb()
   seed(db, [
     { user_id: 'u1', api_key_id: 'k1' },
@@ -120,9 +122,9 @@ test('user owner scope keeps only own key / own user rows and ignores other tena
   ])
   const view = new UsageLogsView(db)
   const mine = view.listBatch({ owner_user_id: 'u1' }).logs
-  assert.equal(mine.length, 2)
+  assert.equal(mine.length, 1)
   assert.ok(mine.every((r) => r.keyId === 'k1'))
-  assert.equal(view.summary({ owner_user_id: 'u1' }).totalRequests, 2)
+  assert.equal(view.summary({ owner_user_id: 'u1' }).totalRequests, 1)
   const opts = view.filterOptions({ owner_user_id: 'u1' })
   assert.deepEqual(opts.users, [{ id: 'u1', name: 'alice' }])
   assert.deepEqual(opts.keys, [{ id: 'k1', name: 'alice-key', userId: 'u1' }])
@@ -219,6 +221,15 @@ test('provider chains for a page come from one request_attempts query, ordered b
   assert.deepEqual(logs.find((r) => r.requestId === c.request_id).providerChain, [])
 })
 
+test('account display falls back from a VM to its current account when the log lacks account_id', () => {
+  const db = freshDb()
+  const [row] = seed(db, [{ vm_id: 'vm-a', account_id: null, final_account_id: null }])
+  const listed = new UsageLogsView(db).listBatch({}).logs
+  const result = listed.find((item) => item.requestId === row.request_id)
+  assert.equal(result.accountId, 'acc-a')
+  assert.equal(result.providerName, 'a@pool')
+})
+
 test('filters: model/requested_model, status, attempts, session, debug, time, q', () => {
   const db = freshDb()
   const rows = seed(db, [
@@ -293,7 +304,7 @@ test('#777 badge: sent priority with a non-priority upstream echo is a Fast down
   assert.equal(downgrade(unechoed.id), undefined)
 })
 
-test('overview splits today/yesterday-same-time in the requested zone', () => {
+test('overview splits today/yesterday-same-time in UTC+8 regardless of client zone', () => {
   const db = freshDb()
   const now = Date.parse('2026-03-10T04:00:00Z') // 12:00 in Shanghai
   seed(db, [
@@ -311,9 +322,9 @@ test('overview splits today/yesterday-same-time in the requested zone', () => {
   assert.equal(sh.yesterdayCost, 1)
   assert.equal(sh.rpm, 1)
   assert.equal(sh.activeSessions, 1)
-  // Unknown zone falls back to UTC: today starts 2026-03-10T00:00Z.
+  // Client timezone cannot change the system business day.
   const utc = view.overview({ tz: 'Not/AZone', now })
-  assert.equal(utc.todayRequests, 1)
+  assert.equal(utc.todayRequests, 2)
   assert.equal(utc.yesterdayRequests, 1)
 })
 
@@ -418,4 +429,33 @@ test('tenant error collection hides other users and anonymous ingress failures',
   const all = repo.windowStats().error_collection
   assert.equal(all.recent.length, 3)
   assert.deepEqual(all.ingress_hits.map((h) => h.ip).sort(), ['198.51.100.7', '203.0.113.9'])
+})
+
+test('legacy Codex outbound models are not presented as observed responses', () => {
+  const db = freshDb()
+  const [legacy, observed, other] = seed(db, [
+    { via: 'codex-kernel', requested_model: 'alias', upstream_model: 'gpt-6-astra', model_mismatch: 1 },
+    {
+      via: 'codex-kernel',
+      requested_model: 'gpt-6-astra',
+      upstream_model: 'gpt-6-astra',
+      response_model: 'gpt-5.6-luna',
+      model_mismatch: 1,
+    },
+    { via: 'api-kernel', requested_model: 'alias', upstream_model: 'claude-sonnet-4', model_mismatch: 1 },
+  ])
+  const view = new UsageLogsView(db)
+  const logs = view.listBatch({}).logs
+  assert.equal(logs.find((r) => r.id === legacy.id).actualResponseModel, null)
+  assert.equal(logs.find((r) => r.id === legacy.id).modelMismatch, null)
+  assert.equal(
+    logs.find((r) => r.id === legacy.id).specialSettings.some((s) => s.key === 'mismatch'),
+    false,
+  )
+  assert.equal(logs.find((r) => r.id === observed.id).actualResponseModel, 'gpt-5.6-luna')
+  assert.equal(logs.find((r) => r.id === other.id).actualResponseModel, 'claude-sonnet-4')
+  assert.deepEqual(
+    view.listBatch({ model_mismatch: true }).logs.map((r) => r.id),
+    [other.id, observed.id],
+  )
 })

@@ -13,6 +13,7 @@ import {
 } from './quota-window.mjs'
 import { GATE_DRAINING, GATE_GATED, gateZone, quotaGateOf } from './quota-gate.mjs'
 import { DEFAULT_TIER_POLICIES } from './quota-tiers.mjs'
+import { projectQuotaWindow } from '../usage/quota-window-projection.mjs'
 import { resolveSlotState } from './schedule-state.mjs'
 import { isOfficialUsageRateLimited } from '../oauth/crs-usage-probe.mjs'
 import { expiresAtToMs } from '../oauth/oauth-credentials.mjs'
@@ -130,6 +131,8 @@ function quotaWindows(quota = {}, account = {}) {
   const u = account.unified || {}
   const w5 = headerWindowOrEmpty(u, '5h')
   const w7 = headerWindowOrEmpty(u, '7d')
+  const project = (window, key) =>
+    projectQuotaWindow({ key, used: window.utilization, limit: 1, reset_at: window.reset })
   if (
     quota &&
     (quota.utilization_5h != null || quota.status_5h || quota.status_7d || quota.reset_5h || quota.reset_7d)
@@ -140,8 +143,8 @@ function quotaWindows(quota = {}, account = {}) {
       utilization_7d: quota.utilization_7d ?? w7.utilization,
       status_5h: quota.status_5h || w5.status,
       status_7d: quota.status_7d || w7.status,
-      reset_5h: quota.reset_5h || w5.reset || null,
-      reset_7d: quota.reset_7d || w7.reset || null,
+      reset_5h: project({ ...w5, reset: quota.reset_5h || w5.reset || null }, '5h').reset_at,
+      reset_7d: project({ ...w7, reset: quota.reset_7d || w7.reset || null }, '7d').reset_at,
       last_used_at: quota.last_used_at || account.last_used_at || null,
     }
   }
@@ -150,9 +153,8 @@ function quotaWindows(quota = {}, account = {}) {
     utilization_7d: w7.utilization,
     status_5h: w5.status,
     status_7d: w7.status,
-    weekly_split: quota.weekly_split || account.weekly_split || u.weekly_split,
-    reset_5h: w5.reset,
-    reset_7d: w7.reset,
+    reset_5h: project(w5, '5h').reset_at,
+    reset_7d: project(w7, '7d').reset_at,
     last_used_at: account.last_used_at || quota.last_used_at || null,
   }
 }
@@ -417,17 +419,6 @@ export function evaluateAccount({
       reason: 'quota_7d_safety',
       window: '7d',
       until: resetUntilMs(w7.reset, now),
-    })
-  }
-
-  const split = q.weekly_split
-  if (split?.enabled && split.mode === 'fable_only') {
-    return finish(base, {
-      key: 'quota',
-      text: '普通限制',
-      accept: true,
-      usable: true,
-      reason: 'weekly_split_regular',
     })
   }
 
