@@ -1,11 +1,14 @@
+import { t as translate } from '@/i18n'
 import type { OpenAIQuotaPolicy } from '@/types/panel-vm'
 import { Fingerprint, ShieldCheck, Waypoints } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { SettingRow } from '@/components/setting-row'
+import { CodexSchedulingSection } from './codex-scheduling-section'
 import { OpenaiQuotaSection } from './openai-quota-section'
 import { ChipGroup, PaneSection } from './scheduler-controls'
 
@@ -13,10 +16,12 @@ type Block = Record<string, unknown>
 type Transport = 'prefer_websocket' | 'http'
 
 const DEFAULT_USER_AGENT = 'codex_cli_rs/0.160.0 (linux x86_64)'
-const TRANSPORT_OPTIONS: [Transport, string][] = [
-  ['prefer_websocket', '优先 WebSocket'],
-  ['http', '仅 HTTP'],
-]
+function getTransportOptions(): [Transport, string][] {
+  return [
+    ['prefer_websocket', translate('settings:openai.preferWebSocket')],
+    ['http', translate('settings:openai.httpOnly')],
+  ]
+}
 
 function asBlock(value: unknown): Block {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -44,6 +49,8 @@ export function OpenaiPane({
   saving?: boolean
   pending?: boolean
 }) {
+  const { t } = useTranslation('settings')
+
   const routeOn = codex.enabled !== false
   const globalWs = asBlock(websocket).enabled !== false
   const gptWs = asBlock(codex.websocket).enabled !== false
@@ -70,18 +77,18 @@ export function OpenaiPane({
     <div className='space-y-4'>
       <PaneSection
         icon={Waypoints}
-        title='传输'
-        desc='推理 WebSocket 与上游传输。总闸或 GPT 子闸任一关闭时强制 HTTP，并拒绝入站 WS。'
+        title={t('openai.transport')}
+        desc={t('openai.transportHelp')}
         aside={
           <Badge variant={wsLive ? 'default' : 'secondary'}>
-            {wsLive ? '推理 WS 开' : '强制 HTTP'}
+            {wsLive ? t('openai.wsEnabled') : t('openai.forcedHttp')}
           </Badge>
         }
       >
         <div className='divide-y'>
           <SettingRow
-            label='全局推理 WebSocket'
-            desc='推理入站与上游 WS 总闸。关闭后全部推理走 HTTP，并拒绝入站 WS。不影响终端或集群 WebSocket。'
+            label={t('openai.globalWebSocket')}
+            desc={t('openai.globalWebSocketHelp')}
           >
             <Switch
               checked={globalWs}
@@ -89,15 +96,15 @@ export function OpenaiPane({
               onCheckedChange={(enabled) =>
                 onWebsocketChange({ ...websocket, enabled })
               }
-              aria-label='全局推理 WebSocket'
+              aria-label={t('openai.globalWebSocket')}
             />
           </SettingRow>
           <SettingRow
             label='GPT WebSocket'
             desc={
               globalWs
-                ? 'GPT 推理 WS 子闸。关闭后 GPT 走 HTTP，并拒绝入站 WS。'
-                : '当前值保留。总闸已关，GPT 即使打开也强制 HTTP。'
+                ? t('openai.gptWebSocketHelp')
+                : t('openai.globalDisabledHint')
             }
           >
             <Switch
@@ -112,17 +119,23 @@ export function OpenaiPane({
             />
           </SettingRow>
           <SettingRow
-            label='上游传输'
+            label={t('openai.upstreamTransport')}
             desc={
               wsLive
-                ? '默认优先 WebSocket；选仅 HTTP 时固定走 HTTP/SSE。'
-                : `已保存「${transport === 'http' ? '仅 HTTP' : '优先 WebSocket'}」，总闸或 GPT 子闸关闭期间实际强制 HTTP，不改草稿。`
+                ? t('openai.upstreamTransportHelp')
+                : t('openai.transportPreserved', {
+                    value1: t(
+                      transport === 'http'
+                        ? 'openai.httpOnly'
+                        : 'openai.preferWebSocket'
+                    ),
+                  })
             }
           >
             <ChipGroup
-              label='上游传输'
+              label={t('openai.upstreamTransport')}
               value={transport}
-              options={TRANSPORT_OPTIONS}
+              options={getTransportOptions()}
               disabled={saving || !wsLive}
               onChange={(upstream_transport) => update({ upstream_transport })}
             />
@@ -132,18 +145,14 @@ export function OpenaiPane({
 
       <PaneSection
         icon={ShieldCheck}
-        title='协议准入'
-        desc={
-          routeOn
-            ? '谁能调用 GPT，以及 gpt-* 进 codex-kernel 的入口。'
-            : '已关：gpt-* 请求 4xx，不回落 Claude。'
-        }
+        title={t('openai.access')}
+        desc={routeOn ? t('openai.accessHelp') : t('openai.routingDisabled')}
         aside={
           <Switch
             checked={routeOn}
             disabled={saving}
             onCheckedChange={(enabled) => update({ enabled })}
-            aria-label='启用 GPT 路由'
+            aria-label={t('openai.enableRouting')}
           />
         }
       >
@@ -155,32 +164,32 @@ export function OpenaiPane({
         >
           <section className='min-w-0 space-y-2'>
             <h4 className='text-xs font-medium text-muted-foreground'>
-              客户端
+              {t('openai.clients')}
             </h4>
             <div className='divide-y'>
-              <SettingRow label='官方 Codex 客户端'>
+              <SettingRow label={t('openai.officialClients')}>
                 <Switch
                   checked={codexClient(codex, 'official_codex')}
                   disabled={saving}
                   onCheckedChange={(allow) =>
                     setClient('official_codex', allow)
                   }
-                  aria-label='允许官方 Codex 客户端'
+                  aria-label={t('openai.allowOfficial')}
                 />
               </SettingRow>
-              <SettingRow label='OpenAI 兼容客户端'>
+              <SettingRow label={t('openai.compatibleClients')}>
                 <Switch
                   checked={codexClient(codex, 'openai_compatible')}
                   disabled={saving}
                   onCheckedChange={(allow) =>
                     setClient('openai_compatible', allow)
                   }
-                  aria-label='允许 OpenAI 兼容客户端'
+                  aria-label={t('openai.allowCompatible')}
                 />
               </SettingRow>
               <SettingRow
-                label='拒绝 Claude Code 客户端'
-                desc='GPT 槽不走 Claude Code。'
+                label={t('openai.rejectClaudeCode')}
+                desc={t('openai.claudeCodeHelp')}
               >
                 <Switch
                   checked={!codexClient(codex, 'claude_code')}
@@ -188,15 +197,20 @@ export function OpenaiPane({
                   onCheckedChange={(reject) =>
                     setClient('claude_code', !reject)
                   }
-                  aria-label='GPT 模型拒绝 Claude Code 客户端'
+                  aria-label={t('openai.rejectClaudeCodeModels')}
                 />
               </SettingRow>
             </div>
           </section>
           <section className='min-w-0 space-y-2'>
-            <h4 className='text-xs font-medium text-muted-foreground'>入口</h4>
+            <h4 className='text-xs font-medium text-muted-foreground'>
+              {t('openai.entryPoints')}
+            </h4>
             <div className='divide-y'>
-              <SettingRow label='/v1/responses' desc='ChatGPT native。'>
+              <SettingRow
+                label='/v1/responses'
+                desc={t('openai.nativeResponses')}
+              >
                 <Switch
                   checked={responsesOn}
                   disabled={saving}
@@ -211,17 +225,17 @@ export function OpenaiPane({
                   aria-label='/v1/responses'
                 />
               </SettingRow>
-              <SettingRow label='Chat 转 Codex Responses'>
+              <SettingRow label={t('openai.chatToResponses')}>
                 <Switch
                   checked={convert.chat_to_codex !== false}
                   disabled={saving}
                   onCheckedChange={(chat_to_codex) =>
                     update({ convert: { ...convert, chat_to_codex } })
                   }
-                  aria-label='Chat 转 Codex Responses'
+                  aria-label={t('openai.chatToResponses')}
                 />
               </SettingRow>
-              <SettingRow label='Completions 转 Codex'>
+              <SettingRow label={t('openai.completionsToCodex')}>
                 <Switch
                   checked={convert.completions_to_codex !== false}
                   disabled={saving}
@@ -230,13 +244,19 @@ export function OpenaiPane({
                       convert: { ...convert, completions_to_codex },
                     })
                   }
-                  aria-label='Completions 转 Codex'
+                  aria-label={t('openai.completionsToCodex')}
                 />
               </SettingRow>
             </div>
           </section>
         </div>
       </PaneSection>
+
+      <CodexSchedulingSection
+        value={asBlock(codex.scheduling)}
+        disabled={saving || pending}
+        onChange={(scheduling) => update({ scheduling })}
+      />
 
       <OpenaiQuotaSection
         quota={quota}
@@ -254,13 +274,13 @@ export function OpenaiPane({
 
       <PaneSection
         icon={Fingerprint}
-        title='客户端画像'
-        desc='上游 User-Agent、安装标识与运行环境 Analytics 各自独立；后两项默认关闭。'
+        title={t('openai.clientProfile')}
+        desc={t('openai.clientProfileHelp')}
       >
         <div className='divide-y'>
           <SettingRow
-            label='安装标识元数据'
-            desc='默认关闭。显式打开后才在推理请求上送槽位持久安装 UUID 和会话 client_metadata，不发送 vm.device_id 原始指纹，也不是独立指纹上传。'
+            label={t('openai.installationMetadata')}
+            desc={t('openai.installationMetadataHelp')}
           >
             <Switch
               checked={features.enabled === true}
@@ -270,12 +290,12 @@ export function OpenaiPane({
                   client_features: { ...features, enabled },
                 })
               }
-              aria-label='安装标识元数据'
+              aria-label={t('openai.installationMetadata')}
             />
           </SettingRow>
           <SettingRow
-            label='运行环境 Analytics 上报'
-            desc='默认关闭。打开后对 kernel 观察到的每个会话独立 POST 一次官方 codex_thread_initialized（/backend-api/codex/analytics-events/events）：真实 kernel 版本、系统、系统版本、架构、会话标识、模型与秒级时间。上报的是 kernel 所在宿主，不是下游用户电脑；此事件没有 turn_id，也不含 prompt、文件、主机名或 MAC。与安装标识无关。'
+            label={t('openai.environmentAnalytics')}
+            desc={t('openai.environmentAnalyticsHelp')}
           >
             <Switch
               checked={analytics.enabled === true}
@@ -285,20 +305,22 @@ export function OpenaiPane({
                   analytics: { ...analytics, enabled },
                 })
               }
-              aria-label='运行环境 Analytics 上报'
+              aria-label={t('openai.environmentAnalytics')}
             />
           </SettingRow>
           <SettingRow
-            label='Codex 目录客户端版本'
-            desc='auto 取官方 @openai/codex 版本并缓存，失败用 0.160.0。'
+            label={t('openai.catalogVersion')}
+            desc={t('openai.catalogVersionHelp')}
           >
             <Input
               className='w-28'
               maxLength={20}
               value={String(codex.catalog_client_version ?? 'auto')}
-              placeholder='auto'
+              placeholder={
+                /* i18n-exempt "auto" -- Literal catalog_client_version auto sentinel; sent to the API unchanged. */ 'auto'
+              }
               disabled={saving}
-              aria-label='Codex 目录客户端版本'
+              aria-label={t('openai.catalogVersion')}
               onChange={(e) =>
                 update({
                   catalog_client_version: e.target.value || 'auto',
@@ -308,9 +330,9 @@ export function OpenaiPane({
           </SettingRow>
           <div className='space-y-2 py-3'>
             <div className='space-y-0.5'>
-              <Label htmlFor='codex-user-agent'>上游 User-Agent</Label>
+              <Label htmlFor='codex-user-agent'>{t('openai.userAgent')}</Label>
               <p className='text-xs text-muted-foreground'>
-                缺省为 {DEFAULT_USER_AGENT}。空输入会回到缺省，避免保存失败。
+                {t('openai.userAgentHelp', { value1: DEFAULT_USER_AGENT })}
               </p>
             </div>
             <Input
@@ -321,7 +343,7 @@ export function OpenaiPane({
               disabled={saving}
               spellCheck={false}
               autoComplete='off'
-              aria-label='上游 User-Agent'
+              aria-label={t('openai.userAgent')}
               onChange={(e) =>
                 update({ user_agent: e.target.value || DEFAULT_USER_AGENT })
               }

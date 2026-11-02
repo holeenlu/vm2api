@@ -330,10 +330,12 @@ function migrateQuestions(stored) {
   if (!stored) return null
   const retired = stored.filter((item) => RETIRED_BUILTIN_IDS.has(item.id))
   const custom = stored.filter((item) => !RETIRED_BUILTIN_IDS.has(item.id) && item.id !== 'nsfw')
-  if (!retired.length || custom.length || retired.some((item) => !uneditedRetired(item))) {
+  const nsfw = stored.find((item) => item.id === 'nsfw')
+  const editedNsfw =
+    nsfw && nsfw.instructions !== NSFW_INSTRUCTION && !LEGACY_BUILTIN_INSTRUCTIONS.get('nsfw')?.has(nsfw.instructions)
+  if (!retired.length || custom.length || editedNsfw || retired.some((item) => !uneditedRetired(item))) {
     return stored.map(refreshBuiltinQuestion)
   }
-  const nsfw = stored.find((item) => item.id === 'nsfw')
   return POLICY_QUESTION_BANK.map((item) => ({
     id: item.id,
     label: item.label,

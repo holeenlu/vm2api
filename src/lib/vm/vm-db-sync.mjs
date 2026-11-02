@@ -21,9 +21,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { isDbOpen, getDb } from '../db/database.mjs'
 import { VmsRepo } from '../db/repos/vms-repo.mjs'
-import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
 import { setVmWriteHook, atomicWriteJson, isVmRecordFile } from './vm-file.mjs'
-import { migrateScheduleFields, reclaimAssignedVms, repairSlotSmbios, repairVmProxyCliEnabled } from './vm-registry.mjs'
+import { migrateScheduleFields, repairSlotSmbios, repairVmProxyCliEnabled } from './vm-registry.mjs'
 
 let _repo = null
 let _watcher = null
@@ -69,23 +68,7 @@ export function removeVmFromDb(id) {
   const r = repo()
   if (!r || !id) return false
   const removed = r.remove(id)
-  // A deleted slot must not linger in named pools: the panel cannot render or
-  // uncheck an unknown id, and every save of that pool used to fail.
-  if (isDbOpen()) {
-    try {
-      new VmPoolsRepo(getDb()).removeVm(id)
-    } catch {}
-  }
   return removed
-}
-
-function pruneVmPools(knownIds) {
-  if (!isDbOpen()) return []
-  try {
-    return new VmPoolsRepo(getDb()).pruneUnknown(knownIds)
-  } catch {
-    return []
-  }
 }
 
 /** Forget settings.active_vm so startup reconcile does not rewrite active.json. */
@@ -138,12 +121,6 @@ export function reconcileVms(projectRoot) {
     } catch {}
   }
 
-  // Pool memberships for slots that exist nowhere any more (file deleted outside
-  // the panel, or DB row gone). Rebuilt rows above count as alive.
-  const known = new Set(seen)
-  for (const row of r.list()) if (row?.id && row.vm) known.add(row.id)
-  out.pruned_pool_members = pruneVmPools(known)
-
   // active.json ↔ settings.active_vm
   const activeFile = path.join(dir, 'active.json')
   try {
@@ -176,21 +153,6 @@ export function initVmDbSync(projectRoot, { watch = true } = {}) {
     if (isVmJsonPath(filePath)) syncVmFile(filePath)
   })
   const result = reconcileVms(projectRoot)
-  // Older releases soft-deleted tenants without releasing their assigned slots.
-  // Only confirmed deletions qualify; disabled/missing users and private slots stay isolated.
-  const deletedOwners = isDbOpen()
-    ? new Set(
-        getDb()
-          .prepare('SELECT id FROM users WHERE deleted_at IS NOT NULL')
-          .all()
-          .map((row) => row.id),
-      )
-    : new Set()
-  result.reclaimed_vm_ids = reclaimAssignedVms(projectRoot, deletedOwners, {
-    onError: (error, name) => {
-      console.warn(`[vm] ownership recovery skipped ${name}: ${error.code || error.name}`)
-    },
-  })
   try {
     result.proxy_cli_repaired = repairVmProxyCliEnabled(projectRoot).length
   } catch {

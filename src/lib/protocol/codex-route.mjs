@@ -1,3 +1,4 @@
+import { normalizeCodexScheduling } from '../pool/codex-scheduling-policy.mjs'
 /**
  * Codex hop routing. Claude traffic never reads this object.
  */
@@ -85,6 +86,7 @@ export function validateInferenceWebsocketPatch(body = {}) {
   if (!Object.prototype.hasOwnProperty.call(body, 'codex')) return
   if (!asObject(body.codex)) throw typedError('codex 必须是对象', 'invalid_codex_websocket')
   const codex = body.codex
+  if (Object.hasOwn(codex, 'scheduling')) normalizeCodexScheduling(codex.scheduling, { strict: true })
   if (Object.prototype.hasOwnProperty.call(codex, 'websocket')) {
     validateEnabledToggle(codex.websocket, 'codex.websocket', 'invalid_codex_websocket')
   }
@@ -148,6 +150,7 @@ export function normalizeCodexRouting(raw = {}) {
     },
     clients,
     quota: normalizeOpenAIQuotaPolicy(src.quota),
+    scheduling: normalizeCodexScheduling(src.scheduling),
     model_mappings: normalizeCodexModelMappings(src.model_mappings),
   }
 }

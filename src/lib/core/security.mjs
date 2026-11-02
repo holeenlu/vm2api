@@ -69,8 +69,8 @@ export const HOP_BY_HOP = new Set([
 /** Panel admin credentials (env override) */
 export function getPanelAdmin() {
   return {
-    username: process.env.VM2API_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
-    password: process.env.VM2API_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
+    username: process.env.TAPMODELS_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
+    password: process.env.TAPMODELS_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
   }
 }
 
@@ -148,7 +148,7 @@ export function createPanelSession(username, ttlMs = SESSION_TTL_MS, extra = {})
     ttlMs = extra.ttlMs || SESSION_TTL_MS
   }
   const token = 'kin-panel-' + crypto.randomBytes(24).toString('hex')
-  const role = extra.role || (_lookupRole && _lookupRole(username)) || 'admin'
+  const role = extra.role || (_lookupRole && _lookupRole(username)) || 'super_admin'
   panelSessions.set(panelSessionKey(token), {
     user: username,
     role,
@@ -173,12 +173,18 @@ export function verifyPanelSession(token) {
     saveSessions()
     return null
   }
-  if (!s.role && _lookupRole) {
-    s.role = _lookupRole(s.user) || null
+  if (_lookupRole) {
+    const role = _lookupRole(s.user)
+    if (!role) {
+      panelSessions.delete(key)
+      saveSessions()
+      return null
+    }
+    s.role = role
   }
   if (!s.role) {
     const admin = getPanelAdmin()
-    s.role = admin.username && s.user === admin.username ? 'admin' : 'user'
+    s.role = admin.username && s.user === admin.username ? 'super_admin' : 'user'
   }
   const now = Date.now()
   const remaining = s.exp - now
@@ -217,14 +223,15 @@ export function verifyPanelLogin(username, password) {
   if (_authenticateUser) {
     const rec = _authenticateUser(username, password)
     if (rec) return { username: rec.username, role: rec.role || 'user', id: rec.id }
-    // Existing DB user (including disabled) must not fall through to env password.
-    if (_lookupRole && _lookupRole(username)) return null
+    // Once database authentication is attached, environment credentials cannot
+    // resurrect a disabled or deleted account (or bypass a changed password).
+    return null
   }
   const admin = getPanelAdmin()
   if (!admin.password) return null
   if (!timingSafeEqualStr(String(username || ''), admin.username)) return null
   if (!timingSafeEqualStr(String(password || ''), admin.password)) return null
-  return { username: admin.username, role: 'admin', id: null, source: 'env' }
+  return { username: admin.username, role: 'super_admin', id: null, source: 'env' }
 }
 
 function parseCookie(header) {

@@ -144,7 +144,7 @@ test('existing loose panel session file is tightened on load', async () => {
   const file = path.join(dir, 'panel-sessions.json')
   fs.writeFileSync(
     file,
-    JSON.stringify({ 'kin-panel-load': { user: 'admin', role: 'admin', exp: Date.now() + 60_000 } }),
+    JSON.stringify({ 'kin-panel-load': { user: 'admin', role: 'super_admin', exp: Date.now() + 60_000 } }),
   )
   fs.chmodSync(file, 0o644)
   try {

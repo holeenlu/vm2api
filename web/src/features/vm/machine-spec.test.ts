@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createMachinePayload,
   kvmAvailabilityFromCheck,
@@ -14,14 +15,18 @@ import {
   vmConfigFieldErrors,
 } from './machine-spec'
 
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+
 describe('normalizeVmConfig', () => {
   it('fills defaults for empty input', () => {
     expect(normalizeVmConfig(undefined)).toEqual(VM_CONFIG_DEFAULTS)
     expect(normalizeVmConfig(null)).toEqual(VM_CONFIG_DEFAULTS)
     expect(normalizeVmConfig({})).toMatchObject({
       default_runtime: 'docker',
-      memory: '512m',
-      vcpus: 2,
+      memory: '4g',
+      vcpus: 4,
       disk_gb: 20,
       cpu_model: 'host',
       mac_oui: '52:54:00',
@@ -70,8 +75,8 @@ describe('normalizeVmConfig', () => {
       })
     ).toMatchObject({
       default_runtime: 'docker',
-      memory: '512m',
-      vcpus: 2,
+      memory: '4g',
+      vcpus: 4,
       disk_gb: 20,
       cpu_model: 'host',
     })
@@ -105,7 +110,7 @@ describe('vmConfigFieldErrors / validateVmConfigPatch', () => {
 })
 
 describe('createMachinePayload', () => {
-  it('always sends memory and only adds kvm fields for kvm', () => {
+  it('sends memory and CPU for both runtimes and disk only for KVM', () => {
     expect(
       createMachinePayload({
         runtimeType: 'docker',
@@ -115,7 +120,7 @@ describe('createMachinePayload', () => {
       })
     ).toEqual({
       runtime_type: 'docker',
-      machine: { memory: '2g' },
+      machine: { memory: '2g', vcpus: 8 },
     })
     expect(
       createMachinePayload({
@@ -138,7 +143,7 @@ describe('createMachinePayload', () => {
         vcpus: 2,
         diskGb: 20,
       }).machine.memory
-    ).toBe('512m')
+    ).toBe('4g')
   })
 })
 
