@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
+import { t as translate } from '@/i18n'
 import type { VmProxySnap } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -24,15 +26,32 @@ const PROBE_MINS = [5, 10, 30, 60]
 // The chosen upstream is tried first; the existing automatic fallback order
 // is unchanged, including when a domain or custom HTTPS endpoint is selected.
 const DNS_CHOICES = [
-  { value: 'auto', label: '自动（默认顺序）' },
+  {
+    value: 'auto',
+    get label() {
+      return translate('proxies:automaticDns')
+    },
+  },
   { value: 'https://1.1.1.1/dns-query', label: 'Cloudflare DoH' },
   {
     value: 'https://cloudflare-dns.com/dns-query',
-    label: 'Cloudflare DoH（域名）',
+    get label() {
+      return translate('proxies:cloudflareDoh')
+    },
   },
   { value: 'https://8.8.8.8/dns-query', label: 'Google DoH' },
-  { value: '8.8.8.8:53', label: 'Google TCP 53（明文）' },
-  { value: '1.1.1.1:53', label: 'Cloudflare TCP 53（明文）' },
+  {
+    value: '8.8.8.8:53',
+    get label() {
+      return translate('proxies:googleTcpDns')
+    },
+  },
+  {
+    value: '1.1.1.1:53',
+    get label() {
+      return translate('proxies:cloudflareTcpDns')
+    },
+  },
 ]
 
 type ConfigResult = {
@@ -54,6 +73,8 @@ export function ProxyManagePanel({
   dnsDisableSvcbHttps: boolean
   followProxyTimezone: boolean
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const refresh = useRefreshProxies()
   const [customDnsDraft, setCustomDnsDraft] = useState<string | null>(null)
   const maxUsed = proxies.reduce(
@@ -71,19 +92,28 @@ export function ProxyManagePanel({
       const failed = (data.egress || []).filter((entry) => !entry.ok)
       if (failed.length) {
         toast.warning(
-          `DNS 已保存，但 ${failed.length} 个出口重载失败：${failed.map((entry) => entry.proxy_id).join('、')}`
+          translate('proxies:dnsSavedReloadFailed', {
+            count: failed.length,
+            p1: failed.map((entry) => entry.proxy_id).join('、'),
+          })
         )
       } else if (
         patch.dns_primary != null ||
         patch.dns_disable_svcb_https != null
       ) {
-        toast.success('出口 DNS 已保存，本机出口已同步')
+        toast.success(translate('proxies:dnsSaved'))
       } else if (patch.bind_limit != null) {
-        toast.success(`每条最多绑 ${String(patch.bind_limit)} 台`)
+        toast.success(
+          translate('proxies:maxBindings', { count: String(patch.bind_limit) })
+        )
       } else if (patch.probe_interval_min != null) {
-        toast.success(`探测间隔 ${String(patch.probe_interval_min)} 分钟`)
+        toast.success(
+          translate('proxies:probeIntervalMinutes', {
+            count: String(patch.probe_interval_min),
+          })
+        )
       } else {
-        toast.success('已保存')
+        toast.success(translate('proxies:saved'))
       }
       await refresh()
       if (patch.dns_primary != null) setCustomDnsDraft(null)
@@ -105,16 +135,24 @@ export function ProxyManagePanel({
   const over = proxies.filter((p) => proxyBoundIds(p).length > limitShown)
 
   return (
-    <ProxyPanel title='池设置' plain>
+    <ProxyPanel title={translate('proxies:poolSettings')} plain>
       <div className='space-y-5'>
         <fieldset>
           <legend className='flex w-full items-baseline justify-between text-xs font-medium'>
-            每条代理最多绑
+            {translate('proxies:maxBindingsLabel')}
             <span className='text-muted-foreground tabular-nums'>
-              容量 {proxies.length} × {limitShown} ={' '}
-              <b className='font-semibold text-foreground'>
-                {proxies.length * limitShown}
-              </b>
+              <Trans
+                ns='proxies'
+                i18nKey='capacityCalculation'
+                values={{
+                  proxies: proxies.length,
+                  limit: limitShown,
+                  total: proxies.length * limitShown,
+                }}
+                components={{
+                  total: <b className='font-semibold text-foreground' />,
+                }}
+              />
             </span>
           </legend>
           <div className='mt-2 flex items-center gap-3'>
@@ -122,7 +160,9 @@ export function ProxyManagePanel({
               <span className='text-2xl leading-none font-[620] tracking-[-0.03em]'>
                 {limitShown}
               </span>
-              <span className='text-xs text-muted-foreground'>台</span>
+              <span className='text-xs text-muted-foreground'>
+                {translate('proxies:slotsUnit')}
+              </span>
             </span>
             <SeatCells
               used={maxUsed}
@@ -132,7 +172,7 @@ export function ProxyManagePanel({
             />
           </div>
           <Segmented
-            label='每条代理最多绑定台数'
+            label={translate('proxies:maxBindingsAria')}
             options={BIND_LIMITS}
             value={limitShown}
             disabled={saveConfig.isPending}
@@ -141,20 +181,25 @@ export function ProxyManagePanel({
           />
           <p className='mt-1.5 text-[11px] text-muted-foreground'>
             {over.length
-              ? `${over.length} 条代理已绑超过 ${limitShown} 台：现有绑定保留，只是不再接新槽位。`
+              ? translate('proxies:overCapacityHint', {
+                  p0: over.length,
+                  p1: limitShown,
+                })
               : maxUsed
-                ? `亮格为当前绑得最多的一条（${maxUsed} 台）。`
-                : '调低不会踢掉已绑的槽位。'}
+                ? translate('proxies:mostBoundHint', { count: maxUsed })
+                : translate('proxies:lowerLimitHint')}
           </p>
         </fieldset>
 
         <fieldset>
-          <legend className='text-xs font-medium'>自动探测间隔</legend>
+          <legend className='text-xs font-medium'>
+            {translate('proxies:autoProbeInterval')}
+          </legend>
           <Segmented
-            label='自动探测间隔（分钟）'
+            label={translate('proxies:autoProbeIntervalAria')}
             options={PROBE_MINS}
             value={probeShown}
-            suffix='分'
+            suffix={translate('proxies:minutesShort')}
             disabled={saveConfig.isPending}
             onChange={(value) =>
               saveConfig.mutate({ probe_interval_min: value })
@@ -168,9 +213,9 @@ export function ProxyManagePanel({
             htmlFor='proxy-dns'
             className='flex items-baseline justify-between text-xs font-medium'
           >
-            出口 DNS
+            {translate('proxies:exitDns')}
             <span className='font-normal text-muted-foreground'>
-              失败自动换下一个
+              {translate('proxies:dnsFallbackHint')}
             </span>
           </label>
           <Select
@@ -194,7 +239,9 @@ export function ProxyManagePanel({
                   {choice.label}
                 </SelectItem>
               ))}
-              <SelectItem value='custom'>自定义 HTTPS DoH</SelectItem>
+              <SelectItem value='custom'>
+                {translate('proxies:customDoh')}
+              </SelectItem>
             </SelectContent>
           </Select>
           {customDnsShown && (
@@ -208,18 +255,18 @@ export function ProxyManagePanel({
               }}
             >
               <label htmlFor='proxy-dns-url' className='text-xs font-medium'>
-                自定义 DoH URL
+                {translate('proxies:customDohUrl')}
               </label>
               <Input
                 id='proxy-dns-url'
                 type='url'
                 required
-                title='请输入完整的 HTTPS DoH URL，例如 https://dns.example.com/dns-query'
+                title={translate('proxies:dohUrlRequired')}
                 pattern='https://.+'
                 value={customDnsDraft ?? dnsShown}
                 onChange={(event) => setCustomDnsDraft(event.target.value)}
                 disabled={saveConfig.isPending}
-                placeholder='https://dns.example.com/dns-query'
+                placeholder={translate('proxies:dohExample')}
                 aria-describedby='proxy-dns-url-help'
                 className='h-8 text-xs'
               />
@@ -227,8 +274,7 @@ export function ProxyManagePanel({
                 id='proxy-dns-url-help'
                 className='text-[11px] text-muted-foreground'
               >
-                输入完整 HTTPS URL，支持域名或 IP（IPv6
-                地址需加方括号）；不能包含用户名、密码、片段（#）或逗号。
+                {translate('proxies:dohUrlHint')}
               </p>
               <Button
                 type='submit'
@@ -237,7 +283,7 @@ export function ProxyManagePanel({
                 disabled={saveConfig.isPending}
                 loading={saveConfig.isPending}
               >
-                保存 DNS
+                {translate('proxies:saveDns')}
               </Button>
             </form>
           )}
@@ -249,15 +295,13 @@ export function ProxyManagePanel({
               htmlFor='proxy-dns-empty-types'
               className='block text-xs font-medium'
             >
-              关闭 DNS type 64 / 65
+              {translate('proxies:disableDnsTypes')}
             </label>
             <p
               id='proxy-dns-empty-types-help'
               className='text-[11px] text-muted-foreground'
             >
-              通过 DNS 覆写让 SVCB（64）、HTTPS（65）返回空答案；A / AAAA
-              解析不受影响。 仅用于 SOCKS5
-              出口，集群出口在下次启动或重载槽位时生效。
+              {translate('proxies:disableDnsTypesHint')}
             </p>
           </div>
           <Switch
@@ -275,10 +319,10 @@ export function ProxyManagePanel({
         <label className='flex cursor-pointer items-start justify-between gap-3'>
           <span className='space-y-0.5'>
             <span className='block text-xs font-medium'>
-              绑定后跟随代理时区
+              {translate('proxies:followProxyTimezone')}
             </span>
             <span className='block text-[11px] text-muted-foreground'>
-              手动钉过时区的槽位不受影响
+              {translate('proxies:pinnedTimezoneHint')}
             </span>
           </span>
           <Switch
@@ -286,7 +330,7 @@ export function ProxyManagePanel({
             onCheckedChange={(value) =>
               saveConfig.mutate({ follow_proxy_timezone: value })
             }
-            aria-label='绑定后跟随代理时区'
+            aria-label={translate('proxies:followProxyTimezone')}
             className='mt-0.5'
           />
         </label>
@@ -312,6 +356,8 @@ function Segmented({
   onChange: (value: number) => void
   className?: string
 }) {
+  useTranslation('proxies')
+
   return (
     <div
       role='group'

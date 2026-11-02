@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createProxyAgent } from '../vm/proxy-agent.mjs'
 import { isSyncableGptCatalogId } from './gpt-ids.mjs'
+import { codexMetadata } from './codex-catalog.mjs'
 
 export { SKIP_GPT, GPT_ID_PREFIX, isGptSeriesId, isSyncableGptCatalogId } from './gpt-ids.mjs'
 
@@ -195,6 +196,7 @@ export function parseCodexModelCatalog(payload) {
     out.push({
       id,
       display_name: String(row.display_name || row.title || id).trim() || id,
+      codex_metadata: codexMetadata(row),
       catalog: sanitizeCodexCatalogMetadata(row),
     })
   }
@@ -235,9 +237,8 @@ async function readFetchBody(res) {
 }
 
 export function makeProxyFetch(proxyUrl, timeoutMs = 15000, { maxMs = 30000 } = {}) {
-  const px = String(proxyUrl || '')
-    .trim()
-    .replace(/^socks5:\/\//i, 'socks5h://')
+  const px = String(proxyUrl || '').trim()
+
   const ms = Math.min(Math.max(Number(timeoutMs) || 15000, 3000), maxMs)
   return (url, init = {}) => {
     // Build the agent before arming the timer, so a bad proxy URL throws without leaking it.
@@ -358,9 +359,8 @@ export async function exchangeCodexAuthorizationCode(opts = {}) {
 export async function fetchChatgptModelCatalog(opts = {}) {
   const token = String(opts.accessToken || '').trim()
   if (!token) return { ok: false, error: 'missing_access_token', ids: [], models: [] }
-  const proxyUrl = String(opts.proxyUrl || '')
-    .trim()
-    .replace(/^socks5:\/\//i, 'socks5h://')
+  const proxyUrl = String(opts.proxyUrl || '').trim()
+
   if (!proxyUrl && !opts.fetchImpl && !opts.direct) return { ok: false, error: 'proxy_required', ids: [], models: [] }
 
   const catalogVersion =

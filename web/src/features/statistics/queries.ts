@@ -11,12 +11,11 @@ import type {
   UsageLogsOverview,
 } from '@/types/panel-usage-logs'
 import { api } from '@/lib/api'
-
-const STATS_KEY = ['panel', 'statistics'] as const
+import { panelQueryKeys } from '@/lib/query-keys'
 
 export function usageOverviewQueryOptions(tz: string) {
   return queryOptions({
-    queryKey: ['panel', 'usage-logs-overview', tz] as const,
+    queryKey: panelQueryKeys.statsOverview(tz),
     queryFn: () =>
       api<UsageLogsOverview>(
         `/api/panel/usage-logs/overview?tz=${encodeURIComponent(tz)}`
@@ -33,7 +32,7 @@ export function statisticsQueryOptions(
   tz: string
 ) {
   return queryOptions({
-    queryKey: [...STATS_KEY, 'chart', range, dimension, tz] as const,
+    queryKey: panelQueryKeys.statsChart(range, dimension, tz),
     queryFn: () => {
       const qs = new URLSearchParams({ range, dimension, tz })
       return api<StatisticsData>(`/api/panel/statistics?${qs.toString()}`)
@@ -52,7 +51,7 @@ export function leaderboardQueryOptions(
   tz: string
 ) {
   return queryOptions({
-    queryKey: [...STATS_KEY, 'leaderboard', range, scope, limit, tz] as const,
+    queryKey: panelQueryKeys.statsLeaderboard(range, scope, limit, tz),
     queryFn: () => {
       const qs = new URLSearchParams({
         range,
@@ -72,7 +71,7 @@ export function leaderboardQueryOptions(
 
 export function activeSessionsQueryOptions(minutes = 5, limit = 12) {
   return queryOptions({
-    queryKey: ['panel', 'usage-logs-active-sessions', minutes, limit] as const,
+    queryKey: panelQueryKeys.activeSessions(minutes, limit),
     queryFn: () =>
       api<ActiveSessionsData>(
         `/api/panel/usage-logs/active-sessions?minutes=${minutes}&limit=${limit}`

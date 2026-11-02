@@ -16,7 +16,7 @@ flowchart LR
 
 | 密钥 | 来源 | 能调 |
 |------|------|------|
-| Master `VM2API_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
+| Master `TAPMODELS_API_KEY` | 环境变量 | `/v1/*` + `/api/panel/*` + `/admin/*` |
 | `sk-vm-…` | 控制台签发 | **只** `/v1/*` |
 | 面板会话 | 面板登录 | **只** `/api/panel/*` |
 
@@ -42,10 +42,15 @@ x-api-key: sk-vm-…
 | `GET` | `/v1/models` | — | 本地模型策略目录；启用且上游声明 `priority` 的 GPT 可公开 `<model>-fast` 别名 |
 | `POST` | `/v1/images/generations` 或 `/images/generations` | OpenAI Images JSON | Codex Images JSON |
 | `POST` | `/v1/images/edits` 或 `/images/edits` | OpenAI Images JSON / multipart | Codex Images JSON |
-| `GET` | `/health` · `/` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
+| `GET` / `HEAD` | `/` | 无鉴权 | `307` 跳转 `/console/`，`Cache-Control: no-store`；沿用管理台现有欢迎、登录与会话流程 |
+| `GET` | `/health` · `/v1/meta` | 无鉴权 | 能力 / 限制 / 计数 |
+
+原先通过 `/` 读取状态 JSON 的程序应改用 `/health`；仅检查服务存活可使用已有的 `/healthz`。其他入口和 API 行为不变。
+
+控制台入口 `/console`、`/console/`、`/cc`、`/cc/` 及前端静态资源均支持 `HEAD`：返回与 `GET` 一致的状态、内容类型和缓存策略，不发送响应体。`HEAD /` 跟随跳转后，控制台文件存在时返回 `200`，缺失时返回 `404`。
 
 上游 hop **永远** `stream: true`。客户端 `stream: true` 收 SSE；`stream: false` 或 `x-kin-delivery: verified` 由网关聚合成 JSON。
-OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 `service_tiers[].id = "priority"` 的模型生效。客户端使用 `<model>-fast` 时，网关在调度前还原基模型并发送 `service_tier: "priority"`；普通模型 ID 和普通档位不改写。图像目录包含启用的 `gpt-image-2`（及 `gpt-image-2-2026-04-21` 快照）、`gpt-image-2.5-flare` 和 `gpt-image-2.5-sunburst`；Images 请求直连 Codex Images 槽位，Free 套餐槽位不参与。
+OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 `service_tiers[].id = "priority"` 的模型生效。客户端使用 `<model>-fast` 时，网关在调度前还原基模型并发送 `service_tier: "priority"`；普通模型 ID 和普通档位不改写。图像目录包含启用的 `gpt-image-2`、`gpt-image-2.5-flare` 和 `gpt-image-2.5-sunburst`；Images 请求直连 Codex Images 槽位，Free 套餐槽位不参与。
 
 别名路径（无 `/v1` 前缀）与上表相同处理函数。
 
@@ -78,6 +83,8 @@ OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 
 | `X-Request-ID` | 原样回写响应头 |
 
 体大小上限由设置 → 配额的「请求体上限」决定（`failover.max_request_mib`，未设置时入口与槽内 kernel 均为 32 MiB）。网关进程天花板是 `KIN_MAX_BODY`（默认 128MB），面板值不能超过它。超限在选号之前返回 `413 body_too_large`；Codex 转发还会按包含 headers/session/request_id 的实际序列化 envelope 检查槽内限额；封装后超限或内核返回的纯文本 413 均报告 `413 body_too_large`。改完保存后，各槽 kernel 在没有请求时重启一次才生效。
+
+请求体上传空闲超时与模型响应超时分开计算。控制面默认在连续 `120` 秒没有收到新的请求体字节时返回 `408 request_timeout`；环境变量 `KIN_REQUEST_BODY_TIMEOUT_MS` 可设置为 `0` 关闭，允许值最大为 `600000`（10 分钟）。客户端主动断开记录为 `499 client_cancelled`，请求体格式或连接异常仍记录为 `400`。Node 保持默认 300 秒接收完整请求时限；该上限约束上传全过程，关闭上述空闲计时不会关闭它，也不限制完整请求接收后的模型生成时间；模型首字节仍由 `KIN_UPSTREAM_TIMEOUT`（默认 600 秒）控制，流空闲仍由 `failover.stream_idle_timeout_ms` 控制。反向代理的 `client_body_timeout` 应与该值保持一致。
 
 ## Messages
 
@@ -180,6 +187,9 @@ curl -sS http://127.0.0.1:8787/v1/models -H "Authorization: Bearer $KEY"
 读面板持久化的 `model_policy`，**不** hop 槽位 `/v1/models`。列表按密钥 `group_type` 过滤：`openai` 只列 GPT，`anthropic` 只列 Claude，`all` 与 master 两者都列。`POST /admin/models/refresh` 仍回完整目录。未入库的 id → `400`，请求被拒，不上游。别名如 `claude-haiku-4-5` 可解析到带日期的目录项。出站 `model` 去掉 `[1m]` 后缀。
 
 ## usage
+
+商业分组 Key 的 `GET /v1/usage` 返回调用用户的 USD 余额、订阅和本人 Key 用量，不返回上游账号窗口。下面的 Claude/Codex 窗口选择仅适用于无组的平台诊断 Key；平台诊断排除历史私人槽位，不能借 `platform` 参数扩大授权范围。
+
 ```bash
 curl -sS http://127.0.0.1:8787/v1/usage -H "Authorization: Bearer $KEY"
 ```
@@ -282,7 +292,7 @@ curl -sS http://127.0.0.1:8787/health
 | 没有任何合格账号（未配置、额度 / 凭证 / 模型 / 人工关闭都不合格，且没有上游冷却） | 503 | `pool_unavailable` | 号池当前没有可用账号 |
 | 已经执行过、最后一跳失败 | 上游本义 | 上游错误码（如 `incomplete_response`、429、401） | 上游本义 |
 
-`pool_overloaded` 是 HTTP 529、`type: overloaded_error`，总带 `retry-after`（秒，至少 1）：优先取相关 VM 最早的席位宽限到期，其次已知恢复时刻（冷却、RPM 窗口），都没有时为 1。排队已满时立即返回，不入队。OpenAI 槽仍是自己的 429 `pool_overloaded`。续接 `previous_response_id` 的 Responses 请求只能在原 GPT 账号上继续；该账号已不可用时返回 `409 response_not_portable`，请带完整上下文重新发起。
+`pool_overloaded` 是 HTTP 529、`type: overloaded_error`，总带 `retry-after`（秒，至少 1）：优先取相关 VM 最早的席位宽限到期，其次已知恢复时刻（冷却、RPM 窗口），都没有时为 1。排队已满时立即返回，不入队。OpenAI 槽仍是自己的 429 `pool_overloaded`。续接 `previous_response_id` 的 Responses 请求只能在原 GPT 账号上继续；该账号已不可用时返回 `409 response_not_portable`，请带完整上下文重新发起。上下文接近模型能力上限时，网关会依据当前模型的有效 `context_window`（默认跟随同步目录，可由 `/console/#/models` 的 OpenAI 模型配置覆盖）与输出预算在首次 hop 前裁剪旧 reasoning/tool 项；若请求仍带 `previous_response_id` 且上游返回上下文过载，返回 `409 codex_context_compaction_required`，要求移除该字段并提交压缩后的完整 `input` 历史，避免继续换号重试。
 
 客户端断开不计 SLA、不处罚账号。
 
@@ -385,3 +395,10 @@ stateDiagram-v2
 4. 同请求加 `"stream": true`，能收到 `message_stop`  
 5. `POST /v1/chat/completions` 一条 system + user  
 6. 带 `x-session-id` 连打两轮，日志 attempt 落同一槽（该槽仍可用时）
+
+
+## Images（1.3.218）
+
+`POST /v1/images/generations` 与 `POST /v1/images/edits` 提供 GPT 生图和编辑；同样接受 `/images/generations`、`/images/edits`。编辑支持 JSON 和 multipart。此入口支持获授权的 OpenAI/混合 VM 分组或 API endpoint 分组；API 分组仅选择关联的 OpenAI 协议 endpoint，经 API kernel 转发并使用其模型映射、上游 Key 与代理，不回退到 VM。API 转发支持图像 SSE，只有成功完整终态进入结算；受模型白名单、用户/Key/分组限流、并发和商业账务约束。未指定模型时，授权与计价采用平台默认 gpt-image-2.5-flare，API 路径显式传递该模型。Free-plan GPT 槽位不能生图。
+
+生图使用独立 image_usage 与 image_cost，Responses image_generation 工具成本与文本成本合计结算。图像文本/图像 token 拆分不足不能推算费用；不满足上游计量条件时不扣费，不创建待对账记录。请求摘要仅记录字段名、模型及图片数量，不记录上传 base64。需要前向迁移 049，既有迁移不变。

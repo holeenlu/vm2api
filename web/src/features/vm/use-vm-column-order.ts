@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 
 export const VM_COLUMN_KEYS = [
   'vm',
+  'groups',
   'sched',
   'type',
   'status',

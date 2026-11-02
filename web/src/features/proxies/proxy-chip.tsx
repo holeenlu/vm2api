@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { Globe } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -30,6 +31,8 @@ export function ProxyChip({
   className?: string
   compact?: boolean
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const fallback = useLocalProxyLabelOpts(vm.node_id)
   const opts = localProxyOptsFromProxy(vm.proxy, fallback)
   const host = proxyHostLabel(vm.proxy, opts)
@@ -45,9 +48,9 @@ export function ProxyChip({
   // （集群槽经节点本机出网），返回真实的出口 IP 与地理。接口只对 admin 开放；
   // 未绑定或被策略封禁的槽位没有可测的出口。
   const canProbe =
-    me.data?.role === 'admin' && bound && !vm.proxy?.blocked_reason
+    me.data?.role === 'super_admin' && bound && !vm.proxy?.blocked_reason
   const probe = useMutation({
-    onMutate: () => toast.loading('正在探测出口…'),
+    onMutate: () => toast.loading(translate('proxies:probingExit')),
     mutationFn: () =>
       api(`/api/panel/vms/${encodeURIComponent(vm.id)}/exit-probe`, {
         method: 'POST',
@@ -59,7 +62,11 @@ export function ProxyChip({
       const geo = res?.geo || {}
       const where = [geo.country, geo.city].filter(Boolean).join(' · ')
       toast.success(
-        `出口 ${geo.ip || '未知'}${where ? ` · ${where}` : ''}${geo.isp ? ` · ${geo.isp}` : ''}`,
+        translate('proxies:exitSummary', {
+          p0: geo.ip || translate('proxies:unknown'),
+          p1: where ? ` · ${where}` : '',
+          p2: geo.isp ? ` · ${geo.isp}` : '',
+        }),
         { id: toastId }
       )
       // 本地代理的结果写回那台 VPS 的代理行，代理池页同步刷新。
@@ -74,14 +81,14 @@ export function ProxyChip({
   const label = bound
     ? vm.proxy?.label?.trim() || host
     : tone === 'danger'
-      ? '缺代理'
-      : '直连'
+      ? translate('proxies:proxyMissing')
+      : translate('proxies:direct')
   const title = blocked
-    ? `${named} · IPv6 已关闭（设置 → SOCKS5 开启）`
+    ? translate('proxies:ipv6DisabledHint', { p0: named })
     : nodeLocal
-      ? `${named} · 出口为该节点本机`
+      ? translate('proxies:nodeLocalExit', { p0: named })
       : lat != null && bound
-        ? `${named} · ${lat}ms`
+        ? /* i18n-exempt "{{expression}} · {{expression}}ms" -- Interpolated proxy address and measured millisecond latency; no UI prose. */ `${named} · ${lat}ms`
         : bound
           ? named
           : label
@@ -119,7 +126,9 @@ export function ProxyChip({
           'border border-dashed border-border/80 bg-transparent',
         className
       )}
-      title={canProbe ? `${title} · 点击探测出口` : title}
+      title={
+        canProbe ? translate('proxies:clickProbeExit', { p0: title }) : title
+      }
     >
       {bound ? (
         <>
@@ -129,7 +138,7 @@ export function ProxyChip({
           )}
           {blocked ? (
             <span className='shrink-0 text-[11px] text-muted-foreground'>
-              IPv6 已关闭
+              {translate('proxies:ipv6Disabled')}
             </span>
           ) : null}
           {compact && !blocked && vm.proxy && proxyIsLocal(vm.proxy) ? (
@@ -141,12 +150,20 @@ export function ProxyChip({
               {latencyDigits(lat)}
             </span>
           ) : compact && !blocked && !(vm.proxy && proxyIsLocal(vm.proxy)) ? (
-            <span className='text-[11px]'>{tone === 'ok' ? '通' : '未测'}</span>
+            <span className='text-[11px]'>
+              {tone === 'ok'
+                ? translate('proxies:reachableShort')
+                : translate('proxies:notChecked')}
+            </span>
           ) : null}
         </>
       ) : (
         <span className='text-[11px]'>
-          {compact ? (tone === 'danger' ? '缺' : '直') : label}
+          {compact
+            ? tone === 'danger'
+              ? translate('proxies:missingShort')
+              : translate('proxies:directShort')
+            : label}
         </span>
       )}
     </div>
