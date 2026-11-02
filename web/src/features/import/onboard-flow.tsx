@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { Check } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { credTypeOf } from '@/lib/cred-type'
@@ -45,10 +47,30 @@ type Bootstrap = { scheduled?: boolean; reason?: string } | null
 type Source = 'new' | 'existing'
 
 const STEPS = [
-  { n: 1, label: '槽位' },
-  { n: 2, label: '出口' },
-  { n: 3, label: '账号' },
-  { n: 4, label: '上线' },
+  {
+    n: 1,
+    get label() {
+      return t('import:slot')
+    },
+  },
+  {
+    n: 2,
+    get label() {
+      return t('import:egress')
+    },
+  },
+  {
+    n: 3,
+    get label() {
+      return t('import:account')
+    },
+  },
+  {
+    n: 4,
+    get label() {
+      return t('import:online')
+    },
+  },
 ] as const
 
 /** 该槽能否换票：权威字段优先，回落看有没有绑代理。 */
@@ -67,34 +89,33 @@ function bootstrapOk(bs: Bootstrap) {
 function bootstrapReason(bs: Bootstrap) {
   const reason = bs?.reason || 'unknown'
   const map: Record<string, string> = {
-    disabled: '官方初装在路由配置中被关闭',
-    already_running: '该槽已有初装任务在跑',
-    credential_edit: '本次只改了凭证，未触发初装',
+    disabled: t('import:bootstrapDisabled'),
+    already_running: t('import:bootstrapRunning'),
+    credential_edit: t('import:credentialsOnly'),
     // 同名码在「手动初装 400」与「刷新凭证 400」下语义不同，
     // 这里只解释「导入成功后自动调度被跳过」这一种来源。
-    credential_mode_unsupported:
-      '此槽为 Setup Token / Console API Key 凭证，官方初装仅支持完整 OAuth',
-    mock: '网关处于 mock 模式',
-    'vmId required': '网关未收到槽位 ID',
+    credential_mode_unsupported: t('import:fullOauthRequired'),
+    mock: t('import:mockMode'),
+    'vmId required': t('import:missingSlotId'),
   }
-  return map[reason] || `原因：${reason}`
+  return map[reason] || t('import:reason', { reason: reason })
 }
 
 function slotSpecRows(vm: Vm): SpecRow[] {
   const runtime = runtimeTypeOf(vm)
   return [
-    { label: '槽位', value: vm.name || vm.id },
-    { label: '平台', value: <PlatformChip vm={vm} /> },
+    { label: t('import:slot'), value: vm.name || vm.id },
+    { label: t('import:platform'), value: <PlatformChip vm={vm} /> },
     {
-      label: '形态',
-      value: runtime === 'kvm' ? '虚拟机 (KVM)' : '容器 (Docker)',
+      label: t('import:runtime'),
+      value: runtime === 'kvm' ? t('import:kvm') : t('import:docker'),
     },
     {
-      label: '系统',
+      label: t('import:system'),
       value: kernelProfile(vm.kernel)?.name || vm.kernel || '—',
     },
     {
-      label: '规格',
+      label: t('import:specifications'),
       value: vm.machine
         ? machineLine(
             runtime,
@@ -104,20 +125,20 @@ function slotSpecRows(vm: Vm): SpecRow[] {
           )
         : '—',
     },
-    { label: '放置', value: <NodeChip nodeId={vm.node_id} /> },
+    { label: t('import:placement'), value: <NodeChip nodeId={vm.node_id} /> },
     {
-      label: '出口',
+      label: t('import:egress'),
       value: vm.proxy?.host ? (
         proxyLabel(vm.proxy)
       ) : (
-        <span className='text-muted-foreground'>未绑定</span>
+        <span className='text-muted-foreground'>{t('import:unbound')}</span>
       ),
     },
     {
-      label: '账号',
+      label: t('import:account'),
       value: vm.email || (
         <span className='text-muted-foreground'>
-          {vm.has_token ? '已导入' : '未导入'}
+          {vm.has_token ? t('import:imported') : t('import:notImported')}
         </span>
       ),
     },
@@ -141,9 +162,14 @@ function Stepper({
   onGo: (n: number) => void
   layout: 'rail' | 'inline'
 }) {
+  const { t } = useTranslation('import')
+
   return (
     <ol
-      aria-label={`上线流程，共 ${STEPS.length} 步，当前第 ${current} 步`}
+      aria-label={t('import:stepProgress', {
+        count: STEPS.length,
+        current: current,
+      })}
       className={
         layout === 'rail'
           ? 'relative space-y-0'
@@ -187,7 +213,11 @@ function Stepper({
               </span>
             ) : null}
             <span className='sr-only'>
-              {done ? '（已完成）' : active ? '（当前步）' : '（未开始）'}
+              {done
+                ? t('import:stepCompleted')
+                : active
+                  ? t('import:stepCurrent')
+                  : t('import:stepNotStarted')}
             </span>
           </span>
         )
@@ -250,6 +280,8 @@ function Step({
   done: boolean
   children?: ReactNode
 }) {
+  useTranslation('import')
+
   const cur = step === n
   return (
     <section
@@ -292,6 +324,8 @@ function Step({
 
 /** 选中的槽在第 1 步缩成的一行：是谁、什么形态、在哪。 */
 function SlotReceipt({ vm, onChange }: { vm: Vm; onChange?: () => void }) {
+  const { t } = useTranslation('import')
+
   return (
     <div className='flex flex-wrap items-center gap-x-2.5 gap-y-1.5 rounded-lg border px-3 py-2.5'>
       <span className='text-sm font-semibold'>{vm.name || vm.id}</span>
@@ -308,7 +342,7 @@ function SlotReceipt({ vm, onChange }: { vm: Vm; onChange?: () => void }) {
           className='ms-auto h-7 px-2 text-xs'
           onClick={onChange}
         >
-          换一台
+          {t('import:chooseAnother')}
         </Button>
       ) : null}
     </div>
@@ -316,6 +350,8 @@ function SlotReceipt({ vm, onChange }: { vm: Vm; onChange?: () => void }) {
 }
 
 export function OnboardFlow() {
+  const { t } = useTranslation('import')
+
   const dash = useQuery(dashboardQueryOptions())
   const routing = useQuery(routingQueryOptions())
   const qc = useQueryClient()
@@ -385,17 +421,29 @@ export function OnboardFlow() {
     bootSeen.current = st
     if (st === 'ok') {
       toast.success(
-        '官方初装完成' +
-          (bootStatus?.account_tier ? ` · ${bootStatus.account_tier}` : '') +
-          (bootStatus?.telemetry_official ? ' · 遥测已对齐' : '')
+        t(
+          bootStatus?.telemetry_official
+            ? 'import:bootstrapResultSynced'
+            : 'import:bootstrapResult',
+          {
+            tier: bootStatus?.account_tier
+              ? ' · ' + bootStatus.account_tier
+              : '',
+          }
+        )
       )
     } else if (st === 'error') {
       const hint = officialCcErrorHint(bootStatus?.error)
       toast.error(
-        (bootStatus?.error || '官方初装失败') + (hint ? `。${hint}` : '')
+        hint
+          ? t('import:bootstrapErrorHint', {
+              message: bootStatus?.error || t('import:bootstrapFailed'),
+              hint,
+            })
+          : bootStatus?.error || t('import:bootstrapFailed')
       )
     }
-  }, [bootStatus])
+  }, [bootStatus, t])
 
   const bootstrap = useMutation({
     mutationFn: (target: string) =>
@@ -406,9 +454,11 @@ export function OnboardFlow() {
     onSuccess: async (data) => {
       if (bootstrapOk(data)) {
         setPendingBootstrap('')
-        toast.success('已重新触发官方初装')
+        toast.success(t('import:bootstrapRestarted'))
       } else {
-        toast.error(`官方初装仍未启动。${bootstrapReason(data)}`)
+        toast.error(
+          t('import:bootstrapNotStarted', { reason: bootstrapReason(data) })
+        )
       }
       await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
       await boot.refetch()
@@ -422,7 +472,7 @@ export function OnboardFlow() {
         method: 'POST',
       }),
     onSuccess: async () => {
-      toast.success('已开机')
+      toast.success(t('import:started'))
       await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
     },
     onError: (error: Error) => toast.error(importErrorMessage(error)),
@@ -447,7 +497,12 @@ export function OnboardFlow() {
       toast.success(`${ok}。${bootstrapReason(bs)}`)
     } else {
       setPendingBootstrap(target)
-      toast.warning(`${ok}，但官方初装未启动。${bootstrapReason(bs)}`)
+      toast.warning(
+        t('import:importWithoutBootstrap', {
+          message: ok,
+          reason: bootstrapReason(bs),
+        })
+      )
     }
     await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
     await qc.invalidateQueries({
@@ -464,7 +519,7 @@ export function OnboardFlow() {
   }
 
   function finishWithoutImport() {
-    toast.success('槽已就绪，可稍后导入账号')
+    toast.success(t('import:slotReady'))
     restart()
   }
 
@@ -488,24 +543,31 @@ export function OnboardFlow() {
   const running = pinned?.status === 'running'
 
   const bootTone = bootDone
-    ? { key: 'bootstrap', text: '初装完成', cls: 'ok' }
+    ? { key: 'bootstrap', text: t('import:bootstrapDone'), cls: 'ok' }
     : bootStatus?.status === 'error'
-      ? { key: 'bootstrap', text: '初装失败', cls: 'bad' }
-      : { key: 'bootstrap', text: '初装进行中', cls: 'warn' }
+      ? { key: 'bootstrap', text: t('import:bootstrapError'), cls: 'bad' }
+      : { key: 'bootstrap', text: t('import:bootstrapInProgress'), cls: 'warn' }
 
   const captions: Record<number, ReactNode> = {
     1: current
       ? current.name || current.id
       : source === 'new'
-        ? '新建一台'
-        : '从空槽里选',
-    2: current ? (hasProxy ? '已绑出口' : '待绑定') : null,
-    3: pinned || current?.has_token ? current?.email || '已导入' : null,
+        ? t('import:createSlot')
+        : t('import:chooseEmpty'),
+    2: current
+      ? hasProxy
+        ? t('import:egressBound')
+        : t('import:pendingBinding')
+      : null,
+    3:
+      pinned || current?.has_token
+        ? current?.email || t('import:imported')
+        : null,
     4: pinned
       ? isCodexVm(pinned) || credType !== 'oauth'
         ? running
-          ? '运行中'
-          : '待开机'
+          ? t('import:running')
+          : t('import:pendingStart')
         : bootTone.text
       : null,
   }
@@ -533,13 +595,13 @@ export function OnboardFlow() {
           n={1}
           step={step}
           done={!!current}
-          title='槽位'
+          title={t('import:slot')}
           lead={
             current
               ? undefined
               : source === 'new'
-                ? '新建一台空槽：定平台、形态、系统与规格。账号在后面两步再接。'
-                : '只列出还没有账号的槽。'
+                ? t('import:newSlotHelp')
+                : t('import:emptySlotHelp')
           }
         >
           {current ? (
@@ -550,16 +612,16 @@ export function OnboardFlow() {
           ) : (
             <div className='space-y-5'>
               <Segmented
-                label='槽位来源'
+                label={t('import:slotSource')}
                 value={source}
                 onChange={setSource}
                 options={[
-                  { value: 'new', label: '新建' },
+                  { value: 'new', label: t('import:create') },
                   {
                     value: 'existing',
                     label: (
                       <span className='inline-flex items-center gap-1.5'>
-                        已有空槽
+                        {t('import:existingEmpty')}
                         <span className='text-xs text-muted-foreground tabular-nums'>
                           {empty.length}
                         </span>
@@ -572,7 +634,7 @@ export function OnboardFlow() {
                 <CreateVmForm draft={draft} variant='flow' />
               ) : empty.length ? (
                 <ChoiceTiles
-                  label='待导入的空槽'
+                  label={t('import:selectEmpty')}
                   layout='list'
                   value={vmId}
                   onChange={(id) => {
@@ -599,7 +661,9 @@ export function OnboardFlow() {
                             vm.machine.disk_gb
                           )
                         : null,
-                      canImportOauth(vm) ? '已绑出口' : '未绑出口',
+                      canImportOauth(vm)
+                        ? t('import:egressBound')
+                        : t('import:noEgress'),
                     ]
                       .filter(Boolean)
                       .join(' · '),
@@ -607,9 +671,9 @@ export function OnboardFlow() {
                 />
               ) : (
                 <div className='rounded-lg border border-dashed px-4 py-6 text-center'>
-                  <p className='text-sm'>没有空槽</p>
+                  <p className='text-sm'>{t('import:noEmptySlots')}</p>
                   <p className='mt-1 text-xs text-muted-foreground'>
-                    每台槽都已有账号。新建一台，或在虚拟机页卸下某台的凭证。
+                    {t('import:noEmptySlotsHelp')}
                   </p>
                   <Button
                     size='sm'
@@ -617,7 +681,7 @@ export function OnboardFlow() {
                     className='mt-3'
                     onClick={() => setSource('new')}
                   >
-                    新建一台
+                    {t('import:createSlot')}
                   </Button>
                 </div>
               )}
@@ -629,13 +693,13 @@ export function OnboardFlow() {
           n={2}
           step={step}
           done={!!current && hasProxy}
-          title='出口'
+          title={t('import:egress')}
           lead={
             !current
-              ? '槽位就绪后绑一条 SOCKS5，换票与转发都走它。'
+              ? t('import:bindSocksHelp')
               : hasProxy
-                ? '已绑到本槽。改选或粘贴新行会盖掉这条。'
-                : '转发必须走槽上的出口。选一条现成的，或粘贴一行新的。'
+                ? t('import:boundEgressHelp')
+                : t('import:egressRequiredHelp')
           }
         >
           {current && !pinned ? (
@@ -647,13 +711,17 @@ export function OnboardFlow() {
           n={3}
           step={step}
           done={!!pinned || !!current?.has_token}
-          title={current && isCodexVm(current) ? '导入 GPT 账号' : '账号'}
+          title={
+            current && isCodexVm(current)
+              ? t('import:importGpt')
+              : t('import:account')
+          }
           lead={
             !current || !hasProxy
-              ? '出口绑好后在这里换票：Cookie、授权链接或官方 Claude Code。'
+              ? t('import:accountAfterProxy')
               : isCodexVm(current)
-                ? 'Codex OAuth 或账号文件（auth.json）。不要用 Setup Token / Console Key。'
-                : 'Cookie、授权链接或官方 Claude Code，都经刚绑的出口。成功后留在本页看初装。'
+                ? t('import:codexCredentialHelp')
+                : t('import:claudeCredentialHelp')
           }
         >
           {current && hasProxy && !pinned ? (
@@ -665,7 +733,7 @@ export function OnboardFlow() {
                 }
               />
               <Button size='sm' variant='ghost' onClick={finishWithoutImport}>
-                先到这里，稍后导入账号
+                {t('import:importLater')}
               </Button>
             </div>
           ) : null}
@@ -675,12 +743,8 @@ export function OnboardFlow() {
           n={4}
           step={step}
           done={false}
-          title='上线'
-          lead={
-            pinned
-              ? undefined
-              : '账号写入后：Claude OAuth 槽自动跑官方初装，完成即可调度。'
-          }
+          title={t('import:online')}
+          lead={pinned ? undefined : t('import:onlineHelp')}
         >
           {pinned ? (
             <div className='space-y-4'>
@@ -689,13 +753,19 @@ export function OnboardFlow() {
                   variant='pill'
                   tone={
                     running
-                      ? { key: 'run', text: '运行中', cls: 'ok' }
-                      : { key: 'run', text: '未开机', cls: 'none' }
+                      ? { key: 'run', text: t('import:running'), cls: 'ok' }
+                      : {
+                          key: 'run',
+                          text: t('import:notStarted'),
+                          cls: 'none',
+                        }
                   }
                 />
                 <span className='min-w-0 text-sm break-all'>
                   {pinned.email ||
-                    (isCodexVm(pinned) ? 'GPT OAuth 已写入' : '凭证已写入')}
+                    (isCodexVm(pinned)
+                      ? t('import:gptOauthSaved')
+                      : t('import:credentialsSaved'))}
                 </span>
                 <div className='ms-auto flex items-center gap-2'>
                   {!running ? (
@@ -706,7 +776,7 @@ export function OnboardFlow() {
                       disabled={start.isPending}
                       loading={start.isPending}
                     >
-                      开机
+                      {t('import:start')}
                     </Button>
                   ) : null}
                 </div>
@@ -714,13 +784,13 @@ export function OnboardFlow() {
 
               {isCodexVm(pinned) ? (
                 <p className='text-xs text-muted-foreground'>
-                  GPT 槽不跑 Claude 官方初装。
+                  {t('import:gptNoBootstrap')}
                 </p>
               ) : credType === 'oauth' ? (
                 <div className='space-y-2 rounded-lg border p-3'>
                   {autoOff ? (
                     <p className='text-xs text-muted-foreground'>
-                      设置里关闭了换票后自动初装，可在下面手动执行。
+                      {t('import:manualBootstrapHelp')}
                     </p>
                   ) : null}
                   <div className='flex items-center gap-2'>
@@ -755,7 +825,7 @@ export function OnboardFlow() {
                       disabled={bootstrap.isPending}
                       loading={bootstrap.isPending}
                     >
-                      重试官方初装
+                      {t('import:retryBootstrap')}
                     </Button>
                   ) : null}
                   {boot.error ? (
@@ -767,18 +837,18 @@ export function OnboardFlow() {
               ) : (
                 <p className='text-xs text-muted-foreground'>
                   {credType === 'apikey'
-                    ? 'Console Key 不跑官方初装。'
-                    : 'Setup Token 不跑官方初装。'}
+                    ? t('import:consoleNoBootstrap')
+                    : t('import:setupNoBootstrap')}
                 </p>
               )}
 
               <div className='flex flex-wrap items-center gap-2 border-t pt-4'>
                 <Button size='sm' onClick={restart}>
-                  再上线一台
+                  {t('import:onboardAnother')}
                 </Button>
                 <Button size='sm' variant='ghost' asChild>
                   <Link to='/vm/$id' params={{ id: pinned.id }}>
-                    打开槽位详情
+                    {t('import:slotDetails')}
                   </Link>
                 </Button>
               </div>
@@ -788,7 +858,7 @@ export function OnboardFlow() {
       </div>
 
       <aside
-        aria-label='进度与规格'
+        aria-label={t('import:progressSpecs')}
         className='sticky top-20 hidden space-y-6 lg:block'
       >
         <Stepper
@@ -801,7 +871,7 @@ export function OnboardFlow() {
         {sheetRows ? (
           <div className='space-y-3 border-t pt-5'>
             <h4 className='text-xs font-medium text-muted-foreground'>
-              {current ? '这台槽' : '将要创建'}
+              {current ? t('import:thisSlot') : t('import:toBeCreated')}
             </h4>
             <SpecSheet rows={sheetRows} />
           </div>

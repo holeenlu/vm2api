@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { JevUsagePanel } from './jev-usage'
@@ -57,8 +58,9 @@ function markup(errors = 0, open = true) {
   }
 }
 describe('JEV usage display', () => {
+  i18n.changeLanguage('zh-CN')
   it('never formats missing cost as zero', () => {
-    expect(usageMoney(null)).toBe('未知')
+    expect(usageMoney(null, '未知')).toBe('未知')
     expect(usageMoney(42000)).toBe('$0.00004200')
   })
   it('distinguishes current accounting from historical balance', () => {

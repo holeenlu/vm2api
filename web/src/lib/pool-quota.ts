@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { expiresAtToMs, fableUsedOf, fableWeeklyFull } from '@/lib/fable-status'
 import { pct, usedPctOf } from '@/lib/format'
@@ -126,8 +127,8 @@ export function poolQuota(vms: Vm[]): {
   }
   return {
     windows: [
-      buildWindow('5h', '5h 窗口', w5),
-      buildWindow('7d', '7d 窗口', w7),
+      buildWindow('5h', t('lib:usage.window', { window: '5h' }), w5),
+      buildWindow('7d', t('lib:usage.window', { window: '7d' }), w7),
       buildWindow('fable', 'Fable 7d', wf),
     ],
     eligible: usable.length,

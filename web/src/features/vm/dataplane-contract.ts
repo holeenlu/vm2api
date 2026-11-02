@@ -1,9 +1,12 @@
+import { t as tVm } from '@/i18n'
+
 export type KernelDataplane = 'wrap' | 'cc' | 'crag'
 
 export const HOP_TRANSPORT_LABEL = 'Rust · cli-hop'
 
-export const DATAPLANE_HINT =
-  '运输固定 Rust cli-hop。cli-node + kernel 是默认（一进程 20 native 槽）；cc-node + kernel 用同一份 wrap kernel；crag + cc-node 用 crag kernel，claude_bin 指向仓内 cc-node。'
+export function dataplaneHint() {
+  return tVm('vm:dataplaneContract.transportIsFixedToRustCliHopDefaultCli')
+}
 
 export function dataplaneLabel(value: unknown): string {
   if (value === 'crag') return 'crag + cc-node'

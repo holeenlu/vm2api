@@ -100,7 +100,12 @@ async function outbound(
     requestLog: { start: () => ({ request_id: 'persona-outbound-fixture' }), finish() {} },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {}, recordUsage() {} },
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      acquire: () => ({ ok: true }),
+      release() {},
+      recordUsage() {},
+    },
     apiScheduler: {
       pick: () => ({
         ok: true,

@@ -106,6 +106,40 @@ test('unsupported classifier runtime stops without counting execution or cooling
   assert.equal(scheduler.selectCalls, 1)
 })
 
+test('attempt ledger keeps an observed ambiguous send when the call throws', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const attempts = new Attempts()
+  const runner = new FailoverRunner({ scheduler, attemptsRepo: attempts })
+  const result = await runner.run({
+    requestId: 'ambiguous-send',
+    model: 'claude-test',
+    canonicalBody: { model: 'claude-test' },
+    callAttempt: async ({ onSendState }) => {
+      onSendState?.('not_sent')
+      onSendState?.('ambiguous')
+      throw Object.assign(new Error('socket closed'), { code: 'ECONNRESET' })
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(attempts.items[0].sendState, 'ambiguous')
+})
+
+test('attempt ledger does not let a stale result downgrade observed send state', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const attempts = new Attempts()
+  const runner = new FailoverRunner({ scheduler, attemptsRepo: attempts })
+  await runner.run({
+    requestId: 'stale-send-state',
+    model: 'claude-test',
+    canonicalBody: { model: 'claude-test' },
+    callAttempt: async ({ onSendState }) => {
+      onSendState?.('ambiguous')
+      return { ok: false, status: 0, sendState: 'not_sent', terminalState: 'transport_error', transportError: true }
+    },
+  })
+  assert.equal(attempts.items[0].sendState, 'ambiguous')
+})
+
 test('invalid panel cache layout stops before execution without rotating or cooling accounts', async () => {
   const scheduler = new Scheduler([candidate(1), candidate(2)])
   const attempts = new Attempts()

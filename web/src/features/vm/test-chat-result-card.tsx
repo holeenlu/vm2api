@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { LifeBuoy } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,7 +12,10 @@ import { EmptyState } from '@/components/empty-state'
 import { StatusMark } from '@/components/status-mark'
 import { vmDiagnoseQueryOptions } from '@/features/vm/use-vm-recovery'
 import { VmRecoveryDialog } from '@/features/vm/vm-recovery-dialog'
-import { firstFailingCheck } from '@/features/vm/vm-recovery-types'
+import {
+  firstFailingCheck,
+  diagnosisCheckLabel,
+} from '@/features/vm/vm-recovery-types'
 import {
   type TestChatLogLine,
   type TestChatResult,
@@ -27,7 +32,7 @@ const LEVEL_CLS: Record<string, string> = {
 
 function fmtNum(n: unknown): string {
   const v = Number(n)
-  return Number.isFinite(v) ? v.toLocaleString() : '—'
+  return Number.isFinite(v) ? v.toLocaleString(i18n.language) : '—'
 }
 
 /**
@@ -45,6 +50,8 @@ export function TestChatResultCard({
   running: boolean
   vm: Vm
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const [recoveryOpen, setRecoveryOpen] = useState(false)
   const status = result?.status
   // 仅上游 5xx 才自动诊断；缺 status 的网络错不请求，避免误报槽位故障。
@@ -60,11 +67,16 @@ export function TestChatResultCard({
     return (
       <Card>
         <CardHeader className='pb-2'>
-          <CardTitle className='text-sm'>结果</CardTitle>
+          <CardTitle className='text-sm'>
+            <Trans ns='vm' i18nKey='detailAccountTab.result' />
+          </CardTitle>
         </CardHeader>
         <CardContent className='pt-0'>
           <p className='text-sm text-muted-foreground'>
-            测试中… 正在走 loopback 发一条真实对话，耗时取决于上游响应。
+            <Trans
+              ns='vm'
+              i18nKey='testChatResultCard.testingSendingARealConversationThroughLoopbackDurationDepends'
+            />
           </p>
         </CardContent>
       </Card>
@@ -75,10 +87,16 @@ export function TestChatResultCard({
     return (
       <Card>
         <CardHeader className='pb-2'>
-          <CardTitle className='text-sm'>结果</CardTitle>
+          <CardTitle className='text-sm'>
+            <Trans ns='vm' i18nKey='detailAccountTab.result' />
+          </CardTitle>
         </CardHeader>
         <CardContent className='pt-0'>
-          <EmptyState reason='尚未运行。选好模型后点「开始测试」。' />
+          <EmptyState
+            reason={tVm(
+              'vm:testChatResultCard.notRunYetSelectAModelThenClickStart'
+            )}
+          />
         </CardContent>
       </Card>
     )
@@ -104,33 +122,45 @@ export function TestChatResultCard({
   const causeLine = !shouldDiagnose
     ? null
     : diagnose.isPending
-      ? '正在检查槽位服务…'
+      ? tVm('vm:testChatResultCard.checkingSlotService')
       : diagnose.data?.ok
-        ? '槽位服务检查正常'
+        ? tVm('vm:testChatResultCard.slotServiceIsHealthy')
         : fail
-          ? `可能原因：${fail.label} — ${fail.message}${
-              fail.code ? ` (${fail.code})` : ''
-            }`
+          ? tVm('vm:testChatResultCard.possibleCause', {
+              label: diagnosisCheckLabel(fail),
+              message: fail.message,
+              value1: fail.code ? ` (${fail.code})` : '',
+            })
           : null
 
   return (
     <Card>
       <CardHeader className='pb-2'>
         <CardTitle className='flex flex-wrap items-center gap-2 text-sm'>
-          结果
-          <StatusMark
-            tone={{
-              key: result.ok ? 'ok' : 'bad',
-              text: result.ok ? '成功' : '失败',
-              cls: result.ok ? 'ok' : 'bad',
+          <Trans
+            ns='vm'
+            i18nKey='testChatResultCard.resultMs'
+            values={{
+              value: result.duration_ms ?? 0,
+              value1: result.model ? ` · ${result.model}` : '',
+              value2: result.status ? ` · HTTP ${result.status}` : '',
+              value3: result.stop_reason ? ` · ${result.stop_reason}` : '',
+            }}
+            components={{
+              part0: (
+                <StatusMark
+                  tone={{
+                    key: result.ok ? 'ok' : 'bad',
+                    text: result.ok
+                      ? tVm('vm:testChatResultCard.succeeded')
+                      : tVm('vm:officialCcCard.failed'),
+                    cls: result.ok ? 'ok' : 'bad',
+                  }}
+                />
+              ),
+              part1: <span className='font-normal text-muted-foreground' />,
             }}
           />
-          <span className='font-normal text-muted-foreground'>
-            {result.duration_ms ?? 0}ms
-            {result.model ? ` · ${result.model}` : ''}
-            {result.status ? ` · HTTP ${result.status}` : ''}
-            {result.stop_reason ? ` · ${result.stop_reason}` : ''}
-          </span>
         </CardTitle>
       </CardHeader>
       <CardContent className='space-y-3 pt-0'>
@@ -143,26 +173,43 @@ export function TestChatResultCard({
         {usage ? (
           <div className='flex flex-wrap gap-3 text-xs text-muted-foreground'>
             <span>
-              入 <b className='text-foreground'>{fmtNum(usage.input_tokens)}</b>
+              <Trans
+                ns='vm'
+                i18nKey='testChatResultCard.input'
+                values={{ formattedNum: fmtNum(usage.input_tokens) }}
+                components={{ part0: <b className='text-foreground' /> }}
+              />
             </span>
             <span>
-              出{' '}
-              <b className='text-foreground'>{fmtNum(usage.output_tokens)}</b>
+              <Trans
+                ns='vm'
+                i18nKey='testChatResultCard.output'
+                values={{ formattedNum: fmtNum(usage.output_tokens) }}
+                components={{ part0: <b className='text-foreground' /> }}
+              />
             </span>
             {usage.cache_read_input_tokens != null ? (
               <span>
-                缓存读{' '}
-                <b className='text-foreground'>
-                  {fmtNum(usage.cache_read_input_tokens)}
-                </b>
+                <Trans
+                  ns='vm'
+                  i18nKey='testChatResultCard.cacheRead'
+                  values={{
+                    formattedNum: fmtNum(usage.cache_read_input_tokens),
+                  }}
+                  components={{ part0: <b className='text-foreground' /> }}
+                />
               </span>
             ) : null}
             {usage.cache_creation_input_tokens != null ? (
               <span>
-                缓存写{' '}
-                <b className='text-foreground'>
-                  {fmtNum(usage.cache_creation_input_tokens)}
-                </b>
+                <Trans
+                  ns='vm'
+                  i18nKey='testChatResultCard.cacheWrite'
+                  values={{
+                    formattedNum: fmtNum(usage.cache_creation_input_tokens),
+                  }}
+                  components={{ part0: <b className='text-foreground' /> }}
+                />
               </span>
             ) : null}
           </div>
@@ -182,7 +229,8 @@ export function TestChatResultCard({
                 </Badge>
               ) : null}
               <p className='text-sm text-[color:var(--status-bad)]'>
-                {result.error.message || '未知错误'}
+                {result.error.message ||
+                  tVm('vm:testChatResultCard.unknownError')}
               </p>
             </div>
             <p className='flex flex-wrap gap-2 text-xs text-muted-foreground'>
@@ -192,7 +240,13 @@ export function TestChatResultCard({
                 </span>
               ) : null}
               {result.error.retry_after != null ? (
-                <span>{result.error.retry_after}s 后可重试</span>
+                <span>
+                  <Trans
+                    ns='vm'
+                    i18nKey='testChatResultCard.retryInS'
+                    values={{ retry_after: result.error.retry_after }}
+                  />
+                </span>
               ) : null}
               {upstream ? <span className='break-all'>{upstream}</span> : null}
             </p>
@@ -204,14 +258,19 @@ export function TestChatResultCard({
               variant='outline'
               onClick={() => setRecoveryOpen(true)}
             >
-              <LifeBuoy />
-              恢复服务
+              <Trans
+                ns='vm'
+                i18nKey='testChatResultCard.recoverService'
+                components={{ part0: <LifeBuoy /> }}
+              />
             </Button>
           </div>
         ) : null}
 
         <div className='space-y-2'>
-          <p className='text-xs font-medium text-muted-foreground'>执行日志</p>
+          <p className='text-xs font-medium text-muted-foreground'>
+            <Trans ns='vm' i18nKey='testChatResultCard.executionLog' />
+          </p>
           {stages.length ? (
             <div className='space-y-2'>
               {stages.map((stage) => (
@@ -239,7 +298,10 @@ export function TestChatResultCard({
             </div>
           ) : (
             <p className='text-xs text-muted-foreground'>
-              没有日志（请求在进入测试流程前就被拒了）。
+              <Trans
+                ns='vm'
+                i18nKey='testChatResultCard.noLogsTheRequestWasRejectedBeforeTestingBegan'
+              />
             </p>
           )}
         </div>
@@ -260,6 +322,8 @@ function LogRow({
   line: TestChatLogLine
   elapsed: number | null
 }) {
+  useTranslation('vm')
+
   return (
     <div className='flex gap-2 pl-1 font-mono text-xs break-all'>
       <span className='shrink-0 text-muted-foreground/60'>[{line.level}]</span>

@@ -26,8 +26,10 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
   credential_refresh_failed: '刷新失败',
   credential_blocked: '凭证不可用',
   organization_disabled: '组织禁用',
+  terms_not_accepted: '未接受条款',
   proxy_required: '未绑代理',
   proxy_desynced: '代理失配',
+  proxy_unavailable: '代理不可用',
   runtime_start_failed: '启动失败',
   circuit_escalated: '熔断升级',
   legacy_unknown: '待确认',
@@ -36,7 +38,15 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
 /** System holds: written and cleared by the system itself (受限 · slot). */
 export const HOLD_MAINTENANCE = 'maintenance'
 export const HOLD_PROXY = 'proxy_cooldown'
+const LEGACY_PROXY_SCHEDULE_OFF =
+  /^(proxy_cooldown|proxy_transport_failure|proxy_or_edge_forbidden|egress_down|proxy_probe_failed|worker_proxy_missing)(?::|\||$)/
 const HOLD_REASONS = Object.freeze({
+  vendor_disabled: '供应商已停用',
+  vendor_paused: '供应商资源已暂停',
+  vendor_archived: '供应商资源已归档',
+  vendor_scope_revoked: '供应范围已撤销',
+  vendor_proxy_disabled: '供应商代理不可用',
+  vendor_policy_unavailable: '供应商状态不可读取',
   [HOLD_MAINTENANCE]: '维护中',
   [HOLD_PROXY]: '代理异常',
 })
@@ -50,7 +60,6 @@ const RESTRICTED_SLOT = [
   { match: /^quota_7d/, text: '7d 限制' },
   { match: /^(account_quota_exhausted|rate_limited|rate_limited_unknown|rpm_limited)$/, text: '限流中' },
   { match: /^[a-z]+_rate_limited$/, text: '限流中' },
-  { match: /^(weekly_split_|fable_split|regular_split|fable_quota)/, text: '周额度切分' },
   {
     match: /^(auth_cooldown|authentication_failed_after_refresh|permission_denied|oauth_refresh_required)$/,
     text: '鉴权冷却',
@@ -87,7 +96,7 @@ const STATELESS = [
   /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|invalid_request|entitlement_required|http_\d+)$/,
   /_repairable$/,
   /^(concurrency_limit|concurrency_disabled|rpm_limit|slot_busy|quota_band_inflight|refresh_pending)$/,
-  /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_plan_denied|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
+  /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_usage_limit|fable_quota|fable_plan_denied|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
   /^(quota_guard_request_too_large|no_eligible_accounts|pool_overload_cooldown|pool_rate_limited|vm_unschedulable)$/,
   /^(wrap_connection_error|worker_transport_failure|worker_timeout|upstream_network_error|stream_interrupted|empty_response|incomplete_assistant|downstream_committed_or_incomplete|provider_timeout|client_cancelled|oauth_unconfirmed)$/,
   // Seat placement labels (why this VM was picked), not a slot condition.
@@ -121,6 +130,31 @@ export function isUnschedulableReason(reason) {
   return stateOfReason(reason)?.state === 'unschedulable'
 }
 
+/** Old proxy failures were persisted as schedule_off; they are self-healing holds. */
+export function clearLegacyProxyScheduleOff(vm) {
+  if (!vm) return false
+  // Some pre-four-state writers only persisted schedule_disabled_reason and
+  // never copied it into schedule_off_reason. Prefer the explicit operator
+  // reason when present so a real manual off can never be mistaken for a
+  // proxy hold; fall back to the derived legacy reason for old records.
+  const explicit = String(vm.schedule_off_reason || '').trim()
+  const legacy = explicit || String(vm.schedule_disabled_reason || '').trim()
+  const proxyHold = vm.schedule_hold?.reason === HOLD_PROXY
+  const legacyOff =
+    vm.schedule_off === true ||
+    (vm.schedulable === false && vm.schedule_manual === true && !vm.unschedulable && !vm.schedule_hold)
+  const legacyProxyOff = legacyOff && LEGACY_PROXY_SCHEDULE_OFF.test(legacy)
+  if (!proxyHold && !legacyProxyOff) return false
+  if (proxyHold) delete vm.schedule_hold
+  if (legacyProxyOff) {
+    delete vm.schedule_off
+    delete vm.schedule_off_reason
+  }
+  stamp(vm, Date.now())
+  deriveScheduleFields(vm)
+  return true
+}
+
 /**
  * Operator actions allowed to clear 不可调度. Background refresh / probe are not.
  * `credential_present` is the one system exception: a slot parked only for
@@ -145,19 +179,38 @@ function stamp(vm, now) {
   vm.updated_at = vm.schedule_updated_at
 }
 
+const VENDOR_DERIVED_REASONS = new Set(['vendor_paused', 'vendor_disabled'])
+
+// Older migration code mistook supplier gates for permanent slot failures.
+// Repair only that exact provenance; real failures and other holds remain owned.
+function clearMisclassifiedVendorState(vm) {
+  if (vm.unschedulable?.reason !== 'legacy_unknown' || !VENDOR_DERIVED_REASONS.has(vm.unschedulable.detail?.raw))
+    return false
+  delete vm.unschedulable
+  return true
+}
+
 /**
  * Re-derive the legacy trio from the owned fields. `paused` is only the UI
  * mark of a running slot out of the pool: it always clears once the slot is
  * schedulable again, and is set only when the caller does not preserve status.
  */
 export function deriveScheduleFields(vm, { preserveStatus = true } = {}) {
+  clearMisclassifiedVendorState(vm)
   const off = vm.schedule_off === true
   const bad = vm.unschedulable?.reason || null
   const hold = vm.schedule_hold?.reason || null
-  const schedulable = !off && !bad && !hold
+  const vendorDisabled = vm.vendor_disabled === true || vm.vendor_resource_paused === true
+  const schedulable = !vendorDisabled && !off && !bad && !hold
   vm.schedulable = schedulable
   vm.schedule_manual = off
-  vm.schedule_disabled_reason = off ? vm.schedule_off_reason || 'disabled' : bad || hold || null
+  vm.schedule_disabled_reason = vendorDisabled
+    ? vm.vendor_resource_paused
+      ? 'vendor_paused'
+      : 'vendor_disabled'
+    : off
+      ? vm.schedule_off_reason || 'disabled'
+      : bad || hold || null
   const status = String(vm.status || '').toLowerCase()
   if (schedulable && status === 'paused') vm.status = 'running'
   if (!preserveStatus && !schedulable && status === 'running') vm.status = 'paused'
@@ -227,9 +280,15 @@ const LEGACY_START_FAILED = /runtime start failed|start|boot|container|docker|ke
  */
 export function migrateScheduleRecord(vm) {
   if (!vm || typeof vm !== 'object') return false
+  if (clearMisclassifiedVendorState(vm)) {
+    deriveScheduleFields(vm)
+    return true
+  }
   if (vm.schedule_off === true || vm.unschedulable || vm.schedule_hold) return false
   if (vm.schedulable !== false) return false
   const reason = String(vm.schedule_disabled_reason || '').trim()
+  // Supplier flags already own these derived reasons, including in record copies.
+  if (VENDOR_DERIVED_REASONS.has(reason) && vm.schedule_manual !== true) return false
   if (vm.schedule_manual === true || reason === 'disabled' || reason === 'stopped' || !reason) {
     vm.schedule_off = true
     if (reason && reason !== 'disabled') vm.schedule_off_reason = reason.slice(0, 64)
@@ -354,6 +413,7 @@ export function resolveSlotState({
     restriction_scope: scope,
     restriction_soft: soft,
   })
+  if (vm.vendor_disabled === true) return restricted('vendor_disabled', null)
   if (vm.schedule_hold?.reason) return restricted(vm.schedule_hold.reason, null)
   const until = Number(restrictionUntil) || Number(availability?.until) || 0
   const live = until > now

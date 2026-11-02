@@ -23,12 +23,14 @@ function exportSince(window: ExportWindow): string | null {
 export function exportQuery(
   opts: ExportOptions,
   filters: LogsFilterState,
-  muted: readonly string[]
+  muted: readonly string[],
+  errorsOnly = false
 ): URLSearchParams {
   const since = exportSince(opts.window)
   let qs: URLSearchParams
   if (opts.scope === 'current') {
     const api = filtersToApi(filters, muted)
+    if (errorsOnly) api.errorsOnly = true
     if (opts.includeMuted && !api.errorClass) {
       delete api.excludeErrorClass
       api.includeMuted = true
@@ -49,6 +51,7 @@ export function exportQuery(
     }
     if (since) qs.set('start_time', since)
   }
+  if (filters.scope === 'mine') qs.set('scope', 'mine')
   qs.set('format', opts.format)
   qs.set('limit', String(opts.limit))
   return qs

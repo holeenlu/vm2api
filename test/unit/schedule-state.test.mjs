@@ -10,6 +10,8 @@ import {
   applyHold,
   applyScheduleOff,
   applyUnschedulable,
+  clearLegacyProxyScheduleOff,
+  deriveScheduleFields,
   migrateScheduleRecord,
   pickScheduleFields,
   resolveSlotState,
@@ -131,6 +133,44 @@ test('mutators keep the legacy trio in step', () => {
   assert.equal(vm.unschedulable, undefined)
 })
 
+test('legacy proxy schedule_off is cleared as a self-healing restriction', () => {
+  const vm = {
+    id: 'vm-proxy-legacy',
+    status: 'paused',
+    schedule_off: true,
+    schedule_manual: true,
+    schedule_off_reason: 'proxy_cooldown',
+    schedulable: false,
+  }
+  assert.equal(clearLegacyProxyScheduleOff(vm), true)
+  assert.equal(vm.schedule_off, undefined)
+  assert.equal(vm.schedule_off_reason, undefined)
+  assert.equal(vm.schedulable, true)
+  assert.equal(vm.status, 'running')
+
+  const derived = {
+    schedule_off: true,
+    schedule_manual: true,
+    schedule_disabled_reason: 'proxy_cooldown',
+    schedulable: false,
+  }
+  assert.equal(clearLegacyProxyScheduleOff(derived), true)
+  assert.equal(derived.schedule_off, undefined)
+  assert.equal(derived.schedulable, true)
+
+  const held = {
+    schedule_hold: { reason: 'proxy_cooldown', detail: { tag: 'px-1' } },
+    schedulable: false,
+  }
+  assert.equal(clearLegacyProxyScheduleOff(held), true)
+  assert.equal(held.schedule_hold, undefined)
+  assert.equal(held.schedulable, true)
+
+  const manual = { schedule_off: true, schedule_off_reason: 'operator', schedulable: false }
+  assert.equal(clearLegacyProxyScheduleOff(manual), false)
+  assert.equal(manual.schedule_off, true)
+})
+
 test('only operator actions clear 不可调度', () => {
   const vm = { schedulable: true }
   applyUnschedulable(vm, 'oauth_revoked')
@@ -148,6 +188,19 @@ test('only operator actions clear 不可调度', () => {
   applyClearUnschedulable(empty, { by: 'credential_present' })
   assert.equal(empty.schedulable, true)
   assert.throws(() => applyUnschedulable({}, 'quota_5h_header'), /not an unschedulable reason/)
+})
+
+test('clearing a proxy hold preserves an independent operator schedule-off', () => {
+  const vm = { id: 'manual-off-with-proxy-hold', status: 'running', schedulable: true }
+  applyHold(vm, 'proxy_cooldown', { tag: 'proxy-a' })
+  applyScheduleOff(vm, true, { reason: 'operator' })
+
+  assert.equal(clearLegacyProxyScheduleOff(vm), true)
+  assert.equal(vm.schedule_hold, undefined)
+  assert.equal(vm.schedule_off, true)
+  assert.equal(vm.schedule_off_reason, 'operator')
+  assert.equal(vm.schedule_manual, true)
+  assert.equal(vm.schedulable, false)
 })
 
 test('migration maps every legacy reason and is idempotent', () => {
@@ -190,6 +243,73 @@ test('migration maps every legacy reason and is idempotent', () => {
     pickScheduleFields({ schedulable: false, schedule_disabled_reason: 'oauth_revoked' }).unschedulable.reason,
     'oauth_revoked',
   )
+})
+
+test('supplier pause and disable survive migration without becoming permanent failures', () => {
+  for (const [flag, reason] of [
+    ['vendor_resource_paused', 'vendor_paused'],
+    ['vendor_disabled', 'vendor_disabled'],
+  ]) {
+    const vm = deriveScheduleFields({ status: 'running', [flag]: true })
+    assert.equal(vm.schedule_disabled_reason, reason)
+    assert.equal(migrateScheduleRecord(vm), false)
+    assert.equal(vm.unschedulable, undefined)
+    assert.deepEqual(pickScheduleFields(vm), {})
+    vm[flag] = false
+    deriveScheduleFields(vm)
+    assert.equal(vm.schedulable, true)
+    assert.equal(vm.schedule_disabled_reason, null)
+  }
+})
+
+test('supplier resume repairs only legacy_unknown records sourced from supplier state', () => {
+  for (const [flag, raw] of [
+    ['vendor_resource_paused', 'vendor_paused'],
+    ['vendor_disabled', 'vendor_disabled'],
+  ]) {
+    const stale = {
+      status: 'running',
+      [flag]: true,
+      schedulable: false,
+      schedule_disabled_reason: raw,
+      unschedulable: { reason: 'legacy_unknown', detail: { raw }, at: null },
+    }
+    const migrated = structuredClone(stale)
+    assert.equal(migrateScheduleRecord(migrated), true)
+    assert.equal(migrated.unschedulable, undefined)
+    assert.equal(migrated.schedulable, false, 'migration must preserve the supplier block')
+    assert.equal(migrated.schedule_disabled_reason, raw)
+    assert.equal(migrateScheduleRecord(migrated), false)
+    assert.deepEqual(pickScheduleFields(stale), {})
+
+    for (const extra of [
+      {},
+      { schedule_off: true, schedule_off_reason: 'operator' },
+      { schedule_hold: { reason: 'maintenance', detail: { tag: 'worker_reload' } } },
+      { unschedulable: { reason: 'oauth_revoked', detail: null } },
+      { unschedulable: { reason: 'legacy_unknown', detail: { raw: 'unrecognized_failure' } } },
+    ]) {
+      const vm = { ...structuredClone(stale), ...structuredClone(extra), [flag]: false }
+      deriveScheduleFields(vm)
+      const expected = extra.schedule_off
+        ? 'off'
+        : extra.schedule_hold
+          ? 'restricted'
+          : extra.unschedulable
+            ? 'unschedulable'
+            : 'on'
+      assert.equal(vm.schedulable, expected === 'on')
+      assert.equal(resolveSlotState({ vm }).schedule_state, expected)
+      assert.deepEqual(vm.unschedulable, extra.unschedulable)
+      assert.deepEqual(vm.schedule_hold, extra.schedule_hold)
+      assert.equal(vm.schedule_off_reason, extra.schedule_off_reason)
+      assert.equal(
+        resolveSlotState({ vm, availability: { key: 'cool', reason: 'cooldown', until: Date.now() + 60000 } })
+          .schedule_state,
+        expected === 'on' ? 'restricted' : expected,
+      )
+    }
+  }
 })
 
 test('resolveSlotState: off > unschedulable > restricted > on', () => {
@@ -273,4 +393,11 @@ test('resolveSlotState reads records written before the migration', () => {
     availability: { key: 'quota', reason: 'quota_5h_header' },
   })
   assert.equal(leftover.schedule_state, 'restricted')
+})
+
+test('Fable-only quota reasons never restrict the whole slot', () => {
+  for (const code of ['fable_usage_limit', 'fable_quota']) {
+    assert.equal(stateOfReason(code).state, 'on')
+    assert.equal(stateOfReason(code).scope, null)
+  }
 })
