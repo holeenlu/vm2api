@@ -1,3 +1,5 @@
+import { t as tVm } from '@/i18n'
+
 export type CheckStatus = 'ok' | 'warn' | 'error' | 'skip'
 
 export type CheckId =
@@ -64,5 +66,37 @@ export function firstRecoverFailure(report: RecoverReport): {
   if (step) return { code: step.code, message: step.message }
   const check = firstFailingCheck(report.diagnosis)
   if (check) return { code: check.code, message: check.message }
-  return { code: null, message: '恢复未完成' }
+  return { code: null, message: tVm('vm:vmRecoveryTypes.recoveryIncomplete') }
+}
+
+/** Stable check IDs are protocol data; labels are resolved only for display. */
+const CHECK_LABEL_KEYS: Record<CheckId, string> = {
+  record: 'vm:recoveryChecks.record',
+  credential: 'vm:recoveryChecks.credential',
+  node_link: 'vm:recoveryChecks.nodeLink',
+  relay: 'vm:recoveryChecks.relay',
+  egress: 'vm:recoveryChecks.egress',
+  container: 'vm:recoveryChecks.container',
+  kernel: 'vm:recoveryChecks.kernel',
+  watchdog: 'vm:recoveryChecks.watchdog',
+  schedule: 'vm:recoveryChecks.schedule',
+}
+const STEP_LABEL_KEYS: Record<RecoverStep['id'], string> = {
+  node_link: 'vm:recoveryChecks.nodeLink',
+  relay: 'vm:recoveryChecks.relay',
+  stop: 'vm:recoverySteps.stop',
+  start: 'vm:recoverySteps.start',
+  watchdog_reset: 'vm:recoverySteps.watchdogReset',
+}
+export function diagnosisCheckLabel(
+  check: Pick<DiagnosisCheck, 'id' | 'label'>
+): string {
+  const key = CHECK_LABEL_KEYS[check.id]
+  return key ? tVm(key) : check.label
+}
+export function recoveryStepLabel(
+  step: Pick<RecoverStep, 'id' | 'label'>
+): string {
+  const key = STEP_LABEL_KEYS[step.id]
+  return key ? tVm(key) : step.label
 }

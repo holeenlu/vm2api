@@ -1,13 +1,5 @@
-/**
- * `POST /api/panel/vms/:id/test-chat` 的返回契约。
- *
- * 注意两层 `ok`：外层 envelope 的 `ok` 恒为 true（`panel.ok()` 包的），
- * 业务成败在剥壳后的这个 `ok` 里。`lib/api.ts` 的 unwrapEnvelope 只看外层，
- * 所以调用方必须自己判 `data.ok`，不能指望 mutation 的 onError。
- *
- * 网关共 8 个 return 分支：3 个早退分支连 `vm_id` 都没有，5 个有部分字段，
- * 只有主分支字段齐全 —— 故除 `ok`/`log`/`duration_ms` 外全部可选。
- */
+import { t as tVm } from '@/i18n'
+import { localizedOption } from './localized-option'
 
 export type TestChatLogLevel = 'info' | 'error' | 'ok' | 'content'
 
@@ -75,12 +67,20 @@ export type TestChatStage = {
 }
 
 const STAGE_RULES: [string, string, RegExp][] = [
-  ['start', '槽位', /^(开始测试|状态 |推理 )/],
-  ['cred', '凭证', /^(凭证 |无 OAuth)/],
-  ['proxy', '代理', /^(代理 |未绑定 SOCKS5)/],
-  ['model', '模型', /^(模型|prompt=)/],
-  ['send', '发起请求', /^(入站 |loopback |\/v1 loopback)/],
-  ['result', '结果', /^(成功 |失败 |命中槽 |usage |request_id=)/],
+  localizedOption('start', 'vm:testChatTypes.slot', /^(开始测试|状态 |推理 )/),
+  localizedOption('cred', 'vm:detailTestTab.credentials', /^(凭证 |无 OAuth)/),
+  localizedOption('proxy', 'vm:detailPage.proxy', /^(代理 |未绑定 SOCKS5)/),
+  localizedOption('model', 'vm:detailCostByModel.model', /^(模型|prompt=)/),
+  localizedOption(
+    'send',
+    'vm:testChatTypes.sendRequest',
+    /^(入站 |loopback |\/v1 loopback)/
+  ),
+  localizedOption(
+    'result',
+    'vm:detailAccountTab.result',
+    /^(成功 |失败 |命中槽 |usage |request_id=)/
+  ),
 ]
 
 /**
@@ -93,7 +93,7 @@ export function groupTestChatStages(log: TestChatLogLine[]): TestChatStage[] {
     if (line.level === 'content') continue
     const rule = STAGE_RULES.find(([, , re]) => re.test(line.message))
     const key = rule ? rule[0] : 'other'
-    const label = rule ? rule[1] : '其它'
+    const label = rule ? rule[1] : tVm('vm:testChatTypes.other')
     let stage = out.find((s) => s.key === key)
     if (!stage) {
       stage = { key, label, lines: [], failed: false }

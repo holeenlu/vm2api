@@ -84,7 +84,7 @@ function geoLookupEndpointForIp(ip, template) {
   return `${base}/${encodeURIComponent(ip)}?fields=status,message,query,country,countryCode,regionName,city,timezone,isp`
 }
 
-async function fetchThroughProxy(url, proxyUrl, { timeoutMs, fetchImpl, accept } = {}) {
+async function fetchThroughProxy(url, proxyUrl, { timeoutMs, fetchImpl, accept, signal } = {}) {
   const timeout = Math.max(1000, Number(timeoutMs) || DEFAULT_GEO_TIMEOUT_MS)
   const { default: nodeFetch } = await import('node-fetch')
   const impl = fetchImpl || nodeFetch
@@ -93,10 +93,11 @@ async function fetchThroughProxy(url, proxyUrl, { timeoutMs, fetchImpl, accept }
     const { createProxyAgent } = await import('./proxy-agent.mjs')
     // Geo describes the proxy exit, so resolve its destination there too.
     // Keep the shared agent factory's explicit SOCKS5 semantics unchanged.
-    const geoProxyUrl = String(proxyUrl).replace(/^socks5:/i, 'socks5h:')
+    const geoProxyUrl = String(proxyUrl)
     opts.agent = createProxyAgent(geoProxyUrl)
   }
-  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(timeout)
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+    opts.signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout)
   try {
     return await impl(url, opts)
   } catch (error) {
@@ -108,13 +109,15 @@ async function fetchThroughProxy(url, proxyUrl, { timeoutMs, fetchImpl, accept }
  * Resolve the exit node's geolocation.
  * @returns {Promise<{ok: true, geo: object} | {ok: false, error: string}>}
  */
-export async function lookupProxyGeo(proxyUrl, { endpoint, timeoutMs, fetchImpl, ipv6Mode } = {}) {
+export async function lookupProxyGeo(proxyUrl, { endpoint, timeoutMs, fetchImpl, ipv6Mode, signal } = {}) {
   const url = endpoint || process.env.KIN_PROXY_GEO_URL || DEFAULT_GEO_ENDPOINT
   const res = await fetchThroughProxy(url, proxyUrl, {
     timeoutMs,
     fetchImpl,
     accept: 'application/json',
+    signal,
   })
+  signal?.throwIfAborted()
   if (res?.error) {
     // The default service has no IPv6 transport. In the explicitly enabled
     // mode, verify an IPv6 exit before querying metadata over the host route.

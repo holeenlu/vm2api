@@ -143,6 +143,14 @@ for (const stream of [false, true]) {
         stickyRouter: {},
         accountQuota: {},
         apiKeyStore: {
+          canAccept: (record) => ({ ok: true, record }),
+          db: {
+            isTransaction: false,
+            exec() {},
+            prepare() {
+              return { get: () => null }
+            },
+          },
           acquire: () => ({ ok: true }),
           release() {},
           recordUsage: (_key, usage, options) => charged.push({ usage, options }),

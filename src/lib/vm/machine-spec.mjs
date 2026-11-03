@@ -1,6 +1,6 @@
 /**
  * Global `routing.vm` defaults and the per-slot `vm.machine` record.
- * Docker slots consume memory and an optional explicit CPU quota; KVM uses its own spec. Invalid values
+ * New Docker slots use memory and vcpus as CPU quota unless explicitly overridden; KVM uses its own spec. Invalid values
  * never persist through normalize (defaults) or a PUT/create patch (400).
  */
 import crypto from 'node:crypto'
@@ -17,8 +17,8 @@ export const VM_CPU_MODELS = Object.freeze([
 
 export const VM_CONFIG_DEFAULTS = Object.freeze({
   default_runtime: 'docker',
-  memory: '512m',
-  vcpus: 2,
+  memory: '4g',
+  vcpus: 4,
   disk_gb: 20,
   cpu_model: 'host',
   smbios: Object.freeze({
@@ -238,7 +238,7 @@ function randomDiskSerial() {
   return `KIN${crypto.randomBytes(8).toString('hex')}`.slice(0, 20)
 }
 
-/** Explicit per-slot Docker quota. Missing/zero preserves the historic unlimited CPU policy. */
+/** Persisted Docker quota. Older records without this field and explicit zero remain unlimited. */
 export function slotDockerCpus(vm) {
   const machine = vm?.machine
   if (!machine || !Object.hasOwn(machine, 'docker_cpus')) return 0
@@ -272,7 +272,7 @@ export function resolveMachineSpec({ config, overrides, runtime } = {}) {
   const brand = randomSmbios()
   return {
     memory: base.memory,
-    ...(Object.hasOwn(base, 'docker_cpus') ? { docker_cpus: base.docker_cpus } : {}),
+    ...((runtime ?? base.default_runtime) === 'docker' ? { docker_cpus: base.docker_cpus ?? base.vcpus } : {}),
     vcpus: base.vcpus,
     disk_gb: base.disk_gb,
     cpu_model: base.cpu_model,
