@@ -9,6 +9,7 @@ import {
   isPersistentSetupTokenSession,
   looksLikeOfficialSetupToken,
   officialSetupTokenToOauth,
+  pastedAccessTokenToOauth,
   pickPreferredSetupToken,
   stopClaudeSetupTokenSession,
 } from '../../src/lib/oauth/claude-setup-token.mjs'
@@ -63,6 +64,22 @@ test('officialSetupTokenToOauth is 1-year official-setup-token without refresh',
 
   assert.ok(oauth.expires_at > Date.now() + 360 * 24 * 60 * 60 * 1000)
   assert.throws(() => officialSetupTokenToOauth('sk-ant-ort01-nope'), /一年期/)
+})
+
+test('pastedAccessTokenToOauth recognises a pasted official oat without type hints', () => {
+  const token = 'sk-ant-oat01-' + 'd'.repeat(95)
+  const oauth = pastedAccessTokenToOauth(token, {})
+  assert.equal(oauth.mode, 'official-setup-token')
+  assert.equal(oauth.source, 'claude-setup-token')
+  assert.equal(oauth.scope, 'user:inference')
+  assert.equal(oauth.refresh_token, '')
+  assert.ok(oauth.expires_at > Date.now() + 360 * 24 * 60 * 60 * 1000)
+
+  const full = pastedAccessTokenToOauth('opaque-access', { refresh_token: 'r', scope: 'inference' })
+  assert.equal(full.mode, 'setup-token')
+  const plain = pastedAccessTokenToOauth('opaque-access', { refresh_token: 'r' })
+  assert.equal(plain.mode, undefined)
+  assert.equal(plain.source, 'access-token')
 })
 
 test('setup-token session stays reusable after a 400 until force regenerate', () => {

@@ -572,8 +572,8 @@ test('panel shell prints live 系统特征 before the prompt', () => {
   assert.match(ran.stdout, new RegExp(`内核\\s+${escapeRe(krel)}`))
   assert.match(ran.stdout, new RegExp(`架构\\s+${escapeRe(kmach)}`))
   assert.match(ran.stdout, /CPU\s+\S/)
-  assert.match(ran.stdout, /核数\s+\d+/)
-  assert.match(ran.stdout, /内存\s+\d+[GMk]/)
+  assert.match(ran.stdout, process.platform === 'linux' ? /核数\s+\d+/ : /核数\s+(\d+|unknown)/)
+  assert.match(ran.stdout, process.platform === 'linux' ? /内存\s+\d+[GMk]/ : /内存\s+(\d+[GMk]|unknown)/)
   assert.match(ran.stdout, /磁盘\s+\S/)
   assert.match(ran.stdout, /MAC\s+\S/)
   assert.match(ran.stdout, /厂商\s+\S/)
@@ -658,4 +658,41 @@ test('panel shell 系统特征 reads the slot computer and cgroup limits before 
   assert.match(ran.stdout, /核数\s+8$/m)
   assert.match(ran.stdout, /内存\s+8G$/m)
   fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('supplier terminal launches only auth login and rechecks revoked tickets', async () => {
+  const { supplierLoginLaunch } = await import('../../src/lib/vm/slot-shell.mjs')
+  assert.deepEqual(supplierLoginLaunch('/opt/tapmodels/cli-node').cmd, ['/opt/tapmodels/cli-node', 'auth', 'login'])
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'supplier-login-ticket-'))
+  fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'vms', 'vm-02.json'), JSON.stringify({ id: 'vm-02' }))
+  let allowed = true
+  const shell = createSlotShell({
+    projectRoot: root,
+    authLoginReady: async () => {},
+    upgradeLoginReady: async () => {},
+    logger: { warn() {} },
+  })
+  try {
+    assert.equal((await shell.issueTicket('vm-02', { restrictedLogin: true })).status, 403)
+    const ticket = await shell.issueTicket('vm-02', {
+      login: true,
+      restrictedLogin: true,
+      authorize: () => {
+        if (!allowed) throw new Error('revoked')
+      },
+    })
+    assert.equal(ticket.ok, true)
+    allowed = false
+    const writes = []
+    shell.handleUpgrade(
+      { url: `/api/panel/vms/vm-02/shell?ticket=${ticket.ticket}&login=1` },
+      { write: (s) => writes.push(String(s)), destroy() {} },
+      Buffer.alloc(0),
+    )
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.ok(writes.some((s) => s.includes('403 Forbidden')))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

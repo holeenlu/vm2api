@@ -1,17 +1,21 @@
 import { queryOptions } from '@tanstack/react-query'
 import type { ApiKeysPayload, KeyStatsPayload } from '@/types/panel-keys'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 
-export function apiKeysQueryOptions() {
+export function apiKeysQueryOptions(scope: 'all' | 'mine' = 'all') {
   return queryOptions({
-    queryKey: ['panel', 'api-keys'] as const,
-    queryFn: () => api<ApiKeysPayload>('/api/panel/api-keys'),
+    queryKey: panelQueryKeys.apiKeys(scope),
+    queryFn: () =>
+      api<ApiKeysPayload>(
+        `/api/panel/api-keys${scope === 'mine' ? '?scope=mine' : ''}`
+      ),
   })
 }
 
 export function keyStatsQueryOptions(id: string) {
   return queryOptions({
-    queryKey: ['panel', 'api-keys', id, 'stats'] as const,
+    queryKey: panelQueryKeys.apiKeyStats(id),
     queryFn: () =>
       api<KeyStatsPayload>(
         `/api/panel/api-keys/${encodeURIComponent(id)}/stats`

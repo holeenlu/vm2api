@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { ClusterApiNode } from '@/types/panel-cluster'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -16,12 +17,14 @@ const looksLikeIp = (s: string) =>
 
 /** 槽位流量经 TLS 直连节点上的 kin-slot-gate，每个请求一条 TCP；不通时自动走 SSH。 */
 export function DirectLinkConfig({ node }: { node: ClusterApiNode }) {
+  const { t } = useTranslation('cluster')
+
   if (node.platform === 'darwin') {
     return (
       <section className='space-y-1 border-t pt-4'>
-        <h3 className='text-sm font-medium'>直连通道</h3>
+        <h3 className='text-sm font-medium'>{t('direct.title')}</h3>
         <p className='text-xs text-muted-foreground'>
-          macOS 原生节点暂不支持直连通道，槽位流量走 SSH。
+          {t('direct.macUnsupported')}
         </p>
       </section>
     )
@@ -30,6 +33,8 @@ export function DirectLinkConfig({ node }: { node: ClusterApiNode }) {
 }
 
 function DirectLinkForm({ node }: { node: ClusterApiNode }) {
+  const { t } = useTranslation('cluster')
+
   const qc = useQueryClient()
   const link = node.direct_link || null
   const [address, setAddress] = useState(
@@ -49,8 +54,8 @@ function DirectLinkForm({ node }: { node: ClusterApiNode }) {
       }),
     onSuccess: (saved) => {
       const next = saved.direct_link
-      if (next?.state === 'ok') toast.success('直连通道已生效')
-      else toast.warning(`已保存，${directLinkText(next)}`)
+      if (next?.state === 'ok') toast.success(t('direct.enabled'))
+      else toast.warning(t('savedDetails', { value1: directLinkText(next) }))
       done()
     },
     onError: (err) => toast.error(err.message),
@@ -58,7 +63,7 @@ function DirectLinkForm({ node }: { node: ClusterApiNode }) {
   const clear = useMutation({
     mutationFn: () => api(path, { method: 'DELETE' }),
     onSuccess: () => {
-      toast.success('已关闭直连通道，槽位流量改走 SSH')
+      toast.success(t('direct.disabled'))
       setAddress('')
       setPort('')
       done()
@@ -69,22 +74,20 @@ function DirectLinkForm({ node }: { node: ClusterApiNode }) {
   return (
     <section className='space-y-3 border-t pt-4'>
       <div className='flex items-baseline justify-between gap-2'>
-        <h3 className='text-sm font-medium'>直连通道</h3>
+        <h3 className='text-sm font-medium'>{t('direct.title')}</h3>
         <span className='text-xs text-muted-foreground'>
           {directLinkText(link)}
         </span>
       </div>
-      <p className='text-xs text-muted-foreground'>
-        槽位请求改为每次一条 TLS 直连，不再挤在 SSH 长连接里；直连不通时自动退回
-        SSH。节点上会起 kin-slot-gate 监听该端口，请在节点防火墙只对控制面的出口
-        IP 放行。
-      </p>
+      <p className='text-xs text-muted-foreground'>{t('direct.description')}</p>
       {link?.gate_error ? (
-        <p className='text-xs text-destructive'>节点端：{link.gate_error}</p>
+        <p className='text-xs text-destructive'>
+          {t('direct.nodeEndpoint', { value1: link.gate_error })}
+        </p>
       ) : null}
       <div className='grid grid-cols-[1fr_7rem] gap-2'>
         <div className='space-y-1'>
-          <Label htmlFor={`pl-addr-${node.id}`}>节点 IP</Label>
+          <Label htmlFor={`pl-addr-${node.id}`}>{t('direct.nodeIp')}</Label>
           <Input
             id={`pl-addr-${node.id}`}
             className='h-8 font-mono text-xs'
@@ -95,7 +98,7 @@ function DirectLinkForm({ node }: { node: ClusterApiNode }) {
           />
         </div>
         <div className='space-y-1'>
-          <Label htmlFor={`pl-port-${node.id}`}>端口</Label>
+          <Label htmlFor={`pl-port-${node.id}`}>{t('port')}</Label>
           <Input
             id={`pl-port-${node.id}`}
             className='h-8 font-mono text-xs'
@@ -114,7 +117,7 @@ function DirectLinkForm({ node }: { node: ClusterApiNode }) {
           disabled={busy || !address.trim()}
           onClick={() => save.mutate()}
         >
-          {link ? '保存' : '启用'}
+          {link ? t('save') : t('enable')}
         </Button>
         {link ? (
           <Button
@@ -123,7 +126,7 @@ function DirectLinkForm({ node }: { node: ClusterApiNode }) {
             disabled={busy}
             onClick={() => clear.mutate()}
           >
-            关闭直连
+            {t('direct.disable')}
           </Button>
         ) : null}
       </div>

@@ -6,6 +6,7 @@ import type {
   VmKernelSnapshot,
   VmProxySnap,
 } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import type {
   ConcurrencyInfo,
   RpmInfo,
@@ -63,17 +64,24 @@ function OpenaiWindowStats({
 }: {
   billing?: Record<string, unknown> | null
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const windows = [
     ['5h', periodOf(billing, 'window_5h')],
     ['7d', periodOf(billing, 'window_7d')],
-    ['今日', periodOf(billing, 'today')],
+    [tVm('vm:detailAccountTab.today'), periodOf(billing, 'today')],
   ] as const
   return (
     <Card>
       <CardHeader className='pb-2'>
-        <CardTitle className='text-sm'>计费窗口</CardTitle>
+        <CardTitle className='text-sm'>
+          <Trans ns='vm' i18nKey='detailOverviewTab.billingWindows' />
+        </CardTitle>
         <p className='text-xs text-muted-foreground'>
-          官方价 · 5 小时、7 天和今日
+          <Trans
+            ns='vm'
+            i18nKey='detailOverviewTab.officialPricing5Hours7DaysAndToday'
+          />
         </p>
       </CardHeader>
       <CardContent className='grid gap-3 sm:grid-cols-3'>
@@ -84,12 +92,29 @@ function OpenaiWindowStats({
               {fmtUsd(row?.cost || 0, 2)}
             </div>
             <div className='mt-1 space-y-0.5 font-mono text-[11px] text-muted-foreground tabular-nums'>
-              <div>{fmtNum(row?.requests || 0)} req</div>
               <div>
-                入 {fmtNum(row?.input || 0)} · 出 {fmtNum(row?.output || 0)}
+                {fmtNum(row?.requests || 0)}{' '}
+                <Trans ns='vm' i18nKey='units.requestsShort' />
               </div>
               <div>
-                缓存 {fmtNum(row?.read || 0)} / {fmtNum(row?.write || 0)}
+                <Trans
+                  ns='vm'
+                  i18nKey='detailOverviewTab.inputOutput'
+                  values={{
+                    formattedNum: fmtNum(row?.input || 0),
+                    formattedNum1: fmtNum(row?.output || 0),
+                  }}
+                />
+              </div>
+              <div>
+                <Trans
+                  ns='vm'
+                  i18nKey='detailOverviewTab.cache'
+                  values={{
+                    formattedNum: fmtNum(row?.read || 0),
+                    formattedNum1: fmtNum(row?.write || 0),
+                  }}
+                />
               </div>
             </div>
           </div>
@@ -100,6 +125,8 @@ function OpenaiWindowStats({
 }
 
 export function VmOverviewTab(props: VmOverviewTabProps) {
+  useTranslation('vm')
+
   const { vm, kernel, costByModel, billing, ...board } = props
   return (
     <TabsContent value='overview' className='space-y-3 pt-3'>
