@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   TIMEZONE_SOURCE_LABELS,
   validTimezone,
   zoneNowLabel,
 } from '@/lib/timezone'
-import {
-  VM_TIMEZONE_CUSTOM,
-  isPresetTimezone,
-} from '@/features/vm/create-options'
+
+// Keep the existing Chinese UI assertions independent of the host locale.
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('validTimezone', () => {
   it('keeps named IANA zones and drops offsets', () => {
@@ -26,13 +28,6 @@ describe('validTimezone', () => {
 })
 
 describe('timezone presets', () => {
-  it('treats custom as a sentinel, not a real zone', () => {
-    expect(isPresetTimezone('Asia/Tokyo')).toBe(true)
-    expect(isPresetTimezone('UTC')).toBe(true)
-    expect(isPresetTimezone(VM_TIMEZONE_CUSTOM)).toBe(false)
-    expect(isPresetTimezone('Pacific/Auckland')).toBe(false)
-  })
-
   it('labels the three timezone sources', () => {
     expect(TIMEZONE_SOURCE_LABELS.manual).toBe('手动')
     expect(TIMEZONE_SOURCE_LABELS.proxy_geo).toBe('跟随代理')

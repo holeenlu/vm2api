@@ -36,3 +36,15 @@ export function sessionIdForLog(value) {
   const s = String(value ?? '').trim()
   return s ? s.slice(0, SESSION_ID_MAX) : null
 }
+
+/** Codex upstream_model is the outbound/billing model, not the response echo
+ * (VM kernel, its Gateway fallback, and the Gateway Worker path).
+ * Legacy non-Codex writers already record the response in upstream_model.
+ * Keep that fallback until those retained rows/writers use response_model.
+ */
+export const OUTBOUND_MODEL_VIAS = ['codex-kernel', 'codex-kernel-fallback', 'gateway-worker']
+
+export function responseModelForLog(row) {
+  const raw = row.response_model ?? (OUTBOUND_MODEL_VIAS.includes(row.via) ? null : row.upstream_model)
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}

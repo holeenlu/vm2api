@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   catalogForVm,
   indexVms,
@@ -9,9 +10,15 @@ import {
   platformLabel,
   compactEmail,
   slotAccountLabel,
+  slotNameLabel,
   slotCredentialLabel,
   vmKindOf,
 } from '@/lib/vm-kind'
+
+// Keep the existing Chinese UI assertions independent of the host locale.
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('vmKindOf', () => {
   it('defaults unmarked slots to Claude', () => {
@@ -56,6 +63,17 @@ describe('kindFromModel / slotAccountLabel', () => {
       slotAccountLabel({ id: 'vm-01', email: 'a@x.com' }, { vmId: 'vm-01' })
     ).toBe('a@x.com')
     expect(slotAccountLabel(undefined, { vmId: 'vm-09' })).toBe('vm-09')
+    expect(
+      slotAccountLabel({ id: 'vm-28', name: 'turning@icloud.com' }, {})
+    ).toBe('turning@icloud.com')
+    expect(slotAccountLabel({ id: 'vm-31', name: 'Yuzulin8888' })).toBe(
+      'Yuzulin8888'
+    )
+    expect(slotAccountLabel({ id: 'vm-30', name: 'vm-30' })).toBe('vm-30')
+    expect(slotNameLabel({ id: 'vm-31', name: 'Yuzulin8888' })).toBe(
+      'Yuzulin8888'
+    )
+    expect(slotNameLabel({ id: 'vm-30', name: 'vm-30' })).toBe('未绑定账号')
     expect(indexVms([{ id: 'vm-01' }]).get('vm-01')?.id).toBe('vm-01')
   })
 
@@ -96,6 +114,18 @@ describe('slotCredentialLabel', () => {
         '已导入账号 · 邮箱未知'
       )
       expect(slotCredentialLabel({ has_token: false }, compact)).toBe('空槽')
+      expect(
+        slotCredentialLabel(
+          { id: 'vm-31', name: 'Yuzulin8888', has_token: true },
+          compact
+        )
+      ).toBe('Yuzulin8888')
+      expect(
+        slotCredentialLabel(
+          { id: 'vm-30', name: 'vm-30', has_refresh: true },
+          compact
+        )
+      ).toBe('已导入账号 · 邮箱未知')
       expect(
         slotCredentialLabel({ email: '  ', has_token: true }, compact)
       ).toBe('已导入账号 · 邮箱未知')

@@ -1,25 +1,33 @@
-# Guest OS layers change independently of application releases.
+# Guest and KVM images are part of upstream system releases and explicit image rebuilds.
 name: guest-images
 
+env:
+  # The image and registry layers are the cache; exporting every intermediate
+  # layer makes the matrix jobs and their cleanup unnecessarily slow.
+  DOCKER_BUILD_SUMMARY: false
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docker/kin-os/**'
-      - 'docker/kin-kvm/**'
-      - '.github/workflows/guest-images.yml'
+  workflow_call:
+    inputs:
+      source_commit:
+        description: 'Frozen source selected by the system release workflow'
+        required: true
+        type: string
   workflow_dispatch:
 
 concurrency:
   group: guest-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   guest:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -35,7 +43,16 @@ jobs:
           - directory: fedora-41
             image: fedora:41
     steps:
+      - name: Start phase timer
+        id: phase_timer
+        run: |
+          started_at=$(date -u +%s)
+          echo "started_at=$started_at" >> "$GITHUB_OUTPUT"
+          echo "### Phase: guest-${{ matrix.directory }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- started: $(date -u --iso-8601=seconds)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -56,10 +73,21 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tag }}
           cache-from: type=gha,scope=kin-os-${{ matrix.directory }}
-          cache-to: type=gha,scope=kin-os-${{ matrix.directory }},mode=max
+          cache-to: type=gha,scope=kin-os-${{ matrix.directory }},mode=min
+      - name: Record phase timing
+        if: always()
+        env:
+          STARTED_AT: ${{ steps.phase_timer.outputs.started_at }}
+        run: |
+          finished_at=$(date -u +%s)
+          echo "- finished: $(date -u --iso-8601=seconds); duration: $((finished_at - STARTED_AT)) seconds" >> "$GITHUB_STEP_SUMMARY"
 
   # URLs must match src/lib/vm/os-catalog.mjs kvm.cloud_image.
   kvm:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -79,7 +107,16 @@ jobs:
             tag: '41'
             cloud_image: https://download.fedoraproject.org/pub/archive/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2
     steps:
+      - name: Start phase timer
+        id: phase_timer
+        run: |
+          started_at=$(date -u +%s)
+          echo "started_at=$started_at" >> "$GITHUB_OUTPUT"
+          echo "### Phase: kvm-${{ matrix.family }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- started: $(date -u --iso-8601=seconds)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -103,4 +140,11 @@ jobs:
           build-args: |
             CLOUD_IMAGE_URL=${{ matrix.cloud_image }}
           cache-from: type=gha,scope=kin-kvm-${{ matrix.family }}
-          cache-to: type=gha,scope=kin-kvm-${{ matrix.family }},mode=max
+          cache-to: type=gha,scope=kin-kvm-${{ matrix.family }},mode=min
+      - name: Record phase timing
+        if: always()
+        env:
+          STARTED_AT: ${{ steps.phase_timer.outputs.started_at }}
+        run: |
+          finished_at=$(date -u +%s)
+          echo "- finished: $(date -u --iso-8601=seconds); duration: $((finished_at - STARTED_AT)) seconds" >> "$GITHUB_STEP_SUMMARY"

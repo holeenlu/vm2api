@@ -28,7 +28,7 @@ function poolHitForVm(proxyPool, vm) {
   )
 }
 
-function socksUrlFromVm(vm) {
+function proxyUrlFromVm(vm) {
   const px = vm?.proxy
   if (!px) return null
   return boundProxyUrl(px) || null
@@ -69,12 +69,12 @@ export function resolveImportProxy({ vm, proxyPool, overrideUrl = null } = {}) {
   if (allocated?.url) {
     return {
       ok: true,
-      proxyUrl: String(allocated.url).replace(/^socks5:\/\//i, 'socks5h://'),
+      proxyUrl: String(allocated.url),
       blocked: false,
       reason: null,
     }
   }
-  const fallback = socksUrlFromVm(vm)
+  const fallback = proxyUrlFromVm(vm)
   if (fallback) return { ok: true, proxyUrl: fallback, blocked: false, reason: null }
   return { ok: false, proxyUrl: null, blocked: false, reason: 'proxy_required' }
 }
