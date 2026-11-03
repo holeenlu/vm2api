@@ -120,7 +120,7 @@ test('legacy 001-013 db upgrades with data intact', () => {
     id: 'pu1',
     email: 'admin@panel.local',
     username: 'admin',
-    role: 'admin',
+    role: 'super_admin',
     status: 'active',
   })
   assert.equal(users[1].status, 'disabled')

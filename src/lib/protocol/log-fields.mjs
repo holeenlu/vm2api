@@ -36,3 +36,27 @@ export function sessionIdForLog(value) {
   const s = String(value ?? '').trim()
   return s ? s.slice(0, SESSION_ID_MAX) : null
 }
+
+/** Codex upstream_model is the outbound/billing model, not the response echo
+ * (VM kernel, its Gateway fallback, and the Gateway Worker path).
+ * Legacy non-Codex writers already record the response in upstream_model.
+ * Keep that fallback until those retained rows/writers use response_model.
+ */
+export const OUTBOUND_MODEL_VIAS = ['codex-kernel', 'codex-kernel-fallback', 'gateway-worker']
+
+export function responseModelForLog(row) {
+  const raw = row.response_model ?? (OUTBOUND_MODEL_VIAS.includes(row.via) ? null : row.upstream_model)
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}
+
+/** Codex 上游在开启安全缓冲时声明的 faster model（`x-codex-safety-buffering-faster-model`，
+ * openai/codex#53291）。流内 `response.model` 只回显请求模型，这是唯一可见的换模信号，
+ * 作为上游响应模型记录；只在超级管理员的使用记录中展示，不参与计费与调度。
+ */
+export function safetyBufferingModel(headers = {}) {
+  const enabled = String(headers?.['x-codex-safety-buffering-enabled'] ?? '')
+    .trim()
+    .toLowerCase()
+  const model = String(headers?.['x-codex-safety-buffering-faster-model'] ?? '').trim()
+  return enabled === 'true' && model ? model : null
+}

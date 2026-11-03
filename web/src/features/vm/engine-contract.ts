@@ -1,3 +1,4 @@
+import { t as tVm } from '@/i18n'
 import type { InferenceEngine } from '@/types/panel-vm'
 import { HOP_TRANSPORT_LABEL } from '@/features/vm/dataplane-contract'
 
@@ -7,7 +8,12 @@ export const INFERENCE_ENGINE_OPTIONS: {
   value: InferenceEngine
   label: string
 }[] = [
-  { value: 'auto', label: '自动（继承 rust）' },
+  {
+    value: 'auto',
+    get label() {
+      return tVm('vm:engineContract.automaticInheritRust')
+    },
+  },
   { value: 'rust', label: HOP_TRANSPORT_LABEL },
 ]
 
@@ -40,6 +46,6 @@ export function inferenceEngineLabel(
   if (value === 'go') return HOP_TRANSPORT_LABEL
   return (
     INFERENCE_ENGINE_OPTIONS.find((option) => option.value === value)?.label ||
-    '未知'
+    tVm('vm:detailAccountTab.unknown')
   )
 }

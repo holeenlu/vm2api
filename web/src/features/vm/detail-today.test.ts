@@ -1,10 +1,15 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { bootOutcome, vmTodayCounts } from './detail-today'
 
 function vm(fields: Partial<Vm>): Vm {
   return { id: 'vm-1', ...fields } as Vm
 }
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('vmTodayCounts', () => {
   it('reads today_* and never the cumulative or 5h counters', () => {

@@ -1,11 +1,17 @@
 import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { House, Import } from 'lucide-react'
+import type { VmProxySnap } from '@/types/panel-vm'
+import { House, Import, List, Plus, Eye, EyeOff } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import { DialogFooter } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { ProxyPanel } from './proxy-panel'
+import { FormField } from '@/components/form-field'
+import { EMPTY_LIFETIME, expiryISO } from './proxy-lifetime'
+import { ProxyLifetimeFields } from './proxy-lifetime-fields'
 import { useRefreshProxies } from './queries'
 
 type ImportResult = {
@@ -44,24 +50,63 @@ function countLines(raw: string): number {
   }).length
 }
 
-export function ProxyImportPanel({ hasLocal }: { hasLocal: boolean }) {
+export function ProxyImportPanel({
+  hasLocal,
+  onClose,
+  proxies,
+}: {
+  hasLocal: boolean
+  onClose: () => void
+  proxies: VmProxySnap[]
+}) {
+  const { t: translate } = useTranslation('proxies')
+
   const refresh = useRefreshProxies()
+  const [lifetime, setLifetime] = useState(EMPTY_LIFETIME)
+  const [mode, setMode] = useState<'standard' | 'batch'>('standard')
   const [raw, setRaw] = useState('')
+  const [form, setForm] = useState({
+    label: '',
+    protocol: 'http',
+    host: '',
+    port: '8080',
+    username: '',
+    password: '',
+  })
+  const [showPassword, setShowPassword] = useState(false)
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null)
   const lines = countLines(raw)
-
   const importPx = useMutation({
     mutationFn: () =>
       api<ImportResult>('/api/panel/proxies/import', {
         method: 'POST',
-        body: JSON.stringify({ text: raw }),
+        body: JSON.stringify({
+          ...(mode === 'batch'
+            ? { text: raw }
+            : { ...form, port: Number(form.port) }),
+          ...lifetime,
+          expires_at: expiryISO(lifetime.expires_at),
+        }),
       }),
     onSuccess: async (data) => {
       const next = outcomeOf(data)
       setOutcome(next)
-      setRaw('')
-      if (next.added) toast.success(`已导入 ${next.added} 条`)
-      else toast.warning('没有新增代理')
+      if (next.added) {
+        toast.success(
+          mode === 'batch'
+            ? translate('proxies:proxiesImported', { count: next.added })
+            : translate('proxies:proxiesCreated', { count: next.added })
+        )
+        if (next.parseFailed === 0 && next.unlisted === 0) {
+          setRaw('')
+          onClose()
+        }
+      } else
+        toast.warning(
+          next.parseFailed
+            ? translate('proxies:parseProxyFailed')
+            : translate('proxies:duplicateProxy')
+        )
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -70,86 +115,221 @@ export function ProxyImportPanel({ hasLocal }: { hasLocal: boolean }) {
     mutationFn: () =>
       api<{ created?: boolean }>('/api/panel/proxies/local', {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: '{}',
       }),
     onSuccess: async (data) => {
-      toast.success(data.created ? '已添加本地代理' : '本地代理已存在')
+      toast.success(
+        data.created
+          ? translate('proxies:localProxyAdded')
+          : translate('proxies:localProxyExists')
+      )
       await refresh()
+      onClose()
     },
     onError: (error: Error) => toast.error(error.message),
   })
-
-  const submit = () => {
-    if (!lines || importPx.isPending) return
-    importPx.mutate()
-  }
-
   return (
-    <ProxyPanel
-      title='添加代理'
-      plain
-      meta={
-        <span className='text-xs text-muted-foreground tabular-nums'>
-          {lines ? `${lines} 行待导入` : '每行一条'}
-        </span>
-      }
-    >
-      <label htmlFor='proxy-import' className='sr-only'>
-        SOCKS5 列表，每行一条
-      </label>
-      <Textarea
-        id='proxy-import'
-        value={raw}
-        onChange={(event) => {
-          setRaw(event.target.value)
-          if (outcome) setOutcome(null)
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault()
-            submit()
-          }
-        }}
-        rows={8}
-        spellCheck={false}
-        autoComplete='off'
-        placeholder={
-          'host:port\nuser:pass@host:port\nsocks5://user:pass@host:port'
-        }
-        className='field-host min-h-40 resize-y text-xs leading-relaxed'
-      />
-      <p className='mt-1.5 text-[11px] text-muted-foreground'>
-        也支持 host:port:user:pass。账密入库后不再回显，重复的自动跳过。
-      </p>
-      <div className='mt-3 flex flex-wrap items-center gap-2'>
-        <Button
-          size='sm'
-          onClick={submit}
-          disabled={!lines || importPx.isPending}
-          loading={importPx.isPending}
-          title='Ctrl / ⌘ + Enter'
-        >
-          <Import aria-hidden='true' />
-          导入{lines ? ` ${lines} 条` : ''}
-        </Button>
-        <Button
-          size='sm'
-          variant='outline'
-          onClick={() => addLocal.mutate()}
-          disabled={addLocal.isPending || hasLocal}
-          loading={addLocal.isPending}
-          title='本地代理：不走 SOCKS5，槽位经所在 VPS（本机或集群节点）自身出口出站。每台 VPS 一条，绑定额度按机器单独计'
-        >
-          <House aria-hidden='true' />
-          {hasLocal ? '已有本地代理' : '本地代理'}
-        </Button>
+    <>
+      <div
+        role='tablist'
+        aria-label={translate('proxies:addMethod')}
+        className='flex gap-2 border-b'
+      >
+        {[
+          {
+            value: 'standard',
+            label: translate('proxies:standardAdd'),
+            icon: Plus,
+          },
+          { value: 'batch', label: translate('proxies:quickAdd'), icon: List },
+        ].map(({ value, label, icon: Icon }) => (
+          <button
+            key={value}
+            type='button'
+            role='tab'
+            aria-selected={mode === value}
+            className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm ${mode === value ? 'border-primary text-primary' : 'border-transparent text-muted-foreground'}`}
+            onClick={() => {
+              setMode(value as typeof mode)
+              setOutcome(null)
+            }}
+          >
+            <Icon className='size-4' />
+            {label}
+          </button>
+        ))}
       </div>
-      {outcome ? <ImportSummary outcome={outcome} /> : null}
-    </ProxyPanel>
+      <form
+        className='space-y-5'
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (!importPx.isPending) importPx.mutate()
+        }}
+      >
+        {mode === 'standard' ? (
+          <>
+            <FormField>
+              {translate('proxies:name')}
+              <Input
+                value={form.label}
+                maxLength={64}
+                placeholder={translate('proxies:proxyNamePlaceholder')}
+                onChange={(e) => setForm({ ...form, label: e.target.value })}
+              />
+            </FormField>
+            <FormField>
+              {translate('proxies:protocol')}
+              <select
+                className='h-10 w-full rounded-md border bg-background px-3'
+                value={form.protocol}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    protocol: e.target.value,
+                    port:
+                      e.target.value === 'https'
+                        ? '443'
+                        : e.target.value === 'http'
+                          ? '8080'
+                          : '1080',
+                  })
+                }
+              >
+                {['http', 'socks5', 'https', 'socks5h'].map((v) => (
+                  <option key={v} value={v}>
+                    {v.toUpperCase()}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <FormField>
+                {translate('proxies:host')}
+                <Input
+                  value={form.host}
+                  required
+                  placeholder={translate('proxies:hostPlaceholder')}
+                  onChange={(e) => setForm({ ...form, host: e.target.value })}
+                />
+              </FormField>
+              <FormField>
+                {translate('proxies:port')}
+                <Input
+                  type='number'
+                  min={1}
+                  max={65535}
+                  required
+                  value={form.port}
+                  onChange={(e) => setForm({ ...form, port: e.target.value })}
+                />
+              </FormField>
+            </div>
+            <FormField>
+              {translate('proxies:optionalUsername')}
+              <Input
+                autoComplete='off'
+                value={form.username}
+                placeholder={translate('proxies:optionalCredentials')}
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+              />
+            </FormField>
+            <FormField>
+              {translate('proxies:optionalPassword')}
+              <div className='relative'>
+                <Input
+                  autoComplete='new-password'
+                  className='pr-10'
+                  type={showPassword ? 'text' : 'password'}
+                  value={form.password}
+                  placeholder={translate('proxies:optionalCredentials')}
+                  onChange={(e) =>
+                    setForm({ ...form, password: e.target.value })
+                  }
+                />
+                <button
+                  type='button'
+                  aria-label={
+                    showPassword
+                      ? translate('proxies:hidePassword')
+                      : translate('proxies:showPassword')
+                  }
+                  className='absolute inset-y-0 right-3 text-muted-foreground'
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {showPassword ? (
+                    <EyeOff className='size-4' />
+                  ) : (
+                    <Eye className='size-4' />
+                  )}
+                </button>
+              </div>
+            </FormField>
+            <p className='text-xs leading-5 text-muted-foreground'>
+              {translate('proxies:protocolHint')}
+            </p>
+          </>
+        ) : (
+          <>
+            <FormField>
+              {translate('proxies:proxyList')}
+              <Textarea
+                value={raw}
+                rows={9}
+                spellCheck={false}
+                autoComplete='off'
+                placeholder={translate('proxies:importPlaceholder')}
+                onChange={(e) => {
+                  setRaw(e.target.value)
+                  setOutcome(null)
+                }}
+                className='min-h-60 font-mono text-sm'
+              />
+            </FormField>
+            <p className='text-xs leading-5 text-muted-foreground'>
+              {translate('proxies:importHint')}
+            </p>
+          </>
+        )}
+        <ProxyLifetimeFields
+          value={lifetime}
+          onChange={setLifetime}
+          proxies={proxies}
+        />
+        {outcome && <ImportSummary outcome={outcome} />}
+        <DialogFooter className='border-t pt-4'>
+          <Button type='button' variant='outline' onClick={onClose}>
+            {translate('proxies:cancel')}
+          </Button>
+          <Button
+            disabled={
+              importPx.isPending ||
+              (mode === 'batch' ? !lines : !!form.password && !form.username)
+            }
+            loading={importPx.isPending}
+          >
+            <Import className='size-4' />
+            {translate('proxies:importProxyCount', { count: lines })}
+          </Button>
+        </DialogFooter>
+      </form>
+      {!hasLocal && (
+        <Button
+          variant='ghost'
+          className='justify-start text-muted-foreground'
+          onClick={() => addLocal.mutate()}
+          loading={addLocal.isPending}
+        >
+          <House className='size-4' />
+          {translate('proxies:addLocalExit')}
+        </Button>
+      )}
+    </>
   )
 }
 
 function ImportSummary({ outcome }: { outcome: ImportOutcome }) {
+  const { t: translate } = useTranslation('proxies')
+
   const { added, duplicates, parseFailed, unlisted } = outcome
   return (
     <div
@@ -158,16 +338,27 @@ function ImportSummary({ outcome }: { outcome: ImportOutcome }) {
     >
       <div className='flex flex-wrap gap-x-3 gap-y-0.5 tabular-nums'>
         <span>
-          新增 <b className='font-semibold'>{added}</b>
+          <Trans
+            ns='proxies'
+            i18nKey='addedCount'
+            values={{ count: added }}
+            components={{ strong: <b className='font-semibold' /> }}
+          />
         </span>
-        {duplicates.length ? <span>重复 {duplicates.length}</span> : null}
+        {duplicates.length ? (
+          <span>
+            {translate('proxies:duplicateCount', { count: duplicates.length })}
+          </span>
+        ) : null}
         {parseFailed ? (
           <span className='text-[color:var(--status-bad)]'>
-            无法解析 {parseFailed}
+            {translate('proxies:parseFailureCount', { count: parseFailed })}
           </span>
         ) : null}
         {unlisted ? (
-          <span className='text-muted-foreground'>另跳过 {unlisted}</span>
+          <span className='text-muted-foreground'>
+            {translate('proxies:alsoSkippedCount', { count: unlisted })}
+          </span>
         ) : null}
       </div>
       {duplicates.length ? (

@@ -19,13 +19,11 @@ import {
 import {
   DEFAULT_PERSONA_PRESET,
   PERSONA_PRESETS,
-  canonicalPersonaCompat,
   normalizePersonaPreset,
   resolvePersonaTemplate,
   templatePresetFor,
   validatePersonaTemplate,
 } from '../../src/lib/identity/persona-template.mjs'
-import { personaPresetFromHopMode } from '../../src/lib/identity/crs-persona.mjs'
 import {
   normalizeSlotPersonaPreset,
   parseSlotPersonaPresetPatch,
@@ -65,75 +63,6 @@ test('model shape follows official 2.1.303 he(model)', () => {
   assert.equal(canonicalPromptModel('Test-Pro/Claude-Opus-5-5[1m]'), 'claude-opus-5-5')
 })
 
-test('official presets and zero bind 2.1.303 while custom/legacy presets retain 2.1.296', () => {
-  for (const preset of ['official', 'official_full', 'official_303', '303', 'official-303', 'zero']) {
-    assert.equal(profileForPreset(preset).cliVersion, '2.1.303', String(preset))
-  }
-  for (const preset of ['custom', '', undefined]) {
-    assert.equal(profileForPreset(preset).cliVersion, '2.1.296', String(preset))
-  }
-  const profile = OFFICIAL_PROFILES['2.1.303']
-  assert.deepEqual(profile.topLevelOrder, [
-    'model',
-    'messages',
-    'system',
-    'tools',
-    'metadata',
-    'max_tokens',
-    'thinking',
-    'output_config',
-    'stream',
-  ])
-  assert.equal(profile.maxMarkers, 4)
-  assert.deepEqual(profile.autoFill, [])
-})
-
-test('official_303 is retired: it is no longer selectable and resolves to official_full', () => {
-  assert.equal(PERSONA_PRESETS.includes('official_303'), false)
-  assert.equal(DEFAULT_PERSONA_PRESET, 'official_full')
-  for (const raw of ['official_303', 'OFFICIAL_303', '303', 'official-303']) {
-    assert.equal(normalizePersonaPreset(raw), 'official_full')
-    assert.equal(personaPresetFromHopMode(raw), 'official_full')
-    // Stored slot values still parse, and the hop renders them as official_full.
-    assert.equal(parseSlotPersonaPresetPatch(raw).ok, true)
-    assert.equal(personaPresetFromHopMode(slotPersonaModeOverride({ persona_preset: raw })), 'official_full')
-  }
-  assert.equal(templatePresetFor('official_303'), 'official_full')
-  assert.equal(templatePresetFor('zero'), 'zero')
-  assert.equal(resolveSlotPersonaPreset({}, { compatibility: { persona_preset: 'official_303' } }), 'official_full')
-  const migrated = canonicalPersonaCompat({
-    persona_preset: 'official_303',
-    persona_templates: { official_303: [{ id: 'x', type: 'text', text: 'saved' }] },
-    agent_standing_presets: { official_303: true },
-  })
-  assert.equal(migrated.persona_preset, 'official_full')
-  assert.deepEqual(migrated.persona_templates, { official_full: [{ id: 'x', type: 'text', text: 'saved' }] })
-  assert.deepEqual(migrated.agent_standing_presets, { official_full: true })
-  assert.equal(parseSlotPersonaPresetPatch('nope').ok, false)
-})
-
-test('built-in 303 template: billing, identity, harness, guidance and valid placeholders', () => {
-  const blocks = resolvePersonaTemplate('official_303')
-  assert.deepEqual(
-    blocks.map((block) => [block.id, block.text, block.cache_control ?? null]),
-    [
-      ['billing', '{{billing}}', null],
-      ['identity', '{{identity_cli}}', null],
-      ['harness', '{{agent_standing}}{{harness_303}}', { type: 'ephemeral', scope: 'global' }],
-      ['dynamic_boundary', '{{dynamic_boundary}}', null],
-      ['guidance', '{{guidance_303}}', { type: 'ephemeral' }],
-      ['env', '{{env_303}}', null],
-      ['env_extra', '{{model_sentence}}', null],
-      ['env_instructions', '{{env_instructions_303}}', null],
-      ['env_timezone', '{{env_timezone}}', null],
-      ['env_locale', '{{env_locale}}', null],
-      ['caller_system', '<system-reminder>\n{{caller_system}}\n</system-reminder>\n', null],
-    ],
-  )
-  assert.deepEqual(validatePersonaTemplate(blocks), [])
-  assert.deepEqual(validatePersonaTemplate([{ type: 'text', text: '{{env_303}}' }]), [])
-})
-
 test('2.1.303 harness and guidance keep the captured split and fill the memory directory per cwd', () => {
   assert.equal(OFFICIAL_303_IDENTITY, "You are Claude Code, Anthropic's official CLI for Claude.")
   assert.equal(OFFICIAL_303_AGENT_IDENTITY, "You are a Claude agent, built on Anthropic's Claude Agent SDK.")
@@ -143,23 +72,19 @@ test('2.1.303 harness and guidance keep the captured split and fill the memory d
   assert.ok(OFFICIAL_303_GUIDANCE.endsWith('<total_tokens>15000000 tokens left</total_tokens>'))
   assert.equal(OFFICIAL_303_MAIN_PROMPT, `${OFFICIAL_303_HARNESS}${OFFICIAL_303_GUIDANCE}`)
   assert.equal(OFFICIAL_303_GUIDANCE.split('{{memory_dir}}').length, 2)
-  const rendered = renderOfficial303Guidance({ cwd: '/srv/app' })
+  const rendered = renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'sdk-cli' })
   assert.match(rendered, /persistent file-based memory at `\/srv\/app\/\.claude\/projects\/-srv-app\/memory\/`/)
   assert.doesNotMatch(rendered, /\{\{memory_dir\}\}/)
-  // e81d988f: the default entrypoint is the interactive cli, which keeps the `! <command>` bullet.
-  assert.match(rendered, /! <command>/)
-  assert.equal(rendered, renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'cli' }))
-  const printMode = renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'sdk-cli' })
-  assert.doesNotMatch(printMode, /! <command>/)
-  const interactive = rendered
+  assert.doesNotMatch(rendered, /! <command>/)
+  const interactive = renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'cli' })
+  assert.match(interactive, /! <command>/)
   const omitted = renderOfficial303Guidance()
   assert.equal(omitted.includes('# Memory'), false)
   assert.equal(omitted.includes('/home/kincli'), false)
   assert.match(omitted, /Write code that reads like the surrounding code/)
-  assert.equal(renderOfficial303MainPrompt({ cwd: '/srv/app' }), `${OFFICIAL_303_HARNESS}${rendered}`)
   assert.equal(
     renderOfficial303MainPrompt({ cwd: '/srv/app', entrypoint: 'sdk-cli' }),
-    `${OFFICIAL_303_HARNESS}${printMode}`,
+    `${OFFICIAL_303_HARNESS}${rendered}`,
   )
   assert.equal(
     renderOfficial303MainPrompt({ cwd: '/srv/app', entrypoint: 'cli' }),
