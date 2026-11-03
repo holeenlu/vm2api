@@ -16,6 +16,7 @@ import { UsageLogsView } from './repos/usage-logs-view.mjs'
 
 const VIEW_METHODS = new Set([
   'listBatch',
+  'ranking',
   'summary',
   'filterOptions',
   'activeSessions',

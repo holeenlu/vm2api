@@ -36,3 +36,30 @@ export function sessionIdForLog(value) {
   const s = String(value ?? '').trim()
   return s ? s.slice(0, SESSION_ID_MAX) : null
 }
+
+/** Codex upstream_model is the outbound/billing model, not the response echo
+ * (VM kernel, its Gateway fallback, and the Gateway Worker path).
+ * Legacy non-Codex writers already record the response in upstream_model.
+ * Keep that fallback until those retained rows/writers use response_model.
+ */
+export const OUTBOUND_MODEL_VIAS = ['codex-kernel', 'codex-kernel-fallback', 'gateway-worker']
+
+export function responseModelForLog(row) {
+  const raw = row.response_model ?? (OUTBOUND_MODEL_VIAS.includes(row.via) ? null : row.upstream_model)
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}
+
+const SAFETY_BUFFERING_VALUE_MAX = 200
+
+/** Codex 上游响应头 `x-codex-safety-buffering-*` 的原值：enabled 为 true/false，未返回或无法识别为 null；
+ * fasterModel 为 faster-model 头原值（去首尾空白），未返回为 null。只用于如实记录，不推断实际服务模型。
+ */
+export function safetyBufferingFromHeaders(headers = {}) {
+  const rawEnabled = headers?.['x-codex-safety-buffering-enabled']
+  const flag = String(rawEnabled ?? '')
+    .trim()
+    .toLowerCase()
+  const enabled = flag === 'true' ? true : flag === 'false' ? false : null
+  const model = String(headers?.['x-codex-safety-buffering-faster-model'] ?? '').trim()
+  return { enabled, fasterModel: model ? model.slice(0, SAFETY_BUFFERING_VALUE_MAX) : null }
+}

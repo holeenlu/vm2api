@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type {
   ClusterApiNode,
   ClusterLocalStatus,
@@ -26,25 +27,45 @@ export const KVM_OVERHEAD_BYTES = 150 * MiB
 export const NEW_SLOT_MEMORY_BYTES = 2 * GiB
 export const NEW_SLOT_QUOTA_BYTES = NEW_SLOT_MEMORY_BYTES + KVM_OVERHEAD_BYTES
 
-/** 通用的本机名称；部署地址单独展示。 */
-export const LOCAL_MACHINE_NAME = '本机 VPS'
-
 export type ClusterLink = 'ok' | 'caution' | 'bad' | 'none'
 
+function linkTone(link: ClusterLink, text: string): StatusTone {
+  return { key: link, cls: link, text, label: text }
+}
+
+/** 文案按调用时的语言取，切换语言后跟着变。 */
 export const LINK_TONE: Record<ClusterLink, StatusTone> = {
-  ok: { key: 'ok', cls: 'ok', text: '正常', label: '正常' },
-  caution: { key: 'caution', cls: 'caution', text: '很慢', label: '很慢' },
-  bad: { key: 'bad', cls: 'bad', text: '连不上', label: '连不上' },
-  none: { key: 'none', cls: 'none', text: '未接入', label: '未接入' },
+  get ok() {
+    return linkTone('ok', translate('cluster:link.ok'))
+  },
+  get caution() {
+    return linkTone('caution', translate('cluster:link.slow'))
+  },
+  get bad() {
+    return linkTone('bad', translate('cluster:link.down'))
+  },
+  get none() {
+    return linkTone('none', translate('cluster:state.notConnected'))
+  },
 }
 
 export const LINK_STATE_TEXT: Record<ClusterApiNode['link']['state'], string> =
   {
-    idle: '未启动',
-    connecting: '连接中',
-    ready: '已连接',
-    backoff: '重连等待',
-    error: '已停止',
+    get idle() {
+      return translate('cluster:state.notStarted')
+    },
+    get connecting() {
+      return translate('cluster:state.connecting')
+    },
+    get ready() {
+      return translate('cluster:state.connected')
+    },
+    get backoff() {
+      return translate('cluster:state.reconnectWait')
+    },
+    get error() {
+      return translate('cluster:state.stopped')
+    },
   }
 
 export function isLiveLink(link: ClusterLink): boolean {
@@ -89,10 +110,11 @@ export function remoteLinkTone(node: ClusterApiNode): StatusTone {
   const link = remoteLink(node)
   const state = node.link.state
   let text = LINK_TONE[link].text
-  if (state === 'backoff') text = '连不上，重连中'
-  else if (state === 'error') text = '连不上'
+  if (state === 'backoff') text = translate('cluster:link.downRetrying')
+  else if (state === 'error') text = translate('cluster:link.down')
   else if (state !== 'ready') text = LINK_STATE_TEXT[state] || state
-  else if (node.direct_link?.state === 'down') text = '直连断了，走 SSH'
+  else if (node.direct_link?.state === 'down')
+    text = translate('cluster:link.directDown')
   return { ...LINK_TONE[link], text, label: text }
 }
 
@@ -106,22 +128,33 @@ export function linkLatencyText(node: ClusterApiNode): string {
   const dl = node.direct_link
   if (dl) {
     if (dl.state === 'ok')
-      parts.push(direct != null ? `直连 ${direct}ms` : '直连')
-    else if (dl.state === 'down') parts.push('直连断开')
-    else parts.push('直连待检查')
+      parts.push(
+        direct != null
+          ? translate('cluster:link.directLatency', { value1: direct })
+          : translate('cluster:direct')
+      )
+    else if (dl.state === 'down')
+      parts.push(translate('cluster:link.directBroken'))
+    else parts.push(translate('cluster:link.directPending'))
   }
-  parts.push(ssh != null ? `SSH ${ssh}ms` : 'SSH')
+  parts.push(
+    ssh != null ? translate('cluster:link.sshLatency', { value1: ssh }) : 'SSH'
+  )
   return parts.join(' · ')
 }
 
 /** 直连通道状态一句话；连接详情与节点面板共用。 */
 export function directLinkText(link: ClusterApiNode['direct_link']): string {
-  if (!link) return '未启用'
-  if (link.state === 'pending') return '等待检查'
+  if (!link) return translate('cluster:state.disabled')
+  if (link.state === 'pending') return translate('cluster:state.pendingCheck')
   if (link.state === 'ok') {
-    return `直连中${link.latency_ms != null ? ` · ${link.latency_ms}ms` : ''}`
+    return translate('cluster:direct.connected', {
+      value1: link.latency_ms != null ? ` · ${link.latency_ms}ms` : '',
+    })
   }
-  return `已退回 SSH${link.error ? `（${link.error}）` : ''}`
+  return translate('cluster:direct.sshFallback', {
+    value1: link.error ? `（${link.error}）` : '',
+  })
 }
 
 /** `2g` / `512m` / `1024` (MiB) → 字节；读不懂为 null。 */
@@ -194,10 +227,13 @@ export function slotBucket(vm: Vm): SlotBucket {
 export function slotStatusTone(vm: Vm): StatusTone {
   const tone = poolStatus(vm)
   if (isRestrictedSchedule(vm)) {
-    const text = `受限 · ${tone.text}`
+    const text = translate('cluster:slot.restricted', { value1: tone.text })
     return { ...tone, text, label: text }
   }
-  if (tone.cls === 'ok') return { ...tone, text: '接单中', label: '接单中' }
+  if (tone.cls === 'ok') {
+    const text = translate('cluster:slot.serving')
+    return { ...tone, text, label: text }
+  }
   return tone
 }
 
@@ -223,7 +259,7 @@ export function tierSummary(vms: Vm[]): string {
     const label = claudeTier(vm).label || '—'
     counts.set(label, (counts.get(label) || 0) + 1)
   }
-  if (!counts.size) return '空'
+  if (!counts.size) return translate('cluster:machine.empty')
   return [...counts.entries()]
     .sort(
       ([a], [b]) =>
@@ -299,15 +335,18 @@ export function buildLocalMachine(input: {
   const memTotal = Number(h?.mem_total) || 0
   const memUsed = Number(h?.mem_used) || 0
   const link: ClusterLink = input.available ? 'ok' : 'none'
-  const text = input.available ? '控制面所在' : '读不到'
+  const text = input.available
+    ? translate('cluster:machine.controlHost')
+    : translate('cluster:machine.unreadable')
   return {
     id: 'local',
     role: 'local',
-    name: LOCAL_MACHINE_NAME,
+    // 通用的本机名称；部署地址单独展示。
+    name: translate('cluster:machine.localName'),
     address: input.status?.nat.public_ip || input.hostname,
     link,
     tone: { ...LINK_TONE[link], text, label: text },
-    linkSub: '本机',
+    linkSub: translate('cluster:local'),
     cpu: h ? hostCpu(h) : null,
     mem:
       h && memTotal
@@ -440,9 +479,20 @@ export const HOT_PCT = 85
 export function capacityTitle(m: ClusterMachine): string | undefined {
   const c = m.capacity
   if (!c) return undefined
-  const slot = `一台 2G 槽按 ${gib(NEW_SLOT_QUOTA_BYTES, 2)}G 算（虚拟机 2G + qemu 实测约 0.15G）`
   if (c.reserve == null) {
-    return `槽用满 ${gib(c.quota)}G / 共 ${gib(c.total)}G；槽此刻实际用了多少没读到，算不出余量`
+    return translate('cluster:capacity.titleUnknown', {
+      value1: gib(c.quota),
+      value2: gib(c.total),
+    })
   }
-  return `共 ${gib(c.total)}G − 系统 ${gib(c.reserve)}G − 槽用满 ${gib(c.quota)}G = 剩 ${gibFloor(c.free)}G；${slot}。此刻实际已用 ${gib(c.used)}G`
+  return translate('cluster:capacity.title', {
+    value1: gib(c.total),
+    value2: gib(c.reserve),
+    value3: gib(c.quota),
+    value4: gibFloor(c.free),
+    value5: translate('cluster:capacity.slotBasis', {
+      value1: gib(NEW_SLOT_QUOTA_BYTES, 2),
+    }),
+    value6: gib(c.used),
+  })
 }

@@ -55,7 +55,7 @@ test('wrap sync updates stopped slots without requiring a kernel restart', async
       routingConfig: {},
       requireAuth(req) {
         req.apiKeyKind = 'master'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, payload) {
@@ -91,7 +91,7 @@ test('kernel upload replaces host and sample kernel', async () => {
       routingConfig: {},
       requireAuth(req) {
         req.apiKeyKind = 'master'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, payload) {
@@ -124,7 +124,7 @@ test('kernel upload rejects non-ELF payloads', async () => {
       routingConfig: {},
       requireAuth(req) {
         req.apiKeyKind = 'master'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, payload) {
@@ -159,27 +159,27 @@ function releaseFetch(
     if (href.endsWith('/releases/latest')) {
       return new Response(
         JSON.stringify({
-          tag_name: 'v1.2.3',
+          tag_name: 'v1.3.208.0',
           assets: [
             {
               name: 'kin-kernel',
               size: assetBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/9',
+              url: 'https://api.github.com/repos/holeenlu/vm2api/releases/assets/9',
             },
             {
               name: 'cli-node',
               size: cliBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/8',
+              url: 'https://api.github.com/repos/holeenlu/vm2api/releases/assets/8',
             },
             {
               name: 'cc-node',
               size: ccBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/7',
+              url: 'https://api.github.com/repos/holeenlu/vm2api/releases/assets/7',
             },
             {
               name: 'kin-kernel-crag',
               size: cragBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/6',
+              url: 'https://api.github.com/repos/holeenlu/vm2api/releases/assets/6',
             },
           ],
         }),
@@ -223,7 +223,7 @@ function panelFor(project, { readBody, readRawBody, fetchImpl, refreshClusterSlo
     refreshClusterSlotPayloads,
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -251,7 +251,7 @@ test('github kernel release replaces host kernel and syncs stopped slots', async
     const { response, handlePanel } = panelFor(project, { fetchImpl: releaseFetch(elf) })
     await handlePanel({ method: 'POST' }, {}, new URL('http://localhost/api/panel/wrap-cli/kernel/release'))
     assert.equal(response.status, 200, JSON.stringify(response.body))
-    assert.equal(response.body.data.release.tag, 'v1.2.3')
+    assert.equal(response.body.data.release.tag, 'v1.3.208.0')
     assert.equal(response.body.data.sync.items[0].kernel.reason, 'vm_stopped')
     assert.ok(fs.readFileSync(path.join(project, 'bin', 'kin-kernel')).equals(elf))
     assert.ok(fs.readFileSync(path.join(project, 'share', 'wrap-cli', 'kin-kernel.bin')).equals(elf))
@@ -269,7 +269,7 @@ test('github kernel release replaces host kernel and syncs stopped slots', async
     )
     const meta = JSON.parse(fs.readFileSync(path.join(project, 'share', 'wrap-cli', 'SAMPLE.json'), 'utf8'))
     assert.equal(meta.source, 'github')
-    assert.equal(meta.release_tag, 'v1.2.3')
+    assert.equal(meta.release_tag, 'v1.3.208.0')
 
     const uploaded = fakeElf64Amd64('manual-kernel')
     const upload = panelFor(project, { readRawBody: async () => uploaded })
@@ -328,7 +328,7 @@ test('wrap sync refreshes a cluster slot with the same kernel payload', async ()
             node_id: vm.node_id,
             ok: true,
             kernel_changed: true,
-            image: 'vm2api/kin-slot-ubuntu-24.04:abc',
+            image: 'tapmodels/kin-slot-ubuntu-24.04:abc',
             kernel: { ok: true, skipped: true, reason: 'vm_stopped' },
           })),
         }
@@ -341,7 +341,7 @@ test('wrap sync refreshes a cluster slot with the same kernel payload', async ()
     assert.equal(response.body.data.cluster.total, 1)
     assert.equal(
       response.body.data.items.find((item) => item.id === 'node-slot').image,
-      'vm2api/kin-slot-ubuntu-24.04:abc',
+      'tapmodels/kin-slot-ubuntu-24.04:abc',
     )
     assert.equal(
       fs.readFileSync(path.join(project, 'vms', 'local-slot', 'cli-home', '.kin', 'kin-kernel.bin'), 'utf8'),

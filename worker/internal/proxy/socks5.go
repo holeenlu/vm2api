@@ -1,104 +1,13 @@
 package proxy
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"strconv"
-	"strings"
-	"time"
 )
-
-type Dialer struct {
-	Address  string
-	Username string
-	Password string
-	Timeout  time.Duration
-}
-
-func New(rawURL string, timeout time.Duration) (*Dialer, error) {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return nil, fmt.Errorf("parse SOCKS5 URL: %w", err)
-	}
-	if u.Scheme != "socks5" && u.Scheme != "socks5h" {
-		return nil, fmt.Errorf("unsupported SOCKS5 scheme %q", u.Scheme)
-	}
-	host := u.Hostname()
-	port := u.Port()
-	if host == "" || port == "" {
-		return nil, errors.New("SOCKS5 URL requires host and port")
-	}
-	username := ""
-	password := ""
-	if u.User != nil {
-		username = u.User.Username()
-		password, _ = u.User.Password()
-	}
-	if len(username) > 255 || len(password) > 255 {
-		return nil, errors.New("SOCKS5 username/password exceeds 255 bytes")
-	}
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
-	return &Dialer{
-		Address:  net.JoinHostPort(host, port),
-		Username: username,
-		Password: password,
-		Timeout:  timeout,
-	}, nil
-}
-
-func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	if d == nil {
-		return nil, errors.New("SOCKS5 dialer is nil")
-	}
-	if network != "tcp" && network != "tcp4" && network != "tcp6" {
-		return nil, fmt.Errorf("SOCKS5 only supports TCP, got %q", network)
-	}
-	if sameHostPort(address, d.Address) {
-		return nil, fmt.Errorf("refusing SOCKS CONNECT to the proxy address %s; DialContext must receive the upstream host", d.Address)
-	}
-	base := &net.Dialer{Timeout: d.Timeout}
-	conn, err := base.DialContext(ctx, "tcp", d.Address)
-	if err != nil {
-		return nil, fmt.Errorf("connect SOCKS5 proxy: %w", err)
-	}
-	ok := false
-	defer func() {
-		if !ok {
-			_ = conn.Close()
-		}
-	}()
-	stopCancel := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.SetDeadline(time.Now())
-		case <-stopCancel:
-		}
-	}()
-	defer close(stopCancel)
-	if deadline, has := ctx.Deadline(); has {
-		_ = conn.SetDeadline(deadline)
-	} else if d.Timeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(d.Timeout))
-	}
-	if err = d.negotiate(conn, address); err != nil {
-		return nil, err
-	}
-	if err = ctx.Err(); err != nil {
-		return nil, err
-	}
-	_ = conn.SetDeadline(time.Time{})
-	ApplyTCPKeepAlive(conn)
-	ok = true
-	return conn, nil
-}
 
 func (d *Dialer) negotiate(conn net.Conn, target string) error {
 	methods := []byte{0x00}

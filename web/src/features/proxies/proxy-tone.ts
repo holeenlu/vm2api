@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
 import {
@@ -84,9 +85,11 @@ export function proxyStatusTone(proxy: VmProxySnap): StatusTone {
   return {
     key,
     text:
-      proxy.blocked_reason === 'ipv6_disabled'
-        ? 'IPv6 已关闭'
-        : PROXY_HEALTH_LABEL[key],
+      proxy.blocked_reason === 'proxy_expired' || proxy.status === 'expired'
+        ? translate('proxies:expired')
+        : proxy.blocked_reason === 'ipv6_disabled'
+          ? translate('proxies:ipv6Disabled')
+          : PROXY_HEALTH_LABEL[key],
     cls: HEALTH_MARK[key],
   }
 }

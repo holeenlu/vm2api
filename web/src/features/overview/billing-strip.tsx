@@ -1,13 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import type { BillingAccountRow, BillingSnapshot } from '@/types/panel-overview'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { fmtUsd } from '@/lib/format'
 import { indexVms, isCodexVm } from '@/lib/vm-kind'
 import { billingRowSlot } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
 import { SlotIdentity } from '@/components/platform-chip'
-import { billingQueryOptions } from '@/features/billing/queries'
 import { PanelCard, StatCell } from '@/features/overview/panel-card'
 
 /** 计费面板。对齐 index.html 的 `renderBillingStrip(src)`。 */
@@ -22,25 +21,17 @@ export function BillingStrip({
   fallbackToday?: number
   fallbackTotal?: number
 }) {
-  const owned = useQuery(billingQueryOptions('vm'))
+  const { t: translate } = useTranslation('overview')
+
   const today = billing?.today?.total_cost ?? fallbackToday ?? 0
   const total = billing?.total?.total_cost ?? fallbackTotal ?? 0
   const byId = indexVms(vms)
   let claudeCost = 0
   let gptCost = 0
-  // 与今日/累计同口径：官方价（total_cost），不乘分组倍率。
-  for (const item of owned.data?.items || []) {
-    const vm = item.vm_id ? byId.get(item.vm_id) : undefined
-    const cost = Number(item.official_cost_usd ?? 0)
+  for (const vm of vms || []) {
+    const cost = Number(vm.total_cost || 0)
     if (isCodexVm(vm)) gptCost += cost
     else claudeCost += cost
-  }
-  if (!owned.data?.items?.length) {
-    for (const vm of vms || []) {
-      const cost = Number(vm.total_cost || 0)
-      if (isCodexVm(vm)) gptCost += cost
-      else claudeCost += cost
-    }
   }
   const rows: BillingAccountRow[] = (billing?.accounts || [])
     .filter((a) => Number(a.total_cost) > 0)
@@ -48,34 +39,34 @@ export function BillingStrip({
 
   return (
     <PanelCard
-      title='计费'
-      meta='上海日切 · Claude / GPT'
+      title={translate('overview:accountUsagePricing')}
+      meta={translate('overview:shanghaiDayBoundary')}
       action={
         <Button variant='outline' size='sm' asChild>
-          <Link to='/billing'>计费详情</Link>
+          <Link to='/statistics'>{translate('overview:spendingStats')}</Link>
         </Button>
       }
     >
       <div className='grid gap-px bg-border/60 sm:grid-cols-4'>
         <StatCell
-          label='今日费用'
+          label={translate('overview:todayCost')}
           value={fmtUsd(today)}
           valueClassName='text-[color:var(--status-ok)]'
         />
         <StatCell
-          label='累计费用'
+          label={translate('overview:totalCost')}
           value={fmtUsd(total)}
-          hint='日志窗口内全部请求'
+          hint={translate('overview:allRequestsInWindow')}
         />
         <StatCell
-          label='Claude'
+          label={translate('overview:claude')}
           value={fmtUsd(claudeCost)}
-          hint='Anthropic 官方价 · 累计'
+          hint={translate('overview:anthropicListPrice')}
         />
         <StatCell
-          label='GPT'
+          label={translate('overview:gpt')}
           value={fmtUsd(gptCost)}
-          hint='OpenAI 官方价 · 累计'
+          hint={translate('overview:openaiListPrice')}
         />
       </div>
       {rows.length ? (
@@ -88,7 +79,13 @@ export function BillingStrip({
                   vm={vm}
                   vmId={vm?.id}
                   email={row.email}
-                  emptyLabel={row.vm_id ? `${row.vm_id} 旧账号` : undefined}
+                  emptyLabel={
+                    row.vm_id
+                      ? translate('overview:legacyAccounts', {
+                          count: row.vm_id,
+                        })
+                      : undefined
+                  }
                 />
                 <b className='font-semibold tabular-nums'>
                   {fmtUsd(row.today_cost || 0)}

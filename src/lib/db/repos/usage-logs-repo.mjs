@@ -8,7 +8,8 @@
  * may pass either name.
  */
 
-import { getDb } from '../database.mjs'
+import { getDb, withTransaction } from '../database.mjs'
+import { recordVendorUsage } from '../../vendor/vendor-usage.mjs'
 import { collectErrors, enrichLogRow, excludeErrorClassSql, ingressAuthSql } from '../../admin/error-class.mjs'
 import {
   costColumnsFromUsage,
@@ -36,7 +37,7 @@ const PRUNED_THROUGH_KEY = 'usage_logs_pruned_through'
 const BILLING_STATS_CACHE_TTL_MS = 10_000
 const BILLING_BACKFILL_INTERVAL_MS = 60_000
 
-function billingStatsCacheKey(accountWindows) {
+export function billingStatsCacheKey(accountWindows) {
   if (!Array.isArray(accountWindows) || accountWindows.length === 0) return 'rolling'
   const normalized = accountWindows
     .map((win) => ({
@@ -45,11 +46,20 @@ function billingStatsCacheKey(accountWindows) {
       reset_5h: win?.reset_5h || null,
       reset_7d: win?.reset_7d || null,
       reset_7d_oi: win?.reset_7d_oi || null,
+      cleared_5h: win?.cleared_windows?.['5h'] || null,
+      cleared_7d: win?.cleared_windows?.['7d'] || null,
+      cleared_fable: win?.cleared_windows?.['7d_oi'] || null,
     }))
     .sort((a, b) =>
       `${a.account_id}\0${a.vm_id}`.localeCompare(`${b.account_id}\0${b.vm_id}`, 'en', { sensitivity: 'case' }),
     )
   return JSON.stringify(normalized)
+}
+
+function billingWindowSince(win, key, duration, fallback, now) {
+  const start = extraWindowSince(win?.[`reset_${key}`], duration, now) ?? Date.parse(fallback)
+  const cleared = Date.parse(win?.cleared_windows?.[key] || '')
+  return Number.isFinite(cleared) && cleared <= now ? Math.max(start, cleared) : start
 }
 
 // Preserve per-row prompt denominators when aligning account quota windows.
@@ -65,6 +75,7 @@ function sumCostBuckets(rows) {
 const SUMMARY_COLUMNS = [
   'id',
   'request_id',
+  'config_revision',
   'created_at',
   'log_mode',
   'method',
@@ -94,6 +105,7 @@ const SUMMARY_COLUMNS = [
   'cache_creation_1h_tokens',
   'requested_model',
   'upstream_model',
+  'response_model',
   'model_mismatch',
   'first_token_ms',
   'first_byte_ms',
@@ -118,6 +130,8 @@ const SUMMARY_COLUMNS = [
   'rate_multiplier',
   'service_tier',
   'upstream_service_tier',
+  'safety_buffering_enabled',
+  'safety_buffering_faster_model',
   'speed',
   'long_context',
   'session_id',
@@ -127,15 +141,28 @@ const SUMMARY_COLUMNS = [
   'intercept',
   'jev_state',
   'vm_owner_user_id',
+  'billing_status',
+  'billing_group_id',
+  'subscription_id',
+  'api_key_name',
+  'source',
   'image_model',
   'image_usage',
   'image_input_tokens',
   'image_output_tokens',
   'image_cost',
+  'execution_kind',
+  'account_resource_id',
+  'gateway_instance_id',
+  'dispatch_id',
+  'receipt_id',
+  'usage_confidence',
 ]
 
 function toRow(rec) {
   return SUMMARY_COLUMNS.map((c) => {
+    if (c === 'billing_status') return rec[c] || 'unmetered'
+    if (c === 'source') return rec[c] || 'protocol'
     if (c === 'created_at') return rec.created_at ?? rec.ts ?? null
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
@@ -291,8 +318,9 @@ export function summarizeLatency(values) {
 }
 
 export class UsageLogsRepo {
-  constructor(db = getDb()) {
+  constructor(db = getDb(), { billingMaintenance = true } = {}) {
     this.db = db
+    this._billingMaintenance = billingMaintenance
     // Panel endpoints request the same expensive billing snapshot several times
     // during one refresh. Keep this cache repository-local so it never affects
     // request accounting or persists across processes.
@@ -356,8 +384,12 @@ export class UsageLogsRepo {
   }
 
   insertSummary(rec) {
-    this._insert.run(...toRow(rec))
-    return rec
+    return withTransaction(this.db, () => {
+      this._insert.run(...toRow(rec))
+      recordVendorUsage(this.db, this._getByRequestId.get(rec.request_id || rec.id))
+      this._billingStatsCache.clear()
+      return rec
+    })
   }
 
   vmOwnerOf(vmId) {
@@ -367,7 +399,14 @@ export class UsageLogsRepo {
 
   /** INSERT OR IGNORE (legacy import path). @returns true when inserted */
   insertSummaryIfAbsent(rec) {
-    return this._insertIfAbsent.run(...toRow(rec)).changes > 0
+    return withTransaction(this.db, () => {
+      const inserted = this._insertIfAbsent.run(...toRow(rec)).changes > 0
+      if (inserted) {
+        recordVendorUsage(this.db, this._getByRequestId.get(rec.request_id || rec.id))
+        this._billingStatsCache.clear()
+      }
+      return inserted
+    })
   }
 
   insertDebug(requestId, ts, record) {
@@ -536,7 +575,7 @@ export class UsageLogsRepo {
     }
     return this.db
       .prepare(`
-      SELECT strftime('${fmt}', created_at) AS bucket,
+      SELECT strftime('${fmt}', created_at, '+8 hours') AS bucket,
              COUNT(*) AS requests,
              SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
              COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -956,7 +995,7 @@ export class UsageLogsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost,
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost,
              COALESCE(SUM(duration_ms), 0) AS duration_ms_sum,
              SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) AS duration_n
       FROM usage_logs ${cond}
@@ -982,7 +1021,7 @@ export class UsageLogsRepo {
       SELECT ${expr} AS name,
              COUNT(*) AS requests,
              COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0) AS tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost
       FROM usage_logs ${cond}
       GROUP BY name ORDER BY requests DESC, total_cost DESC LIMIT ${limit}
     `)
@@ -1076,28 +1115,24 @@ export class UsageLogsRepo {
     const cached = cacheable ? this._billingStatsCache.get(key) : null
     if (cached && cached.expires_at > cacheNow) return cached.value
 
-    // Historical cost repair is maintenance, not part of rendering a panel.
-    // Limit it independently so several panel endpoints cannot repeat the same
-    // synchronous scan in a single refresh.
+    if (this._billingMaintenance) this.maintainBillingCosts()
+
+    const value = this._computeBillingStats({ accountWindows, now })
+    if (this._billingStatsCache.size >= 32) this._billingStatsCache.clear()
+    if (cacheable) this._billingStatsCache.set(key, { value, expires_at: Date.now() + BILLING_STATS_CACHE_TTL_MS })
+    return value
+  }
+
+  // The reporting worker runs the existing repair before its read transaction,
+  // so all parts of a billing snapshot see the same committed database state.
+  maintainBillingCosts() {
+    const cacheNow = Date.now()
     if (cacheNow - this._billingBackfillAt >= BILLING_BACKFILL_INTERVAL_MS) {
       this._billingBackfillAt = cacheNow
       try {
-        this.backfillMissingCosts()
+        if (this.backfillMissingCosts()) this._billingStatsCache.clear()
       } catch {}
     }
-
-    const value = this._computeBillingStats({ accountWindows, now })
-    if (this._billingStatsCache.size > 32) {
-      for (const [cacheKey, entry] of this._billingStatsCache) {
-        if (entry.expires_at <= cacheNow) this._billingStatsCache.delete(cacheKey)
-      }
-    }
-    // Start the TTL after the expensive synchronous aggregation completes. On
-    // large databases the computation itself can exceed the TTL; anchoring the
-    // expiry at cache lookup time would make a freshly computed entry already
-    // stale and every refresh would scan the table again.
-    if (cacheable) this._billingStatsCache.set(key, { value, expires_at: Date.now() + BILLING_STATS_CACHE_TTL_MS })
-    return value
   }
 
   _computeBillingStats({ accountWindows = null, now = Date.now() } = {}) {
@@ -1139,8 +1174,8 @@ export class UsageLogsRepo {
     const accounts = accountsTotal.map((a) => {
       const t = todayById.get(keyOf(a)) || emptyCostBucket()
       const win = aligned ? resolveAccountWindow(accountWindows, a) : null
-      const since5 = aligned ? (extraWindowSince(win?.reset_5h, WINDOW_5H_MS, now) ?? Date.parse(fiveHStart)) : null
-      const since7 = aligned ? (extraWindowSince(win?.reset_7d, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)) : null
+      const since5 = aligned ? billingWindowSince(win, '5h', WINDOW_5H_MS, fiveHStart, now) : null
+      const since7 = aligned ? billingWindowSince(win, '7d', WINDOW_7D_MS, sevenDStart, now) : null
       const w = aligned
         ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since5)
         : fiveById.get(keyOf(a)) || emptyCostBucket()
@@ -1148,8 +1183,8 @@ export class UsageLogsRepo {
         ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since7)
         : sevenById.get(keyOf(a)) || emptyCostBucket()
       let window_fable = null
-      if (aligned && win?.reset_7d_oi) {
-        const sinceFable = extraWindowSince(win.reset_7d_oi, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)
+      if (aligned && (win?.reset_7d_oi || win?.cleared_windows?.['7d_oi'])) {
+        const sinceFable = billingWindowSince(win, '7d_oi', WINDOW_7D_MS, sevenDStart, now)
         const fable = bucketEventsSince((eventsByKey.get(keyOf(a)) || []).filter(isFableRow), sinceFable)
         window_fable = {
           cost: Number(fable.total_cost || 0),
