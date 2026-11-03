@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { VmKernelHealth } from '@/types/panel-vm'
 
 export function kernelVersionOf(health?: VmKernelHealth | null): string {
@@ -22,18 +23,18 @@ export function wrapHealthLabel(health?: VmKernelHealth | null): string {
   const slots = health.ready_slots
   const processUp = kernelProcessUp(health)
   if (kernelHopReady(health)) {
-    const bits = ['在线']
+    const bits = [t('lib:wrap.online')]
     if (health.provider === 'local_cli') bits.push('cli-hop')
-    if (slots != null) bits.push(`${slots} 槽就绪`)
+    if (slots != null) bits.push(t('lib:wrap.slotsReady', { count: slots }))
     if (version) bits.push(version)
     return bits.join(' · ')
   }
   if (processUp) {
-    const bits = ['kernel 在', 'CLI 未就绪']
-    if (slots != null) bits.push(`槽 ${slots}`)
+    const bits = [t('lib:wrap.kernelRunning'), t('lib:wrap.cliNotReady')]
+    if (slots != null) bits.push(t('lib:wrap.slots', { count: slots }))
     return bits.join(' · ')
   }
-  return '不可用'
+  return t('lib:status.unavailable')
 }
 
 export function wrapSyncKernelFails(

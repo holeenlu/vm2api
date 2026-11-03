@@ -1,18 +1,13 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { VmProxySnap } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { importErrorMessage } from '@/lib/import-errors'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { SearchSelect } from '@/components/search-select'
 import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import {
@@ -43,7 +38,9 @@ type ImportResp = {
  * 刻意只取 host/port：账密部分解析出来也无处可用，取了反而多一个能泄漏的变量。
  * 对齐 index.html:8065 parseImportSocksHint()。
  */
-function parseSocksHint(text: string): { host: string; port: string } | null {
+function parseProxyHint(
+  text: string
+): { host: string; port: string; scheme: string } | null {
   const line =
     String(text || '')
       .split(/\r?\n/)
@@ -51,30 +48,41 @@ function parseSocksHint(text: string): { host: string; port: string } | null {
       .find(Boolean) || ''
   if (!line) return null
   try {
-    if (/^socks5h?:\/\//i.test(line)) {
+    if (/^(?:https?|socks5h?):\/\//i.test(line)) {
       const url = new URL(line)
       return {
         host: url.hostname.replace(/^\[|\]$/g, ''),
-        port: url.port || '1080',
+        port:
+          url.port ||
+          (url.protocol === 'http:'
+            ? '80'
+            : url.protocol === 'https:'
+              ? '443'
+              : '1080'),
+        scheme: url.protocol.slice(0, -1),
       }
     }
     const bracketed = line.match(/^(\[[^\]]+\]):(\d+)/)
     if (bracketed) {
       const url = new URL(`socks5://${bracketed[1]}:${bracketed[2]}`)
-      return { host: url.hostname.slice(1, -1), port: url.port }
+      return {
+        host: url.hostname.slice(1, -1),
+        port: url.port,
+        scheme: 'socks5',
+      }
     }
   } catch {
     return null
   }
   const parts = line.split(':')
   if (parts.length >= 2 && parts[0] && /^\d+$/.test(parts[1])) {
-    return { host: parts[0], port: parts[1] }
+    return { host: parts[0], port: parts[1], scheme: 'socks5' }
   }
   return null
 }
 
 /**
- * 导入流程第 2 步：给指定槽绑一条 SOCKS5。
+ * 导入流程第 2 步：给指定槽绑定代理。
  *
  * 两条路都通向「绑到本槽」——下拉选池中现成的，或粘贴新行直接导入并绑定。
  * 对齐 index.html 第 2 步（renderImport 的 import-block 之二）。
@@ -87,6 +95,8 @@ export function ImportProxyStep({
   /** 槽位所在节点；本地代理按节点名标「节点名local代理」。 */
   nodeId?: string | null
 }) {
+  const { t } = useTranslation('import')
+
   const px = useQuery(proxiesQueryOptions())
   const qc = useQueryClient()
   const pasteRef = useRef<HTMLTextAreaElement>(null)
@@ -124,7 +134,7 @@ export function ImportProxyStep({
         body: JSON.stringify({ vm_id: vmId }),
       }),
     onSuccess: async () => {
-      toast.success('已绑到本槽')
+      toast.success(t('import:bound'))
       await refresh()
     },
     onError: (error: Error) => toast.error(importErrorMessage(error)),
@@ -139,7 +149,7 @@ export function ImportProxyStep({
     const text = (el?.value || '').trim()
     if (!text) return true
     if (!vmId) {
-      toast.error('请先选择空槽')
+      toast.error(t('import:selectSlotFirst'))
       return false
     }
     setBusy(true)
@@ -150,18 +160,21 @@ export function ImportProxyStep({
       })
       if (el) el.value = ''
       if (d.bound?.id || d.bound?.bound_vm_id) {
-        toast.success('已写入 SOCKS5 并绑到本槽')
+        toast.success(t('import:proxySaved'))
         await refresh()
         return true
       }
       // 这条代理池里已经有了，后端不会重复新建，也就没有 bound —— 自己找回来再绑。
       await refresh()
-      const hint = parseSocksHint(text)
+      const hint = parseProxyHint(text)
       const existing =
         d.items?.[0] ||
         (hint
           ? proxies.find(
-              (p) => p.host === hint.host && String(p.port) === hint.port
+              (p) =>
+                p.host === hint.host &&
+                String(p.port) === hint.port &&
+                (p.scheme || 'socks5') === hint.scheme
             )
           : undefined)
       if (existing?.id) {
@@ -172,11 +185,11 @@ export function ImportProxyStep({
             body: JSON.stringify({ vm_id: vmId }),
           }
         )
-        toast.success('该条已在池中，已绑到本槽')
+        toast.success(t('import:existingProxyBound'))
         await refresh()
         return true
       }
-      toast.error('未能绑到本槽')
+      toast.error(t('import:bindFailed'))
       return false
     } catch (error) {
       toast.error(importErrorMessage(error as Error))
@@ -191,41 +204,24 @@ export function ImportProxyStep({
   return (
     <div className='space-y-3'>
       <div className='flex flex-wrap items-center gap-2'>
-        <Select
-          value={bound?.id || ''}
-          onValueChange={(id) => bindOne.mutate(id)}
-          disabled={pending || !proxies.length}
-        >
-          <SelectTrigger className='min-w-[220px] flex-1' aria-label='选择出口'>
-            <SelectValue
-              placeholder={
-                proxies.length
-                  ? bound
-                    ? '已绑定，可改选'
-                    : '选择出口（本地代理 / SOCKS5）'
-                  : '代理池为空'
-              }
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((p) => {
-              const here = proxyBoundIds(p).includes(vmId)
-              const full =
-                !here && proxyBoundIds(p).length >= proxyBindLimit(p, poolLimit)
-              const bad = proxyIsInvalid(p)
-              return (
-                <SelectItem
-                  key={p.id}
-                  value={p.id || ''}
-                  disabled={!here && (full || bad)}
-                >
-                  {proxyOptionLabel(p, poolLimit, labelOpts)}
-                  {full ? ' · 已绑满' : ''}
-                </SelectItem>
-              )
-            })}
-          </SelectContent>
-        </Select>
+        <SearchSelect
+          className='min-w-56 flex-1'
+          label={t('import:selectEgress')}
+          value={bound?.id}
+          options={options.map((p) => ({
+            id: p.id || '',
+            name: proxyOptionLabel(p, poolLimit, labelOpts),
+            disabled:
+              pending ||
+              (!proxyBoundIds(p).includes(vmId) &&
+                (proxyBoundIds(p).length >= proxyBindLimit(p, poolLimit) ||
+                  proxyIsInvalid(p))),
+          }))}
+          searchPlaceholder={t('import:searchEgress')}
+          onChange={(id) => {
+            if (id) bindOne.mutate(id)
+          }}
+        />
         {bound ? (
           <StatusMark
             tone={{
@@ -250,7 +246,7 @@ export function ImportProxyStep({
         <Textarea
           ref={pasteRef}
           rows={2}
-          aria-label='粘贴 SOCKS5'
+          aria-label={t('import:pasteProxy')}
           placeholder={'host:port:user:pass\nsocks5://user:pass@host:1080'}
           onBlur={() => void flushPaste()}
         />
@@ -261,13 +257,11 @@ export function ImportProxyStep({
           loading={pending}
           onClick={() => void flushPaste()}
         >
-          导入并绑定
+          {t('import:importAndBind')}
         </Button>
       </div>
 
-      <p className='text-xs text-muted-foreground'>
-        账密只入库不回显。换票前会先落地未提交的粘贴，避免还走旧代理。
-      </p>
+      <p className='text-xs text-muted-foreground'>{t('import:proxyHelp')}</p>
     </div>
   )
 }

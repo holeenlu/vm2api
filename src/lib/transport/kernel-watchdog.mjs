@@ -3,8 +3,8 @@
  *
  * The kernel recovers its own CLI first (close slot, ping, restart CLI) and
  * reports `healthy:false` only after that budget is spent. Then this restarts
- * the container via ensureRustKernel, a bounded number of times with growing
- * waits; when that is spent too, the VM is marked faulted, the scheduler skips
+ * the container via ensureRustKernel, with bounded recovery attempts and growing
+ * waits; when that budget is spent too, the VM is marked faulted, the scheduler skips
  * it and the operator is notified. Never falls back to kin-worker hop.
  */
 import fs from 'node:fs'
@@ -176,7 +176,7 @@ export function createKernelWatchdog({
       })
   }
 
-  /** L4 gate: bounded container restarts with growing waits; spending them is L5. */
+  /** L4 gate: bounded recovery attempts with growing waits; spending them is L5. */
   function admitRestart(vm, reason, at) {
     if (kernelFaults.has(vm.id)) return false
     const state = restarts.get(vm.id) || { attempts: [], nextAt: at + config.restart_backoff_sec[0] * 1000 }
@@ -185,7 +185,7 @@ export function createKernelWatchdog({
     if (at < state.nextAt) return false
     const backoff = config.restart_backoff_sec
     if (state.attempts.length >= backoff.length) {
-      const fault = `kernel unhealthy after ${state.attempts.length} container restarts: ${reason}`
+      const fault = `kernel unhealthy after ${state.attempts.length} recovery attempts: ${reason}`
       kernelFaults.set(vm.id, fault)
       console.error(`[kernel-watchdog] ${vm.id} faulted; scheduling skips it: ${fault}`)
       if (typeof onFault === 'function') {
@@ -197,17 +197,54 @@ export function createKernelWatchdog({
       }
       return false
     }
-    state.attempts.push(at)
-    const nextDelay = backoff[state.attempts.length] ?? config.interval_sec
-    state.nextAt = at + nextDelay * 1000
-    return true
+    return state
+  }
+
+  function clearRecoveredFault(vm) {
+    // An isolated failed probe must not leave an already elapsed first backoff.
+    // Keep real attempts until their window expires so crash loops stay bounded.
+    if (kernelFaults.delete(vm.id) || restarts.get(vm.id)?.attempts.length === 0) restarts.delete(vm.id)
+  }
+
+  async function recover(vm, state, reason, action) {
+    let result
+    try {
+      result = await action()
+      return result
+    } finally {
+      const unchanged =
+        result?.skipped === true ||
+        (result?.ok === true && ['already_up', 'health_cache', 'busy'].includes(result.reason))
+      if (unchanged) {
+        if (!rustKernelNeedsRestart(result.health) || state.attempts.length === 0) clearRecoveredFault(vm)
+      } else if (restarts.get(vm.id) === state) {
+        // ensure may find the kernel healthy without starting anything. Count
+        // only after its result is known, including actual attempts that fail.
+        const at = now()
+        state.attempts.push(at)
+        const nextDelay = config.restart_backoff_sec[state.attempts.length] ?? config.interval_sec
+        state.nextAt = at + nextDelay * 1000
+        console.warn(`[kernel-watchdog] ${vm.id} recovery attempt ${result?.ok ? 'completed' : 'failed'}: ${reason}`)
+      }
+    }
+  }
+
+  async function acceptHealthyKernel(vm, exec) {
+    clearRecoveredFault(vm)
+    // Config convergence, not a failure: outside the restart budget.
+    if (kernelSlotMismatch(exec)) {
+      const observed = await observeRuntime(vm)
+      if (!held.has(vm.id) && observed?.state === 'running') await ensure(exec, { timeoutMs: config.timeout_ms })
+    }
   }
 
   /** One VM's check. `held` is re-read after every await: an operator cycle may start mid-check. */
   async function reviveDownContainer(vm, state) {
     if (vm.status !== 'running' || typeof revive !== 'function') return
-    if (!admitRestart(vm, `container ${state}`, now())) return
-    const revived = await revive(vm)
+    const reason = `container ${state}`
+    const admitted = admitRestart(vm, reason, now())
+    if (!admitted) return
+    const revived = await recover(vm, admitted, reason, () => revive(vm))
     if (!revived?.ok) console.warn(`[kernel-watchdog] ${vm.id} boot failed: ${revived?.error || revived?.code}`)
   }
 
@@ -224,30 +261,41 @@ export function createKernelWatchdog({
       vm: probed,
       homeDir: typeof homeDirFor === 'function' ? homeDirFor(vm) : null,
     }
-    const current = await health(exec, { timeoutMs: vmNodeId(vm) ? NODE_SLOT_HEALTH_TIMEOUT_MS : 800 })
+    let current = await health(exec, { timeoutMs: vmNodeId(vm) ? NODE_SLOT_HEALTH_TIMEOUT_MS : 800 })
     if (held.has(vm.id)) return
     // cc-node is the crag worker. Restarting a live kernel SIGKILLs it.
-    if (dataplaneUsesCcNode(exec) && rustKernelProcessUp(current)) return
-    if (!rustKernelNeedsRestart(current)) {
-      // Healthy again after a fault means someone fixed it: start a fresh budget.
-      // Plain recovery keeps past attempts so a crash loop stays bounded by the window.
-      if (kernelFaults.delete(vm.id)) restarts.delete(vm.id)
-      // Config convergence, not a failure: outside the restart budget.
-      if (kernelSlotMismatch(exec)) {
-        const observed = await observeRuntime(vm)
-        if (!held.has(vm.id) && observed?.state === 'running') await ensure(exec, { timeoutMs: config.timeout_ms })
-      }
+    if (dataplaneUsesCcNode(exec) && rustKernelProcessUp(current)) {
+      clearRecoveredFault(vm)
       return
     }
-    const reason = current?.unhealthy_reason || current?.error || 'kernel process down'
-    const observed = await observeRuntime(vm)
+    if (!rustKernelNeedsRestart(current)) return acceptHealthyKernel(vm, exec)
+    let observed = await observeRuntime(vm)
     if (held.has(vm.id)) return
     // Permission/transport failures and deliberately paused containers never authorize recovery.
     if (!['running', 'missing', 'stopped', 'restarting'].includes(observed?.state)) return
     if (observed.state !== 'running') return reviveDownContainer(vm, observed.state)
-    if (!admitRestart(vm, reason, now())) return
-    console.warn(`[kernel-watchdog] ${vm.id} restarting container: ${reason}`)
-    const result = await ensure(exec, { timeoutMs: config.timeout_ms })
+    if (!rustKernelProcessUp(current)) {
+      // A short timeout or broken connection is not a kernel health verdict.
+      // Recheck independently before spending budget or isolating this slot.
+      const confirmedVm = probeVm(vm)
+      if (!confirmedVm) return
+      exec.vm = confirmedVm
+      current = await health(exec, { timeoutMs: config.timeout_ms })
+      if (held.has(vm.id)) return
+      if (dataplaneUsesCcNode(exec) && rustKernelProcessUp(current)) {
+        clearRecoveredFault(vm)
+        return
+      }
+      if (!rustKernelNeedsRestart(current)) return acceptHealthyKernel(vm, exec)
+      observed = await observeRuntime(vm)
+      if (held.has(vm.id) || !['running', 'missing', 'stopped', 'restarting'].includes(observed?.state)) return
+      if (observed.state !== 'running') return reviveDownContainer(vm, observed.state)
+      if (!probeVm(vm)) return
+    }
+    const reason = current?.unhealthy_reason || current?.error || 'kernel process down'
+    const admitted = admitRestart(vm, reason, now())
+    if (!admitted) return
+    const result = await recover(vm, admitted, reason, () => ensure(exec, { timeoutMs: config.timeout_ms }))
     if (held.has(vm.id)) return
     // The container itself is gone or exited: a kernel restart cannot help, a full boot can.
     if (result?.reason === 'container_unavailable' && typeof revive === 'function' && vm.status === 'running') {
