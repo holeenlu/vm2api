@@ -6,8 +6,11 @@
  */
 import { parseResetMs, toPercentUsed } from '../pool/quota-window.mjs'
 
-/** Below this the vendor's rounding dominates the ratio (magpie HoldsFloor). */
-export const ESTIMATE_MIN_USED_RATIO = 0.05
+/**
+ * Smallest used% the vendor reports (1%). Upstream magpie floors at 5%; tapmodels keeps
+ * estimating from the first reported percent by operator requirement (2026-10-29).
+ */
+export const ESTIMATE_MIN_USED_RATIO = 0.01
 
 function round(v, digits) {
   const f = 10 ** digits

@@ -38,11 +38,11 @@ for (const [kernel, meta] of Object.entries(OS_CATALOG)) {
   // Tags are mutable: --pull refreshes an existing image so runner fixes reach cached hosts.
   if (pull && spawnSync('docker', ['pull', kvm.image], { stdio: 'inherit' }).status === 0) continue
   if (!force && imageExists(kvm.image)) {
-    console.log(`vm2api: keep existing ${kvm.image}`)
+    console.log(`tapmodels: keep existing ${kvm.image}`)
     continue
   }
   if (pullOnly) {
-    console.warn(`vm2api: ${kvm.image} not pulled; will build on first slot start`)
+    console.warn(`tapmodels: ${kvm.image} not pulled; will build on first slot start`)
     continue
   }
   const context = path.resolve(root, '..', '..', KVM_BUILD_DIR)

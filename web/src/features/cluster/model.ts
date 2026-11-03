@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { ClusterApiNode } from '@/types/panel-cluster'
 import type { Dashboard } from '@/types/panel-overview'
 import type { UsagePayload } from '@/types/panel-usage'
@@ -38,10 +39,38 @@ export type ClusterTotals = {
 }
 
 export const LINK_TONE: Record<ClusterLink, StatusTone> = {
-  ok: { key: 'ok', cls: 'ok', text: '已连接', label: '已连接' },
-  caution: { key: 'caution', cls: 'caution', text: '延迟高', label: '延迟高' },
-  bad: { key: 'bad', cls: 'bad', text: '不可达', label: '不可达' },
-  none: { key: 'none', cls: 'none', text: '未接入', label: '未接入' },
+  get ok() {
+    return {
+      key: 'ok',
+      cls: 'ok',
+      text: translate('cluster:state.connected'),
+      label: translate('cluster:state.connected'),
+    }
+  },
+  get caution() {
+    return {
+      key: 'caution',
+      cls: 'caution',
+      text: translate('cluster:state.highLatency'),
+      label: translate('cluster:state.highLatency'),
+    }
+  },
+  get bad() {
+    return {
+      key: 'bad',
+      cls: 'bad',
+      text: translate('cluster:state.unreachable'),
+      label: translate('cluster:state.unreachable'),
+    }
+  },
+  get none() {
+    return {
+      key: 'none',
+      cls: 'none',
+      text: translate('cluster:state.notConnected'),
+      label: translate('cluster:state.notConnected'),
+    }
+  },
 }
 
 export function isLiveLink(link: ClusterLink): boolean {
@@ -107,7 +136,7 @@ export function buildLocalNode(input: {
     return {
       id: 'local',
       role: 'local',
-      label: '本机',
+      label: translate('cluster:local'),
       host: input.host,
       link: 'none',
       latencyMs: null,
@@ -124,7 +153,7 @@ export function buildLocalNode(input: {
   return {
     id: 'local',
     role: 'local',
-    label: '本机',
+    label: translate('cluster:local'),
     host: input.host,
     link: 'ok',
     latencyMs: 0,
@@ -136,11 +165,21 @@ export function buildLocalNode(input: {
 
 export const LINK_STATE_TEXT: Record<ClusterApiNode['link']['state'], string> =
   {
-    idle: '未启动',
-    connecting: '连接中',
-    ready: '已连接',
-    backoff: '重连等待',
-    error: '已停止',
+    get idle() {
+      return translate('cluster:state.notStarted')
+    },
+    get connecting() {
+      return translate('cluster:state.connecting')
+    },
+    get ready() {
+      return translate('cluster:state.connected')
+    },
+    get backoff() {
+      return translate('cluster:state.reconnectWait')
+    },
+    get error() {
+      return translate('cluster:state.stopped')
+    },
   }
 
 /**
@@ -182,10 +221,14 @@ export function remoteNodeFromApi(
 
 /** 直连通道状态一句话；面板与节点行共用。 */
 export function directLinkText(link: ClusterApiNode['direct_link']): string {
-  if (!link) return '未启用'
-  if (link.state === 'pending') return '等待检查'
+  if (!link) return translate('cluster:state.disabled')
+  if (link.state === 'pending') return translate('cluster:state.pendingCheck')
   if (link.state === 'ok') {
-    return `直连中${link.latency_ms != null ? ` · ${link.latency_ms}ms` : ''}`
+    return translate('cluster:direct.connected', {
+      value1: link.latency_ms != null ? ` · ${link.latency_ms}ms` : '',
+    })
   }
-  return `已退回 SSH${link.error ? `（${link.error}）` : ''}`
+  return translate('cluster:direct.sshFallback', {
+    value1: link.error ? `（${link.error}）` : '',
+  })
 }
