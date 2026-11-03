@@ -73,7 +73,7 @@ export function looksLikeOfficialSetupToken(value) {
   const s = String(value || '')
     .replace(/[\r\n\s]+/g, '')
     .trim()
-  return /^sk-ant-oat01-/i.test(s) && s.length >= 100
+  return /^sk-ant-oat01-[\x21-\x7e]+$/i.test(s) && s.length >= 100
 }
 
 function readFreshOfficialSetupToken(homeDir, sinceMs) {
@@ -113,6 +113,43 @@ export function officialSetupTokenToOauth(token, extra = {}) {
     auth_scheme: AUTH_SCHEME_BEARER,
     ...extra,
   }
+}
+
+/** Pasted access token: official oat (or inference without refresh) → one-year setup token. */
+export function pastedAccessTokenToOauth(accessToken, body = {}) {
+  // Terminal wraps add whitespace; look-alike Unicode means a retyped/OCR copy the CLI cannot send.
+  const token = String(accessToken).replace(/\s+/g, '')
+  if (!/^[\x21-\x7e]+$/.test(token)) {
+    const err = fail(
+      'access_token_invalid',
+      'Token 含非 ASCII 字符（如形近字母或 ×），请从终端直接复制原文，不要手工录入或截图识别',
+    )
+    err.status = 400
+    throw err
+  }
+  const requested = String(body.type || body.credential_mode || body.scope || '').toLowerCase()
+  const inference =
+    ['inference', 'setup-token', 'setup_token'].includes(requested) ||
+    String(body.scope || '').toLowerCase() === 'inference'
+  const oauth = {
+    access_token: token,
+    refresh_token: body.refresh_token || null,
+    expires_at: body.expires_at || null,
+    scope: body.scope || (inference ? 'user:inference' : null),
+    source: body.source || (inference ? SETUP_TOKEN_SOURCE : 'access-token'),
+  }
+  if (looksLikeOfficialSetupToken(token) || (inference && !String(body.refresh_token || '').trim())) {
+    oauth.type = 'official-setup-token'
+    oauth.mode = 'official-setup-token'
+    oauth.refresh_token = ''
+    oauth.scope = 'user:inference'
+    oauth.source = body.source || SETUP_TOKEN_SOURCE
+    if (!oauth.expires_at) oauth.expires_at = Date.now() + 365 * 24 * 60 * 60 * 1000
+  } else if (inference) {
+    oauth.type = 'setup-token'
+    oauth.mode = 'setup-token'
+  }
+  return oauth
 }
 
 function readJson(file) {

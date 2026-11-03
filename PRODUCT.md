@@ -12,7 +12,7 @@ web
 
 ## Product Purpose
 
-vm2api 把 Claude / Codex 账号做成可调度的虚拟机槽，并对外提供兼容上游的 API。种子页的成功标准：管理员不用进容器，就能看见当前槽 `settings.json` 里实际生效的配置项，改完能播种，并实时看到遥测开或关。
+tapmodels 把 Claude / Codex 账号做成可调度的虚拟机槽，并对外提供兼容上游的 API。种子页的成功标准：管理员不用进容器，就能看见当前槽 `settings.json` 里实际生效的配置项，改完能播种，并实时看到遥测开或关。
 
 ## Positioning
 
