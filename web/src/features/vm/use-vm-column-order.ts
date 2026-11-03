@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 
 export const VM_COLUMN_KEYS = [
   'vm',
+  'groups',
   'sched',
   'type',
   'status',
@@ -11,6 +12,19 @@ export const VM_COLUMN_KEYS = [
 ] as const
 
 export type VmColumnKey = (typeof VM_COLUMN_KEYS)[number]
+
+/** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
+export const VM_COL_CLS: Record<VmColumnKey | 'actions', string> = {
+  groups: 'min-w-[130px] flex-[0.8]',
+  vm: 'min-w-[170px] flex-[1.15]',
+  sched: 'min-w-[62px] flex-[0.3]',
+  type: 'min-w-[120px] flex-[0.75]',
+  status: 'min-w-[180px] flex-[1.1]',
+  req: 'min-w-[124px] flex-[0.7]',
+  usage: 'min-w-[248px] flex-[1.4]',
+  cost: 'min-w-[212px] flex-[1.1]',
+  actions: 'w-[44px] shrink-0 pr-2',
+}
 
 const STORAGE_KEY = 'kin.vm.column-order'
 

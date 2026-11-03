@@ -572,7 +572,7 @@ async function startKvmGuestKernel(
     const waited = await waitForHealth(exec, budget, allowMissingCredential)
     if (waited?.ok) {
       waited.reconcile = await reconcileCliHopRuntime(exec, { runDockerExec })
-      return waited
+      return { ...waited, reason: 'already_up' }
     }
   }
   const retired = await retireLegacyTelemetryBeforeStart(exec, runDockerExec)
@@ -672,7 +672,7 @@ async function startRustKernel(
     const waited = await waitForHealth(exec, waitMs, allowMissingCredential)
     if (waited?.ok) {
       waited.reconcile = await reconcileCliHopRuntime(exec, { runDockerExec })
-      return waited
+      return { ...waited, reason: 'already_up' }
     }
   }
   const retired = await retireLegacyTelemetryBeforeStart(exec, runDockerExec)

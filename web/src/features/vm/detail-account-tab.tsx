@@ -1,6 +1,7 @@
 import type { ComponentProps } from 'react'
 import type { Dashboard } from '@/types/panel-overview'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import {
   type CredType,
   authSchemeLabel,
@@ -31,7 +32,7 @@ import { Field, Meter } from '@/features/vm/detail-section-primitives'
 import type { VmTodayCounts } from '@/features/vm/detail-today'
 import { OfficialCcCard } from '@/features/vm/official-cc-card'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
-import { isRemoteVm, REMOTE_UNSUPPORTED_TEXT } from '@/features/vm/placement'
+import { isRemoteVm, remoteUnsupportedText } from '@/features/vm/placement'
 import {
   latestProbe,
   probeOutcome,
@@ -66,6 +67,8 @@ type VmAccountTabProps = {
 }
 
 export function VmAccountTab(props: VmAccountTabProps) {
+  const { t: tVm } = useTranslation('vm')
+
   const {
     id,
     vm,
@@ -106,17 +109,22 @@ export function VmAccountTab(props: VmAccountTabProps) {
         {perms.credential ? (
           <Card>
             <CardHeader className='pb-2'>
-              <CardTitle className='text-sm'>导入凭证</CardTitle>
+              <CardTitle className='text-sm'>
+                <Trans ns='vm' i18nKey='detailAccountTab.importCredentials' />
+              </CardTitle>
             </CardHeader>
             <CardContent className='pt-0'>
               {blocked ? (
                 <div className='space-y-3'>
                   <p className='text-sm text-muted-foreground'>
-                    该槽需要已绑定且健康的 SOCKS5 才能换票。
+                    <Trans
+                      ns='vm'
+                      i18nKey='detailAccountTab.thisSlotRequiresABoundHealthySOCKS5ProxyTo'
+                    />
                   </p>
                   {perms.admin ? (
                     <Button size='sm' onClick={onNeedProxy}>
-                      去绑定代理
+                      <Trans ns='vm' i18nKey='detailAccountTab.bindAProxy' />
                     </Button>
                   ) : null}
                 </div>
@@ -139,17 +147,19 @@ export function VmAccountTab(props: VmAccountTabProps) {
         <div className='space-y-3'>
           <Card>
             <CardHeader className='pb-2'>
-              <CardTitle className='text-sm'>账号</CardTitle>
+              <CardTitle className='text-sm'>
+                <Trans ns='vm' i18nKey='detailAccountTab.account' />
+              </CardTitle>
             </CardHeader>
             <CardContent className='divide-y pt-0'>
-              <Field label='类型' compact>
+              <Field label={tVm('vm:detailAccountTab.type')} compact>
                 {credType === 'none' ? '—' : credTypeLabel(credType)}
               </Field>
-              <Field label='状态' compact>
+              <Field label={tVm('vm:detailAccountTab.status')} compact>
                 <StatusMark tone={credExpiry(vm)} variant='pill' />
               </Field>
               {claudeTier(vm).key !== 'none' ? (
-                <Field label='套餐' compact>
+                <Field label={tVm('vm:detailAccountTab.plan')} compact>
                   {gpt ? (
                     <OpenaiPlanBadge vm={vm} />
                   ) : (
@@ -158,41 +168,52 @@ export function VmAccountTab(props: VmAccountTabProps) {
                 </Field>
               ) : null}
               {gpt ? (
-                <Field label='订阅到期（以凭证为准）' compact>
+                <Field
+                  label={tVm(
+                    'vm:detailAccountTab.subscriptionExpiryFromCredentials'
+                  )}
+                  compact
+                >
                   {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
                 </Field>
               ) : null}
               {credType === 'apikey' ? (
-                <Field label='Key' compact>
-                  {vm.has_token ? '已写入' : '—'}
+                <Field label={tVm('vm:labels.key')} compact>
+                  {vm.has_token ? tVm('vm:detailAccountTab.written') : '—'}
                 </Field>
               ) : (
                 <>
-                  <Field label='Access' compact>
-                    {vm.has_token ? '已绑定' : '—'}
+                  <Field label={tVm('vm:labels.accessToken')} compact>
+                    {vm.has_token ? tVm('vm:detailAccountTab.bound') : '—'}
                   </Field>
-                  <Field label='Refresh' compact>
-                    {vm.has_refresh ? '已绑定' : '—'}
+                  <Field label={tVm('vm:labels.refreshToken')} compact>
+                    {vm.has_refresh ? tVm('vm:detailAccountTab.bound') : '—'}
                   </Field>
-                  <Field label='过期' compact>
+                  <Field label={tVm('vm:detailAccountTab.expiry')} compact>
                     {fmtExpiresAt(vm.expires_at)}
                   </Field>
                 </>
               )}
               {gpt ? null : (
-                <Field label='上游认证' compact>
+                <Field
+                  label={tVm('vm:credentialPanel.upstreamAuthenticationHeader')}
+                  compact
+                >
                   <div className='flex items-center gap-1'>
                     <span>{authSchemeLabel(authSchemeOf(vm))}</span>
                     {vm.auth_scheme ? null : (
                       <span className='text-xs text-muted-foreground'>
-                        默认
+                        <Trans ns='vm' i18nKey='detailAccountTab.default' />
                       </span>
                     )}
                     <AuthSchemeEditor vm={vm} />
                   </div>
                 </Field>
               )}
-              <Field label={gpt ? 'ChatGPT 账号' : 'UUID'} compact>
+              <Field
+                label={gpt ? tVm('vm:detailAccountTab.chatGPTAccount') : 'UUID'}
+                compact
+              >
                 {gpt ? (
                   <span className='text-sm'>
                     {String(
@@ -205,13 +226,13 @@ export function VmAccountTab(props: VmAccountTabProps) {
                   </span>
                 )}
               </Field>
-              <Field label='Org' compact>
+              <Field label={tVm('vm:labels.organization')} compact>
                 <span className='font-mono text-xs'>
                   {String(vm.org_uuid || '—')}
                 </span>
               </Field>
               {gpt ? null : (
-                <Field label='来源' compact>
+                <Field label={tVm('vm:detailAccountTab.source')} compact>
                   {String(vm.oauth_source || '—')}
                 </Field>
               )}
@@ -235,7 +256,10 @@ export function VmAccountTab(props: VmAccountTabProps) {
                           loading={busy('/oauth/refresh')}
                           onClick={() => onAction('/oauth/refresh', {})}
                         >
-                          刷新凭证
+                          <Trans
+                            ns='vm'
+                            i18nKey='detailAccountTab.refreshCredentials'
+                          />
                         </Button>
                       </span>
                     </TooltipTrigger>
@@ -251,32 +275,36 @@ export function VmAccountTab(props: VmAccountTabProps) {
           <div className='grid grid-cols-2 gap-3'>
             <Card>
               <CardHeader className='pb-2'>
-                <CardTitle className='text-sm'>探测</CardTitle>
+                <CardTitle className='text-sm'>
+                  <Trans ns='vm' i18nKey='detailAccountTab.probe' />
+                </CardTitle>
               </CardHeader>
               <CardContent className='divide-y pt-0'>
-                <Field label='时间' compact>
+                <Field label={tVm('vm:detailAccountTab.time')} compact>
                   <span className='font-mono text-xs'>
                     {probe.at || probe.probed_at
                       ? fmtExpiresAt(probe.at || probe.probed_at)
-                      : '未探测'}
+                      : tVm('vm:detailAccountTab.notProbed')}
                   </span>
                 </Field>
-                <Field label='来源' compact>
+                <Field label={tVm('vm:detailAccountTab.source')} compact>
                   {probeSourceLabel(
                     probe.source ||
                       String(acc.probe_source ?? vm.probe_source ?? '')
                   )}
                 </Field>
-                <Field label='结果' compact>
+                <Field label={tVm('vm:detailAccountTab.result')} compact>
                   {probeOutcome(probe)}
                 </Field>
                 {probe.via === 'passive-headers' ? (
-                  <Field label='采样时间' compact>
-                    {probe.data_at ? fmtExpiresAt(probe.data_at) : '未知'}
+                  <Field label={tVm('vm:detailAccountTab.sampleTime')} compact>
+                    {probe.data_at
+                      ? fmtExpiresAt(probe.data_at)
+                      : tVm('vm:detailAccountTab.unknown')}
                   </Field>
                 ) : null}
                 {gpt ? null : (
-                  <Field label='超额' compact>
+                  <Field label={tVm('vm:detailAccountTab.overage')} compact>
                     {extraUsageText(acc.extra_usage ?? vm.extra_usage)}
                   </Field>
                 )}
@@ -284,40 +312,49 @@ export function VmAccountTab(props: VmAccountTabProps) {
             </Card>
             <Card>
               <CardHeader className='pb-2'>
-                <CardTitle className='text-sm'>今日</CardTitle>
+                <CardTitle className='text-sm'>
+                  <Trans ns='vm' i18nKey='detailAccountTab.today' />
+                </CardTitle>
               </CardHeader>
               <CardContent className='space-y-2 pt-0'>
                 <div className='grid grid-cols-3 gap-2 text-center'>
                   <div>
                     <div className='text-[11px] text-muted-foreground'>
-                      请求
+                      <Trans ns='vm' i18nKey='detailAccountTab.requests' />
                     </div>
                     <div className='text-sm font-semibold tabular-nums'>
                       {fmtNum(today.requests)}
                     </div>
                   </div>
                   <div>
-                    <div className='text-[11px] text-muted-foreground'>入</div>
+                    <div className='text-[11px] text-muted-foreground'>
+                      <Trans ns='vm' i18nKey='detailAccountTab.input' />
+                    </div>
                     <div className='text-sm font-semibold tabular-nums'>
                       {fmtNum(today.input)}
                     </div>
                   </div>
                   <div>
-                    <div className='text-[11px] text-muted-foreground'>出</div>
+                    <div className='text-[11px] text-muted-foreground'>
+                      <Trans ns='vm' i18nKey='detailAccountTab.output' />
+                    </div>
                     <div className='text-sm font-semibold tabular-nums'>
                       {fmtNum(today.output)}
                     </div>
                   </div>
                 </div>
                 <Meter
-                  label='缓存命中'
+                  label={tVm('vm:detailAccountTab.cacheHit')}
                   value={todayHit ?? 0}
                   kind='remain'
-                  hint={`${fmtNum(todayReadCache)} 读 / ${fmtNum(todayWriteCache)} 写`}
+                  hint={tVm('vm:detailAccountTab.readWrite', {
+                    value1: fmtNum(todayReadCache),
+                    value2: fmtNum(todayWriteCache),
+                  })}
                 />
                 {gpt ? null : (
                   <Meter
-                    label='7 天 Sonnet'
+                    label={tVm('vm:detailAccountTab.7DaySonnet')}
                     value={pct(
                       acc.utilization_7d_sonnet ?? vm.utilization_7d_sonnet
                     )}
@@ -332,12 +369,15 @@ export function VmAccountTab(props: VmAccountTabProps) {
       {gpt || !perms.admin ? null : officialCc ? (
         <OfficialCcCard
           vmId={id}
-          blockedReason={remote ? REMOTE_UNSUPPORTED_TEXT : ''}
+          blockedReason={remote ? remoteUnsupportedText() : ''}
         />
       ) : credType !== 'none' ? (
         <p className='text-xs text-muted-foreground'>
-          官方 Claude Code 初装仅支持完整 OAuth 凭证，当前槽为{' '}
-          {credTypeLabel(credType)}。
+          <Trans
+            ns='vm'
+            i18nKey='detailAccountTab.officialClaudeCodeSetupRequiresFullOAuthCredentialsThis'
+            values={{ credTypeLabel: credTypeLabel(credType) }}
+          />
         </p>
       ) : null}
 

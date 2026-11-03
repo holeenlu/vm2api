@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { SITE_ICON_PATHS } from './site-icon-paths.mjs'
 
 const MIME = {
   '.css': 'text/css; charset=utf-8',
@@ -53,9 +54,24 @@ function relativePath(pathname) {
 // Vite 把内容哈希写进 assets/ 下的文件名，内容变了 URL 就变，可以永久缓存；
 // index.html 必须每次重新取，才能拿到新的哈希文件名。
 function cacheControl(rel, ext) {
-  if (ext === '.html') return 'no-store'
+  if (ext === '.html' || SITE_ICON_PATHS.has(`/${rel}`)) return 'no-store'
   if (rel.startsWith('assets/')) return 'public, max-age=31536000, immutable'
   return 'public, max-age=86400'
+}
+
+function acceptsGzip(header) {
+  const encodings = new Map(
+    String(header || '')
+      .toLowerCase()
+      .split(',')
+      .map((entry) => {
+        const [name, ...params] = entry.trim().split(';')
+        const quality = params.find((param) => param.trim().startsWith('q='))
+        const q = quality == null ? 1 : Number(quality.trim().slice(2))
+        return [name.trim(), Number.isFinite(q) && q > 0 && q <= 1]
+      }),
+  )
+  return encodings.get('gzip') ?? encodings.get('*') ?? false
 }
 
 export function tryServeWebDist(res, projectRoot, pathname) {
@@ -73,10 +89,13 @@ export function tryServeWebDist(res, projectRoot, pathname) {
   if (!file) return false
 
   const ext = path.extname(file).toLowerCase()
+  const compressed = acceptsGzip(res.req?.headers?.['accept-encoding']) ? safeFile(root, `${rel}.gz`) : ''
   res.writeHead(200, {
     'content-type': MIME[ext] || 'application/octet-stream',
     'cache-control': cacheControl(rel, ext),
+    vary: 'Accept-Encoding',
+    ...(compressed ? { 'content-encoding': 'gzip' } : {}),
   })
-  res.end(fs.readFileSync(file))
+  res.end(res.req?.method === 'HEAD' ? undefined : fs.readFileSync(compressed || file))
   return true
 }
