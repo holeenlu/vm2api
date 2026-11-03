@@ -1,0 +1,2 @@
+ALTER TABLE proxies ADD COLUMN quality_json TEXT;
+ALTER TABLE proxies ADD COLUMN quality_version INTEGER NOT NULL DEFAULT 0;

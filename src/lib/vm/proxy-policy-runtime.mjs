@@ -1,7 +1,7 @@
 import { getVm, listVms } from './vm-registry.mjs'
 import { slotHost } from './slot-host.mjs'
 import { configuredIpv6Enabled } from './proxy-policy.mjs'
-import { socksProxyFamily } from './socks-address.mjs'
+import { proxyFamily } from './proxy-address.mjs'
 
 /** Keep bridges/VMs intact. Stopping the helper closes existing proxy connections. */
 export async function syncIpv6ProxyEgress(projectRoot, proxyPool, { nodeId, vms } = {}) {
@@ -9,7 +9,7 @@ export async function syncIpv6ProxyEgress(projectRoot, proxyPool, { nodeId, vms 
   if (nodeId === undefined && !configuredIpv6Enabled()) {
     for (const proxy of proxyPool?.state?.proxies || []) {
       if (configuredIpv6Enabled()) break
-      if (socksProxyFamily(proxy) !== 6) continue
+      if (proxyFamily(proxy) !== 6) continue
       const result = await slotHost({ proxy }).setProxyEgressEnabled({ proxy }, projectRoot, false)
       results.push({ proxy_id: proxy.id, ok: result.ok, error: result.error || null })
     }
@@ -17,7 +17,7 @@ export async function syncIpv6ProxyEgress(projectRoot, proxyPool, { nodeId, vms 
   for (const summary of vms || listVms(projectRoot)) {
     if (nodeId !== undefined && summary.node_id !== nodeId) continue
     const vm = vms ? summary : getVm(projectRoot, summary.id)
-    if (!vm || socksProxyFamily(vm.proxy) !== 6) continue
+    if (!vm || proxyFamily(vm.proxy) !== 6) continue
     const enabled = configuredIpv6Enabled()
     if (enabled && vm.status !== 'running') continue
     try {

@@ -11,6 +11,10 @@ describe('login terminal shortcuts', () => {
   it('extracts the authorize URL from terminal text', () => {
     expect(loginAuthUrl(`Browser didn't open? ${url}\nPaste code`)).toBe(url)
     expect(loginAuthUrl('https://example.com/nope')).toBe('')
+    expect(loginAuthUrl(url + '\u0007terminal-output')).toBe(url)
+    expect(loginAuthUrl('https://claude.com/cai/oauth/authorize?\u0007')).toBe(
+      ''
+    )
   })
   it('joins an authorize URL split across terminal frames', () => {
     const cut = url.indexOf('oauth')

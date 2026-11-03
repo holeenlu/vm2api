@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { fmtBytes, fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -38,46 +39,45 @@ export function RemoteList({
   onDisconnect: (node: ClusterNode) => void
   canManage: boolean
 }) {
+  const { t } = useTranslation('cluster')
+
   return (
     <PanelCard
-      title='扩展节点'
-      meta='SSH 接入的 VPS，远端 Docker 经同一条连接管理'
+      title={t('remote.title')}
+      meta={t('remote.description')}
       action={
         canManage ? (
           <Button size='sm' variant='outline' onClick={onJoin}>
-            接入
+            {t('connect')}
           </Button>
         ) : undefined
       }
     >
       {nodes.length === 0 ? (
         <EmptyState
-          reason='还没有扩展节点。用 SSH 接入一台 VPS，在面板里管理它的终端和 Docker。'
-          actionLabel={canManage ? '接入 VPS' : undefined}
+          reason={t('remote.empty')}
+          actionLabel={canManage ? t('join') : undefined}
           onAction={canManage ? onJoin : undefined}
         />
       ) : (
         <div className='overflow-x-auto'>
           <div className='min-w-[1064px]'>
             <div className='flex h-8 items-center border-b bg-muted/30 text-[11px] font-medium tracking-wide text-muted-foreground/80'>
-              <div className={COL.name}>节点</div>
+              <div className={COL.name}>{t('nodes')}</div>
               <div className={COL.host}>IP</div>
-              <div className={COL.link}>链路</div>
+              <div className={COL.link}>{t('link')}</div>
               <div className={COL.metric}>CPU</div>
-              <div className={COL.metric}>内存</div>
-              <div
-                className={COL.metric}
-                title='全部容器内存合计（不含文件缓存）'
-              >
-                容器
+              <div className={COL.metric}>{t('memory')}</div>
+              <div className={COL.metric} title={t('remote.memoryHint')}>
+                {t('containers')}
               </div>
-              <div className={COL.metric} title='运行中 / 全部容器（含出口）'>
+              <div className={COL.metric} title={t('remote.containerHint')}>
                 Docker
               </div>
-              <div className={COL.metric}>槽位</div>
-              <div className={COL.metric}>凭证</div>
-              <div className={COL.metric}>在线</div>
-              <div className={COL.spend}>花费</div>
+              <div className={COL.metric}>{t('slots')}</div>
+              <div className={COL.metric}>{t('credentials')}</div>
+              <div className={COL.metric}>{t('online')}</div>
+              <div className={COL.spend}>{t('spend')}</div>
               <div className={COL.action} />
             </div>
             {nodes.map((node) => {
@@ -127,11 +127,13 @@ export function RemoteList({
                             ? 'border-primary/40 text-primary'
                             : 'border-caution-3/50 text-caution-3'
                         )}
-                        title={`直连通道：${directLinkText(node.remote.direct_link)}`}
+                        title={t('remote.directStatus', {
+                          value1: directLinkText(node.remote.direct_link),
+                        })}
                       >
                         {node.remote.direct_link.state === 'ok'
-                          ? '直连'
-                          : '直连→SSH'}
+                          ? t('direct')
+                          : t('remote.directFallback')}
                       </span>
                     ) : null}
                     {lat ? (
@@ -153,7 +155,12 @@ export function RemoteList({
                     )}
                     title={
                       hs
-                        ? `${hs.cpu_count} 核 · load ${[hs.load1, hs.load5, hs.load15].map((n) => (n == null ? '—' : n.toFixed(2))).join(' / ')}`
+                        ? t('remote.cpuLoad', {
+                            value1: hs.cpu_count,
+                            value2: [hs.load1, hs.load5, hs.load15]
+                              .map((n) => (n == null ? '—' : n.toFixed(2)))
+                              .join(' / '),
+                          })
                         : undefined
                     }
                   >
@@ -182,7 +189,10 @@ export function RemoteList({
                     className={cn(COL.metric, 'field-metric')}
                     title={
                       node.docker
-                        ? `运行 ${node.docker.running} / 共 ${node.docker.total} 个容器`
+                        ? t('remote.runningContainers', {
+                            value1: node.docker.running,
+                            count: Number(node.docker.total),
+                          })
                         : undefined
                     }
                   >
@@ -211,7 +221,7 @@ export function RemoteList({
                           className='h-7 px-2 text-xs'
                           onClick={() => onOpen(node)}
                         >
-                          管理
+                          {t('manage')}
                         </Button>
                         <Button
                           size='sm'
@@ -219,7 +229,7 @@ export function RemoteList({
                           className='h-7 px-2 text-xs'
                           onClick={() => onDisconnect(node)}
                         >
-                          移除
+                          {t('remove')}
                         </Button>
                       </>
                     ) : null}

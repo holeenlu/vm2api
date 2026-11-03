@@ -8,6 +8,7 @@ import {
   isQuotaWindowReason,
   isLeftoverQuotaScheduleOff,
   resolveScheduleState,
+  accountLimitReason,
 } from '../../src/lib/pool/availability.mjs'
 
 const usageOk = { ok: true, source: 'vm-oauth-usage', at: '2026-08-24T00:00:00.000Z' }
@@ -612,4 +613,38 @@ test('rest stays restricted even with a stale cooldown left on the slot', () => 
   assert.equal(triad.restriction_reason, 'rest_period')
   assert.equal(triad.restriction_until, until)
   assert.equal(triad.restriction_text, '休息时段')
+})
+
+test('an account 429 whose headers name the spent window reads as that window', () => {
+  const now = Date.parse('2026-11-03T00:00:00Z')
+  const reset7d = String(Math.floor(Date.parse('2026-11-05T20:00:00Z') / 1000))
+  const unified = {
+    headers: {
+      '5h': { utilization: 0.12, reset: null, status: 'allowed' },
+      '7d': { utilization: 1, reset: reset7d, status: 'rejected' },
+    },
+  }
+  assert.equal(accountLimitReason('account_quota_exhausted', { unified }, now), 'quota_7d_header')
+  assert.equal(accountLimitReason('rate_limited', { unified }, now), 'quota_7d_header')
+  assert.equal(
+    accountLimitReason('rate_limited', { quota: { status_5h: 'rejected', reset_5h: '2026-11-03T02:00:00Z' } }, now),
+    'quota_5h_header',
+  )
+  // No window named: a bare 429 stays 限流中; other reasons pass through.
+  assert.equal(accountLimitReason('rate_limited', {}, now), 'rate_limited')
+  assert.equal(
+    accountLimitReason('rate_limited', { quota: { status_7d: 'rejected', reset_7d: '2026-11-02T00:00:00Z' } }, now),
+    'rate_limited',
+  )
+  assert.equal(accountLimitReason('overloaded', { unified }, now), 'overloaded')
+
+  const ev = evaluateAccount({
+    vm: { schedulable: true, has_token: true },
+    hasToken: true,
+    hardBlock: { reason: accountLimitReason('rate_limited', { unified }, now), until: now + 3600_000 },
+    now,
+  })
+  assert.equal(ev.text, '7d 限制')
+  assert.equal(ev.reason, 'quota_7d_header')
+  assert.equal(ev.window, '7d')
 })
