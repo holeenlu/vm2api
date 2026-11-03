@@ -29,11 +29,12 @@ test('header 0-1 ratios and leftover 0-100 percents normalize to the same ratio'
   assert.equal(usedRatioOf(''), null)
 })
 
-test('vendor rounding floor: 4.9% has no number, 5% does', () => {
-  assert.equal(estimateWindow({ ...base, usedRatio: 0.049 }).status, 'low_usage')
-  assert.equal(estimateWindow({ ...base, usedRatio: 0.049 }).total_usd, null)
-  assert.equal(estimateWindow({ ...base, usedRatio: 0.05 }).status, 'ok')
-  assert.equal(estimateWindow({ ...base, usedRatio: 0.05 }).total_usd, 240)
+test('estimates from the first reported percent: 0% has no number, 1% does', () => {
+  assert.equal(estimateWindow({ ...base, usedRatio: 0 }).status, 'low_usage')
+  assert.equal(estimateWindow({ ...base, usedRatio: 0.009 }).total_usd, null)
+  assert.equal(estimateWindow({ ...base, usedRatio: 0.01 }).status, 'ok')
+  assert.equal(estimateWindow({ ...base, usedRatio: 0.01 }).total_usd, 1200)
+  assert.equal(estimateWindow({ ...base, usedRatio: 0.04 }).total_usd, 300)
 })
 
 test('a full window has nothing left', () => {
@@ -69,7 +70,7 @@ test('projection: live estimate wins when it has a number', () => {
 })
 
 test('projection: a fresh window falls back to last window spend ÷ final used%', () => {
-  const live = estimateWindow({ ...base, usedRatio: 0.02 })
+  const live = estimateWindow({ ...base, usedRatio: 0 })
   assert.equal(live.status, 'low_usage')
   const closed = { start: '2026-10-14T05:00:00Z', used_ratio: 0.8, total_cost: 40, unpriced: 0 }
   const out = projectWindowRemaining({ live, closed, spentUsd: 1, coveredSince: base.coveredSince })
@@ -80,7 +81,7 @@ test('projection: no number when the last window is thin, unpriced or not fully 
   const closed = { start: '2026-10-14T05:00:00Z', used_ratio: 0.8, total_cost: 40, unpriced: 0 }
   const coveredSince = base.coveredSince
   const none = { source: null, total_usd: null, remaining_usd: null }
-  assert.deepEqual(projectWindowRemaining({ closed: { ...closed, used_ratio: 0.03 }, coveredSince }), none)
+  assert.deepEqual(projectWindowRemaining({ closed: { ...closed, used_ratio: 0.005 }, coveredSince }), none)
   assert.deepEqual(projectWindowRemaining({ closed: { ...closed, unpriced: 2 }, coveredSince }), none)
   assert.deepEqual(projectWindowRemaining({ closed, coveredSince: '2026-10-14T06:00:00Z' }), none)
   assert.deepEqual(projectWindowRemaining({ closed: null, coveredSince }), none)

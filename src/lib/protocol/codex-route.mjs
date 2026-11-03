@@ -1,3 +1,4 @@
+import { normalizeCodexScheduling } from '../pool/codex-scheduling-policy.mjs'
 /**
  * Codex hop routing. Claude traffic never reads this object.
  */
@@ -40,7 +41,26 @@ export const DEFAULT_CODEX_ROUTING = Object.freeze({
     unknown: 'allow',
   },
   quota: normalizeOpenAIQuotaPolicy(),
+  gateway_worker: { enabled: false, preference: 'auto' },
+  warmup: { enabled: false, times: [], model: '' },
 })
+
+// Gateway Worker 账号预热（对齐 CPR warmup 策略）：在本地时刻（UTC+8，"HH:MM"）对 OAuth 账号发起最小请求，
+// 提前激活 5h 额度窗口。缺少模型或时刻时视为关闭。
+export function normalizeCodexWarmup(raw) {
+  const src = asObject(raw) || {}
+  const times = [
+    ...new Set(
+      (Array.isArray(src.times) ? src.times : [])
+        .map((value) => String(value || '').trim())
+        .filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)),
+    ),
+  ]
+    .sort()
+    .slice(0, 24)
+  const model = typeof src.model === 'string' ? src.model.trim().slice(0, 128) : ''
+  return { enabled: src.enabled === true && times.length > 0 && !!model, times, model }
+}
 
 function typedError(message, code) {
   const error = new TypeError(message)
@@ -85,6 +105,7 @@ export function validateInferenceWebsocketPatch(body = {}) {
   if (!Object.prototype.hasOwnProperty.call(body, 'codex')) return
   if (!asObject(body.codex)) throw typedError('codex 必须是对象', 'invalid_codex_websocket')
   const codex = body.codex
+  if (Object.hasOwn(codex, 'scheduling')) normalizeCodexScheduling(codex.scheduling, { strict: true })
   if (Object.prototype.hasOwnProperty.call(codex, 'websocket')) {
     validateEnabledToggle(codex.websocket, 'codex.websocket', 'invalid_codex_websocket')
   }
@@ -148,6 +169,14 @@ export function normalizeCodexRouting(raw = {}) {
     },
     clients,
     quota: normalizeOpenAIQuotaPolicy(src.quota),
+    gateway_worker: {
+      enabled: src.gateway_worker?.enabled === true,
+      preference: ['auto', 'vm', 'gateway_worker'].includes(src.gateway_worker?.preference)
+        ? src.gateway_worker.preference
+        : 'auto',
+    },
+    scheduling: normalizeCodexScheduling(src.scheduling),
+    warmup: normalizeCodexWarmup(src.warmup),
     model_mappings: normalizeCodexModelMappings(src.model_mappings),
   }
 }

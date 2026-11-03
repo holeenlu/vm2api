@@ -31,6 +31,7 @@ export type ProxyGeo = {
 }
 
 export type VmProxySnap = {
+  quality?: import('./proxy-quality').ProxyQualityReport | null
   id?: string
   host?: string
   port?: number | string
@@ -38,7 +39,10 @@ export type VmProxySnap = {
   label?: string | null
   status?: string
   enabled?: boolean
-  blocked_reason?: 'ipv6_disabled' | null
+  blocked_reason?: 'ipv6_disabled' | 'proxy_expired' | null
+  expires_at?: string | null
+  fallback_mode?: 'none' | 'proxy' | 'direct'
+  backup_proxy_id?: string | null
   address_family?: 4 | 6 | null
   latency_ms?: number
   last_error?: string
@@ -55,6 +59,13 @@ export type VmProxySnap = {
   scheme?: string
   /** 透明 TCP 把唯一 DNS 应答改写成 SOCKS 主机名。默认关。 */
   domain_forward?: boolean
+  // Gateway Worker 按代理共享的上游 Codex WS 连接上限，0 不限
+  max_websocket_connections?: number
+  /** Gateway Worker 请求位置：inherit 回退全局，manual 使用 location，auto 跟随探测到的出口 */
+  request_location_mode?: 'inherit' | 'manual' | 'auto'
+  location?: RequestLocation | null
+  /** Worker 实际使用的代理位置；继承、冲突或探测不完整时为 null */
+  effective_request_location?: RequestLocation | null
   /** 出口地理位置（IPv4）；从未检测过为 null。 */
   geo?: ProxyGeo | null
   /** 公网 IPv6 出口地理位置；从未检测过为 null。 */
@@ -63,16 +74,20 @@ export type VmProxySnap = {
   node_id?: string | null
   /**
    * 节点显示名。Admin 本地代理槽位视图：控制面为 null，节点为标签。
-   * 字段出现即允许展示节点名；租户响应省略该字段。
+   * 字段出现即允许展示节点名；未授权的响应省略该字段。
    */
   node_name?: string | null
+  vendor_id?: string | null
+  vendor_resource_id?: string | null
+  platforms?: string[]
 }
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'
 
 export type VmTelemetryState = {
   enabled: boolean
-  state:
+  running?: boolean
+  state?:
     | 'disabled'
     | 'idle'
     | 'waiting_credentials'
@@ -80,9 +95,9 @@ export type VmTelemetryState = {
     | 'uploading'
     | 'error'
     | 'unsupported'
-  pending_events: number
-  last_upload_at: string | null
-  last_error: string | null
+  pending_events?: number
+  last_upload_at?: string | null
+  last_error?: string | null
 }
 
 export type VmKernelHealth = {
@@ -169,7 +184,7 @@ export type VmMachine = {
   disk_serial?: string
 }
 
-/** `GET /vms/:id` 的脱敏客户机特征。不含 machine-id / token / 代理账密。 */
+/** `GET /vms/:id` 的脱敏用户机特征。不含 machine-id / token / 代理账密。 */
 export type VmPhysicalDmi = {
   manufacturer?: string | null
   product?: string | null
@@ -215,7 +230,12 @@ export type ScheduleState = 'on' | 'off' | 'unschedulable' | 'restricted'
 export type Vm = {
   id: string
   name?: string
+  groups?: { id: number; name: string; platform?: string; status: string }[]
+  groups_version?: number
   owner_user_id?: string | null
+  /** 超管列表中的供应商关联；租户列表不会返回这些字段。 */
+  vendor_id?: string | null
+  vendor_name?: string | null
   /** 所在集群节点；null / 缺省 = 本机。远端槽位不支持官方初装、wrap-cli、换内核等。 */
   node_id?: string | null
   /** Admin-only cluster node label for `node_id`. Tenants never receive this. */
@@ -303,7 +323,7 @@ export type Vm = {
   } | null
   /** Raw OpenAI `plan_type` from wham/usage (GPT slots only). */
   plan_type?: string | null
-  /** ChatGPT subscription end from OAuth `id_token` (`chatgpt_subscription_active_until`). */
+  /** ChatGPT subscription renewal/end: accounts/check entitlement first, OAuth `id_token` claim as fallback. */
   chatgpt_subscription_active_until?: string | null
   /** Plan label fallback from OAuth `id_token` when `plan_type` from usage is absent. */
   chatgpt_plan_type?: string | null
@@ -351,7 +371,7 @@ export type Vm = {
   runtime_type?: RuntimeType | null
   /** 创建时固化的机器规格；旧槽可能缺省。 */
   machine?: VmMachine | null
-  /** 观测到的客户机特征；列表也可能带上。缺省按未采集展示。 */
+  /** 观测到的用户机特征；列表也可能带上。缺省按未采集展示。 */
   physical_features?: VmPhysicalFeatures | null
 
   region?: string
@@ -805,4 +825,12 @@ export type TestModelsPayload = {
   protocol?: 'openai.responses' | 'anthropic.messages' | null
   inbound_path?: '/v1/responses' | '/v1/messages' | null
   source?: string
+}
+
+/** 请求位置（对齐 CPR）：国家两位大写代码、地区与城市、IANA 时区。 */
+export type RequestLocation = {
+  country: string
+  region: string
+  city: string
+  timezone: string
 }

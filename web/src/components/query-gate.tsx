@@ -1,3 +1,5 @@
+import { t } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { ApiError } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -6,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message
   if (error instanceof Error) return error.message
-  return '加载失败'
+  return t('common:loadFailed')
 }
 
 export function QueryGate({
@@ -25,6 +27,7 @@ export function QueryGate({
   skeleton?: React.ReactNode
   children: React.ReactNode
 }) {
+  useTranslation('common')
   if (loading) {
     if (skeleton) return skeleton
     return (
@@ -38,7 +41,7 @@ export function QueryGate({
     if (error instanceof ApiError && error.status === 401) return null
     return (
       <Alert variant='destructive'>
-        <AlertTitle>加载失败</AlertTitle>
+        <AlertTitle>{t('common:loadFailed')}</AlertTitle>
         <AlertDescription>{errorMessage(error)}</AlertDescription>
       </Alert>
     )

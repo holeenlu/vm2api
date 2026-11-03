@@ -137,6 +137,22 @@ test('reset-only quota headers must not restore cached utilization through norma
   assert.deepEqual(values(root).windows, [null, null])
 })
 
+test('with spendable credits a quota error keeps the measured window percentages', async (t) => {
+  const root = fixture(t)
+  const file = path.join(root, 'vms', 'vm-a.json')
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  stored.codex.credits = { has_credits: true, unlimited: false, balance: '60000', fetched_at: new Date().toISOString() }
+  fs.writeFileSync(file, JSON.stringify(stored))
+  await hop(root)
+  const { vm, summary, windows } = values(root)
+  assert.deepEqual(windows, [20, 30])
+  assert.equal(summary.utilization_7d, 0.3)
+  // The refusal still parks the slot for the default interval.
+  const until = Date.parse(vm.codex.extra.codex_limited_until)
+  assert.ok(until > Date.now())
+  assert.equal(codexQuotaPark(vm.codex.extra, until - 1).limited, true)
+})
+
 test('generic rate limit is not proof that quota percentages are stale', async (t) => {
   const root = fixture(t)
   await hop(root, { code: 'rate_limit_exceeded' })

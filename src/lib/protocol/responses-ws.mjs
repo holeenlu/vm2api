@@ -5,6 +5,7 @@
  * Each `response.create` goes through handleProtocol (auth, scope, schedule,
  * billing, logs). Downstream sees JSON frames, never SSE.
  */
+import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import http from 'node:http'
 import { Readable } from 'node:stream'
@@ -150,6 +151,20 @@ export function parseResponsesWsClientMessage(raw) {
   return { kind: 'interrupt', value: decoded.value }
 }
 
+// 没有可用的上游控制通道（上游走 HTTP 或当前没有活动响应）时，中断未转发；当前响应继续交付（CPR 合同）
+export function responseInterruptFailedFrame(
+  value = {},
+  message = 'No upstream control channel is bound to this connection',
+) {
+  const frame = {
+    type: 'response.interrupt.failed',
+    error: { type: 'invalid_request_error', code: 'no_upstream_control_channel', message },
+  }
+  const responseId = interruptTargetResponseId(value)
+  if (responseId) frame.response_id = responseId
+  return frame
+}
+
 export function responseInterruptAcceptedFrame(value = {}) {
   const frame = { type: 'response.interrupt.accepted' }
   const previousId = typeof value.previous_response_id === 'string' ? value.previous_response_id.trim() : ''
@@ -259,6 +274,7 @@ export function createSseJsonBridge() {
   let terminal = null
   let responseId = null
   let output = null
+  const completedOutput = new Map()
 
   function takeData() {
     if (!dataLines.length) return null
@@ -273,6 +289,17 @@ export function createSseJsonBridge() {
     const id = parsed.response?.id
     if (typeof id === 'string' && id) responseId = id
     if (Array.isArray(parsed.response?.output)) output = parsed.response.output
+    // Preserve completed items for continuation when the terminal frame omits
+    // its output array. Never replay unfinished output_item.added placeholders.
+    if (
+      type === 'response.output_item.done' &&
+      Number.isInteger(parsed.output_index) &&
+      parsed.output_index >= 0 &&
+      parsed.item &&
+      typeof parsed.item === 'object' &&
+      !Array.isArray(parsed.item)
+    )
+      completedOutput.set(parsed.output_index, parsed.item)
     if (type === 'response.completed') terminal = 'completed'
     else if (type === 'response.failed') terminal = 'failed'
     else if (type === 'response.incomplete') terminal = 'incomplete'
@@ -325,7 +352,13 @@ export function createSseJsonBridge() {
     },
     snapshot() {
       if (!responseId) return null
-      return { id: responseId, output: Array.isArray(output) ? output : [] }
+      return {
+        id: responseId,
+        output:
+          Array.isArray(output) && output.length
+            ? output
+            : [...completedOutput.entries()].sort(([a], [b]) => a - b).map(([, item]) => item),
+      }
     },
   }
 }
@@ -351,7 +384,6 @@ function createProtocolReq(upgradeReq, body) {
   req.panelUser = upgradeReq.panelUser
   req.panelRole = upgradeReq.panelRole
   req.panelUserId = upgradeReq.panelUserId
-  req.panelVmCreateQuota = upgradeReq.panelVmCreateQuota
   req.abort = () => {
     if (req.aborted) return
     req.aborted = true
@@ -452,6 +484,7 @@ export function createResponsesWsHandler({
   requireAuth,
   json,
   getRouting,
+  getGatewayWorker = () => null,
   maxBodyBytes = DEFAULT_MAX_REQUEST_BYTES,
 } = {}) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: maxBodyBytes })
@@ -506,6 +539,13 @@ export function createResponsesWsHandler({
     let currentReq = null
     let activeResponseId = null
     let activeHopCompleted = false
+    // Gateway Worker 路径：同一入站连接绑定 Worker 上的同一条上游 WS（连接内续接、控制帧透传）
+    const gatewayState = {
+      connectionKey: `wsc_${randomUUID()}`,
+      instanceId: null,
+      activeGateway: false,
+      nativeBody: null,
+    }
 
     const abortCurrent = () => {
       try {
@@ -563,6 +603,9 @@ export function createResponsesWsHandler({
           activeResponseId = null
           activeHopCompleted = false
           const req = createProtocolReq(upgradeReq, hopBody)
+          gatewayState.activeGateway = false
+          gatewayState.nativeBody = previousId ? { ...decoded.body, stream: true } : null
+          req.gatewayWs = gatewayState
           currentReq = req
           let hopClientAborted = false
           const res = createProtocolRes()
@@ -668,6 +711,22 @@ export function createResponsesWsHandler({
           return
         }
         const targetId = interruptTargetResponseId(clientMessage.value)
+        const gatewayWorker = getGatewayWorker()
+        if (gatewayState.activeGateway && gatewayState.instanceId && gatewayWorker?.wsFrame) {
+          // 转发到上游 WS，不取消本地请求：上游继续交付事件与终态，部分输出是否丢弃以终态为准
+          gatewayWorker
+            .wsFrame(gatewayState.instanceId, gatewayState.connectionKey, clientMessage.value)
+            .then((result) =>
+              sendFrame(
+                ws,
+                result?.ok
+                  ? responseInterruptAcceptedFrame(clientMessage.value)
+                  : responseInterruptFailedFrame(clientMessage.value, result?.data?.error?.message),
+              ),
+            )
+            .catch(() => sendFrame(ws, responseInterruptFailedFrame(clientMessage.value)))
+          return
+        }
         const shouldAbort =
           currentReq && !activeHopCompleted && (!targetId || (activeResponseId && targetId === activeResponseId))
         if (shouldAbort) abortCurrent()
@@ -717,6 +776,10 @@ export function createResponsesWsHandler({
       queue.length = 0
       queuedBytes = 0
       abortCurrent()
+      if (gatewayState.instanceId)
+        getGatewayWorker()
+          ?.wsClose?.(gatewayState.instanceId, gatewayState.connectionKey)
+          ?.catch?.(() => {})
     })
     ws.on('error', () => {
       closed = true
