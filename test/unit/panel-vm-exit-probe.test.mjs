@@ -35,7 +35,7 @@ function setup(t) {
     cfg: { paths: { project: root }, vm: { id: null } },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {

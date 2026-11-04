@@ -6,7 +6,8 @@
  * This table mirrors identity / expiry / presence flags only.
  */
 
-import { getDb } from '../database.mjs'
+import { getDb, withTransaction } from '../database.mjs'
+import { GroupsRepo } from './groups-repo.mjs'
 import { SettingsRepo } from './settings-repo.mjs'
 import { maybeEncrypt, maybeDecrypt, encryptionEnabled } from '../secure.mjs'
 import { hasAccessPresence, hasRefreshPresence, stripCredentialSecrets } from '../../oauth/oauth-credentials.mjs'
@@ -100,8 +101,12 @@ export class VmsRepo {
       .map((r) => r.id)
   }
 
-  remove(id) {
-    return this._remove.run(id).changes > 0
+  remove(id, actor = 'system') {
+    return withTransaction(this.db, () => {
+      const groups = new GroupsRepo(this.db)
+      groups.assignResource('vm', id, [], groups.resourceVersion('vm', id), actor)
+      return this._remove.run(id).changes > 0
+    })
   }
 
   count() {

@@ -1,0 +1,17 @@
+{
+  "passwordMismatch": "新しいパスワードが一致しません",
+  "saved": "プロフィールを保存しました",
+  "passwordChanged": "パスワードを変更し、他のセッションをログアウトしました",
+  "title": "プロフィール",
+  "description": "プロフィールとログインパスワードを管理します。",
+  "username": "ユーザー名",
+  "displayName": "表示名",
+  "email": "メールアドレス",
+  "identityHelp": "ログイン用ユーザー名は変更できません。表示名と連絡用メールアドレスは権限に影響しません。",
+  "emailHelp": "メールアドレスは連絡先としてのみ使用され、ログインやパスワードの再設定には使用されません。",
+  "save": "プロフィールを保存",
+  "changePassword": "パスワードを変更",
+  "currentPassword": "現在のパスワード",
+  "newPassword": "新しいパスワード",
+  "confirmPassword": "新しいパスワードを確認"
+}

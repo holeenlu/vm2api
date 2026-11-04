@@ -1,3 +1,4 @@
+import { SYSTEM_TIMEZONE } from '../../../shared/system-time.mjs'
 /**
  * `/api/panel/statistics*` aggregates over `usage_logs`.
  *
@@ -11,14 +12,14 @@
  */
 
 import { getDb } from '../database.mjs'
-import { reportTimezone, zonedDayStartMs, zonedParts, zonedWallToMs } from '../../core/timezone.mjs'
+import { zonedDayStartMs, zonedParts, zonedWallToMs } from '../../core/timezone.mjs'
 import { ERROR_PRED, PROMPT_TOKENS_SQL, SUCCESS_PRED, TOTAL_TOKENS_SQL, ownerPred } from './usage-log-preds.mjs'
 import { lookupNames } from './usage-logs-view.mjs'
 
 export const STATS_RANGES = ['today', '7days', '30days', 'thisMonth']
-export const STATS_DIMENSIONS = ['user', 'key', 'model', 'vm']
+export const STATS_DIMENSIONS = ['user', 'key', 'model', 'vm', 'group', 'endpoint']
 /** Dimensions a tenant may group by; user/vm would expose other tenants or the pool layout. */
-export const USER_ROLE_DIMENSIONS = ['key', 'model']
+export const USER_ROLE_DIMENSIONS = ['key', 'model', 'group', 'endpoint']
 
 const MAX_SERIES = 8
 const OTHERS_ID = '__others__'
@@ -29,7 +30,14 @@ const HOUR_MS = 3_600_000
 const LEADERBOARD_DEFAULT = 20
 const LEADERBOARD_MAX = 100
 
-const DIMENSION_COLUMN = { user: 'user_id', key: 'api_key_id', model: 'model', vm: 'vm_id' }
+const DIMENSION_COLUMN = {
+  user: 'user_id',
+  key: 'api_key_id',
+  model: 'model',
+  vm: 'vm_id',
+  group: 'billing_group_id',
+  endpoint: 'path',
+}
 
 const TOKENS_SQL = TOTAL_TOKENS_SQL
 
@@ -120,7 +128,7 @@ export class StatisticsRepo {
       .prepare(`
       SELECT COUNT(*) AS requests,
              COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END), 0) AS errors,
-             COALESCE(SUM(total_cost), 0) AS cost,
+             COALESCE(SUM(actual_cost), 0) AS cost,
              COALESCE(SUM(actual_cost), 0) AS actual_cost,
              COALESCE(SUM(input_tokens), 0) AS input_tokens,
              COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -155,6 +163,14 @@ export class StatisticsRepo {
 
   _names(dimension, ids) {
     const real = ids.filter((id) => id !== NONE_ID)
+    if (dimension === 'group')
+      return new Map(
+        this.db
+          .prepare('SELECT id,name FROM groups')
+          .all()
+          .map((r) => [String(r.id), r.name]),
+      )
+    if (dimension === 'endpoint') return new Map(real.map((id) => [id, id]))
     if (dimension === 'model') return new Map(real.map((id) => [id, id]))
     const names = lookupNames(this.db, {
       userIds: dimension === 'user' ? real : [],
@@ -169,10 +185,10 @@ export class StatisticsRepo {
   }
 
   /** Stacked-area series (top 8 by cost + others), window totals, and deltas vs the previous equal window. */
-  statistics({ range = 'today', dimension = 'model', tz = 'UTC', owner_user_id = null, now = Date.now() } = {}) {
+  statistics({ range = 'today', dimension = 'model', owner_user_id = null, now = Date.now() } = {}) {
     const r = normalizeRange(range) || 'today'
     const dim = normalizeDimension(dimension) || 'model'
-    const zone = reportTimezone(tz)
+    const zone = SYSTEM_TIMEZONE
     const { since, until, resolution, buckets } = resolveWindow(r, zone, now)
     const col = DIMENSION_COLUMN[dim]
     const { cond, params } = this._scope(since, until, owner_user_id)
@@ -180,7 +196,7 @@ export class StatisticsRepo {
       .prepare(`
       SELECT ${col} AS sid, ${SLOT_SQL} AS slot,
              COUNT(*) AS requests,
-             COALESCE(SUM(total_cost), 0) AS cost,
+             COALESCE(SUM(actual_cost), 0) AS cost,
              COALESCE(SUM(${TOKENS_SQL}), 0) AS tokens
       FROM usage_logs ${cond}
       GROUP BY sid, slot
@@ -258,13 +274,12 @@ export class StatisticsRepo {
     range = 'today',
     scope = 'model',
     limit = LEADERBOARD_DEFAULT,
-    tz = 'UTC',
     owner_user_id = null,
     now = Date.now(),
   } = {}) {
     const r = normalizeRange(range) || 'today'
     const s = normalizeDimension(scope) || 'model'
-    const zone = reportTimezone(tz)
+    const zone = SYSTEM_TIMEZONE
     const n = Math.min(LEADERBOARD_MAX, Math.max(1, Math.trunc(Number(limit)) || LEADERBOARD_DEFAULT))
     const { since, until } = resolveWindow(r, zone, now)
     const col = DIMENSION_COLUMN[s]
@@ -280,7 +295,7 @@ export class StatisticsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS cost,
+             COALESCE(SUM(actual_cost), 0) AS cost,
              COALESCE(SUM(actual_cost), 0) AS actual_cost,
              AVG(duration_ms) AS avg_duration_ms,
              AVG(first_token_ms) AS avg_ttft_ms

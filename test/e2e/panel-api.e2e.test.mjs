@@ -38,6 +38,12 @@ test('panel login → cookie → /api/panel/me', async () => {
 test('admin database metrics endpoint returns a safe SQLite snapshot', async () => {
   const gw = await startGateway()
   try {
+    const invalid = await fetch(gw.baseUrl + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-kin-test-sim-001', 'content-type': 'application/json' },
+      body: '{',
+    })
+    assert.equal(invalid.status, 400)
     const response = await api(gw, 'GET', '/api/panel/database/metrics')
     assert.equal(response.status, 200, response.text)
     const data = response.json.data || response.json
@@ -49,6 +55,13 @@ test('admin database metrics endpoint returns a safe SQLite snapshot', async () 
     assert.equal(typeof data.database.page_count, 'number')
     assert.equal(typeof data.usage_cache.requests, 'number')
     assert.ok(data.sampled_at)
+    assert.equal(data.runtime.enabled, true)
+    assert.equal(data.runtime.size_basis, 'decoded_inbound_bytes')
+    const parse = data.runtime.request_work_total.find(
+      (row) => row.stage === 'json_parse' && row.traffic === 'inference',
+    )
+    assert.equal(parse.errors, 1)
+    assert.equal(parse.size_bucket, 'le_16_kib')
 
     const serialized = JSON.stringify(data)
     assert.equal(serialized.includes(gw.project), false)

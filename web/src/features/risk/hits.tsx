@@ -1,10 +1,18 @@
+import { t as translate, i18n } from '@/i18n'
+import { useTranslation } from 'react-i18next'
 import { STAGES } from './model'
 import type { GateRow } from './queries'
 
 const REFUSAL_KEYWORDS: Record<string, string> = {
-  exact: '精确指纹',
-  similar: '近似正文',
-  device: '封禁 device',
+  get exact() {
+    return translate('risk:exactFingerprint')
+  },
+  get similar() {
+    return translate('risk:similarBody')
+  },
+  get device() {
+    return translate('risk:blockedDevice')
+  },
 }
 
 /**
@@ -23,6 +31,8 @@ export function HitTable({
   showSource: boolean
   action?: (row: GateRow) => React.ReactNode
 }) {
+  useTranslation('risk')
+
   if (!rows.length) {
     return <p className='px-4 py-8 text-sm text-muted-foreground'>{empty}</p>
   }
@@ -62,7 +72,7 @@ export function HitTable({
             ) : null}
           </div>
           <span className='shrink-0 text-sm font-medium tabular-nums'>
-            {row.count.toLocaleString()}
+            {row.count.toLocaleString(i18n.language)}
           </span>
           {action ? action(row) : null}
         </li>

@@ -254,3 +254,76 @@ test('#163 A18: a failed hop keeps the old sample and backs off instead of retry
   assert.equal(second.reason, 'probe_backoff')
   assert.equal(calls, 1)
 })
+
+test('normal traffic and visible lists refresh stale usage read-only even with the periodic timer off', async () => {
+  let now = Date.parse('2030-01-01T00:00:00Z')
+  let account = { unified: {} }
+  let calls = 0
+  const monitor = createUsageProbeMonitor({
+    now: () => now,
+    config: { enabled: false },
+    listTargets: () => [live],
+    accountForVm: () => account,
+    probeOne: async (_vm, options) => {
+      assert.equal(options.readOnly, true)
+      calls++
+      account = {
+        last_probe: { ok: true, at: new Date(now).toISOString() },
+        unified: { official: { '5h': { utilization: 0.2, reset: '2030-01-01T05:00:00Z' } } },
+      }
+      return { ok: true, data: { ok: true } }
+    },
+  })
+  assert.equal(monitor.start().reason, 'disabled')
+  await Promise.all([monitor.refreshAfterRequest('vm-13'), monitor.refreshVisible(['vm-13'])])
+  assert.equal(calls, 1)
+  await monitor.refreshVisible(['vm-13'])
+  assert.equal(calls, 1, 'fresh official sample is reused')
+  now += 180_001
+  await monitor.refreshVisible(['vm-13'])
+  assert.equal(calls, 2, 'visible idle account refreshes when cache expires')
+  await monitor.refreshVisible(['not-visible'])
+  assert.equal(calls, 2)
+})
+
+test('complete live windows avoid an extra hop and failed automatic refreshes back off', async () => {
+  const now = Date.parse('2030-01-01T00:00:00Z')
+  let calls = 0
+  const monitor = createUsageProbeMonitor({
+    now: () => now,
+    listTargets: () => [live],
+    accountForVm: () => ({ unified: {} }),
+    probeOne: async () => {
+      calls++
+      return { ok: true, data: { ok: false } }
+    },
+  })
+  const headers = Object.fromEntries(
+    ['5h', '7d', '7d_oi'].flatMap((key) => [
+      [`anthropic-ratelimit-unified-${key}-utilization`, '0.2'],
+      [`anthropic-ratelimit-unified-${key}-reset`, '2030-01-02T00:00:00Z'],
+    ]),
+  )
+  assert.equal((await monitor.refreshAfterRequest('vm-13', headers)).reason, 'live_headers')
+  assert.equal(calls, 0)
+  await monitor.refreshAfterRequest('vm-13')
+  assert.equal((await monitor.refreshAfterRequest('vm-13')).reason, 'probe_backoff')
+  assert.equal(calls, 1)
+})
+
+test('automatic failures in panel error envelopes retain retry backoff', async () => {
+  for (const result of [null, undefined, { status: 400, body: { ok: false } }, { status: 503 }]) {
+    let calls = 0
+    const monitor = createUsageProbeMonitor({
+      listTargets: () => [live],
+      accountForVm: () => ({ unified: {} }),
+      probeOne: async () => {
+        calls++
+        return result
+      },
+    })
+    await monitor.refreshVisible(['vm-13'])
+    assert.equal((await monitor.refreshAfterRequest('vm-13')).reason, 'probe_backoff')
+    assert.equal(calls, 1)
+  }
+})
