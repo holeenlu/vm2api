@@ -22,8 +22,19 @@ import {
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { evaluateOpenAIQuotaGate } from '../../src/lib/pool/openai-quota-policy.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { setDetachedCodexSettings } from '../../src/lib/executor/settings-store.mjs'
 
-beforeEach(() => resetOpenAIAccountRuntime())
+// Codex 本地设置 credit_overage 默认关闭（控制面设置存储，P4.2；本文件不打开数据库，用未接数据库时的设置）；
+// 本文件其余用例验证开启后的点数放行，关闭时的停放单独验证。
+function setCreditOverage(enabled) {
+  setDetachedCodexSettings({ credit_overage: enabled })
+}
+process.on('exit', () => setDetachedCodexSettings(null))
+
+beforeEach(() => {
+  resetOpenAIAccountRuntime()
+  setCreditOverage(true)
+})
 
 const NOW = Date.parse('2026-10-17T12:00:00Z')
 const WEEK_RESET = new Date(NOW + 3 * 86_400_000).toISOString()
@@ -170,6 +181,15 @@ test('a spent window with fresh credits passes every local quota gate', () => {
   assert.deepEqual(pickCodexSlots([vm], { now: NOW }).ready, ['vm-a'])
 })
 
+test('with credit overage disabled (the default) fresh credits do not reopen a spent window', () => {
+  setCreditOverage(false)
+  const vm = slot({ extra: WEEK_SPENT, credits: credits() })
+  assert.equal(hasSpendableCodexCredits(vm, NOW), false)
+  assert.equal(isCodexSlotParked(vm, NOW), true)
+  assert.equal(codexQuotaWindowReason(vm, NOW), 'quota_7d_header')
+  assert.deepEqual(pickCodexSlots([vm], { now: NOW }).ready, [])
+})
+
 test('credits never reopen an operator-disabled or credential-less slot', () => {
   const vm = slot({ extra: WEEK_SPENT, credits: credits() })
   assert.equal(codexAccountStatus({ ...vm, schedulable: false, schedule_manual: true }, NOW), 'disabled')
@@ -204,8 +224,31 @@ test('no credits, stale credits, or an explicit park keep the existing parking',
   const parkedUntil = new Date(NOW + 60_000).toISOString()
   const refused = slot({ extra: { ...WEEK_SPENT, codex_limited_until: parkedUntil }, credits: credits() })
   assert.equal(isCodexSlotParked(refused, NOW), true, 'an explicit park outranks credits')
-  assert.equal(codexQuotaWindowReason(refused, NOW), 'quota_5h_header')
+  assert.equal(codexQuotaWindowReason(refused, NOW), 'rate_limited')
   assert.equal(evaluateCodexQuotaSchedule(refused, NOW).until, Date.parse(parkedUntil))
+})
+
+test('a 429 park with no window at its cap is a rate limit, not a 5h limit, and clears on expiry', () => {
+  // Pro reading seen in production: only the 7d window is metered, the other side is 0 minutes.
+  const proWeek = {
+    codex_primary_used_percent: 64,
+    codex_primary_window_minutes: 10080,
+    codex_primary_reset_at: WEEK_RESET,
+    codex_secondary_used_percent: 0,
+    codex_secondary_window_minutes: 0,
+  }
+  const parkedUntil = NOW + 60_000
+  const parked = slot({ extra: { ...proWeek, codex_limited_until: new Date(parkedUntil).toISOString() } })
+  assert.equal(codexQuotaWindowReason(parked, NOW), 'rate_limited')
+  assert.deepEqual(evaluateCodexQuotaSchedule(parked, NOW), {
+    action: 'restrict',
+    reason: 'rate_limited',
+    until: parkedUntil,
+  })
+  const later = parkedUntil + 1
+  const restricted = { temp_unschedulable_reason: 'rate_limited', temp_unschedulable_until: parkedUntil }
+  assert.equal(codexQuotaWindowReason(parked, later), null)
+  assert.equal(evaluateCodexQuotaSchedule({ ...parked, ...restricted }, later).action, 'clear')
 })
 
 test('/wham/usage credits are persisted next to, not inside, reset credits and reach the pool summary', async (t) => {

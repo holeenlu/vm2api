@@ -5,6 +5,7 @@ import type {
   ClusterNodeInput,
   ClusterProbeResult,
 } from '@/types/panel-cluster'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -87,6 +88,8 @@ export function JoinVpsDialog({
   nodes: ClusterApiNode[]
   onJoined: (node: ClusterApiNode) => void
 }) {
+  const { t } = useTranslation('cluster')
+
   const [form, setForm] = useState<Form>(EMPTY)
   const [probe, setProbe] = useState<ClusterProbeResult | null>(null)
 
@@ -111,7 +114,7 @@ export function JoinVpsDialog({
       ),
     onSuccess: (data) => {
       if (data.existing_id) {
-        toast.error('这台主机和用户已经接入')
+        toast.error(t('joinDuplicate'))
         return
       }
       setProbe(data)
@@ -130,7 +133,7 @@ export function JoinVpsDialog({
         })
       ),
     onSuccess: (node) => {
-      toast.success(`已接入 ${node.label}`)
+      toast.success(t('joined', { value1: node.label }))
       onJoined(node)
       onOpenChange(false)
     },
@@ -151,28 +154,25 @@ export function JoinVpsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='sm:max-w-xl'>
         <DialogHeader>
-          <DialogTitle>接入 VPS</DialogTitle>
-          <DialogDescription>
-            控制面从本机主动拨 SSH，本机在 NAT 后也能接入。远端在 NAT
-            后时，经由一台已接入的节点跳转。
-          </DialogDescription>
+          <DialogTitle>{t('join')}</DialogTitle>
+          <DialogDescription>{t('joinDescription')}</DialogDescription>
         </DialogHeader>
 
         <div className='grid grid-cols-6 gap-3'>
           <div className='col-span-4 space-y-1.5'>
-            <Label htmlFor='cluster-host'>主机</Label>
+            <Label htmlFor='cluster-host'>{t('host')}</Label>
             <Input
               id='cluster-host'
               autoFocus
               autoComplete='off'
               spellCheck={false}
-              placeholder='203.0.113.12 或 vps.example.net'
+              placeholder={t('hostPlaceholder')}
               value={form.host}
               onChange={(e) => set('host', e.target.value)}
             />
           </div>
           <div className='col-span-2 space-y-1.5'>
-            <Label htmlFor='cluster-port'>端口</Label>
+            <Label htmlFor='cluster-port'>{t('port')}</Label>
             <Input
               id='cluster-port'
               inputMode='numeric'
@@ -181,7 +181,7 @@ export function JoinVpsDialog({
             />
           </div>
           <div className='col-span-3 space-y-1.5'>
-            <Label htmlFor='cluster-user'>用户</Label>
+            <Label htmlFor='cluster-user'>{t('user')}</Label>
             <Input
               id='cluster-user'
               autoComplete='off'
@@ -191,11 +191,11 @@ export function JoinVpsDialog({
             />
           </div>
           <div className='col-span-3 space-y-1.5'>
-            <Label htmlFor='cluster-label'>备注</Label>
+            <Label htmlFor='cluster-label'>{t('remark')}</Label>
             <Input
               id='cluster-label'
               autoComplete='off'
-              placeholder='可选，如 aws-east'
+              placeholder={t('remarkPlaceholder')}
               value={form.label}
               onChange={(e) => set('label', e.target.value)}
             />
@@ -207,14 +207,14 @@ export function JoinVpsDialog({
               onValueChange={(v) => set('authType', v as Form['authType'])}
             >
               <TabsList>
-                <TabsTrigger value='key'>私钥</TabsTrigger>
-                <TabsTrigger value='password'>密码</TabsTrigger>
+                <TabsTrigger value='key'>{t('privateKey')}</TabsTrigger>
+                <TabsTrigger value='password'>{t('password')}</TabsTrigger>
               </TabsList>
             </Tabs>
             {form.authType === 'key' ? (
               <div className='space-y-2'>
                 <Textarea
-                  aria-label='私钥'
+                  aria-label={t('privateKey')}
                   spellCheck={false}
                   className='h-28 font-mono text-[11px]'
                   placeholder='-----BEGIN OPENSSH PRIVATE KEY-----'
@@ -224,7 +224,7 @@ export function JoinVpsDialog({
                 <Input
                   type='password'
                   autoComplete='off'
-                  placeholder='私钥口令（可选）'
+                  placeholder={t('passphraseOptional')}
                   value={form.passphrase}
                   onChange={(e) => set('passphrase', e.target.value)}
                 />
@@ -232,7 +232,7 @@ export function JoinVpsDialog({
             ) : (
               <Input
                 type='password'
-                aria-label='密码'
+                aria-label={t('password')}
                 autoComplete='off'
                 value={form.password}
                 onChange={(e) => set('password', e.target.value)}
@@ -241,7 +241,7 @@ export function JoinVpsDialog({
           </div>
 
           <div className='col-span-6 space-y-1.5'>
-            <Label>经由节点</Label>
+            <Label>{t('jumpNode')}</Label>
             <Select
               value={form.jumpNodeId}
               onValueChange={(v) => set('jumpNodeId', v)}
@@ -250,7 +250,7 @@ export function JoinVpsDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_JUMP}>直连</SelectItem>
+                <SelectItem value={NO_JUMP}>{t('direct')}</SelectItem>
                 {nodes.map((n) => (
                   <SelectItem
                     key={n.id}
@@ -268,7 +268,7 @@ export function JoinVpsDialog({
         {probe ? (
           <div className='space-y-1 rounded-md border bg-muted/30 p-3 text-xs'>
             <div className='font-medium text-foreground'>
-              核对主机指纹后再接入
+              {t('verifyFingerprint')}
             </div>
             <div className='font-mono break-all'>
               {probe.host_key.alg} {probe.host_key.sha256}
@@ -278,27 +278,29 @@ export function JoinVpsDialog({
             ) : null}
             <div className='text-muted-foreground'>
               {probe.platform === 'darwin'
-                ? 'macOS 原生节点：槽位以 launchd 服务运行，不需要 Docker'
-                : `Docker：${
-                    probe.docker.ok
-                      ? '可用'
-                      : `不可用（${probe.docker.error}），接入后可在面板安装`
-                  }`}
+                ? t('macNative')
+                : t('dockerStatus', {
+                    value1: probe.docker.ok
+                      ? t('available')
+                      : t('docker.joinUnavailable', {
+                          error: probe.docker.error,
+                        }),
+                  })}
             </div>
           </div>
         ) : null}
 
         <DialogFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
-            取消
+            {t('cancel')}
           </Button>
           {probe ? (
             <Button onClick={() => addMut.mutate()} disabled={addMut.isPending}>
-              {addMut.isPending ? '接入中…' : '确认指纹并接入'}
+              {addMut.isPending ? t('joining') : t('confirmJoin')}
             </Button>
           ) : (
             <Button onClick={() => probeMut.mutate()} disabled={!canProbe}>
-              {probeMut.isPending ? '探测中…' : '探测'}
+              {probeMut.isPending ? t('probing') : t('probe')}
             </Button>
           )}
         </DialogFooter>

@@ -1,16 +1,33 @@
-import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t } from '@/i18n'
 import type {
   ApiEndpoint,
   ApiEndpointPreset,
   ApiKeyEntry,
   ApiModelEntry,
 } from '@/types/panel-api-endpoints'
+import { ChevronRight, Trash2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtExpiresAt } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -20,27 +37,45 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { apiEndpointsQueryOptions } from '@/features/api-endpoints/queries'
+import { modelPolicyQueryOptions } from '@/features/models/queries'
+import {
+  PROXY_DIRECT,
+  PROXY_SAVED,
+  ProxyPicker,
+} from '@/features/proxies/proxy-picker'
+import {
+  appendSystemModels,
+  hasModelDraftContent,
+  systemEndpointModels,
+} from './default-models'
 
 type EndpointKind = 'claude' | 'openai' | 'custom'
 type Protocol = 'anthropic' | 'openai'
 type EpAuthScheme = 'x_api_key' | 'authorization_bearer'
 
-const KIND_FALLBACK_LABEL: Record<EndpointKind, string> = {
-  claude: 'Claude 官方',
-  openai: 'OpenAI 官方',
-  custom: '自定义',
+const KIND_LABEL_KEYS: Record<EndpointKind, string> = {
+  claude: 'apiEndpoints:claudeOfficial',
+  openai: 'apiEndpoints:openaiOfficial',
+  custom: 'apiEndpoints:custom',
 }
+
+/** Draft key (create mode or the add-key row) in the test-result map. */
+const DRAFT_KEY = '__draft__'
+
+type KeyTestResult = {
+  ok?: boolean
+  status?: number
+  text?: string
+  error?: string
+  proxy?: boolean
+}
+
+/** Grid shared by the model table header and its rows. */
+const MODEL_GRID =
+  'grid items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_3.5rem_minmax(0,1fr)_2.25rem]'
 
 type ModelDraft = {
   name: string
@@ -60,12 +95,11 @@ export function EndpointDetailSheet({
   presets: ApiEndpointPreset[]
   onOpenChange: (open: boolean) => void
 }) {
+  useTranslation('apiEndpoints')
+
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side='right'
-        className='w-[95vw] overflow-y-auto sm:w-[560px] sm:max-w-none md:w-[720px] lg:w-[820px]'
-      >
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-3xl'>
         {open ? (
           <EndpointForm
             key={endpoint?.id ?? 'create'}
@@ -74,8 +108,8 @@ export function EndpointDetailSheet({
             onOpenChange={onOpenChange}
           />
         ) : null}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -88,6 +122,8 @@ function EndpointForm({
   presets: ApiEndpointPreset[]
   onOpenChange: (open: boolean) => void
 }) {
+  const { t } = useTranslation('apiEndpoints')
+
   const qc = useQueryClient()
   const isEdit = !!endpoint
   const [kind, setKind] = useState<EndpointKind>(endpoint?.kind || 'claude')
@@ -96,11 +132,14 @@ function EndpointForm({
       (presetFor(presets, kind).protocol as Protocol)
   )
   const [authScheme, setAuthScheme] = useState<EpAuthScheme>(
-    endpoint?.auth_scheme || 'x_api_key'
+    endpoint?.auth_scheme ||
+      (kind === 'openai' ? 'authorization_bearer' : 'x_api_key')
   )
   const [name, setName] = useState(
     endpoint?.name || presetFor(presets, kind).label
   )
+  // Keep the auto-filled name stable across language changes, like the draft itself.
+  const autoName = useRef(presetFor(presets, kind).label)
   const [baseUrl, setBaseUrl] = useState(
     endpoint?.base_url || presetFor(presets, kind).base_url
   )
@@ -115,26 +154,60 @@ function EndpointForm({
   const [models, setModels] = useState<ModelDraft[]>(
     modelsFromEndpoint(endpoint)
   )
+  const autoModels = useRef<ModelDraft[] | null>(null)
+  const modelPolicy = useQuery({
+    ...modelPolicyQueryOptions(kind === 'openai' ? 'openai' : 'anthropic'),
+    enabled: kind !== 'custom',
+  })
   const [newKey, setNewKey] = useState('')
-  const [newProxy, setNewProxy] = useState('')
+  const [newProxyId, setNewProxyId] = useState(PROXY_DIRECT)
+  const [testResults, setTestResults] = useState<Record<string, KeyTestResult>>(
+    {}
+  )
   const keys = endpoint?.api_key_entries || []
+  const connectionLocked = endpoint?.connection_editable === false
+  const canTest = protocol === 'anthropic'
 
   const refresh = () =>
     qc.invalidateQueries({ queryKey: apiEndpointsQueryOptions().queryKey })
 
+  useEffect(() => {
+    if (kind === 'custom' || hasModelDraftContent(models)) return
+    const defaults = systemEndpointModels(kind, modelPolicy.data).map(
+      (model) => ({
+        name: model.name,
+        alias: model.alias,
+        image: !!model.image,
+        thinking: (model.thinking?.levels || []).join(','),
+      })
+    )
+    if (defaults.length) {
+      autoModels.current = defaults
+      setModels(defaults)
+    }
+  }, [kind, models, modelPolicy.data])
+
   const applyKind = (nextKind: EndpointKind) => {
+    if (
+      autoModels.current &&
+      JSON.stringify(models) === JSON.stringify(autoModels.current)
+    ) {
+      setModels([])
+    }
+    autoModels.current = null
     const nextPreset = presetFor(presets, nextKind)
-    const prevPreset = presetFor(presets, kind)
     setKind(nextKind)
     if (nextKind !== 'custom') {
       setBaseUrl(nextPreset.base_url)
       setProtocol((nextPreset.protocol as Protocol) || 'anthropic')
     }
+    setAuthScheme(nextKind === 'openai' ? 'authorization_bearer' : 'x_api_key')
     // 名称为空、或仍是「自动填充」态时才跟着类型联动；用户改过名字就不再覆盖
-    const autoNames = [prevPreset.label, 'api', '']
+    const autoNames = [autoName.current, 'api', '']
     if (autoNames.includes(name.trim())) {
       setName(nextKind === 'custom' ? '' : nextPreset.label)
     }
+    autoName.current = nextPreset.label
   }
 
   const fetchModels = useMutation({
@@ -145,7 +218,7 @@ function EndpointForm({
     }> => {
       if (!isEdit) {
         const key = newKey.trim()
-        if (!key) throw new Error('先填上游 key')
+        if (!key) throw new Error(t('apiEndpoints:keyRequired'))
         return api<{ models?: ApiModelEntry[] }>(
           '/api/panel/api-endpoints/fetch-models',
           {
@@ -155,8 +228,9 @@ function EndpointForm({
               protocol,
               base_url: baseUrl.trim(),
               api_key: key,
-              proxy_url: newProxy.trim(),
-              auth_scheme: authScheme,
+              proxy_id: newProxyId,
+              auth_scheme:
+                kind === 'openai' ? 'authorization_bearer' : authScheme,
             }),
           }
         )
@@ -179,11 +253,15 @@ function EndpointForm({
               }))
             : modelsFromEndpoint(null)
         )
-        toast.success(`拉到 ${fetched.length} 个模型`)
+        toast.success(
+          t('apiEndpoints:fetchedModels', { count: fetched.length })
+        )
       } else {
         setModels(modelsFromEndpoint(data.item ?? null))
         toast.success(
-          `拉到 ${data.fetched ?? data.item?.models?.length ?? 0} 个模型`
+          t('apiEndpoints:fetchedModels', {
+            count: data.fetched ?? data.item?.models?.length ?? 0,
+          })
         )
         await refresh()
       }
@@ -208,189 +286,273 @@ function EndpointForm({
       )
     },
     onSuccess: async () => {
-      toast.success(isEdit ? '已保存' : '地址已添加')
+      toast.success(
+        isEdit ? t('apiEndpoints:saved') : t('apiEndpoints:addressAdded')
+      )
       onOpenChange(false)
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
   })
 
-  const addKey = useMutation({
-    mutationFn: (body: { api_key: string; proxy_url: string }) => {
-      if (!endpoint) throw new Error('地址不存在')
+  const patchKey = useMutation({
+    mutationFn: (body: {
+      key_id?: string
+      api_key?: string
+      proxy_id: string
+    }) => {
+      if (!endpoint) throw new Error(t('apiEndpoints:addressNotFound'))
       return api(
-        `/api/panel/api-endpoints/${encodeURIComponent(endpoint.id)}/keys`,
-        {
-          method: 'POST',
-          body: JSON.stringify(body),
-        }
+        `/api/panel/api-endpoints/${encodeURIComponent(endpoint.id)}`,
+        { method: 'PATCH', body: JSON.stringify(body) }
       )
     },
-    onSuccess: async () => {
-      toast.success('key 已加入')
-      setNewKey('')
-      setNewProxy('')
+    onSuccess: async (_data, body) => {
+      if (body.key_id) {
+        toast.success(t('apiEndpoints:proxyUpdated'))
+        setTestResults((current) => withoutResult(current, body.key_id!))
+      } else {
+        toast.success(t('apiEndpoints:keyAdded'))
+        setNewKey('')
+        setNewProxyId(PROXY_DIRECT)
+        setTestResults((current) => withoutResult(current, DRAFT_KEY))
+      }
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
   })
 
+  const testKey = useMutation({
+    mutationFn: async (slot: string) => {
+      const model = models.find((row) => row.name.trim())?.name.trim()
+      if (!model) throw new Error(t('apiEndpoints:testModelRequired'))
+      const key =
+        slot === DRAFT_KEY
+          ? {
+              api_key: newKey.trim(),
+              base_url: baseUrl.trim(),
+              auth_scheme: authScheme,
+              proxy_id: newProxyId,
+            }
+          : { key_id: slot }
+      if (slot === DRAFT_KEY && !key.api_key)
+        throw new Error(t('apiEndpoints:keyRequired'))
+      const data = await api<KeyTestResult & { items?: KeyTestResult[] }>(
+        '/api/panel/anthropic/messages',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            model,
+            max_tokens: 16,
+            message: 'Hi',
+            keys: [key],
+            key_index: 0,
+          }),
+        }
+      )
+      return data.items?.[0] ?? data
+    },
+    onSuccess: (result, slot) =>
+      setTestResults((current) => ({ ...current, [slot]: result })),
+    onError: (error: Error) => toast.error(error.message),
+  })
+
   const removeKey = useMutation({
     mutationFn: (kid: string) => {
-      if (!endpoint) throw new Error('地址不存在')
+      if (!endpoint) throw new Error(t('apiEndpoints:addressNotFound'))
       return api(
         `/api/panel/api-endpoints/${encodeURIComponent(endpoint.id)}/keys/${encodeURIComponent(kid)}`,
         { method: 'DELETE' }
       )
     },
     onSuccess: async () => {
-      toast.success('已删除 key')
+      toast.success(t('apiEndpoints:keyDeleted'))
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
   })
 
-  const pending = save.isPending || addKey.isPending || removeKey.isPending
+  const pending = save.isPending || patchKey.isPending || removeKey.isPending
+
+  const draftResult = testResults[DRAFT_KEY]
 
   return (
     <>
-      <SheetHeader className='pb-2'>
-        <SheetTitle>{isEdit ? '编辑地址' : '添加地址'}</SheetTitle>
-        <SheetDescription>
+      <DialogHeader>
+        <DialogTitle>
           {isEdit
-            ? endpoint?.name || endpoint?.id
-            : '直连上游 · key 池 · 模型 alias。地址不要带 /v1。'}
-        </SheetDescription>
-      </SheetHeader>
-      <div className='space-y-6 pb-8'>
-        <section className='space-y-3'>
-          <h3 className='text-sm font-medium'>基本信息</h3>
-          <Field label='类型'>
-            <Select
-              value={kind}
-              onValueChange={(value) => applyKind(value as EndpointKind)}
-            >
-              <SelectTrigger className='w-full'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(presets.length
-                  ? presets
-                  : (['claude', 'openai', 'custom'] as EndpointKind[]).map(
-                      (k) => ({
-                        kind: k,
-                        label: KIND_FALLBACK_LABEL[k],
-                      })
-                    )
-                ).map((p) => (
-                  <SelectItem key={p.kind} value={p.kind}>
-                    {p.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label='名称'>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder='api'
-            />
-          </Field>
-          {kind === 'custom' ? (
-            <Field label='地址'>
-              <Input
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder='https://api.example.com'
-              />
-            </Field>
-          ) : null}
-          {kind === 'custom' ? (
-            <Field label='协议'>
+            ? t('apiEndpoints:editAddress')
+            : t('apiEndpoints:addAddress')}
+        </DialogTitle>
+        <DialogDescription className='break-all'>
+          {isEdit
+            ? [endpoint?.name || endpoint?.id, endpoint?.base_url]
+                .filter(Boolean)
+                .join(' · ')
+            : t('apiEndpoints:detailDescription')}
+        </DialogDescription>
+      </DialogHeader>
+      <div className='space-y-6'>
+        <section className='space-y-4'>
+          <h3 className='text-sm font-semibold'>
+            {t('apiEndpoints:basicInfo')}
+          </h3>
+          <div className='grid gap-4 sm:grid-cols-2'>
+            <Field label={t('apiEndpoints:kind')}>
               <Select
-                value={protocol}
-                onValueChange={(value) => setProtocol(value as Protocol)}
+                disabled={connectionLocked}
+                value={kind}
+                onValueChange={(value) => applyKind(value as EndpointKind)}
               >
                 <SelectTrigger className='w-full'>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value='anthropic'>Anthropic Messages</SelectItem>
-                  <SelectItem value='openai'>OpenAI Chat</SelectItem>
+                  {(presets.length
+                    ? presets
+                    : (['claude', 'openai', 'custom'] as EndpointKind[]).map(
+                        (k) => ({
+                          kind: k,
+                          label: t(KIND_LABEL_KEYS[k]),
+                        })
+                      )
+                  ).map((p) => (
+                    <SelectItem key={p.kind} value={p.kind}>
+                      {p.kind === 'claude' ||
+                      p.kind === 'openai' ||
+                      p.kind === 'custom'
+                        ? t(KIND_LABEL_KEYS[p.kind])
+                        : p.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </Field>
-          ) : null}
-          <Field label='前缀'>
-            <Input
-              value={prefix}
-              onChange={(e) => setPrefix(e.target.value)}
-              placeholder='可选'
-            />
-          </Field>
-          <Field label='优先级'>
-            <Input
-              type='number'
-              value={priority}
-              onChange={(e) => setPriority(e.target.value)}
-            />
-          </Field>
-          <Field label='上游认证'>
-            <Select
-              value={authScheme}
-              onValueChange={(value) => setAuthScheme(value as EpAuthScheme)}
-            >
-              <SelectTrigger className='w-full'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='x_api_key'>x-api-key</SelectItem>
-                <SelectItem value='authorization_bearer'>
-                  Authorization: Bearer
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
-          <div className='flex items-center justify-between gap-3'>
-            <Label htmlFor='disable_cooling'>关闭 429 冷却</Label>
+            <Field label={t('apiEndpoints:name')}>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder='api'
+              />
+            </Field>
+            {kind === 'custom' ? (
+              <>
+                <Field label={t('apiEndpoints:address')}>
+                  <Input
+                    disabled={connectionLocked}
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                    placeholder='https://api.example.com'
+                  />
+                </Field>
+                <Field label={t('apiEndpoints:protocol')}>
+                  <Select
+                    disabled={connectionLocked}
+                    value={protocol}
+                    onValueChange={(value) => setProtocol(value as Protocol)}
+                  >
+                    <SelectTrigger className='w-full'>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='anthropic'>
+                        Anthropic Messages
+                      </SelectItem>
+                      <SelectItem value='openai'>OpenAI Chat</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </>
+            ) : null}
+          </div>
+          <div className='grid gap-4 sm:grid-cols-3'>
+            <Field label={t('apiEndpoints:upstreamAuth')}>
+              <Select
+                disabled={connectionLocked}
+                value={authScheme}
+                onValueChange={(value) => setAuthScheme(value as EpAuthScheme)}
+              >
+                <SelectTrigger className='w-full'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='x_api_key'>x-api-key</SelectItem>
+                  <SelectItem value='authorization_bearer'>
+                    Authorization: Bearer
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label={t('apiEndpoints:prefix')}>
+              <Input
+                value={prefix}
+                onChange={(e) => setPrefix(e.target.value)}
+                placeholder={t('apiEndpoints:optional')}
+              />
+            </Field>
+            <Field label={t('apiEndpoints:priority')}>
+              <Input
+                type='number'
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+              />
+            </Field>
+          </div>
+          <div className='flex items-start justify-between gap-4 rounded-md border px-3 py-2.5'>
+            <div className='space-y-0.5'>
+              <Label htmlFor='disable_cooling'>
+                {t('apiEndpoints:disable429Cooling')}
+              </Label>
+              <p className='text-xs text-muted-foreground'>
+                {t('apiEndpoints:disable429CoolingHint')}
+              </p>
+            </div>
             <Switch
               id='disable_cooling'
               checked={disableCooling}
               onCheckedChange={setDisableCooling}
             />
           </div>
-          <Field label='Headers（JSON）'>
-            <Textarea
-              className='font-mono text-xs'
-              rows={4}
-              value={headersText}
-              onChange={(e) => setHeadersText(e.target.value)}
-              placeholder='{"anthropic-beta":"…"}'
-            />
-          </Field>
         </section>
 
         <section className='space-y-3'>
-          <h3 className='text-sm font-medium'>上游 key</h3>
+          <h3 className='text-sm font-semibold'>
+            {t('apiEndpoints:upstreamKey')}
+          </h3>
           {isEdit ? (
             keys.length ? (
-              <div className='space-y-2'>
+              <div className='divide-y rounded-md border'>
                 {keys.map((entry) => (
                   <KeyRow
                     key={entry.id}
                     entry={entry}
                     busy={pending}
+                    proxyLocked={connectionLocked}
+                    canTest={canTest}
+                    testing={
+                      testKey.isPending && testKey.variables === entry.id
+                    }
+                    result={testResults[entry.id]}
+                    onProxyChange={(proxy_id) => {
+                      if (proxy_id === PROXY_SAVED) return
+                      patchKey.mutate({ key_id: entry.id, proxy_id })
+                    }}
+                    onTest={() => testKey.mutate(entry.id)}
                     onRemove={() => removeKey.mutate(entry.id)}
                   />
                 ))}
               </div>
             ) : (
-              <p className='text-xs text-muted-foreground'>还没有 key</p>
+              <p className='text-xs text-muted-foreground'>
+                {t('apiEndpoints:noKeys')}
+              </p>
             )
           ) : null}
-          <div className='grid gap-2 sm:grid-cols-2'>
-            <Field label={isEdit ? '新 key' : '上游 key'}>
+          <div className='space-y-2'>
+            {isEdit ? (
+              <Label htmlFor='api_key'>{t('apiEndpoints:newKey')}</Label>
+            ) : null}
+            <div className='grid gap-2 sm:grid-cols-[minmax(0,1fr)_12rem_auto]'>
               <Input
                 id='api_key'
                 name='api_key'
@@ -398,52 +560,93 @@ function EndpointForm({
                 autoComplete='off'
                 value={newKey}
                 onChange={(e) => setNewKey(e.target.value)}
-                placeholder='sk-…'
+                placeholder={kind === 'openai' ? 'sk-…' : 'sk-ant-…'}
+                aria-label={t('apiEndpoints:upstreamKey')}
               />
-            </Field>
-            <Field label='代理'>
-              <Input
-                value={newProxy}
-                onChange={(e) => setNewProxy(e.target.value)}
-                placeholder='socks5://… 可选'
+              <ProxyPicker
+                value={newProxyId}
+                onChange={setNewProxyId}
+                disabled={isEdit && connectionLocked}
+                ariaLabel={t('apiEndpoints:proxy')}
               />
-            </Field>
+              <div className='flex gap-2'>
+                {canTest ? (
+                  <Button
+                    type='button'
+                    variant='outline'
+                    disabled={testKey.isPending || !newKey.trim()}
+                    loading={
+                      testKey.isPending && testKey.variables === DRAFT_KEY
+                    }
+                    onClick={() => testKey.mutate(DRAFT_KEY)}
+                  >
+                    {t('apiEndpoints:test')}
+                  </Button>
+                ) : null}
+                {isEdit ? (
+                  <Button
+                    type='button'
+                    variant='outline'
+                    disabled={pending || !newKey.trim()}
+                    onClick={() =>
+                      patchKey.mutate({
+                        api_key: newKey.trim(),
+                        proxy_id: newProxyId,
+                      })
+                    }
+                  >
+                    {t('apiEndpoints:addKey')}
+                  </Button>
+                ) : (
+                  <Button
+                    type='button'
+                    variant='outline'
+                    disabled={fetchModels.isPending}
+                    loading={fetchModels.isPending}
+                    onClick={() => fetchModels.mutate()}
+                  >
+                    {t('apiEndpoints:fetchModels')}
+                  </Button>
+                )}
+              </div>
+            </div>
+            {draftResult ? <TestResultLine result={draftResult} /> : null}
           </div>
-          {isEdit ? (
-            <Button
-              type='button'
-              size='sm'
-              variant='outline'
-              disabled={pending}
-              onClick={() => {
-                const api_key = newKey.trim()
-                if (!api_key) {
-                  toast.error('先填上游 key')
-                  return
-                }
-                addKey.mutate({ api_key, proxy_url: newProxy.trim() })
-              }}
-            >
-              加 key
-            </Button>
-          ) : (
-            <Button
-              type='button'
-              size='sm'
-              variant='outline'
-              disabled={fetchModels.isPending}
-              loading={fetchModels.isPending}
-              onClick={() => fetchModels.mutate()}
-            >
-              获取模型
-            </Button>
-          )}
         </section>
 
         <section className='space-y-3'>
-          <div className='flex items-center justify-between gap-2'>
-            <h3 className='text-sm font-medium'>模型</h3>
-            <div className='flex items-center gap-2'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <h3 className='text-sm font-semibold'>
+              {t('apiEndpoints:models')}
+            </h3>
+            <div className='flex flex-wrap items-center gap-2'>
+              {kind !== 'custom' ? (
+                <Button
+                  type='button'
+                  size='sm'
+                  variant='outline'
+                  disabled={!modelPolicy.data || modelPolicy.isFetching}
+                  onClick={() =>
+                    setModels((rows) =>
+                      appendSystemModels(
+                        rows.filter(
+                          (row) => row.name.trim() || row.alias.trim()
+                        ),
+                        systemEndpointModels(kind, modelPolicy.data).map(
+                          (model) => ({
+                            name: model.name,
+                            alias: model.alias,
+                            image: !!model.image,
+                            thinking: '',
+                          })
+                        )
+                      )
+                    )
+                  }
+                >
+                  {t('apiEndpoints:addWhitelistModels')}
+                </Button>
+              ) : null}
               {isEdit ? (
                 <Button
                   type='button'
@@ -453,13 +656,13 @@ function EndpointForm({
                   loading={fetchModels.isPending}
                   onClick={() => fetchModels.mutate()}
                 >
-                  获取模型
+                  {t('apiEndpoints:fetchModels')}
                 </Button>
               ) : null}
               <Button
                 type='button'
                 size='sm'
-                variant='ghost'
+                variant='outline'
                 onClick={() =>
                   setModels((rows) => [
                     ...rows,
@@ -467,12 +670,26 @@ function EndpointForm({
                   ])
                 }
               >
-                加一行
+                {t('apiEndpoints:addRow')}
               </Button>
             </div>
           </div>
           {models.length ? (
             <div className='space-y-2'>
+              <div
+                className={cn(
+                  MODEL_GRID,
+                  'hidden px-1 text-xs text-muted-foreground sm:grid'
+                )}
+              >
+                <span>{t('apiEndpoints:upstreamModel')}</span>
+                <span>{t('apiEndpoints:alias')}</span>
+                <span className='text-center'>
+                  {t('apiEndpoints:imageCapability')}
+                </span>
+                <span>{t('apiEndpoints:thinkingLevels')}</span>
+                <span />
+              </div>
               {models.map((row, index) => (
                 <ModelRow
                   key={index}
@@ -492,19 +709,61 @@ function EndpointForm({
             </div>
           ) : (
             <p className='text-xs text-muted-foreground'>
-              还没有模型。点「加一行」补 alias。
+              {t('apiEndpoints:noModelsHint')}
             </p>
           )}
         </section>
+
+        <Collapsible
+          defaultOpen={
+            !!endpoint && Object.keys(endpoint.headers || {}).length > 0
+          }
+          className='group/advanced space-y-3'
+        >
+          <CollapsibleTrigger asChild>
+            <button
+              type='button'
+              className='flex items-center gap-1 text-sm font-semibold'
+            >
+              <ChevronRight className='size-4 transition-transform group-data-[state=open]/advanced:rotate-90' />
+              {t('apiEndpoints:advanced')}
+            </button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <Field label={t('apiEndpoints:headersJson')}>
+              <Textarea
+                className='font-mono text-xs'
+                rows={4}
+                disabled={connectionLocked}
+                value={headersText}
+                onChange={(e) => setHeadersText(e.target.value)}
+                placeholder='{"anthropic-beta":"…"}'
+              />
+            </Field>
+          </CollapsibleContent>
+        </Collapsible>
+
+        {connectionLocked ? (
+          <p className='text-sm text-muted-foreground'>
+            {t('apiEndpoints:connectionAdminOnly')}
+          </p>
+        ) : null}
       </div>
-      <SheetFooter>
+      <DialogFooter className='sticky -bottom-6 -mx-6 -mb-6 border-t bg-background px-6 py-4'>
+        <Button
+          type='button'
+          variant='outline'
+          onClick={() => onOpenChange(false)}
+        >
+          {t('apiEndpoints:cancel')}
+        </Button>
         <Button
           type='button'
           disabled={pending}
           onClick={() => {
             const headers = parseHeadersJson(headersText)
             if (!headers) {
-              toast.error('Headers 不是合法 JSON')
+              toast.error(t('apiEndpoints:invalidHeadersJson'))
               return
             }
             const api_key = newKey.trim()
@@ -516,21 +775,31 @@ function EndpointForm({
               prefix: prefix.trim(),
               priority: Number(priority || 0),
               disable_cooling: disableCooling,
-              auth_scheme: authScheme,
+              auth_scheme:
+                kind === 'openai' ? 'authorization_bearer' : authScheme,
               headers,
               models: collectModels(models),
             }
+            if (isEdit && connectionLocked) {
+              for (const field of [
+                'kind',
+                'protocol',
+                'base_url',
+                'auth_scheme',
+                'headers',
+              ])
+                delete body[field]
+            }
             if (!isEdit) {
-              body.api_key_entries = api_key
-                ? [{ api_key, proxy_url: newProxy.trim() }]
-                : []
+              body.api_key_entries = api_key ? [{ api_key }] : []
+              body.proxy_id = newProxyId
             }
             save.mutate(body)
           }}
         >
-          {isEdit ? '保存' : '添加'}
+          {isEdit ? t('apiEndpoints:save') : t('apiEndpoints:add')}
         </Button>
-      </SheetFooter>
+      </DialogFooter>
     </>
   )
 }
@@ -538,37 +807,106 @@ function EndpointForm({
 function KeyRow({
   entry,
   busy,
+  proxyLocked,
+  canTest,
+  testing,
+  result,
+  onProxyChange,
+  onTest,
   onRemove,
 }: {
   entry: ApiKeyEntry
   busy: boolean
+  proxyLocked: boolean
+  canTest: boolean
+  testing: boolean
+  result?: KeyTestResult
+  onProxyChange: (proxyId: string) => void
+  onTest: () => void
   onRemove: () => void
 }) {
+  const { t } = useTranslation('apiEndpoints')
+
   const cooldown = cooldownLabel(entry.cooldown_until)
+  const proxyId =
+    entry.proxy_id || (entry.has_proxy ? PROXY_SAVED : PROXY_DIRECT)
   return (
-    <div className='flex flex-wrap items-center gap-2 rounded-md border px-3 py-2'>
-      <span className='font-mono text-xs'>{entry.id}</span>
-      <span className='font-mono text-xs text-muted-foreground'>
-        {entry.api_key ||
-          (entry.key_suffix ? `••••${entry.key_suffix}` : '••••••••')}
-      </span>
-      {entry.disabled ? (
-        <span className='text-xs text-muted-foreground'>停用</span>
-      ) : null}
-      {cooldown ? (
-        <span className='text-xs text-muted-foreground'>{cooldown}</span>
-      ) : null}
-      <Button
-        type='button'
-        size='sm'
-        variant='ghost'
-        className='ms-auto'
-        disabled={busy}
-        onClick={onRemove}
-      >
-        删
-      </Button>
+    <div className='space-y-2 px-3 py-2.5'>
+      <div className='grid items-center gap-2 sm:grid-cols-[minmax(0,1fr)_12rem_auto]'>
+        <div className='flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1'>
+          <span className='truncate font-mono text-sm'>
+            {entry.api_key ||
+              (entry.key_suffix ? `••••${entry.key_suffix}` : '••••••••')}
+          </span>
+          {entry.disabled ? (
+            <span className='rounded-sm bg-muted px-1.5 text-xs text-muted-foreground'>
+              {t('apiEndpoints:disabled')}
+            </span>
+          ) : null}
+          {cooldown ? (
+            <span className='rounded-sm bg-muted px-1.5 text-xs text-muted-foreground'>
+              {cooldown}
+            </span>
+          ) : null}
+        </div>
+        <ProxyPicker
+          value={proxyId}
+          onChange={onProxyChange}
+          disabled={busy || proxyLocked}
+          ariaLabel={t('apiEndpoints:proxy')}
+        />
+        <div className='flex gap-2'>
+          {canTest ? (
+            <Button
+              type='button'
+              variant='outline'
+              disabled={busy || testing}
+              loading={testing}
+              onClick={onTest}
+            >
+              {t('apiEndpoints:test')}
+            </Button>
+          ) : null}
+          <Button
+            type='button'
+            variant='ghost'
+            size='icon'
+            className='text-muted-foreground hover:text-destructive'
+            disabled={busy}
+            onClick={onRemove}
+            aria-label={t('apiEndpoints:remove')}
+            title={t('apiEndpoints:remove')}
+          >
+            <Trash2 className='size-4' />
+          </Button>
+        </div>
+      </div>
+      {result ? <TestResultLine result={result} /> : null}
     </div>
+  )
+}
+
+function TestResultLine({ result }: { result: KeyTestResult }) {
+  const { t } = useTranslation('apiEndpoints')
+  const detail = result.ok ? result.text : result.error
+  return (
+    <p
+      className={cn(
+        'text-xs break-words whitespace-pre-wrap',
+        result.ok ? 'text-muted-foreground' : 'text-destructive'
+      )}
+    >
+      {t('apiEndpoints:testSummary', {
+        availability: result.ok
+          ? t('apiEndpoints:available')
+          : t('apiEndpoints:unavailable'),
+        status: result.status || 0,
+        route: result.proxy
+          ? t('apiEndpoints:viaProxy')
+          : t('apiEndpoints:direct'),
+      })}
+      {detail ? ` — ${detail}` : ''}
+    </p>
   )
 }
 
@@ -581,35 +919,54 @@ function ModelRow({
   onChange: (next: Partial<ModelDraft>) => void
   onRemove: () => void
 }) {
+  const { t } = useTranslation('apiEndpoints')
+
   return (
-    <div className='flex flex-wrap items-center gap-2'>
+    <div
+      className={cn(
+        MODEL_GRID,
+        'grid-cols-[minmax(0,1fr)_auto] max-sm:rounded-md max-sm:border max-sm:p-2'
+      )}
+    >
       <Input
-        className='min-w-[8rem] flex-1'
-        placeholder='上游 name'
+        className='max-sm:col-span-2'
+        placeholder={t('apiEndpoints:upstreamModel')}
+        aria-label={t('apiEndpoints:upstreamModel')}
         value={row.name}
         onChange={(e) => onChange({ name: e.target.value })}
       />
       <Input
-        className='min-w-[8rem] flex-1'
-        placeholder='alias'
+        className='max-sm:col-span-2'
+        placeholder={t('apiEndpoints:aliasPlaceholder')}
+        aria-label={t('apiEndpoints:alias')}
         value={row.alias}
         onChange={(e) => onChange({ alias: e.target.value })}
       />
-      <label className='flex items-center gap-1.5 text-sm'>
+      <label className='flex items-center gap-1.5 text-sm sm:justify-center'>
         <Checkbox
           checked={row.image}
           onCheckedChange={(value) => onChange({ image: value === true })}
+          aria-label={t('apiEndpoints:imageCapability')}
         />
-        图
+        <span className='sm:sr-only'>{t('apiEndpoints:imageCapability')}</span>
       </label>
       <Input
-        className='min-w-[10rem] flex-1'
-        placeholder='thinking levels'
+        className='max-sm:col-span-2'
+        placeholder={t('apiEndpoints:thinkingPlaceholder')}
+        aria-label={t('apiEndpoints:thinkingLevels')}
         value={row.thinking}
         onChange={(e) => onChange({ thinking: e.target.value })}
       />
-      <Button type='button' size='sm' variant='ghost' onClick={onRemove}>
-        删
+      <Button
+        type='button'
+        size='icon'
+        variant='ghost'
+        className='text-muted-foreground hover:text-destructive max-sm:col-start-2 max-sm:row-start-3'
+        onClick={onRemove}
+        aria-label={t('apiEndpoints:remove')}
+        title={t('apiEndpoints:remove')}
+      >
+        <Trash2 className='size-4' />
       </Button>
     </div>
   )
@@ -622,6 +979,8 @@ function Field({
   label: string
   children: React.ReactNode
 }) {
+  useTranslation('apiEndpoints')
+
   return (
     <div className='space-y-1'>
       <Label>{label}</Label>
@@ -636,24 +995,31 @@ function presetFor(
   kind: string
 ): { kind: string; label: string; base_url: string; protocol: string } {
   const found = presets.find((p) => p.kind === kind)
-  if (found) return found
+  if (found)
+    return {
+      ...found,
+      label:
+        kind === 'claude' || kind === 'openai' || kind === 'custom'
+          ? t(KIND_LABEL_KEYS[kind])
+          : found.label,
+    }
   if (kind === 'custom')
     return {
       kind: 'custom',
-      label: '自定义',
+      label: t('apiEndpoints:custom'),
       base_url: '',
       protocol: 'anthropic',
     }
   if (kind === 'openai')
     return {
       kind: 'openai',
-      label: 'OpenAI 官方',
+      label: t('apiEndpoints:openaiOfficial'),
       base_url: 'https://api.openai.com',
       protocol: 'openai',
     }
   return {
     kind: 'claude',
-    label: 'Claude 官方',
+    label: t('apiEndpoints:claudeOfficial'),
     base_url: 'https://api.anthropic.com',
     protocol: 'anthropic',
   }
@@ -699,9 +1065,18 @@ function parseHeadersJson(raw: string): Record<string, string> | null {
   }
 }
 
+function withoutResult(
+  results: Record<string, KeyTestResult>,
+  slot: string
+): Record<string, KeyTestResult> {
+  const next = { ...results }
+  delete next[slot]
+  return next
+}
+
 function cooldownLabel(until?: number): string | null {
   if (!until) return null
   const formatted = fmtExpiresAt(until)
-  if (!formatted || formatted === '—') return '冷却中'
-  return `冷却中 · ${formatted}`
+  if (!formatted || formatted === '—') return t('apiEndpoints:cooling')
+  return t('apiEndpoints:coolingUntil', { when: formatted })
 }

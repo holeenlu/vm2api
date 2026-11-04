@@ -44,3 +44,25 @@ test('official outbound paths', () => {
   assert.equal(chatCompletionsUrl('https://api.openai.com'), 'https://api.openai.com/v1/chat/completions')
   assert.equal(responsesUrl('https://api.openai.com/'), 'https://api.openai.com/v1/responses')
 })
+
+test('OpenAI discovery retains GPT Image models and marks their image capability', () => {
+  const models = parseUpstreamModels(
+    {
+      data: [
+        { id: 'gpt-image-2.5-flare' },
+        { id: 'gpt-image-2.5-sunburst-2026-09-08' },
+        { id: 'GPT-IMAGE-2.5-FLARE' },
+        { id: 'tts-1' },
+        { id: 'text-embedding-3-small' },
+      ],
+    },
+    'openai',
+  )
+  assert.deepEqual(
+    models.map(({ name, image }) => ({ name, image })),
+    [
+      { name: 'gpt-image-2.5-flare', image: true },
+      { name: 'gpt-image-2.5-sunburst-2026-09-08', image: true },
+    ],
+  )
+})

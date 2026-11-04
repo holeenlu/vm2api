@@ -30,6 +30,7 @@ import { inspectWrapCliDir, materializeWrapCli, wrapCliHomeDir } from './wrap-cl
 import { isLocalEgressProxy } from './egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm, slotHost } from './slot-host.mjs'
+import { projectTransportHealth } from '../transport/transport-health.mjs'
 
 export { runtimeKind }
 
@@ -60,7 +61,7 @@ export async function startSlotReady(vm, projectRoot, opts = {}) {
     if (!kernel.ok) return kernel
     return { ok: true, engine: 'codex', docker: boot, kernel }
   }
-  const boot = await startSlot(vm, projectRoot, opts)
+  const boot = await (opts.ops?.startSlot || startSlot)(vm, projectRoot, opts)
   if (!boot?.ok) return boot
   persistNodeRuntime(vm, projectRoot, boot)
   return attachInferenceRuntime(boot, vm, projectRoot, opts)
@@ -318,7 +319,11 @@ export async function switchSlotInferenceEngine(vm, projectRoot, engine, { timeo
       error: rust?.error || rust?.reason || 'Rust kernel failed to start',
       rollback,
       runtime: {
-        rust: { reachable: false, health: rust?.health || null },
+        rust: {
+          reachable: false,
+          health: rust?.health || null,
+          transport_health: projectTransportHealth({ reachable: false, healthy: false, error_code: code }),
+        },
       },
     }
   }
@@ -327,7 +332,11 @@ export async function switchSlotInferenceEngine(vm, projectRoot, engine, { timeo
     active_engine: 'rust',
     action: boot.action,
     runtime: {
-      rust: { reachable: true, health: rust.health || null },
+      rust: {
+        reachable: true,
+        health: rust.health || null,
+        transport_health: projectTransportHealth({ reachable: true, process_up: true, healthy: true }),
+      },
     },
   }
 }

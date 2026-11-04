@@ -1,0 +1,211 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { createDatabase } from '../../src/lib/db/database.mjs'
+import { createCredentialVault, loadKeyring, tokenFingerprint } from '../../src/lib/executor/vault.mjs'
+import {
+  openCredentialBundle,
+  openCustodyBundle,
+  sealCredentialBundle,
+  sealCustodyBundle,
+} from '../../src/lib/executor/custody.mjs'
+import { createCredentialCustody, credentialCustodyMode } from '../../src/lib/executor/credential-custody.mjs'
+
+const fixture = JSON.parse(
+  fs.readFileSync(new URL('../fixtures/executor-contract/custody.json', import.meta.url), 'utf8'),
+)
+const KEY = 'custody-test-key'
+
+function withCustody(mode, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-'))
+  const db = createDatabase({ dataDir: dir })
+  const vault = createCredentialVault({ db, keyring: loadKeyring({ file: path.join(dir, 'keys.json') }) })
+  const warnings = []
+  const env = { KIN_CREDENTIAL_CUSTODY: mode, KIN_CODEX_GATEWAY_CREDENTIAL_BUNDLE_KEY: KEY }
+  const custody = createCredentialCustody({ db, env, vault, log: { warn: (m) => warnings.push(m) } })
+  try {
+    return fn({ db, vault, custody, warnings })
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const exportedFor = (runtimeId, bundle, account = {}) => ({
+  account: { id: runtimeId, chatgpt_account_id: 'cg-1', email: 'a@example.test', ...account },
+  credential_bundle: sealCredentialBundle(KEY, runtimeId, bundle),
+})
+
+test('bundle formats match the Worker (shared fixture) in both directions', () => {
+  const revisions = {
+    credentialRevision: fixture.revisions.credential_revision,
+    bpsGeneration: fixture.revisions.bps_generation,
+  }
+  assert.deepEqual(
+    openCustodyBundle(fixture.private_key, fixture.instance_id, fixture.account_id, fixture.custody_bundle, revisions),
+    fixture.bundle,
+  )
+  assert.throws(() =>
+    openCustodyBundle(fixture.private_key, fixture.instance_id, fixture.account_id, fixture.custody_bundle),
+  )
+  assert.deepEqual(
+    openCredentialBundle(fixture.bundle_key, fixture.account_id, fixture.credential_bundle),
+    fixture.bundle,
+  )
+  const sealed = sealCustodyBundle(fixture.public_key, 'gw-x', 'acct_y', { refresh_token: 'r' })
+  assert.deepEqual(openCustodyBundle(fixture.private_key, 'gw-x', 'acct_y', sealed), { refresh_token: 'r' })
+  assert.throws(() => openCustodyBundle(fixture.private_key, 'gw-x', 'acct_other', sealed))
+  assert.equal(credentialCustodyMode({}), 'worker')
+  assert.equal(credentialCustodyMode({ KIN_CREDENTIAL_CUSTODY: 'CONTROL' }), 'control')
+})
+
+test('worker custody passes the shared bundle through and never touches the vault', () =>
+  withCustody('worker', ({ custody, vault }) => {
+    const exported = exportedFor('rt_1', { access_token: 'at', refresh_token: 'rt' }, { credential_revision: 1 })
+    const fields = custody.projectionFields({
+      instance: { id: 'gw-2', custody_public_key: fixture.public_key },
+      runtimeAccountId: 'rt_1',
+      accountResourceId: 'acct_1',
+      exported,
+    })
+    assert.deepEqual(fields, { credential_bundle: exported.credential_bundle })
+    assert.deepEqual(vault.list(), [])
+    assert.equal(custody.recordRotation({ grant: 'native' }).skipped, true)
+    // 导出账号文件：解开凭据包，字段与旧明文接口一致
+    const out = custody.exportSecrets({ accountResourceId: 'acct_1', runtimeAccountId: 'rt_1', exported })
+    assert.deepEqual(out.credentials, {
+      access_token: 'at',
+      refresh_token: 'rt',
+      id_token: '',
+      chatgpt_account_id: 'cg-1',
+      email: 'a@example.test',
+    })
+  }))
+
+test('control custody captures by revision, seals per instance and records rotations by CAS', () =>
+  withCustody('control', ({ custody, vault, warnings }) => {
+    const instance = {
+      id: fixture.instance_id,
+      custody_public_key: fixture.public_key,
+      capabilities: { custody: true },
+    }
+    const v1 = exportedFor(
+      'rt_1',
+      { access_token: 'at1', refresh_token: 'rt1', bps_access_token: 'bat1', bps_refresh_token: 'brt1' },
+      { credential_revision: 1, bps: { revision: 1, token_generation: 0 } },
+    )
+    const fields = custody.projectionFields({
+      instance,
+      runtimeAccountId: 'rt_1',
+      accountResourceId: 'acct_1',
+      exported: v1,
+    })
+    assert.equal(fields.credential_revision, 1)
+    assert.equal(fields.bps.token_generation, 0)
+    assert.deepEqual(
+      openCustodyBundle(fixture.private_key, fixture.instance_id, 'rt_1', fields.custody_bundle, {
+        credentialRevision: 1,
+        bpsGeneration: 0,
+      }),
+      { access_token: 'at1', refresh_token: 'rt1', bps_access_token: 'bat1', bps_refresh_token: 'brt1' },
+    )
+    // 旧副本（代次不更高）不会覆盖凭据库
+    const stale = exportedFor('rt_1', { access_token: 'old', refresh_token: 'old' }, { credential_revision: 1 })
+    assert.deepEqual(custody.capture({ accountResourceId: 'acct_1', runtimeAccountId: 'rt_1', exported: stale }), {
+      native: 'current',
+      bps: 'skipped',
+    })
+    // 原生轮换：按代次 CAS
+    const rotated = sealCredentialBundle(KEY, 'rt_1', { access_token: 'at2', refresh_token: 'rt2' })
+    const rotateNative = (previousRevision) =>
+      custody.recordRotation({
+        accountResourceId: 'acct_1',
+        runtimeAccountId: 'rt_1',
+        grant: 'native',
+        credentialBundle: rotated,
+        revision: 2,
+        previousRevision,
+      })
+    assert.equal(rotateNative(0).code, 'stale_revision')
+    assert.deepEqual(rotateNative(1), { ok: true })
+    assert.equal(vault.get('acct_1', 'native').revision, 2)
+    // BPS 轮换：按令牌代次 CAS（凭据库代次 = 令牌代次 + 1）
+    const bpsRotated = sealCredentialBundle(KEY, 'rt_1', { bps_access_token: 'bat2', bps_refresh_token: 'brt2' })
+    const rotateBps = (revision, previousRevision) =>
+      custody.recordRotation({
+        accountResourceId: 'acct_1',
+        runtimeAccountId: 'rt_1',
+        grant: 'bps',
+        credentialBundle: bpsRotated,
+        revision,
+        previousRevision,
+      })
+    assert.equal(rotateBps(1, 5).code, 'stale_revision')
+    assert.deepEqual(rotateBps(1, 0), { ok: true })
+    assert.equal(vault.get('acct_1', 'bps').revision, 2)
+    // 轮换报告丢失：下一次从持有者导出时按更高的令牌代次收录，凭据库仍能追上（R3 审查 P1-2）
+    const v3 = exportedFor(
+      'rt_1',
+      { access_token: 'at2', refresh_token: 'rt2', bps_access_token: 'bat3', bps_refresh_token: 'brt3' },
+      { credential_revision: 2, bps: { revision: 1, token_generation: 2 } },
+    )
+    assert.deepEqual(custody.capture({ accountResourceId: 'acct_1', runtimeAccountId: 'rt_1', exported: v3 }), {
+      native: 'current',
+      bps: 'stored',
+    })
+    assert.equal(vault.get('acct_1', 'bps').secrets.refresh_token, 'brt3')
+    // 收录失败、凭据库比来源旧：回退到来源副本，绝不下发“旧令牌 + 新代次”（R3 审查 P1-1）
+    const newer = {
+      account: { id: 'rt_1', credential_revision: 9, bps: { revision: 1, token_generation: 2 } },
+      credential_bundle: sealCredentialBundle('another-key', 'rt_1', { access_token: 'at9', refresh_token: 'rt9' }),
+    }
+    assert.deepEqual(
+      custody.projectionFields({ instance, runtimeAccountId: 'rt_1', accountResourceId: 'acct_1', exported: newer }),
+      { credential_bundle: newer.credential_bundle },
+    )
+    // 来源已撤销 BPS：不带凭据库里的 BPS 令牌
+    const noBps = exportedFor('rt_1', { access_token: 'at2', refresh_token: 'rt2' }, { credential_revision: 2 })
+    const withoutBps = custody.projectionFields({
+      instance,
+      runtimeAccountId: 'rt_1',
+      accountResourceId: 'acct_1',
+      exported: noBps,
+    })
+    assert.equal(withoutBps.bps, undefined)
+    assert.deepEqual(
+      openCustodyBundle(fixture.private_key, fixture.instance_id, 'rt_1', withoutBps.custody_bundle, {
+        credentialRevision: 2,
+      }),
+      { access_token: 'at2', refresh_token: 'rt2' },
+    )
+    // 旧版 Worker（没有 custody 能力）与公钥待确认的实例：回退到共享凭据包并告警
+    for (const target of [
+      { id: 'gw-old', custody_public_key: fixture.public_key },
+      { ...instance, id: 'gw-pending', custody_key_pending: 'x'.repeat(43) },
+    ])
+      assert.deepEqual(
+        Object.keys(
+          custody.projectionFields({
+            instance: target,
+            runtimeAccountId: 'rt_1',
+            accountResourceId: 'acct_1',
+            exported: noBps,
+          }),
+        ),
+        ['credential_bundle'],
+      )
+    assert.ok(warnings.some((line) => line.includes('gw-old')))
+    // 导出读凭据库；撤销 BPS 后凭据库里的 BPS 记录一并删除
+    const out = custody.exportSecrets({ accountResourceId: 'acct_1', runtimeAccountId: 'rt_1', exported: stale })
+    assert.equal(out.credentials.refresh_token, 'rt2')
+    assert.equal(out.bps_credentials.refresh_token, 'brt3')
+    assert.equal(custody.forget('acct_1', 'bps'), 1)
+    assert.equal(vault.get('acct_1', 'bps'), null)
+    // 代次增幅过大的上报被拒（R3 审查 P2-6）
+    const jump = exportedFor('rt_1', { access_token: 'x', refresh_token: 'x' }, { credential_revision: 5000 })
+    assert.throws(() => custody.capture({ accountResourceId: 'acct_1', runtimeAccountId: 'rt_1', exported: jump }), {
+      code: 'revision_jump',
+    })
+  }))

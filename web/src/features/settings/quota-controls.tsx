@@ -2,6 +2,7 @@ import { type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import type { Vm } from '@/types/panel-vm'
 import { CircleAlert, type LucideIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { RATIO_STEPS, withCurrent } from '@/features/vm/scheduling-steps'
 import { recordOf } from './quota-values'
@@ -27,6 +28,8 @@ export function RatioSetting({
   fallback: number
   onChange: (value: number) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const percent = Math.round(value * 100)
   return (
     <div className='space-y-2'>
@@ -42,7 +45,7 @@ export function RatioSetting({
         onChange={(next) => onChange(next / 100)}
       />
       <ChipGroup
-        label={`${label}常用值`}
+        label={t('presetsFor', { value1: label })}
         value={percent}
         options={ratioOptions(percent)}
         onChange={(next) => onChange(next / 100)}
@@ -70,6 +73,8 @@ export function QuotaSummary({
   disabled: boolean
   onClick: () => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <Button
       ref={buttonRef}
@@ -85,7 +90,7 @@ export function QuotaSummary({
           <span className='truncate'>{title}</span>
           {pending ? (
             <span className='shrink-0 rounded bg-[color:var(--status-caution)]/15 px-1.5 py-0.5 text-[10px] text-[color:var(--status-caution)]'>
-              待保存
+              {t('pendingSave')}
             </span>
           ) : null}
         </span>
@@ -111,10 +116,12 @@ export function PlatformAccountList({
   loading: boolean
   error: unknown
 }) {
+  const { t } = useTranslation('settings')
+
   if (loading) {
     return (
       <p className='rounded-md border px-3 py-6 text-center text-sm text-muted-foreground'>
-        读取账号状态中…
+        {t('quota.loadingAccounts')}
       </p>
     )
   }
@@ -123,8 +130,9 @@ export function PlatformAccountList({
       <div className='flex items-start gap-2 rounded-md border border-[color:var(--status-bad)]/40 px-3 py-3 text-sm text-[color:var(--status-bad)]'>
         <CircleAlert className='mt-0.5 size-4 shrink-0' aria-hidden />
         <span>
-          账号状态读取失败：
-          {error instanceof Error ? error.message : String(error)}
+          {t('quota.accountLoadFailed', {
+            value1: error instanceof Error ? error.message : String(error),
+          })}
         </span>
       </div>
     )
@@ -132,8 +140,10 @@ export function PlatformAccountList({
   if (!items.length) {
     return (
       <div className='rounded-md border border-dashed px-3 py-6 text-center text-sm text-muted-foreground'>
-        当前没有 {platform === 'claude' ? 'Claude' : 'OpenAI'}{' '}
-        VM；全局策略仍可保存。
+        {t('quota.noAccounts', {
+          value1: platform === 'claude' ? 'Claude' : 'OpenAI',
+          value2: ' ',
+        })}
       </div>
     )
   }
@@ -146,7 +156,7 @@ export function PlatformAccountList({
             : vm.concurrency_override === true ||
               vm.rpm_override === true ||
               vm.max_sessions_override === true
-        const status = vm.availability?.text || vm.status || '状态未知'
+        const status = vm.availability?.text || vm.status || t('unknownStatus')
         return (
           <div
             key={vm.id}
@@ -157,8 +167,14 @@ export function PlatformAccountList({
                 {vm.name || vm.id}
               </div>
               <div className='mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground'>
-                <span>来源：{hasSource ? '本槽覆盖' : '跟随全局'}</span>
-                <span>状态：{status}</span>
+                <span>
+                  {t('quota.source', {
+                    value1: t(
+                      hasSource ? 'quota.sourceOverride' : 'quota.sourceGlobal'
+                    ),
+                  })}
+                </span>
+                <span>{t('quota.status', { value1: status })}</span>
               </div>
             </div>
             <Link
@@ -166,7 +182,7 @@ export function PlatformAccountList({
               params={{ id: vm.id }}
               className='inline-flex min-h-11 items-center gap-1 text-xs text-primary hover:underline'
             >
-              查看 VM 调度
+              {t('quota.viewScheduling')}
             </Link>
           </div>
         )
