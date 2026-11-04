@@ -1,0 +1,15 @@
+{
+  "back": "Go back",
+  "home": "Back to home",
+  "forbiddenTitle": "Access forbidden",
+  "forbiddenDescription": "You do not have permission to view this resource.",
+  "generalTitle": "Something went wrong",
+  "generalDescription": "We apologize for the inconvenience. Please try again later.",
+  "maintenanceTitle": "Website under maintenance",
+  "maintenanceDescription": "The site is temporarily unavailable. We will be back shortly.",
+  "learnMore": "Learn more",
+  "notFoundTitle": "Page not found",
+  "notFoundDescription": "The page you are looking for does not exist or has been removed.",
+  "unauthorizedTitle": "Sign-in required",
+  "unauthorizedDescription": "Sign in with an authorized account to access this resource."
+}

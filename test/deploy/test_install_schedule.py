@@ -69,7 +69,7 @@ class ScheduleTests(unittest.TestCase):
         mock = r'''
 read_env_key() {
   case "$1" in
-    VM2API_API_KEY) echo test-key ;;
+    TAPMODELS_API_KEY) echo test-key ;;
     PORT) echo 16801 ;;
   esac
 }

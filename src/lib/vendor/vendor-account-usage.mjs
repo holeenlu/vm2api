@@ -1,0 +1,366 @@
+import { SYSTEM_TIMEZONE } from '../../shared/system-time.mjs'
+import { ERROR_PRED, SUCCESS_PRED, PROMPT_TOKENS_SQL, TOTAL_TOKENS_SQL } from '../db/repos/usage-log-preds.mjs'
+import { zonedParts, zonedWallToMs, zonedDayStartMs } from '../core/timezone.mjs'
+import { VendorError } from './vendor-platform.mjs'
+import { pooledVendorRead } from './vendor-read-pool.mjs'
+
+// Retained supplier facts cover periods whose detailed request logs have expired.
+// Prefer the detailed row when present so a request is never counted twice.
+// `usageScope` / `factsScope` narrow each arm before its joins; callers keep their outer filter.
+// Resource JSON is extracted once per query instead of once per log row.
+// Gateway Worker 账号的请求没有 VM，按 `gateway:<账号资源>` 归入对应账号。
+export const vendorAccountLogs = (usageScope = '', factsScope = '') => `
+  WITH vm_map AS MATERIALIZED (SELECT id,vendor_id,json_extract(config_json,'$.runtime_vm_id') AS runtime_vm_id
+    FROM vendor_resources WHERE resource_type='vm'),
+  account_map AS MATERIALIZED (SELECT id,vendor_id,json_extract(config_json,'$.vm_resource_id') AS vm_resource_id,
+    json_extract(config_json,'$.execution_kind') AS execution_kind FROM vendor_resources WHERE resource_type='account')
+  SELECT u.rowid AS watermark,u.id,COALESCE(NULLIF(u.request_id,''),u.id) AS request_id,
+    COALESCE(u.vm_id,CASE WHEN u.execution_kind='gateway_worker' THEN 'gateway:'||COALESCE(u.account_resource_id,ga.id) END) AS vm_id,u.group_id,u.created_at,
+    CASE WHEN f.id IS NULL THEN u.status ELSE 200 END AS status,CASE WHEN f.id IS NULL THEN u.error_code ELSE NULL END AS error_code,u.model,u.upstream_model,CASE WHEN f.id IS NULL THEN u.pricing_model ELSE NULL END AS pricing_model,COALESCE(f.cost_usd,u.total_cost) AS total_cost,u.input_tokens,u.output_tokens,
+    u.cache_read_tokens,u.cache_creation_tokens,u.duration_ms,u.first_token_ms,COALESCE(f.vendor_id,a.vendor_id,ga.vendor_id) AS vendor_id,COALESCE(f.resource_id,a.id,ga.id) AS account_resource_id,
+    u.authorization_mode
+  FROM usage_logs u LEFT JOIN vm_map v ON v.runtime_vm_id=u.vm_id
+  LEFT JOIN account_map a ON a.vendor_id=v.vendor_id AND a.vm_resource_id=v.id
+  LEFT JOIN account_map ga ON ga.id=u.account_resource_id
+  LEFT JOIN vendor_usage_facts f ON f.source_request_id=u.request_id
+  ${usageScope ? `WHERE ${usageScope}` : ''}
+  UNION ALL
+  SELECT f.rowid AS watermark,f.id,COALESCE(NULLIF(f.source_request_id,''),f.id),COALESCE(v.runtime_vm_id,CASE WHEN a.execution_kind='gateway_worker' THEN 'gateway:'||a.id ELSE 'vendor-history:'||f.vendor_id END),NULL,f.occurred_at,
+    200,NULL,f.model,NULL,NULL,f.cost_usd,f.input_tokens,f.output_tokens,f.cache_read_tokens,f.cache_creation_tokens,NULL,NULL,f.vendor_id,f.resource_id,NULL
+  FROM vendor_usage_facts f LEFT JOIN account_map a ON a.id=f.resource_id AND a.vendor_id=f.vendor_id
+  LEFT JOIN vm_map v ON v.id=a.vm_resource_id AND v.vendor_id=a.vendor_id
+  WHERE ${factsScope ? `${factsScope} AND ` : ''}NOT EXISTS(SELECT 1 FROM usage_logs u WHERE u.request_id=f.source_request_id)
+`
+
+export const VENDOR_USAGE_SELECT = `COUNT(*) AS requests,
+  COALESCE(SUM(CASE WHEN ${SUCCESS_PRED} THEN 1 ELSE 0 END),0) AS success,
+  COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END),0) AS errors,
+  COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
+  COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
+  COALESCE(SUM(${PROMPT_TOKENS_SQL}),0) AS prompt_tokens, COALESCE(SUM(${TOTAL_TOKENS_SQL}),0) AS total_tokens,
+  COALESCE(SUM(CASE WHEN status>=200 AND status<300 THEN total_cost ELSE 0 END),0) AS cost_usd,
+  COALESCE(SUM(CASE WHEN status>=200 AND status<300 AND (total_cost IS NULL OR pricing_model='unpriced') THEN 1 ELSE 0 END),0) AS unpriced_requests,
+  COALESCE(SUM(CASE WHEN status>=200 AND status<300 AND LOWER(COALESCE(NULLIF(upstream_model,''),NULLIF(pricing_model,''),model,'')) LIKE '%fable%' THEN total_cost ELSE 0 END),0) AS fable_cost_usd,
+  COALESCE(SUM(CASE WHEN status>=200 AND status<300 AND LOWER(COALESCE(NULLIF(upstream_model,''),NULLIF(pricing_model,''),model,'')) LIKE '%opus%' THEN total_cost ELSE 0 END),0) AS opus_cost_usd,
+  COUNT(cache_read_tokens) AS cache_read_known_requests, COUNT(cache_creation_tokens) AS cache_creation_known_requests,
+  SUM(CASE WHEN cache_read_tokens IS NULL OR cache_creation_tokens IS NULL THEN 1 ELSE 0 END) AS cache_unknown_requests,
+  AVG(duration_ms) AS avg_duration_ms, AVG(first_token_ms) AS avg_ttft_ms`
+
+export function normalizeVendorUsage(row = {}) {
+  const number = (key) => Number(row[key] || 0)
+  const requests = number('requests'),
+    success = number('success'),
+    errors = number('errors')
+  const input = number('input_tokens'),
+    output = number('output_tokens'),
+    read = number('cache_read_tokens'),
+    write = number('cache_creation_tokens')
+  const prompt = number('prompt_tokens')
+  return {
+    requests,
+    success,
+    errors,
+    success_rate: requests ? success / requests : null,
+    input_tokens: input,
+    output_tokens: output,
+    tokens: input + output,
+    cache_read_tokens: read,
+    cache_creation_tokens: write,
+    cache_read_known_requests: number('cache_read_known_requests'),
+    cache_creation_known_requests: number('cache_creation_known_requests'),
+    total_tokens: number('cache_unknown_requests') ? null : input + output + read + write,
+    cache_hit_rate: prompt && !number('cache_unknown_requests') ? read / prompt : null,
+    cache_complete: !number('cache_unknown_requests'),
+    cost_usd: number('unpriced_requests') ? null : number('cost_usd'),
+    unpriced_requests: number('unpriced_requests'),
+    fable_cost_usd: number('fable_cost_usd'),
+    opus_cost_usd: number('opus_cost_usd'),
+    avg_duration_ms: row.avg_duration_ms ?? null,
+    avg_ttft_ms: row.avg_ttft_ms ?? null,
+  }
+}
+// The outer filter on the derived vm_id cannot use an index, so `from` also narrows both arms to the
+// same accounts and period (usage_logs through idx_reqlog_vm); the outer filter stays authoritative.
+// authorization_mode：按 Gateway 请求的实际授权方式筛选（native / bps，迁移 094）；历史补录用量没有授权方式，筛选时不计入
+const AUTHORIZATION_MODES = new Set(['native', 'bps'])
+function authorizationModeOf(query = {}) {
+  const mode = query.authorization_mode
+  if (mode == null || mode === '' || mode === 'all') return null
+  if (!AUTHORIZATION_MODES.has(mode)) throw new VendorError('invalid_authorization_mode', '授权方式筛选无效')
+  return mode
+}
+function condition(ids, since, until, mode = null) {
+  const keys = [...new Set(ids.filter(Boolean))]
+  const marks = (values) => values.map(() => '?').join(',')
+  const prefixed = (prefix) => keys.filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length))
+  const gateways = prefixed('gateway:')
+  const history = prefixed('vendor-history:')
+  const vms = keys.filter((key) => !key.startsWith('gateway:') && !key.startsWith('vendor-history:'))
+  const any = (terms) => terms.filter(Boolean).join(' OR ') || '0'
+  const usageAccounts = any([
+    vms.length && `u.vm_id IN (${marks(vms)})`,
+    gateways.length && `(u.execution_kind='gateway_worker' AND u.account_resource_id IN (${marks(gateways)}))`,
+  ])
+  const factAccounts = any([
+    vms.length &&
+      `f.resource_id IN (SELECT a.id FROM account_map a JOIN vm_map v ON v.id=a.vm_resource_id AND v.vendor_id=a.vendor_id
+        WHERE v.runtime_vm_id IN (${marks(vms)}))`,
+    gateways.length && `f.resource_id IN (${marks(gateways)})`,
+    history.length && `f.vendor_id IN (${marks(history)})`,
+  ])
+  const period = (column) => `${column}<?${since ? ` AND ${column}>=?` : ''}`
+  const periodParams = [until, ...(since ? [since] : [])]
+  return {
+    from: vendorAccountLogs(
+      `(${usageAccounts}) AND ${period('u.created_at')}`,
+      `(${factAccounts}) AND ${period('f.occurred_at')}`,
+    ),
+    sql: `vm_id IN (${keys.length ? marks(keys) : 'NULL'}) AND ${period('created_at')}${mode ? ' AND authorization_mode=?' : ''}`,
+    params: [
+      ...vms,
+      ...gateways,
+      ...periodParams,
+      ...vms,
+      ...gateways,
+      ...history,
+      ...periodParams,
+      ...keys,
+      ...periodParams,
+      ...(mode ? [mode] : []),
+    ],
+  }
+}
+export function vendorUsageSummary(db, ids, { since = null, until = new Date().toISOString(), mode = null } = {}) {
+  const where = condition(ids, since, until, mode)
+  return normalizeVendorUsage(
+    db.prepare(`SELECT ${VENDOR_USAGE_SELECT} FROM (${where.from}) usage_logs WHERE ${where.sql}`).get(...where.params),
+  )
+}
+// Per-account summaries in one pass; accounts without requests are absent from the map.
+export function vendorUsageSummaries(db, ids, { since = null, until = new Date().toISOString() } = {}) {
+  const where = condition(ids, since, until)
+  const rows = db
+    .prepare(`SELECT vm_id,${VENDOR_USAGE_SELECT} FROM (${where.from}) usage_logs WHERE ${where.sql} GROUP BY vm_id`)
+    .all(...where.params)
+  return new Map(rows.map((row) => [row.vm_id, normalizeVendorUsage(row)]))
+}
+export function vendorAccountRuntime(platform, identity, accountId, { write = false } = {}) {
+  if (write || !identity.system_admin) platform.requireActive(identity)
+  const row = platform.getResource(identity, accountId, { write })
+  if (row.resource_type !== 'account') throw new VendorError('resource_not_found', '账号不存在', 404)
+  const config = JSON.parse(row.config_json || '{}')
+  if (config.execution_kind === 'gateway_worker') {
+    const binding = platform.db
+      .prepare(
+        'SELECT * FROM gateway_worker_account_bindings WHERE account_resource_id=? ORDER BY updated_at DESC LIMIT 1',
+      )
+      .get(row.id)
+    return {
+      row,
+      config,
+      linked: null,
+      vmId: null,
+      executionKind: 'gateway_worker',
+      gatewayInstanceId: binding?.gateway_instance_id || config.gateway_instance_id || null,
+      runtimeAccountId: binding?.runtime_account_id || config.runtime_account_id || null,
+      accountResourceId: row.id,
+    }
+  }
+  const linked = platform.db
+    .prepare("SELECT * FROM vendor_resources WHERE id=? AND vendor_id=? AND resource_type='vm'")
+    .get(config.vm_resource_id || '', row.vendor_id)
+  return { row, config, linked, vmId: linked ? JSON.parse(linked.config_json || '{}').runtime_vm_id : null }
+}
+function dateStart(date, timezone, offset = 0) {
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) ||
+    !Number.isFinite(Date.parse(date)) ||
+    new Date(date).toISOString().slice(0, 10) !== date
+  )
+    throw new VendorError('invalid_usage_period', '日期范围无效')
+  const [year, month, day] = date.split('-').map(Number)
+  return zonedWallToMs({ year, month, day: day + offset }, timezone)
+}
+function periodOf(query, now) {
+  const timezone = SYSTEM_TIMEZONE
+  const range = query.range || (query.start_date || query.end_date ? 'custom' : 'all')
+  if (!['all', 'today', '7days', '30days', 'custom'].includes(range))
+    throw new VendorError('invalid_usage_range', '用量范围无效')
+  let start = null,
+    end = now + 1
+  if (range === 'custom') {
+    start = dateStart(query.start_date, timezone)
+    end = dateStart(query.end_date, timezone, 1)
+  } else if (range !== 'all')
+    start = zonedDayStartMs(now, timezone, range === 'today' ? 0 : range === '7days' ? -6 : -29)
+  if (start != null && (start >= end || end - start > 3660 * 86400000))
+    throw new VendorError('invalid_usage_period', '结束日期不能早于开始日期，自定义范围最长十年')
+  return { range, timezone, start, until: Math.min(end, now + 1) }
+}
+const dateKey = (ms, tz, monthly = false) => {
+  const p = zonedParts(ms, tz)
+  return `${p.year}-${String(p.month).padStart(2, '0')}${monthly ? '' : '-' + String(p.day).padStart(2, '0')}`
+}
+
+// Mirrors the panel statistics reader: aggregate UTC quarter-hours, then bucket by local date.
+// Supplier projections never include consumer users, API keys, prompts, or request bodies.
+export function readVendorUsage(db, ids, query = {}, now = Date.now()) {
+  const period = periodOf(query, now)
+  const mode = authorizationModeOf(query)
+  const since = period.start == null ? null : new Date(period.start).toISOString(),
+    until = new Date(period.until).toISOString()
+  const where = condition(ids, since, until, mode)
+  const summary = vendorUsageSummary(db, ids, { since, until, mode })
+  const first = db
+    .prepare(`SELECT MIN(created_at) at FROM (${where.from}) usage_logs WHERE ${where.sql}`)
+    .get(...where.params)?.at
+  const start = period.start ?? (first ? zonedDayStartMs(Date.parse(first), period.timezone) : period.until)
+  const monthly = period.until - start > 366 * 86400000
+  const buckets = new Map()
+  if (first) {
+    const parts = zonedParts(start, period.timezone)
+    for (let i = 0; i < 3700; i++) {
+      const at = monthly
+        ? zonedWallToMs({ year: parts.year, month: parts.month + i, day: 1 }, period.timezone)
+        : zonedDayStartMs(start, period.timezone, i)
+      if (at >= period.until) break
+      const date = dateKey(at, period.timezone, monthly)
+      buckets.set(date, {
+        date,
+        requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_known_requests: 0,
+        cache_creation_known_requests: 0,
+        tokens: 0,
+        total_tokens: 0,
+        cost_usd: 0,
+        cache_complete: true,
+      })
+    }
+  }
+  const slots = db
+    .prepare(`SELECT substr(created_at,1,14)||printf('%02d',(CAST(substr(created_at,15,2) AS INTEGER)/15)*15) slot,
+    COUNT(*) requests,COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens,
+    COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,COALESCE(SUM(cache_creation_tokens),0) cache_creation_tokens,
+    COALESCE(SUM(${TOTAL_TOKENS_SQL}),0) total_tokens,COALESCE(SUM(CASE WHEN status>=200 AND status<300 THEN total_cost ELSE 0 END),0) cost_usd,
+    SUM(CASE WHEN status>=200 AND status<300 AND (total_cost IS NULL OR pricing_model='unpriced') THEN 1 ELSE 0 END) unpriced,
+    COUNT(cache_read_tokens) cache_read_known_requests, COUNT(cache_creation_tokens) cache_creation_known_requests,
+    SUM(CASE WHEN cache_read_tokens IS NULL OR cache_creation_tokens IS NULL THEN 1 ELSE 0 END) cache_unknown
+    FROM (${where.from}) usage_logs WHERE ${where.sql} GROUP BY slot ORDER BY slot`)
+    .all(...where.params)
+  for (const row of slots) {
+    const date = dateKey(Date.parse(row.slot + ':00.000Z'), period.timezone, monthly)
+    const target = buckets.get(date)
+    if (!target) continue
+    for (const field of [
+      'requests',
+      'input_tokens',
+      'output_tokens',
+      'cache_read_tokens',
+      'cache_creation_tokens',
+      'cache_read_known_requests',
+      'cache_creation_known_requests',
+      'total_tokens',
+    ])
+      target[field] += Number(row[field] || 0)
+    if (row.unpriced) target.cost_usd = null
+    else if (target.cost_usd != null) target.cost_usd += Number(row.cost_usd || 0)
+    if (row.cache_unknown) target.cache_complete = false
+    target.tokens = target.input_tokens + target.output_tokens
+  }
+  const models = db
+    .prepare(`SELECT COALESCE(NULLIF(upstream_model,''),NULLIF(model,''),'unknown') model,${VENDOR_USAGE_SELECT}
+    FROM (${where.from}) usage_logs WHERE ${where.sql} GROUP BY 1 ORDER BY requests DESC,model`)
+    .all(...where.params)
+    .map((row) => ({ model: row.model, ...normalizeVendorUsage(row) }))
+  const account_usage = db
+    .prepare(`SELECT u.*,a.name AS account_name FROM (
+      SELECT account_resource_id,${VENDOR_USAGE_SELECT} FROM (${where.from}) usage_logs
+      WHERE ${where.sql} GROUP BY account_resource_id) u
+      LEFT JOIN vendor_resources a ON a.id=u.account_resource_id ORDER BY cost_usd DESC`)
+    .all(...where.params)
+    .map((row) => ({
+      account_id: row.account_resource_id,
+      account_name: row.account_name,
+      ...normalizeVendorUsage(row),
+    }))
+  const fixed_windows = {}
+  for (const [key, duration] of [
+    ['5h', 5 * 3600000],
+    ['7d', 7 * 86400000],
+    ['30d', 30 * 86400000],
+  ])
+    fixed_windows[key] = vendorUsageSummary(db, ids, {
+      since: new Date(now - duration).toISOString(),
+      until: new Date(now + 1).toISOString(),
+      mode,
+    })
+  return {
+    period: { range: period.range, start: since, end: until, timezone: period.timezone },
+    authorization_mode: mode || 'all',
+    summary,
+    trend: [...buckets.values()].map((row) => {
+      const prompt = row.input_tokens + row.cache_read_tokens + row.cache_creation_tokens
+      return {
+        ...row,
+        total_tokens: row.cache_complete ? row.total_tokens : null,
+        cache_hit_rate: row.cache_complete && prompt ? row.cache_read_tokens / prompt : null,
+      }
+    }),
+    account_usage,
+    models,
+    fixed_windows,
+    collected_at: new Date(now).toISOString(),
+    resolution: monthly ? 'month' : 'day',
+    source: 'usage_logs',
+  }
+}
+export async function readVendorUsagePooled(db, ids, query = {}, now = Date.now()) {
+  periodOf(query, now)
+  authorizationModeOf(query)
+  return pooledVendorRead(db, 'readVendorUsage', [ids, query, now], () => readVendorUsage(db, ids, query, now))
+}
+export async function supplierAccountUsage(platform, identity, accountId, query = {}, now = Date.now()) {
+  platform.requireCapability(identity, 'vendor.usage.read')
+  const account = vendorAccountRuntime(platform, identity, accountId)
+  if (!account.vmId && account.executionKind !== 'gateway_worker')
+    throw new VendorError('resource_pair_missing', '账号的运行关联缺失，请联系超级管理员', 409)
+  const usageId = account.vmId || `gateway:${account.accountResourceId}`
+  return {
+    account_id: account.row.id,
+    name: account.row.name,
+    ...(await readVendorUsagePooled(platform.db, [usageId], query, now)),
+  }
+}
+export async function supplierUsage(platform, identity, { query = {} } = {}) {
+  platform.requireCapability(identity, 'vendor.usage.read')
+  const ids = platform.resourceScope(identity, query.vendor_id || '')
+  let rows = platform.db
+    .prepare(`SELECT a.id,a.name,a.vendor_id,a.config_json,v.config_json AS vm_config_json FROM vendor_resources a
+    LEFT JOIN vendor_resources v ON v.id=json_extract(a.config_json,'$.vm_resource_id') AND v.vendor_id=a.vendor_id AND v.resource_type='vm'
+    WHERE a.resource_type='account' AND a.vendor_id IN (${ids.map(() => '?').join(',')})`)
+    .all(...ids)
+  if (query.account_id) {
+    if (!rows.some((r) => r.id === query.account_id))
+      throw new VendorError('vendor_scope_forbidden', '账号不属于当前供应商范围', 403)
+    rows = rows.filter((r) => r.id === query.account_id)
+  }
+  const result = await readVendorUsagePooled(
+    platform.db,
+    [
+      ...rows.map((r) => {
+        const config = JSON.parse(r.config_json || '{}')
+        return config.execution_kind === 'gateway_worker'
+          ? `gateway:${r.id}`
+          : JSON.parse(r.vm_config_json || '{}').runtime_vm_id
+      }),
+      ...(query.account_id ? [] : ids.map((id) => 'vendor-history:' + id)),
+    ],
+    query,
+    Date.now(),
+  )
+  return { ...result, accounts: rows.map((r) => ({ id: r.id, name: r.name, vendor_id: r.vendor_id })) }
+}

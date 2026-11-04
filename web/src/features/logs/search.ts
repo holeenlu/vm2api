@@ -1,4 +1,8 @@
-import type { UsageLogFilters } from '@/types/panel-usage-logs'
+import {
+  USAGE_PLATFORMS,
+  type UsageLogFilters,
+  type UsagePlatform,
+} from '@/types/panel-usage-logs'
 
 /**
  * `/logs` 的 URL 查询串。键名沿用 hub（camelCase，`minRetry`、`statusCode=!200`），
@@ -6,10 +10,14 @@ import type { UsageLogFilters } from '@/types/panel-usage-logs'
  * 全部可选：任何只带一个键的 search 对象都要能通过类型检查。
  */
 export type LogsSearch = {
+  scope?: 'mine'
   userId?: string
+  groupId?: string
   keyId?: string
   /** 供应商 = 槽位。 */
   vmId?: string
+  accountId?: string
+  /** 仅站内深链（实时会话、日志详情「查看该会话」）写入，筛选表单不再编辑。 */
   sessionId?: string
   /** 毫秒时间戳，含。 */
   startTime?: number
@@ -18,36 +26,31 @@ export type LogsSearch = {
   /** 精确状态码或 `!200`（= 只看非 2xx）。 */
   statusCode?: number | '!200'
   model?: string
-  /** 计费/实际模型不一致。 */
-  mismatch?: boolean
-  endpoint?: string
-  protocol?: string
+  platform?: UsagePlatform
   /** 重试次数下限（= 尝试次数 - 1）。 */
   minRetry?: number
   error_class?: string
   /** 旧深链：等价于 `statusCode=!200`。 */
   kind?: 'error'
-  /** 只看 debug 采样行。 */
-  debug?: boolean
 }
 
 /** 筛选面板编辑的草稿形状；`kind=error` 在这里已折叠成 `excludeStatus200`。 */
 export type LogsFilterState = {
+  scope?: 'mine'
   userId?: string
+  groupId?: string
   keyId?: string
   vmId?: string
+  accountId?: string
   sessionId?: string
   startTime?: number
   endTime?: number
   statusCode?: number
   excludeStatus200?: boolean
   model?: string
-  mismatch?: boolean
-  endpoint?: string
-  protocol?: string
+  platform?: UsagePlatform
   minRetry?: number
   errorClass?: string
-  debugOnly?: boolean
 }
 
 function str(value: unknown): string | undefined {
@@ -63,10 +66,8 @@ function int(value: unknown): number | undefined {
   return Number.isFinite(n) ? Math.trunc(n) : undefined
 }
 
-function flag(value: unknown): boolean | undefined {
-  return value === true || value === 'true' || value === '1' || value === 1
-    ? true
-    : undefined
+function platform(value: unknown): UsagePlatform | undefined {
+  return USAGE_PLATFORMS.find((p) => p === value)
 }
 
 export function validateLogsSearch(
@@ -81,30 +82,33 @@ export function validateLogsSearch(
         : int(rawStatus)
   const minRetry = search.minRetry == null ? undefined : int(search.minRetry)
   return {
+    scope: search.scope === 'mine' ? 'mine' : undefined,
     userId: str(search.userId),
+    groupId: str(search.groupId),
     keyId: str(search.keyId),
     vmId: str(search.vmId),
+    accountId: str(search.accountId),
     sessionId: str(search.sessionId),
     startTime: search.startTime == null ? undefined : int(search.startTime),
     endTime: search.endTime == null ? undefined : int(search.endTime),
     statusCode,
     model: str(search.model),
-    mismatch: flag(search.mismatch),
-    endpoint: str(search.endpoint),
-    protocol: str(search.protocol),
+    platform: platform(search.platform),
     minRetry: minRetry != null && minRetry >= 0 ? minRetry : undefined,
     error_class: str(search.error_class),
     kind: search.kind === 'error' ? 'error' : undefined,
-    debug: flag(search.debug),
   }
 }
 
 export function searchToFilters(search: LogsSearch): LogsFilterState {
   const exclude = search.statusCode === '!200' || search.kind === 'error'
   return {
+    scope: search.scope,
     userId: search.userId,
+    groupId: search.groupId,
     keyId: search.keyId,
     vmId: search.vmId,
+    accountId: search.accountId,
     sessionId: search.sessionId,
     startTime: search.startTime,
     endTime: search.endTime,
@@ -112,33 +116,30 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
       typeof search.statusCode === 'number' ? search.statusCode : undefined,
     excludeStatus200: exclude || undefined,
     model: search.model,
-    mismatch: search.mismatch,
-    endpoint: search.endpoint,
-    protocol: search.protocol,
+    platform: search.platform,
     minRetry: search.minRetry,
     errorClass: search.error_class,
-    debugOnly: search.debug,
   }
 }
 
 /** 草稿 → URL。`kind` 不再写回，统一由 `statusCode=!200` 表达。 */
 export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   const out: LogsSearch = {}
+  if (filters.scope === 'mine') out.scope = 'mine'
   if (filters.userId) out.userId = filters.userId
+  if (filters.groupId) out.groupId = filters.groupId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
+  if (filters.accountId) out.accountId = filters.accountId
   if (filters.sessionId?.trim()) out.sessionId = filters.sessionId.trim()
   if (filters.startTime != null) out.startTime = filters.startTime
   if (filters.endTime != null) out.endTime = filters.endTime
   if (filters.excludeStatus200) out.statusCode = '!200'
   else if (filters.statusCode != null) out.statusCode = filters.statusCode
   if (filters.model) out.model = filters.model
-  if (filters.mismatch) out.mismatch = true
-  if (filters.endpoint) out.endpoint = filters.endpoint
-  if (filters.protocol) out.protocol = filters.protocol
+  if (filters.platform) out.platform = filters.platform
   if (filters.minRetry != null) out.minRetry = filters.minRetry
   if (filters.errorClass) out.error_class = filters.errorClass
-  if (filters.debugOnly) out.debug = true
   return out
 }
 
@@ -151,21 +152,21 @@ export function filtersToApi(
   muted: readonly string[]
 ): UsageLogFilters {
   const out: UsageLogFilters = {}
+  if (filters.scope === 'mine') out.scope = 'mine'
   if (filters.userId) out.userId = filters.userId
+  if (filters.groupId) out.groupId = filters.groupId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
+  if (filters.accountId) out.accountId = filters.accountId
   if (filters.sessionId) out.sessionId = filters.sessionId
   if (filters.model) out.model = filters.model
-  if (filters.endpoint) out.endpoint = filters.endpoint
-  if (filters.protocol) out.protocol = filters.protocol
+  if (filters.platform) out.platform = filters.platform
   if (filters.statusCode != null) out.statusCode = filters.statusCode
   else if (filters.excludeStatus200) out.excludeStatus200 = true
-  if (filters.mismatch) out.modelMismatch = true
   if (filters.minRetry != null && filters.minRetry > 0)
     out.minAttemptCount = filters.minRetry + 1
   if (filters.errorClass) out.errorClass = filters.errorClass
   else if (muted.length) out.excludeErrorClass = muted.join(',')
-  if (filters.debugOnly) out.debugOnly = true
   if (filters.startTime != null)
     out.startTime = new Date(filters.startTime).toISOString()
   if (filters.endTime != null)
@@ -178,25 +179,25 @@ export function usageLogFiltersQuery(
   filters: UsageLogFilters
 ): URLSearchParams {
   const qs = new URLSearchParams()
+  if (filters.scope === 'mine') qs.set('scope', 'mine')
   const set = (key: string, value: string | number | undefined) => {
     if (value !== undefined && value !== '') qs.set(key, String(value))
   }
   set('user_id', filters.userId)
+  if (filters.errorsOnly) qs.set('errors_only', '1')
+  set('group_id', filters.groupId)
   set('key_id', filters.keyId)
   set('vm_id', filters.vmId)
   set('account_id', filters.accountId)
   set('session_id', filters.sessionId)
   set('model', filters.model)
-  set('endpoint', filters.endpoint)
-  set('protocol', filters.protocol)
+  set('platform', filters.platform)
   set('status_code', filters.statusCode)
   if (filters.excludeStatus200) qs.set('exclude_status_200', '1')
-  if (filters.modelMismatch) qs.set('model_mismatch', '1')
   set('min_attempt_count', filters.minAttemptCount)
   set('error_class', filters.errorClass)
   set('exclude_error_class', filters.excludeErrorClass)
   if (filters.includeMuted) qs.set('include_muted', '1')
-  if (filters.debugOnly) qs.set('log_mode', 'debug')
   set('start_time', filters.startTime)
   set('end_time', filters.endTime)
   set('q', filters.q)
@@ -208,16 +209,15 @@ export function activeFilterCount(filters: LogsFilterState): number {
   let count = 0
   if (filters.startTime != null || filters.endTime != null) count++
   if (filters.userId) count++
+  if (filters.groupId) count++
   if (filters.keyId) count++
   if (filters.vmId) count++
+  if (filters.accountId) count++
   if (filters.sessionId) count++
   if (filters.statusCode != null || filters.excludeStatus200) count++
   if (filters.model) count++
-  if (filters.mismatch) count++
-  if (filters.endpoint) count++
-  if (filters.protocol) count++
+  if (filters.platform) count++
   if (filters.minRetry != null && filters.minRetry > 0) count++
   if (filters.errorClass) count++
-  if (filters.debugOnly) count++
   return count
 }

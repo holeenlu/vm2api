@@ -1,9 +1,26 @@
+import { filterAccountRows } from '../../shared/vendor-account-filters.mjs'
+import { wakeOpenAIWaiter } from '../pool/openai-account-runtime.mjs'
+import { listGlobalPricing, createGlobalPricing } from '../vendor/vendor-pricing.mjs'
+import { withTransaction } from '../db/database.mjs'
+import { maybeDecrypt, maybeEncrypt } from '../db/secure.mjs'
+import { createPanelApiKeyRoutes } from './panel-api-key-routes.mjs'
+import { createPanelApiEndpointRoutes } from './panel-api-endpoint-routes.mjs'
+import { createPanelBackupRoutes } from './panel-backup-routes.mjs'
+import { siteBranding, saveSiteBranding } from './site-branding.mjs'
+import { ownProfile, profileView, updateOwnProfile, changeOwnPassword } from './panel-profile.mjs'
+import { projectPanelUsage, projectUsage } from './usage-projection.mjs'
+import { createPanelVmBulkRoutes } from './panel-vm-bulk-routes.mjs'
+import { createRelayHandler } from './relay-routes.mjs'
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
+import { relayError, audit } from './relay-common.mjs'
 /**
  * /admin and /api/panel routes. Login / logout / me and { ok, data }
  * envelopes are unchanged; slot start/reload go through startSlotReady.
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
+import { resolveVendorAccountName } from '../vendor/vendor-account-name.mjs'
 import {
   verifyPanelLogin,
   createPanelSession,
@@ -29,15 +46,25 @@ import { JevUsageRepo } from '../db/repos/jev-usage-repo.mjs'
 import { RefusalGuardsRepo } from '../db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
+import {
+  DEFAULT_ACCOUNT_ERROR_PROTECTION,
+  compileAccountErrorProtection,
+  normalizeAccountErrorProtection,
+  validateAccountErrorProtection,
+  clearProtectionState,
+} from '../pool/account-error-protection.mjs'
 import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts } from '../vm/codex-slot.mjs'
 import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oauth/oauth-auth-url.mjs'
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
 import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
+import { refreshAccountProfile } from '../oauth/account-profile.mjs'
 import { generateCodexAuthUrl, exchangeCodexAuthCode } from '../oauth/codex-oauth.mjs'
+import { makeProxyFetch } from '../protocol/codex-models.mjs'
 import {
   completeClaudeSetupToken,
   readSetupTokenSession,
   looksLikeOfficialSetupToken,
+  pastedAccessTokenToOauth,
   SETUP_TOKEN_FLAVOR,
 } from '../oauth/claude-setup-token.mjs'
 import {
@@ -50,7 +77,6 @@ import {
 import {
   canOfficialCc,
   isApiKeyMode,
-  isAnySetupTokenMode,
   isOfficialSetupTokenMode,
   isSetupTokenMode,
   looksLikeConsoleApiKey,
@@ -78,49 +104,55 @@ import {
   resetGptModelPolicy,
 } from '../protocol/gpt-model-policy.mjs'
 import { refreshCodexAccessToken } from '../protocol/codex-models.mjs'
-import {
-  defaultSeedPolicy,
-  isTelemetryEnabled,
-  seedTelemetryContract,
-  standardSeedPolicy,
-} from '../protocol/seed-policy.mjs'
+import { defaultSeedPolicy, isTelemetryEnabled, seedTelemetryContract } from '../protocol/seed-policy.mjs'
 
 import { runVmTestChat, resolveTestModels, syncCodexCatalog } from './vm-test-chat.mjs'
 import { VmTestScheduleError } from './vm-test-schedule.mjs'
 import { readCatalogSync, syncClaudeCatalog, syncGptCatalog } from './catalog-monitor.mjs'
 import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-catalog.mjs'
 import { buildPricing } from './pricing-view.mjs'
-import { publicKeyView } from './api-keys.mjs'
-import { assertVmScope, normalizeKeyScope } from './key-scope.mjs'
+import { createGatewayWorkerRoutes } from '../gateway-worker/gateway-routes.mjs'
+import { GatewayWorkerService } from '../gateway-worker/gateway-execution.mjs'
+import { GatewayAccountManagement } from '../gateway-worker/account-management.mjs'
 import {
-  assertVmPoolExists,
-  createVmPool,
-  deleteVmPool,
-  updateVmPool,
-  vmPoolHttpStatus,
-  vmPoolsFor,
-} from './vm-pools.mjs'
-import { publicEndpointView, fetchUpstreamModels, API_ENDPOINT_PRESETS } from './api-endpoints.mjs'
-import { runAnthropicConsole, resolveConsoleProxyUrl, savedEndpointKey } from './anthropic-console.mjs'
-import { publicUserView } from './panel-users.mjs'
-import { authorizePanelRoute, mePayload, panelIdentity } from './panel-acl.mjs'
+  CLIENT_PROFILE_SETTING,
+  PRIVACY_POLICY_SETTING,
+  readClientProfileSetting,
+  readPrivacyPolicySetting,
+  validateClientProfileSelection,
+  validatePrivacyPolicy,
+  validateProfileDeployment,
+} from '../gateway-worker/codex-client-profile.mjs'
 import {
-  denyIfUserCannotDeleteVm,
-  denyIfUserMissesKey,
-  denyIfUserMissesProxy,
-  denyIfUserMissesVm,
-  userMissesVmId,
-} from './panel-tenant.mjs'
-import {
-  VM_ORIGIN,
-  canBindProxyToVm,
-  assignOriginForOwner,
-  clampVmCreateQuota,
-  countUserCreatedVms,
-  filterVmsForPanel,
-  normalizeOwnerId,
-  vmOwnerId,
-} from './resource-owner.mjs'
+  DEFAULT_REQUEST_LOCATION,
+  REQUEST_LOCATION_SETTING,
+  normalizeRequestLocation,
+  readRequestLocationSetting,
+} from '../gateway-worker/request-location.mjs'
+
+import { runAnthropicConsole } from './anthropic-console.mjs'
+import { mePayload, panelIdentity } from './panel-acl.mjs'
+import { authorizePanelRoute } from './capability-policy.mjs'
+import { createPanelRouteContext } from './route-context.mjs'
+import { createPanelUserRoutes } from './panel-user-routes.mjs'
+import { createPanelVmReadRoutes } from './panel-vm-read-routes.mjs'
+import { createPanelVmCommandRoutes } from './panel-vm-command-routes.mjs'
+import { createPanelVmLifecycleRoutes } from './panel-vm-lifecycle-routes.mjs'
+import { createPanelVmDiagnoseRoutes } from './panel-vm-diagnose-routes.mjs'
+import { createPanelVmProbeRoutes } from './panel-vm-probe-routes.mjs'
+import { createPanelVmQuotaRoutes } from './panel-vm-quota-routes.mjs'
+import { createPanelVmTestRoutes } from './panel-vm-test-routes.mjs'
+import { createPanelVmCredentialRoutes } from './panel-vm-credential-routes.mjs'
+import { createPanelVmRuntimeRoutes } from './panel-vm-runtime-routes.mjs'
+import { createPanelVmOauthQueryRoutes } from './panel-vm-oauth-query-routes.mjs'
+import { createPanelVmOauthMutationRoutes } from './panel-vm-oauth-mutation-routes.mjs'
+import { createPanelVmSeedRoutes } from './panel-vm-seed-routes.mjs'
+import { createPanelVmPackageRoutes } from './panel-vm-package-routes.mjs'
+import { createPanelVmResetRoutes } from './panel-vm-reset-routes.mjs'
+import { createPanelVmMaintenanceRoutes } from './panel-vm-maintenance-routes.mjs'
+import { createPanelVmProvisionRoutes } from './panel-vm-provision-routes.mjs'
+import { createPanelVmImportRoutes } from './panel-vm-import-routes.mjs'
+import { VM_ORIGIN, canBindProxyToVm, filterVmsForPanel, normalizeOwnerId } from './resource-owner.mjs'
 import { servePoolSeatStream } from './pool-seat-stream.mjs'
 import { logsToCsv, logsToJsonl } from './request-log.mjs'
 import {
@@ -151,7 +183,6 @@ import {
   persistSlotEnginePolicy,
   persistVmActiveHours,
   persistVmScheduleLevel,
-  persistVmOwner,
   persistVmTimezone,
 } from '../vm/vm-registry.mjs'
 import {
@@ -163,13 +194,14 @@ import {
 } from '../pool/schedule-state.mjs'
 import { fillVmTimezoneFromExit, syncVmTimezoneFromProxy } from '../vm/proxy-timezone.mjs'
 import { validTimezone } from '../core/timezone.mjs'
-import { stampVmKind, isCodexVm } from '../vm/vm-kind.mjs'
+import { stampVmKind, isCodexVm, normalizeVmKind } from '../vm/vm-kind.mjs'
 import { parseAllowedModelsPatch } from '../pool/slot-model-gate.mjs'
 import { parseScheduleLevelInput, manualScheduleLevelOf } from '../pool/credential-weight.mjs'
 import { parseActiveHoursInput } from '../pool/active-hours.mjs'
 import { parseVmQuotaOverride } from '../pool/vm-quota-override.mjs'
 import { validateOpenAIQuotaPatch, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
-import { validateInferenceWebsocketPatch } from '../protocol/codex-route.mjs'
+import { normalizeCodexRouting, validateInferenceWebsocketPatch } from '../protocol/codex-route.mjs'
+import { queryOpenaiQuota } from '../oauth/openai-quota.mjs'
 import {
   normalizeInferenceConfig,
   normalizeSessionSlots,
@@ -188,9 +220,11 @@ import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
 import { withVmLock, atomicWriteJson, isValidVmId, invalidateVmSlotReadCache } from '../vm/vm-file.mjs'
 import { snapshotDatabaseMetrics } from '../db/database-metrics.mjs'
+import { runtimeMetrics } from '../core/runtime-metrics.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { getDb, getDbPath } from '../db/database.mjs'
 import { usagePoolEnabled, usageRead } from '../db/sqlite-pool.mjs'
+import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
 import {
   readLocalVersion,
   loadChangelog,
@@ -201,15 +235,29 @@ import {
 import { downloadReleaseKernel, kernelReleaseHttpStatus } from './release-kernel.mjs'
 import { clearActiveVmFromDb, removeVmFromDb } from '../vm/vm-db-sync.mjs'
 import { normalizeCredentialMode } from '../oauth/credential-mode.mjs'
-import { reloadActiveVm } from '../core/config.mjs'
+import { oauthCredentialState, oauthCredentialView, oauthVmPaths } from '../oauth/oauth-route-context.mjs'
+import { accountPortalRows } from '../vendor/vendor-portal-view.mjs'
+import { createSharedSnapshot } from '../vendor/shared-snapshot.mjs'
+import { deriveScheduleFields } from '../pool/schedule-state.mjs'
+import { VendorError, VendorPlatform, vendorProxyAddress, rejectInlinePricing } from '../vendor/vendor-platform.mjs'
+import { projectResource } from './project-resource.mjs'
 import {
-  OS_CATALOG,
-  kernelForIndex,
-  normalizeTimezone,
-  nextNumericIndex,
-  padVm,
-  STANDARD_LOCALE,
-} from '../vm/vm-runtime.mjs'
+  adminVendorIdentity,
+  adminVendors,
+  adminResources,
+  updateAdminVendor,
+  vendorIds,
+  listSettlements,
+} from '../vendor/vendor-admin.mjs'
+import { createUsageQueryService } from '../vendor/queries/usage-query-service.mjs'
+import { createSettlementQueryService } from '../vendor/queries/settlement-query-service.mjs'
+import { createSettlementCommandService } from '../vendor/commands/settlement-command-service.mjs'
+import { createAccountCommandService } from '../vendor/commands/account-command-service.mjs'
+import { createAccountQueryService } from '../vendor/queries/account-query-service.mjs'
+import { createProxyCommandService } from '../vendor/commands/proxy-command-service.mjs'
+import { parseSocks5Line } from '../vm/proxy-pool.mjs'
+import { reloadActiveVm } from '../core/config.mjs'
+import { OS_CATALOG, kernelForIndex, normalizeTimezone, newVmNaming, STANDARD_LOCALE } from '../vm/vm-runtime.mjs'
 import {
   startSlotReady,
   reloadSlotReady,
@@ -219,6 +267,7 @@ import {
   switchInheritedInferenceEngines,
   slotExec,
 } from '../vm/slot-runtime.mjs'
+import { buildNewVmRecord } from '../vm/vm-create-config.mjs'
 import { recreateVmFiles, seedFreshCliHome } from '../vm/vm-recreate.mjs'
 import { diagnoseSlotServices, powerOnSlot, recoverSlot } from '../vm/slot-recovery.mjs'
 import { commitVmPackage, exportVmPackage, parseVmPackage } from '../vm/vm-package.mjs'
@@ -274,15 +323,13 @@ import { readRawBody as defaultReadRawBody } from '../http/respond.mjs'
 import { corsHeadersForRequest } from '../http/cors.mjs'
 import { restartRustKernel, syncClaudeKernelConfigs, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
-import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
-import { apiKeyBetaHeader, setupTokenBetaHeader } from '../protocol/claude-code-betas.mjs'
 import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
 import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
 import { mergeNotifyConfig, publicNotifyConfig, publicRoutingNotify, sendNotifyTest } from './notify.mjs'
-import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
+import { notificationStatus, notificationTestConfig } from './ops/notification-command.mjs'
 import {
   applyOnboardingAction,
   buildOnboardingPayload,
@@ -302,8 +349,29 @@ import {
   normalizeRange,
 } from '../db/repos/statistics-repo.mjs'
 
+/**
+ * An upstream credential failure must remain a panel error. Returning the
+ * upstream 401 directly would make the web client clear its own panel session
+ * and redirect to login because panelFetch treats every panel 401 as session
+ * expiry.
+ */
+function upstreamFetchStatus(error) {
+  const status = Number(error?.status)
+  if (status === 401) return 502
+  return status >= 400 && status < 600 ? status : 400
+}
+
 /** Tenants always see their own rows; other roles may narrow by `user_id`. */
 function logsOwner(req, u) {
+  if (panelIdentity(req).role === 'admin') {
+    if (u.searchParams.get('scope') === 'mine') return { type: 'panel_key_creator', creatorId: req.panelUserId }
+    const requested = u.searchParams.get('user_id') || null
+    const managed = new Set(req.panelManagedUserIds || [])
+    const userId = requested ? (managed.has(requested) ? requested : '__none__') : req.panelUserId
+    return requested
+      ? { type: 'panel_users', userId, scopeRootId: req.panelScopeRootId }
+      : { type: 'panel_admin_scope', adminId: req.panelUserId, scopeRootId: req.panelScopeRootId }
+  }
   return panelIdentity(req).role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null
 }
 
@@ -320,6 +388,12 @@ function clusterNodesOf(ctx) {
 
 function collectOnboardingFacts(req, ctx) {
   const ident = panelIdentity(req)
+  if (ident.role === 'admin')
+    return {
+      hasFirstRequest: ctx.requestLog.hasSuccessfulRequest({
+        owner_user_id: logsOwner(req, new URL(req.url, 'http://x')),
+      }),
+    }
   const ownerUserId = ident.role === 'user' ? req.panelUserId : null
   const vms = listVms(ctx.cfg.paths.project, ctx.routingConfig)
   const snap = ctx.proxyPool.panelSnapshot({
@@ -338,6 +412,17 @@ function collectOnboardingFacts(req, ctx) {
     envAdmin: ctx.panelUsers.getByUsername(admin.username),
     proxyCount: (snap.proxies || []).length,
     ...vmStepFacts(visible),
+    groupCount:
+      ident.role === 'user'
+        ? new GroupsRepo(ctx.apiKeyStore.db).list().filter((g) => {
+            try {
+              new GroupsRepo(ctx.apiKeyStore.db).access(ctx.apiKeyStore.users.getById(ownerUserId), g.id)
+              return true
+            } catch {
+              return false
+            }
+          }).length
+        : 0,
     activeKeyCount: mine.filter((k) => k.status === 'active').length,
     hasFirstRequest: ctx.requestLog.hasSuccessfulRequest({ owner_user_id: ownerUserId }),
   }
@@ -365,31 +450,32 @@ function usageLogFilters(req, u) {
     const v = u.searchParams.get(k)
     return v == null || v === '' ? null : v
   }
-  const isUser = panelIdentity(req).role === 'user'
+  const role = panelIdentity(req).role
+  const isUser = role === 'user'
+  const diagnostic = role === 'super_admin'
   return {
     limit: get('limit'),
     cursor_created_at: get('cursor_created_at'),
     cursor_id: get('cursor_id'),
     user_id: isUser ? null : get('user_id'),
     key_id: get('key_id'),
-    vm_id: get('vm_id'),
-    account_id: get('account_id'),
-    session_id: get('session_id'),
+    group_id: get('group_id'),
+    vm_id: diagnostic ? get('vm_id') : null,
+    account_id: diagnostic ? get('account_id') : null,
+    session_id: diagnostic ? get('session_id') : null,
     model: get('model'),
-    endpoint: get('endpoint'),
-    protocol: get('protocol'),
+    platform: get('platform'),
     status_code: get('status_code'),
     exclude_status_200: get('exclude_status_200') === '1',
-    model_mismatch: get('model_mismatch') === '1',
-    min_attempt_count: get('min_attempt_count'),
+    min_attempt_count: diagnostic ? get('min_attempt_count') : null,
     error_class: get('error_class'),
     exclude_error_class: get('exclude_error_class'),
     include_muted: get('include_muted') === '1',
-    debug_only: get('log_mode') === 'debug',
+    errors_only: get('errors_only') === '1',
     start_time: get('start_time'),
     end_time: get('end_time'),
     q: get('q'),
-    owner_user_id: isUser ? req.panelUserId : null,
+    owner_user_id: logsOwner(req, u),
   }
 }
 
@@ -406,7 +492,9 @@ function statsParams(req, u, dimensionKey) {
   const dimension = rawDim ? normalizeDimension(rawDim) : 'model'
   if (!dimension) return { error: `invalid ${dimensionKey}: ${rawDim}` }
   if (isUser && !USER_ROLE_DIMENSIONS.includes(dimension)) return { error: `${dimensionKey} not allowed: ${dimension}` }
-  return { range, dimension, tz: u.searchParams.get('tz') || 'UTC', owner_user_id: logsOwner(req, u) }
+  if (panelIdentity(req).role === 'admin' && !['user', 'model'].includes(dimension))
+    return { error: `${dimensionKey} not allowed: ${dimension}` }
+  return { range, dimension, owner_user_id: logsOwner(req, u) }
 }
 
 async function commitImportedCodexVm({
@@ -460,6 +548,7 @@ async function commitImportedCodexVm({
     stampVmKind(vm)
   })
   if (writtenCodex) Object.assign(existing, writtenCodex)
+  resolveVendorAccountName(existing, saved.email)
   // Importing a GPT credential is an operator action: it reopens 不可调度.
   if (saved.access_token || saved.refresh_token) {
     const reopened = clearUnschedulable(cfg.paths.project, existing.id, { by: 'credential_import' })
@@ -476,6 +565,17 @@ async function commitImportedCodexVm({
   } catch {
     catalog = null
   }
+  // Plan, subscription dates and payment channel come with the quota snapshot;
+  // fetch it now so a fresh slot does not read 订阅 未知 until someone queries.
+  try {
+    await queryOpenaiQuota({
+      projectRoot: cfg.paths.project,
+      vmId: existing.id,
+      rotate: false,
+      policy: normalizeCodexRouting(routingConfig.codex).quota,
+    })
+    Object.assign(existing, getVm(cfg.paths.project, existing.id) || {})
+  } catch {}
   return {
     vm: summarizeVm(existing, cfg.paths.project, routingConfig),
     platform: 'openai',
@@ -516,7 +616,7 @@ async function runKernelSync({ project, routingConfig, body = {}, refreshCluster
   const wanted = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null
   const selected = wanted ? all.filter((vm) => wanted.has(vm.id)) : all
   // Local slots bind the new binaries. Cluster slots bake the same kernel, CLIs
-  // and OAuth helpers into a content-hashed image, then recreate onto it.
+  // and kin-worker telemetry into a content-hashed image, then recreate onto it.
   const localVms = selected.filter((vm) => !slotHost(vm).bakedKernel)
   const clusterVms = selected.filter((vm) => slotHost(vm).bakedKernel)
   const checkOnly = body.restart === false
@@ -600,9 +700,43 @@ function slotProxyHint(px = {}, label = null) {
 }
 
 export function createPanelHandler(ctx) {
+  const handleRelay = createRelayHandler(ctx)
+  const handleVmBulk = createPanelVmBulkRoutes(ctx)
   // A checkout can change under a live Node process; report its boot version.
   const runningVersion = readLocalVersion(ctx.cfg?.paths?.project)
-  const json = (...args) => ctx.json(...args)
+  const {
+    cfg,
+    json,
+    readBody,
+    readRawBody,
+    refreshCluster,
+    requireAuth,
+    routingConfigPath,
+    stickyRouter,
+    accountQuota,
+    proxyPool,
+    apiKeyStore,
+    apiEndpointStore,
+    apiScheduler,
+    panelUsers,
+    requestLog,
+    vmTestSchedule,
+    backupService,
+    stats,
+    persistRoutingPatch,
+    applyVmConcurrency,
+    applyVmRpm,
+    applyVmSessionSlots,
+    inheritVmScheduling,
+    applyVmQuotaOverride,
+    initPoolRuntime,
+    poolSchedulerConfig,
+    commitImportedOauth,
+    requireSlotProxy,
+    officialCcStatsHandler,
+    refreshWorkerCredentialForVm,
+    fetchWorkerModels,
+  } = createPanelRouteContext(ctx, { defaultReadRawBody, refreshClusterSlotPayloads })
   const hostUnsupported = (res, vm, cap) => {
     if (slotHost(vm).supports(cap)) return false
     json(res, 409, {
@@ -611,36 +745,487 @@ export function createPanelHandler(ctx) {
     })
     return true
   }
-  const readBody = (...args) => ctx.readBody(...args)
-  const readRawBody = (...args) => (ctx.readRawBody || defaultReadRawBody)(...args)
-  const refreshCluster = ctx.refreshClusterSlotPayloads || refreshClusterSlotPayloads
-  const requireAuth = (...args) => ctx.requireAuth(...args)
-  const cfg = ctx.cfg
-  const routingConfigPath = ctx.routingConfigPath
-  const stickyRouter = ctx.stickyRouter
-  const accountQuota = ctx.accountQuota
-  const proxyPool = ctx.proxyPool
-  const apiKeyStore = ctx.apiKeyStore
-  const apiEndpointStore = ctx.apiEndpointStore
-  const apiScheduler = ctx.apiScheduler
-  const panelUsers = ctx.panelUsers
-  const requestLog = ctx.requestLog
-  const vmTestSchedule = ctx.vmTestSchedule
-  const backupService = ctx.backupService
-  const stats = ctx.stats
-  const persistRoutingPatch = (...args) => ctx.persistRoutingPatch(...args)
-  const applyVmConcurrency = (...args) => ctx.applyVmConcurrency(...args)
-  const applyVmRpm = (...args) => ctx.applyVmRpm(...args)
-  const applyVmSessionSlots = (...args) => ctx.applyVmSessionSlots(...args)
-  const inheritVmScheduling = (...args) => ctx.inheritVmScheduling(...args)
-  const applyVmQuotaOverride = (...args) => ctx.applyVmQuotaOverride(...args)
-  const initPoolRuntime = (...args) => ctx.initPoolRuntime(...args)
-  const poolSchedulerConfig = (...args) => ctx.poolSchedulerConfig(...args)
-  const commitImportedOauth = (...args) => ctx.commitImportedOauth(...args)
-  const requireSlotProxy = (...args) => ctx.requireSlotProxy(...args)
-  const officialCcStatsHandler = (...args) => ctx.officialCcStatsHandler(...args)
-  const refreshWorkerCredentialForVm = (...args) => ctx.refreshWorkerCredentialForVm(...args)
-  const fetchWorkerModels = (...args) => ctx.fetchWorkerModels(...args)
+  const vendorPlatform = () =>
+    ctx.vendorPlatform || (ctx.vendorPlatform = new VendorPlatform(getDb(), { vmProvisioner: ctx.vendorVmProvisioner }))
+  const usageQueries = createUsageQueryService()
+  const settlementQueries = createSettlementQueryService()
+  const settlementCommands = createSettlementCommandService()
+  const accountCommands = createAccountCommandService()
+  const accountQueries = createAccountQueryService()
+  const handleGatewayWorkerRoutes = createGatewayWorkerRoutes({
+    json,
+    readBody,
+    proxyPool,
+    supervisor: ctx.gatewayWorkerSupervisor,
+  })
+  const gatewayWorkerService = ctx.gatewayWorker || new GatewayWorkerService()
+  // 供应商（及运营端账号池）重新授权已有 Gateway 账号：复用运营端 Codex 账号的草稿与 OAuth 流程
+  let gatewayReauthorization = null
+  const vendorGatewayAccounts = () =>
+    (gatewayReauthorization ||= new GatewayAccountManagement({
+      repo: gatewayWorkerService.repo,
+      service: gatewayWorkerService,
+      proxyPool,
+    }))
+  const settingsRepo = () => new SettingsRepo(ctx.db || getDb())
+  const handlePanelUsers = createPanelUserRoutes({ panelUsers, json, readBody, vendorPlatform })
+  const handlePanelApiKeys = createPanelApiKeyRoutes({
+    apiKeyStore,
+    requestLog,
+    json,
+    readBody,
+    ctx,
+    normalizeInput: normalizePanelApiKeyInput,
+  })
+  const handlePanelApiEndpoints = createPanelApiEndpointRoutes({
+    apiEndpointStore,
+    apiKeyStore,
+    apiScheduler,
+    proxyPool,
+    cfg,
+    ctx,
+    json,
+    readBody,
+    upstreamFetchStatus,
+  })
+  const handlePanelBackups = createPanelBackupRoutes({ backupService, apiKeyStore, json, readBody })
+  const handlePanelVmReadRoutes = createPanelVmReadRoutes({
+    panel,
+    cfg,
+    accountQuota,
+    routingConfig: ctx.routingConfig,
+    poolScheduler: ctx.poolScheduler,
+    proxyPool,
+    requestLog,
+    db: ctx.db || null,
+    kernelHealth: panelKernelHealth,
+    clusterNodesOf: () => clusterNodesOf(ctx),
+    panelIdentity,
+    probeLocalKvm: ctx.probeLocalKvm || probeLocalKvm,
+    usageProbeMonitor: ctx.usageProbeMonitor,
+    json,
+  })
+  const handlePanelVmProvisionRoutes = createPanelVmProvisionRoutes({
+    cfg,
+    fs,
+    path,
+    json,
+    readBody,
+    listVms,
+    accountQuota,
+    newVmNaming,
+    isValidVmId,
+    panelIdentity,
+    ctx,
+    normalizeVmConfig,
+    resolveMachineSpec,
+    OS_CATALOG,
+    kernelForIndex,
+    RUNTIME_KVM,
+    probeLocalKvm,
+    preflightNode,
+    stampVmKind,
+    isCodexVm,
+    slotHost,
+    proxyPool,
+    isLocalEgressId,
+    isLocalEgressProxy,
+    localProxyMismatchMessage: LOCAL_PROXY_MISMATCH_MESSAGE,
+    canBindProxyToVm,
+    validTimezone,
+    slotLocales: SLOT_LOCALES,
+    standardLocale: STANDARD_LOCALE,
+    assignComputerFingerprint,
+    takenFingerprintKeys,
+    buildNewVmRecord,
+    atomicWriteJson,
+    writeGuestMachineIdFile,
+    seedFreshCliHome,
+    bindVmProxy,
+    adoptVmProxyBinding,
+    fillTimezoneFromExit,
+    activateVmSlot,
+    startSlotReady,
+    patchVmRecord,
+    markUnschedulable,
+    getVm,
+    clusterNodesOf,
+    summarizeVm,
+    panel,
+  })
+  const handlePanelVmImportRoutes = createPanelVmImportRoutes({
+    cfg,
+    fs,
+    path,
+    json,
+    readBody,
+    panel,
+    ctx,
+    summarizeVm,
+    panelImportErrorPayload,
+    requireSlotProxy,
+    slotExec,
+    isCodexVm,
+    parseCodexImportPayload,
+    refreshCodexAccessToken,
+    commitImportedCodexVm,
+    looksLikeConsoleApiKey,
+    pastedAccessTokenToOauth,
+    sessionKeyToOAuth,
+    isSub2apiAccountExport,
+    sub2apiAccountToOauth,
+    enrichOauthIdentity,
+    assertVendorRuntimeVm,
+    commitImportedOauth,
+    invalidateLiveCredentialCache,
+  })
+  const handlePanelVmCommandRoutes = createPanelVmCommandRoutes({
+    cfg,
+    routingConfig: ctx.routingConfig,
+    readBody,
+    json,
+  })
+  const handlePanelVmLifecycleRoutes = createPanelVmLifecycleRoutes({
+    cfg,
+    routingConfig: ctx.routingConfig,
+    proxyPool,
+    clusterNodesOf: () => clusterNodesOf(ctx),
+    panel,
+    panelIdentity,
+    gatewayCapabilities: GATEWAY_CAPABILITIES,
+    json,
+    start: async (id, { role }) => {
+      if (role === 'vendor') {
+        const started = await startVendorRuntimeVm(id)
+        return started.ok ? started : { ...started, status: started.status || 409 }
+      }
+      const started = await powerOnSlot({
+        projectRoot: cfg.paths.project,
+        id,
+        proxyPool,
+        routing: ctx.routingConfig,
+        fillTimezone: fillTimezoneFromExit,
+        by: 'start',
+      })
+      return started.ok ? started : { ...started, status: started.status || 409 }
+    },
+    recover: async (id, { role }) =>
+      recoverSlot({
+        projectRoot: cfg.paths.project,
+        id,
+        proxyPool,
+        routing: ctx.routingConfig,
+        fillTimezone: fillTimezoneFromExit,
+        watchdog: ctx.kernelWatchdog,
+        internal: role === 'super_admin',
+      }),
+    stop: async (id) => {
+      const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
+      if (!fs.existsSync(vmPath)) return { ok: false, status: 404, code: 'vm_not_found', error: 'vm not found' }
+      const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+      const halt = await stopSlot(vm)
+      if (!halt.ok)
+        return { ok: false, status: 500, code: 'runtime_stop_failed', error: halt.error || 'runtime stop failed' }
+      vm.status = 'stopped'
+      migrateScheduleRecord(vm)
+      applyScheduleOff(vm, true, { reason: 'stopped' })
+      atomicWriteJson(vmPath, vm, { mode: 0o600 })
+      return { ok: true, vm, halt }
+    },
+  })
+  const handlePanelVmDiagnoseRoutes = createPanelVmDiagnoseRoutes({
+    cfg,
+    routingConfig: ctx.routingConfig,
+    kernelWatchdog: ctx.kernelWatchdog,
+    panelIdentity,
+    json,
+  })
+  const handlePanelVmProbeRoutes = createPanelVmProbeRoutes({
+    cfg,
+    routingConfig: ctx.routingConfig,
+    accountQuota,
+    panel,
+    probeExitGeo: probeVmExitGeo,
+    json,
+  })
+  const handlePanelVmQuotaRoutes = createPanelVmQuotaRoutes({
+    cfg,
+    routingConfig: ctx.routingConfig,
+    accountQuota,
+    panel,
+    json,
+  })
+  const handlePanelVmTestRoutes = createPanelVmTestRoutes({
+    cfg: { ...cfg, accountQuota },
+    panel,
+    panelIdentity,
+    readBody,
+    json,
+    getVm: (projectRoot, id) => getVm(projectRoot, id),
+    isValidVmId,
+    vmTestSchedule,
+    VmTestScheduleError,
+    runVmTestChat,
+    resolveTestModels,
+  })
+  const handlePanelVmCredentialRoutes = createPanelVmCredentialRoutes({
+    cfg,
+    fs,
+    path,
+    json,
+    readBody,
+    withVmLock,
+    getVm,
+    patchVmRecord,
+    migrateScheduleRecord,
+    applyUnschedulable,
+    invalidateLiveCredentialCache,
+    stopCodexKernel,
+    ensureCodexKernel,
+    slotExec,
+    isCodexVm,
+    accountQuota,
+    summarizeVm,
+    routingConfig: () => ctx.routingConfig,
+    assignComputerFingerprint,
+    takenFingerprintKeys,
+    listVms,
+    atomicWriteJson,
+    writeGuestMachineIdFile,
+    applyGeneratedFingerprint,
+    applyOfficialFingerprintToVm,
+    officialCcHome,
+  })
+  const handlePanelVmRuntimeRoutes = createPanelVmRuntimeRoutes({
+    cfg,
+    json,
+    readBody,
+    panel,
+    panelIdentity,
+    getVm,
+    reloadSlotReady,
+    slotShell: ctx.slotShell,
+    assertVendorRuntimeVm,
+    collectSlotIdentity,
+    routing: ctx.routingConfig,
+  })
+  const handlePanelVmOauthQueryRoutes = createPanelVmOauthQueryRoutes({
+    cfg,
+    json,
+    panel,
+    getVm,
+    readWorkerCredentialFile,
+    oauthToSub2apiExport,
+    readSetupTokenSession,
+    setupTokenFlavor: SETUP_TOKEN_FLAVOR,
+  })
+  const handlePanelVmOauthMutationRoutes = createPanelVmOauthMutationRoutes({
+    cfg,
+    fs,
+    path,
+    json,
+    readBody,
+    panel,
+    proxyPool,
+    requireSlotProxy,
+    slotProxyHint,
+    getVm,
+    summarizeVm,
+    isCodexVm,
+    generateCodexAuthUrl,
+    startClaudeAuthLoginSession,
+    normalizeOauthFlavor,
+    setupTokenFlavor: SETUP_TOKEN_FLAVOR,
+    authLoginFlavor: AUTH_LOGIN_FLAVOR,
+    authLoginSource: AUTH_LOGIN_SOURCE,
+    generateAuthUrl,
+    exchangeCodexAuthCode,
+    readAuthLoginSession,
+    looksLikeOfficialSetupToken,
+    completeClaudeSetupToken,
+    completeClaudeAuthLogin,
+    exchangeAuthCode,
+    slotExec,
+    enrichOauthIdentity,
+    assertVendorRuntimeVm,
+    commitImportedCodexVm,
+    commitImportedOauth,
+    parseCredentialEdit,
+    readWorkerCredentialFile,
+    isApiKeyMode,
+    isOfficialSetupTokenMode,
+    isSetupTokenMode,
+    liveOauthToSetupToken,
+    readCodexAccounts,
+    refreshCodexAccessToken,
+    hostProxyUrlForVm,
+    upsertCodexAccount,
+    oauthCredentialState,
+    refreshWorkerCredentialForVm,
+    refreshAccountProfile,
+    invalidateLiveCredentialCache,
+    routingConfig: ctx.routingConfig,
+  })
+  const handlePanelVmSeedRoutes = createPanelVmSeedRoutes({
+    cfg,
+    json,
+    readBody,
+    panel,
+    getVm,
+    fs,
+    path,
+    withVmLock,
+    readSeedSettings,
+    defaultSeedPolicy,
+    seedTelemetryContract,
+    readTelemetryUploadLog,
+    isCodexVm,
+    slotHost,
+    isTelemetryEnabled,
+    validTimezone,
+    standardLocale: STANDARD_LOCALE,
+    slotLocales: SLOT_LOCALES,
+    syncVmTimezoneFromProxy,
+    proxyPool,
+    atomicWriteJson,
+    writeSlotSeedFiles,
+    applyNativeTelemetry,
+    routingConfig: ctx.routingConfig,
+  })
+  const handlePanelVmPackageRoutes = createPanelVmPackageRoutes({
+    cfg,
+    json,
+    readBody,
+    panel,
+    panelIdentity,
+    getVm,
+    exportVmPackage,
+    commitVmPackage,
+    parseVmPackage,
+    proxyPool,
+    fillTimezoneFromExit,
+    accountQuota,
+    reloadSlotReady,
+    setScheduleHold,
+    restoreSchedulableIfReady,
+    bringUpImportedVm,
+    summarizeVm,
+    routingConfig: ctx.routingConfig,
+    packageImportBringUp: ctx.packageImportBringUp,
+    holdMaintenance: HOLD_MAINTENANCE,
+  })
+  const handlePanelVmResetRoutes = createPanelVmResetRoutes({
+    cfg,
+    json,
+    readBody,
+    panel,
+    fs,
+    path,
+    withVmLock,
+    destroySlot,
+    recreateVmFiles,
+    getVm,
+    invalidateLiveCredentialCache,
+    hasBoundExit,
+    proxyPool,
+    bindVmProxy,
+    adoptVmProxyBinding,
+    patchVmRecord,
+    markUnschedulable,
+    startSlotReady,
+    summarizeVm,
+    routingConfig: ctx.routingConfig,
+  })
+  const handlePanelVmMaintenanceRoutes = createPanelVmMaintenanceRoutes({
+    cfg,
+    json,
+    readBody,
+    panel,
+    getVm,
+    listVms,
+    setScheduleOff,
+    holdSchedulableSlots,
+    waitForSlotDrain: (ids) => waitForSlotDrain(ctx.poolScheduler, ids),
+    kernelUpdateHold: KERNEL_UPDATE_HOLD,
+    resumeSchedulableSlots,
+    isMaintenanceHold,
+    activateVmSlot,
+    deactivateVmSlot,
+    clearVmCooldown: (id) =>
+      panel.clearVmCooldown({
+        cfg,
+        accountQuota,
+        stickyRouter,
+        poolScheduler: ctx.poolScheduler,
+        id,
+      }),
+    resetVmCircuit: (id) => panel.resetVmCircuit({ cfg, poolScheduler: ctx.poolScheduler, id }),
+    deleteVm: async (id, respond, response, req) => {
+      if (!isValidVmId(id)) return respond(response, 400, { ok: false, error: { message: 'invalid vm id' } })
+      const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
+      if (!fs.existsSync(vmPath)) return respond(response, 404, { ok: false, error: { message: 'vm not found' } })
+      const active = getActiveVmId(cfg.paths.project)
+      if (active === id && listVms(cfg.paths.project).some((vm) => vm.id !== id))
+        return respond(response, 409, { ok: false, error: { message: 'cannot delete active VM, switch active first' } })
+      const vm = getVm(cfg.paths.project, id)
+      try {
+        if (vm) {
+          const gone = await destroySlot(vm)
+          if (!gone.ok && slotHost(vm).kind === 'node')
+            return respond(response, 409, {
+              ok: false,
+              error: { code: gone.code || 'remote_destroy_failed', message: gone.error || 'remote destroy failed' },
+            })
+        }
+      } catch {}
+      try {
+        removeVmFromDb(id, panelIdentity(req).user)
+      } catch {
+        return respond(response, 500, {
+          ok: false,
+          error: { code: 'vm_delete_failed', message: '槽位分组关系清理失败，请重试删除' },
+        })
+      }
+      try {
+        proxyPool.unbindVm(id)
+      } catch {}
+      try {
+        fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
+      } catch {}
+      fs.unlinkSync(vmPath)
+      invalidateVmSlotReadCache(cfg.paths.project, id)
+      try {
+        vmTestSchedule.remove(id)
+      } catch {}
+      if (active === id) {
+        clearActiveVm(cfg.paths.project)
+        try {
+          clearActiveVmFromDb()
+        } catch {}
+        try {
+          reloadActiveVm(cfg)
+        } catch {}
+      }
+      try {
+        const chat = path.join(cfg.paths.project, 'vms', `${id}-chat.json`)
+        if (fs.existsSync(chat)) fs.unlinkSync(chat)
+      } catch {}
+      return respond(response, 200, panel.ok({ deleted: id }))
+    },
+  })
+  const numericRevision = (value) => {
+    if (value == null || typeof value === 'boolean' || (typeof value === 'string' && value.trim() === '')) return NaN
+    return Number(value)
+  }
+  const currentConfigRevision = () => {
+    try {
+      const revision = ctx.getConfigRevision?.() ?? ctx.runtimeSnapshot?.revision?.()
+      const numeric = numericRevision(revision)
+      return Number.isSafeInteger(numeric) && numeric >= 1 ? numeric : 1
+    } catch {
+      return 1
+    }
+  }
   /**
    * A worker reload finished: lift its maintenance hold. `by` names the operator
    * action that caused the reload; only that may also clear 不可调度.
@@ -657,6 +1242,779 @@ export function createPanelHandler(ctx) {
 
   function fillTimezoneFromExit(id) {
     return fillVmTimezoneFromExit(cfg.paths.project, proxyPool, id)
+  }
+
+  function assertVendorRuntimeVm(req, runtimeVmId) {
+    if (panelIdentity(req).role !== 'vendor') return
+    runtimeVmId = String(runtimeVmId || '').trim()
+    const platform = vendorPlatform()
+    const identity = platform.identity(req.panelUserId)
+    platform.requireActive(identity)
+    platform.requireCapability(identity, 'vendor.resource.manage')
+    const rows = platform.db
+      .prepare(`SELECT vm.config_json,a.config_json AS account_config_json FROM vendor_resources vm
+      JOIN vendor_resources a ON a.id=json_extract(vm.config_json,'$.account_resource_id') AND a.vendor_id=vm.vendor_id
+      WHERE vm.vendor_id=? AND vm.resource_type='vm' AND vm.status<>'archived'
+        AND a.resource_type='account' AND a.status<>'archived'`)
+      .all(identity.vendor.id)
+    const owned = rows.some(
+      (row) => String(JSON.parse(row.config_json || '{}').runtime_vm_id || '') === String(runtimeVmId),
+    )
+    if (!owned) throw new VendorError('vendor_scope_forbidden', '虚拟机或配对账号已归档，或不属于当前供应商', 403)
+    const runtime = getVm(cfg.paths.project, runtimeVmId)
+    const selected = rows.find((row) => JSON.parse(row.config_json || '{}').runtime_vm_id === runtimeVmId)
+    const accountPlatform = JSON.parse(selected.account_config_json || '{}').platform
+    const actualPlatform = normalizeVmKind(runtime || { platform: accountPlatform }).platform
+    const allowed = new Set(platform.availableAccountGroups(identity, actualPlatform).map((g) => g.id))
+    const assigned = platform.db
+      .prepare("SELECT group_id FROM group_resources WHERE resource_kind='vm' AND resource_id=?")
+      .all(runtimeVmId)
+    if (actualPlatform !== accountPlatform || !assigned.length || assigned.some((g) => !allowed.has(g.group_id)))
+      throw new VendorError('vendor_scope_revoked', '账号平台或分组授权已变更，请联系超级管理员', 403)
+  }
+
+  async function startVendorRuntimeVm(runtimeVmId) {
+    const vm = getVm(cfg.paths.project, runtimeVmId)
+    if (!vm) return { ok: false, status: 404, code: 'vm_not_found', error: 'vm not found' }
+    if (vm.status === 'running') return { ok: true, vm }
+    let boot
+    try {
+      boot = await startSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
+    } catch (error) {
+      boot = { ok: false, code: error?.code || 'runtime_start_failed', error: String(error?.message || error) }
+    }
+    if (!boot?.ok)
+      return {
+        ok: false,
+        status: 500,
+        code: boot?.code || 'runtime_start_failed',
+        error: '运行环境启动失败，请联系超级管理员检查代理和虚拟机服务',
+      }
+    const saved = patchVmRecord(cfg.paths.project, runtimeVmId, {
+      ...(boot.runtime ? { runtime: boot.runtime } : {}),
+      status: 'running',
+    })
+    return { ok: true, vm: saved || getVm(cfg.paths.project, runtimeVmId) || vm, boot }
+  }
+
+  function vendorDraftProxyUrl(platform, identity, draft) {
+    if (draft.body.proxy_endpoint) return vendorProxyAddress(draft.body.proxy_endpoint)
+    if (!draft.body.proxy_id) return ''
+    const resource = platform.getResource(identity, String(draft.body.proxy_id), { write: true })
+    if (resource.resource_type !== 'proxy' || resource.status !== 'active')
+      throw new VendorError('proxy_unavailable', '代理不可用', 409)
+    const secret = platform.resourceSecret(identity, resource.id)
+    return vendorProxyAddress(secret.endpoint || resource.config.endpoint)
+  }
+
+  function normalizeVendorDraft(platform, identity, body) {
+    const allowed = [
+      'name',
+      'platform',
+      'authorization_kind',
+      'auth_method',
+      'execution_kind',
+      'proxy_id',
+      'proxy_endpoint',
+      'group_ids',
+      'idempotency_key',
+    ]
+    if (Object.keys(body).some((key) => !allowed.includes(key)))
+      throw new VendorError('vm_config_forbidden', '供应商不能修改虚拟机运行参数', 403)
+    const kind =
+      String(body.authorization_kind || '').trim() ||
+      (String(body.platform || '').toLowerCase() === 'openai' ? 'codex_oauth' : 'claude_oauth')
+    const defaults = {
+      claude_oauth: { platform: 'anthropic', auth_method: 'oauth' },
+      claude_setup_token: { platform: 'anthropic', auth_method: 'setup-token' },
+      claude_console: { platform: 'anthropic', auth_method: 'apikey' },
+      codex_oauth: { platform: 'openai', auth_method: 'oauth' },
+      codex_account_file: { platform: 'openai', auth_method: 'oauth' },
+    }[kind]
+    if (!defaults) throw new VendorError('authorization_kind_invalid', '授权方式无效')
+    const normalizedPlatform =
+      { claude: 'anthropic', codex: 'openai' }[String(body.platform || '').trim()] ||
+      String(body.platform || defaults.platform).trim()
+    if (normalizedPlatform !== defaults.platform)
+      throw new VendorError('authorization_platform_mismatch', '授权方式与所选平台不一致')
+    const executionKind = String(body.execution_kind || 'vm').trim()
+    if (!['vm', 'gateway_worker'].includes(executionKind))
+      throw new VendorError('execution_kind_invalid', '执行方式无效')
+    if (body.proxy_id && body.proxy_endpoint)
+      throw new VendorError('proxy_source_conflict', '请选择已有代理或填写新代理')
+    if (body.proxy_endpoint) vendorProxyAddress(body.proxy_endpoint)
+    // Worker 进程共用主机出口，账号没有代理就会以 Worker IP 直连上游（与超管自营开户同一规则）
+    if (executionKind === 'gateway_worker' && !body.proxy_id && !body.proxy_endpoint)
+      throw new VendorError('proxy_required', '请先配置账号出站代理')
+    if (body.proxy_id) {
+      const proxy = platform.getResource(identity, String(body.proxy_id), { write: true })
+      if (proxy.resource_type !== 'proxy' || proxy.status !== 'active')
+        throw new VendorError('proxy_unavailable', '代理不可用', 409)
+    }
+    platform.requireActive(identity)
+    platform.requireCapability(identity, 'vendor.resource.manage')
+    if (executionKind === 'vm') platform.requireCapability(identity, 'vendor.vm.create')
+    const groupIds = platform.accountGroupIds(identity, body.group_ids, normalizedPlatform, {
+      requireExplicitGroup: true,
+    })
+    return {
+      name: String(body.name || '').trim(),
+      platform: normalizedPlatform,
+      authorization_kind: kind,
+      auth_method: defaults.auth_method,
+      execution_kind: executionKind,
+      proxy_id: body.proxy_id ? String(body.proxy_id) : '',
+      proxy_endpoint: body.proxy_endpoint ? String(body.proxy_endpoint).trim() : '',
+      group_ids: groupIds,
+      idempotency_key: String(body.idempotency_key || '').trim(),
+    }
+  }
+
+  async function finalizeVendorDraft(identity, draft) {
+    if (draft.result) return draft.result
+    if (!draft.credential) throw new VendorError('authorization_required', '请先完成账号授权', 409)
+    const platform = vendorPlatform()
+    let pair = null
+    const resourceView = (resourceId) =>
+      projectResource(platform.db.prepare('SELECT * FROM vendor_resources WHERE id=?').get(resourceId))
+    try {
+      pair = platform.createAccount(
+        identity,
+        {
+          ...draft.body,
+          idempotency_key: draft.body.idempotency_key || `vendor-draft:${draft.id}`,
+        },
+        {
+          configure: (runtime, account) => {
+            const proxyId = account.config?.proxy_id
+            if (proxyId) {
+              const proxyResource = platform.getResource(identity, proxyId, { write: true })
+              const poolId = vendorProxyPoolId(identity, projectResource(proxyResource))
+              proxyPool.addPlatform(poolId, account.config.platform)
+              const bound = proxyPool.bind(poolId, runtime.id)
+              if (!bound.ok) throw new VendorError('proxy_bind_failed', '代理不可用或已达到绑定上限', 409)
+              runtime.proxy = proxyPool.getProxyForVm(runtime.id)
+              runtime.proxy_required = true
+              runtime.proxy_cli_enabled = true
+            }
+            if (ctx.groupsRepo)
+              ctx.groupsRepo.assignResource(
+                'vm',
+                runtime.id,
+                account.config?.group_ids || [],
+                ctx.groupsRepo.resourceVersion('vm', runtime.id),
+                identity.user_id,
+              )
+          },
+        },
+      )
+      if (draft.body.execution_kind === 'gateway_worker') {
+        const runtimeAccountId = String(draft.credential.runtime_account_id || `gwacct_${pair.account.id}`)
+        // 凭据来源实例只选一次：OAuth 用完成换票的实例，导入用推送凭据的实例
+        const sourceInstanceId = draft.credential.worker_authorized
+          ? draft.credential.gateway_instance_id || null
+          : gatewayWorkerService.repo.pickInstance()?.id || null
+        if (!sourceInstanceId) throw new VendorError('gateway_worker_unavailable', '暂无可用 Gateway Worker', 503)
+        const proxyUrl = vendorDraftProxyUrl(platform, identity, draft)
+        let pushed = { ok: true, data: { account: { credential_revision: draft.credential.credential_revision || 1 } } }
+        if (!draft.credential.worker_authorized) {
+          pushed = await gatewayWorkerService.upsertAccount(
+            {
+              id: runtimeAccountId,
+              email: draft.credential.email || draft.credential.account_email || '',
+              chatgpt_account_id: draft.credential.chatgpt_account_id || draft.credential.account_id || '',
+              plan: draft.credential.plan_type || draft.credential.plan || '',
+              auth_type: draft.credential.api_key ? 'api_key' : 'oauth',
+              access_token: draft.credential.access_token || draft.credential.accessToken || '',
+              refresh_token: draft.credential.refresh_token || draft.credential.refreshToken || '',
+              id_token: draft.credential.id_token || draft.credential.idToken || '',
+              api_key: draft.credential.api_key || draft.credential.apiKey || '',
+              enabled: true,
+              groups: (draft.body.group_ids || []).map(String),
+              proxy_url: proxyUrl,
+            },
+            sourceInstanceId,
+          )
+          if (!pushed?.ok) throw new VendorError('gateway_account_sync_failed', 'Gateway Worker 账号同步失败', 502)
+        }
+        const credentialRevision = Number(
+          pushed.data?.account?.credential_revision || draft.credential.credential_revision || 1,
+        )
+        const authorizedEmail = String(draft.credential.email || draft.credential.account_email || '').trim()
+        const authorizedPlan = String(draft.credential.plan_type || draft.credential.plan || '').trim()
+        const accountConfig = {
+          ...pair.account.config,
+          execution_kind: 'gateway_worker',
+          runtime_account_id: runtimeAccountId,
+          gateway_instance_id: sourceInstanceId,
+          group_ids: draft.body.group_ids || [],
+          // 与运营端建号相同：授权身份写入配置，账号池据此显示邮箱与套餐
+          ...(authorizedEmail ? { email: authorizedEmail } : {}),
+          ...(authorizedPlan ? { plan: authorizedPlan } : {}),
+        }
+        // 名称留空时使用授权邮箱（与虚拟机账号的 resolveVendorAccountName 相同）
+        const authorizedName = accountConfig.name_from_authorization === true && authorizedEmail ? authorizedEmail : ''
+        if (authorizedName) delete accountConfig.name_from_authorization
+        // 账号已进入来源实例：先落绑定、运行 ID 与代理，后续投影失败也能由心跳对账并重放代理
+        gatewayWorkerService.repo.recordProjection({
+          accountResourceId: pair.account.id,
+          instanceId: sourceInstanceId,
+          runtimeAccountId,
+          credentialRevision,
+          status: 'pending',
+        })
+        const storedSecret = JSON.parse(
+          maybeDecrypt(
+            platform.db.prepare('SELECT secret_json FROM vendor_resources WHERE id=?').get(pair.account.id)
+              ?.secret_json,
+          ) || '{}',
+        )
+        platform.db
+          .prepare(
+            'UPDATE vendor_resources SET name=COALESCE(?,name),config_json=?,secret_json=?,updated_at=? WHERE id=?',
+          )
+          .run(
+            authorizedName || null,
+            JSON.stringify(accountConfig),
+            maybeEncrypt(JSON.stringify({ ...storedSecret, proxy_url: proxyUrl })),
+            new Date().toISOString(),
+            pair.account.id,
+          )
+        const projected = await gatewayWorkerService.projectAccountToAll(
+          { id: runtimeAccountId, account_resource_id: pair.account.id, credential_revision: credentialRevision },
+          sourceInstanceId,
+        )
+        if (!projected?.ok)
+          throw new VendorError('gateway_account_projection_pending', 'Gateway Worker 账号正在同步到集群实例', 502)
+        platform.db
+          .prepare("UPDATE vendor_resources SET status='active',updated_at=? WHERE id=?")
+          .run(new Date().toISOString(), pair.account.id)
+        for (const item of projected.results || []) {
+          if (!item.instance_id) continue
+          const stamp = new Date().toISOString()
+          const status = item.ok ? 'synced' : 'drifted'
+          platform.db
+            .prepare(
+              `INSERT INTO gateway_worker_account_bindings(id,account_resource_id,gateway_instance_id,runtime_account_id,credential_revision,projection_status,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?, ?,?,?,?) ON CONFLICT(account_resource_id,gateway_instance_id) DO UPDATE SET runtime_account_id=excluded.runtime_account_id,credential_revision=excluded.credential_revision,projection_status=excluded.projection_status,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`,
+            )
+            .run(
+              `binding_${pair.account.id}_${item.instance_id}`,
+              pair.account.id,
+              item.instance_id,
+              runtimeAccountId,
+              credentialRevision,
+              status,
+              stamp,
+              stamp,
+              stamp,
+            )
+        }
+        for (const groupId of draft.body.group_ids || []) {
+          try {
+            ctx.groupsRepo?.assignResource(
+              'gateway_worker_account',
+              pair.account.id,
+              [Number(groupId)],
+              ctx.groupsRepo.resourceVersion('gateway_worker_account', pair.account.id),
+              identity.user_id,
+            )
+          } catch {}
+        }
+        const result = {
+          account: resourceView(pair.account.id),
+          vm: null,
+          provisioning: { state: 'normal', schedulable: true },
+          gateway_worker: { runtime_account_id: runtimeAccountId, instance_id: sourceInstanceId },
+        }
+        accountCommands.finalizeDraft(identity, draft.id, result)
+        return result
+      }
+      const runtimeVmId = String(pair.vm.config?.runtime_vm_id || '')
+      const vmPath = path.join(cfg.paths.project, 'vms', `${runtimeVmId}.json`)
+      const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+      existing.id = existing.id || runtimeVmId
+      let committed
+      if (draft.body.platform === 'openai') {
+        committed = await commitImportedCodexVm({
+          cfg,
+          vmPath,
+          existing,
+          account: draft.credential,
+          catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
+          routingConfig: ctx.routingConfig,
+        })
+      } else {
+        committed = await commitImportedOauth({
+          vmId: runtimeVmId,
+          vmPath,
+          existing,
+          oauth: draft.credential,
+          source: draft.credential.source || 'vendor-account-draft',
+          skipOfficialCc: true,
+        })
+      }
+      if (!committed?.ok && committed?.status)
+        throw new VendorError('credential_commit_failed', '授权凭证写入失败', 502)
+      const runtime = await startVendorRuntimeVm(runtimeVmId)
+      const credentialReady =
+        draft.body.platform === 'openai'
+          ? vmHasSchedulableCredential(getVm(cfg.paths.project, runtimeVmId), cfg.paths.project)
+          : vmHasClaudeCredential(getVm(cfg.paths.project, runtimeVmId))
+      const ready = !!runtime.ok && credentialReady
+      const stamp = new Date().toISOString()
+      platform.db
+        .prepare('UPDATE vendor_resources SET status=?,updated_at=? WHERE id IN (?,?)')
+        .run(ready ? 'active' : 'provisioning', stamp, pair.account.id, pair.vm.id)
+      if (ready) restoreSchedulableIfReady(runtimeVmId, { by: 'credential_import' })
+      const result = {
+        account: resourceView(pair.account.id),
+        vm: resourceView(pair.vm.id),
+        runtime_boot: { ok: !!runtime.ok, code: runtime.code || null, error: runtime.error || null },
+        provisioning: {
+          state: ready ? 'normal' : 'preparing',
+          schedulable: ready,
+        },
+        ...(committed?.oauth_email ? { oauth_email: committed.oauth_email } : {}),
+      }
+      accountCommands.finalizeDraft(identity, draft.id, result)
+      return result
+    } catch (error) {
+      if (!pair) throw error
+      const stamp = new Date().toISOString()
+      if (draft.body.execution_kind === 'gateway_worker') {
+        platform.db
+          .prepare("UPDATE vendor_resources SET status='provisioning',updated_at=? WHERE id=?")
+          .run(stamp, pair.account.id)
+        const result = {
+          account: resourceView(pair.account.id),
+          vm: null,
+          runtime_boot: {
+            ok: false,
+            code: error.code || 'provisioning_failed',
+            error: '账号已授权，Gateway Worker 账号正在同步',
+          },
+          provisioning: { state: 'preparing', schedulable: false },
+        }
+        accountCommands.finalizeDraft(identity, draft.id, result)
+        return result
+      }
+      platform.db
+        .prepare("UPDATE vendor_resources SET status='provisioning',updated_at=? WHERE id IN (?,?)")
+        .run(stamp, pair.account.id, pair.vm.id)
+      const result = {
+        account: resourceView(pair.account.id),
+        vm: resourceView(pair.vm.id),
+        runtime_boot: { ok: false, code: error.code || 'provisioning_failed', error: '账号已授权，运行环境正在准备' },
+        provisioning: { state: 'preparing', schedulable: false },
+      }
+      accountCommands.finalizeDraft(identity, draft.id, result)
+      return result
+    }
+  }
+
+  function presentVendorProxy(resource) {
+    const row = proxyPool.findByVendorResource(resource.id)
+    if (!row) return resource
+    const view = proxyPool.publicProxy(row)
+    return {
+      ...resource,
+      config: {
+        ...resource.config,
+        pool_id: view.id,
+        host: view.host,
+        port: view.port,
+        has_auth: view.has_auth,
+        pool_status: view.status,
+        pool_enabled: view.enabled,
+        latency_ms: view.latency_ms,
+        last_probe_at: view.last_probe_at,
+        last_error: view.last_error,
+        quality: view.quality,
+        geo: view.geo,
+        expires_at: view.expires_at,
+        region: view.geo?.country_code || '',
+        region_name: view.geo?.country || '',
+        city: view.geo?.city || '',
+        bound_count: view.bound_count,
+        bind_limit: view.bind_limit,
+        bound_vm_ids: view.bound_vm_ids,
+        available: view.enabled && !view.blocked_reason && !['dead', 'fail', 'expired'].includes(view.status),
+      },
+    }
+  }
+
+  async function vendorProxyAction(identity, resourceId, action) {
+    const platform = vendorPlatform()
+    const resource = platform.getResource(identity, resourceId, { write: true })
+    if (resource.resource_type !== 'proxy') throw new VendorError('resource_not_found', '代理资源不存在', 404)
+    const poolId = vendorProxyPoolId(identity, projectResource(resource))
+    if (action === 'probe') return proxyPool.probeById(poolId, { connectivity: true })
+    if (action === 'quality') return proxyPool.qualityById(poolId)
+    if (action === 'geo') return proxyPool.detectGeo(poolId, { force: true })
+    if (action === 'enable' || action === 'disable' || action === 'archive') {
+      const enabled = action === 'enable'
+      const current = proxyPool.state.proxies.find((item) => item.id === poolId)
+      if (action === 'archive' && (current?.bound_vm_ids || []).length)
+        throw new VendorError('proxy_in_use', '代理仍绑定账号，解除绑定后才能归档', 409)
+      const result = proxyPool.setEnabled(poolId, enabled)
+      if (!result.ok) throw new VendorError('proxy_not_found', '统一代理池中不存在该代理', 404)
+      const updated = platform.updateProxyResource(identity, resourceId, {
+        status: action === 'archive' ? 'archived' : enabled ? 'active' : 'paused',
+      })
+      return { resource: presentVendorProxy(updated), proxy: result.proxy }
+    }
+    throw new VendorError('invalid_proxy_action', '代理操作不受支持', 400)
+  }
+  const proxyCommands = createProxyCommandService(vendorProxyAction)
+
+  async function updateVendorAccount(identity, resourceId, body) {
+    const platform = vendorPlatform()
+    platform.requireCapability(identity, 'vendor.resource.manage')
+    const context = accountQueries.runtime(platform, identity, resourceId, { write: true })
+    if (body.expected_updated_at && body.expected_updated_at !== context.row.updated_at)
+      throw new VendorError('account_config_changed', '账号配置已变化，请重新打开编辑', 409)
+    if (
+      body.group_ids != null &&
+      body.expected_group_version != null &&
+      (context.executionKind === 'gateway_worker'
+        ? ctx.groupsRepo?.resourceVersion('gateway_worker_account', resourceId)
+        : ctx.groupsRepo?.resourceVersion('vm', context.vmId)) !== body.expected_group_version
+    )
+      throw new VendorError('group_config_changed', '账号分组已变化，请重新打开编辑', 409)
+    if (context.row.status === 'archived' || context.linked?.status === 'archived')
+      throw new VendorError('resource_archived', '已归档账号不可修改', 409)
+    const vm = context.vmId ? getVm(cfg.paths.project, context.vmId) : null
+    const gatewayAccount = context.executionKind === 'gateway_worker'
+    if (gatewayAccount) {
+      if (body.proxy_id && body.proxy_endpoint)
+        throw new VendorError('proxy_source_conflict', '请选择已有代理或填写新代理')
+      if (body.proxy_source === 'auto' || body.proxy_region)
+        throw new VendorError('proxy_source_unsupported', 'Gateway Worker 账号请选择已有代理或填写代理地址')
+      if (body.proxy_endpoint) vendorProxyAddress(body.proxy_endpoint)
+      if (body.proxy_id) {
+        const proxy = platform.getResource(identity, String(body.proxy_id), { write: true })
+        if (proxy.resource_type !== 'proxy' || proxy.status !== 'active')
+          throw new VendorError('proxy_unavailable', '代理不可用', 409)
+      }
+      const groupIds =
+        body.group_ids == null
+          ? null
+          : platform.accountGroupIds(identity, body.group_ids, context.config.platform, { requireExplicitGroup: true })
+      if (body.status && !identity.system_admin) {
+        const policy = platform.db
+          .prepare(
+            "SELECT allow_runtime FROM vendor_execution_policies WHERE vendor_id IN (?,?) AND platform='openai' AND execution_kind='gateway_worker' ORDER BY vendor_id=? DESC LIMIT 1",
+          )
+          .get(identity.vendor.id, identity.vendor.parent_id || identity.vendor.id, identity.vendor.id)
+        if (!policy?.allow_runtime)
+          throw new VendorError('execution_kind_forbidden', '当前供应商未开放 Gateway Worker 运行控制', 403)
+      }
+      // 换代理时解析出完整地址下发 Worker 并加密保存（心跳投影据此重放）；配置里只留来源与不含认证的地址
+      const proxyChanged = !!(body.proxy_id || body.proxy_endpoint)
+      const proxyUrl = proxyChanged
+        ? vendorDraftProxyUrl(platform, identity, {
+            body: { proxy_id: body.proxy_id || '', proxy_endpoint: body.proxy_endpoint || '' },
+          })
+        : ''
+      const proxyEndpoint = proxyUrl ? `${new URL(proxyUrl).protocol}//${new URL(proxyUrl).host}` : ''
+      const nextConfig = {
+        ...context.config,
+        ...(groupIds ? { group_ids: groupIds } : {}),
+        ...(proxyChanged
+          ? { proxy_id: body.proxy_id || null, proxy_endpoint: body.proxy_id ? null : proxyEndpoint }
+          : {}),
+      }
+      const updated = withTransaction(platform.db, () => {
+        const next = platform.updateResource(identity, resourceId, {
+          ...(body.status != null ? { status: body.status } : {}),
+          ...(body.name != null ? { name: body.name } : {}),
+          ...(body.notes != null ? { notes: body.notes } : {}),
+        })
+        platform.db
+          .prepare('UPDATE vendor_resources SET config_json=? WHERE id=?')
+          .run(JSON.stringify(nextConfig), resourceId)
+        if (proxyChanged) {
+          const stored = JSON.parse(
+            maybeDecrypt(
+              platform.db.prepare('SELECT secret_json FROM vendor_resources WHERE id=?').get(resourceId)?.secret_json,
+            ) || '{}',
+          )
+          platform.db
+            .prepare('UPDATE vendor_resources SET secret_json=? WHERE id=?')
+            .run(maybeEncrypt(JSON.stringify({ ...stored, proxy_url: proxyUrl })), resourceId)
+        }
+        if (groupIds && ctx.groupsRepo)
+          ctx.groupsRepo.assignResource(
+            'gateway_worker_account',
+            resourceId,
+            groupIds,
+            ctx.groupsRepo.resourceVersion('gateway_worker_account', resourceId),
+            identity.user_id,
+          )
+        return { ...next, config: nextConfig }
+      })
+      // 分组、代理或状态变化时下发完整运行配置（含配置指纹），与心跳投影的期望一致
+      const projectable =
+        groupIds || proxyUrl || body.status != null ? gatewayWorkerService.projectableAccount(resourceId) : null
+      if (projectable) {
+        const projected = await gatewayWorkerService.patchAccount(
+          resourceId,
+          gatewayWorkerService.accountPatch(projectable),
+        )
+        if (!projected.ok) {
+          platform.db
+            .prepare(
+              "UPDATE gateway_worker_account_bindings SET projection_status='drifted',updated_at=? WHERE account_resource_id=?",
+            )
+            .run(new Date().toISOString(), resourceId)
+          throw new VendorError(
+            projected.data?.error?.code || 'gateway_account_sync_failed',
+            'Gateway Worker 账号同步失败',
+            projected.status || 502,
+          )
+        }
+      }
+      if (body.status != null) {
+        const action = body.status === 'active' ? 'resume' : 'pause'
+        const control = await gatewayWorkerService.accountAction(resourceId, action)
+        if (!control.ok)
+          throw new VendorError(
+            control.data?.error?.code || 'gateway_worker_unavailable',
+            'Gateway Worker 账号状态更新失败',
+            control.status || 502,
+          )
+      }
+      return updated
+    }
+    const groupIds =
+      body.group_ids == null
+        ? null
+        : platform.accountGroupIds(identity, body.group_ids, context.config.platform, {
+            requireExplicitGroup: true,
+          })
+    let proxyId = body.proxy_id || null
+    if (body.proxy_endpoint && proxyId) throw new VendorError('proxy_source_conflict', '请选择已有代理或填写新代理')
+    if (body.proxy_source && !['auto', 'existing', 'new'].includes(body.proxy_source))
+      throw new VendorError('invalid_proxy_source', '代理来源无效')
+    if (
+      (body.proxy_source === 'existing' && (!proxyId || body.proxy_endpoint)) ||
+      (body.proxy_source === 'new' && (!body.proxy_endpoint || proxyId)) ||
+      (body.proxy_source === 'auto' && (body.proxy_endpoint || proxyId))
+    )
+      throw new VendorError('proxy_source_conflict', '代理来源与地址不一致')
+    if (body.proxy_source === 'auto') {
+      const candidates = platform
+        .listResources(identity, 'proxy')
+        .map(presentVendorProxy)
+        .filter(
+          (r) =>
+            r.status === 'active' &&
+            r.config.available !== false &&
+            (!body.proxy_region || r.config.region === body.proxy_region),
+        )
+      candidates.sort(
+        (a, b) =>
+          (a.config.pool_status === 'ok' ? 0 : 1) - (b.config.pool_status === 'ok' ? 0 : 1) ||
+          Number(a.config.bound_count || 0) - Number(b.config.bound_count || 0),
+      )
+      const found = candidates.find(
+        (r) =>
+          r.id === context.config.proxy_id ||
+          Number(r.config.bound_count || 0) < Number(r.config.bind_limit || proxyPool.bindLimit()),
+      )
+      if (!found) throw new VendorError('no_vendor_proxy', '当前地区没有可分配的供应商代理', 409)
+      proxyId = found.id
+    }
+    let selectedPoolId = null
+    const previousVendorProxyId = String(context.config.proxy_id || '').trim()
+    const previousPoolProxyId = previousVendorProxyId
+      ? proxyPool.findByVendorResource(previousVendorProxyId)?.id || null
+      : null
+    let result
+    try {
+      result = withTransaction(platform.db, () => {
+        if (body.proxy_endpoint) {
+          assertVendorProxyAvailable(identity, body.proxy_endpoint)
+          proxyId = platform.inlineProxy(identity, body.proxy_endpoint).id
+        }
+        if (proxyId) {
+          const own = platform.getResource(identity, proxyId, { write: true })
+          if (own.resource_type !== 'proxy' || own.status !== 'active')
+            throw new VendorError('proxy_unavailable', '代理不可用', 409)
+          selectedPoolId = vendorProxyPoolId(identity, projectResource(own))
+          const row = proxyPool.state.proxies.find((p) => p.id === selectedPoolId)
+          const view = proxyPool.publicProxy(row)
+          if (!view.enabled || view.blocked_reason || ['dead', 'fail', 'expired'].includes(view.status))
+            throw new VendorError('proxy_unavailable', '代理不可用', 409)
+          if (!vm) throw new VendorError('vm_not_found', '账号运行环境不存在', 409)
+        }
+        const updated = platform.updateResource(identity, resourceId, {
+          ...(body.status != null ? { status: body.status } : {}),
+          ...(body.name != null ? { name: body.name } : {}),
+          ...(body.notes != null ? { notes: body.notes } : {}),
+        })
+        const nextConfig = {
+          ...updated.config,
+          ...(proxyId ? { proxy_id: proxyId } : {}),
+          ...(groupIds ? { group_ids: groupIds } : {}),
+        }
+        platform.db
+          .prepare('UPDATE vendor_resources SET config_json=? WHERE id=?')
+          .run(JSON.stringify(nextConfig), resourceId)
+        if (context.linked) {
+          const linkedConfig = {
+            ...JSON.parse(context.linked.config_json || '{}'),
+            ...(proxyId ? { proxy_id: proxyId } : {}),
+          }
+          platform.db
+            .prepare('UPDATE vendor_resources SET name=?,config_json=? WHERE id=?')
+            .run(updated.name, JSON.stringify(linkedConfig), context.linked.id)
+        }
+        if (groupIds && context.vmId && ctx.groupsRepo)
+          ctx.groupsRepo.assignResource(
+            'vm',
+            context.vmId,
+            groupIds,
+            ctx.groupsRepo.resourceVersion('vm', context.vmId),
+            identity.user_id,
+          )
+        if (selectedPoolId) {
+          const bound = proxyPool.bind(selectedPoolId, context.vmId)
+          if (!bound.ok) throw new VendorError('proxy_bind_failed', '代理无法绑定到此账号', 409)
+          proxyPool.addPlatform(selectedPoolId, context.config.platform)
+          bindVmProxy(cfg.paths.project, context.vmId, proxyPool.getProxyForVm(context.vmId))
+        }
+        if (vm && body.name != null) patchVmRecord(cfg.paths.project, context.vmId, { name: updated.name })
+        if (vm && body.status)
+          patchVmRecord(cfg.paths.project, context.vmId, (next) => {
+            if (next.schedule_off_reason === 'vendor_paused') {
+              delete next.schedule_off
+              delete next.schedule_off_reason
+            }
+            next.vendor_resource_paused = body.status !== 'active'
+            return deriveScheduleFields(next, { preserveStatus: true })
+          })
+        return { ...updated, config: nextConfig }
+      })
+    } catch (error) {
+      proxyPool.reload()
+      if (vm) atomicWriteJson(path.join(cfg.paths.project, 'vms', context.vmId + '.json'), vm, { mode: 0o600 })
+      throw error
+    }
+    let applied = true
+    if (selectedPoolId) {
+      try {
+        if (previousPoolProxyId && previousPoolProxyId !== selectedPoolId) {
+          const unbound = proxyPool.unbind(previousPoolProxyId, context.vmId)
+          if (unbound.ok && !(unbound.proxy?.bound_vm_ids || []).length && egressEnabled())
+            stopProxyEgress(cfg.paths.project, previousPoolProxyId)
+        }
+        if (egressEnabled()) await ensureProxyEgress(cfg.paths.project, proxyPool.getProxyForVm(context.vmId))
+        if (process.env.KIN_CRS_MOCK !== '1')
+          await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, context.vmId, { proxyId: selectedPoolId })
+        if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
+          setScheduleHold(cfg.paths.project, context.vmId, HOLD_MAINTENANCE, { tag: 'proxy_rebind_worker_reload' })
+          const ready = await reloadSlotReady(getVm(cfg.paths.project, context.vmId), cfg.paths.project, {
+            routing: ctx.routingConfig,
+          })
+          applied = ready.ok === true
+          if (applied) restoreSchedulableIfReady(context.vmId, { by: 'proxy_rebind' })
+        }
+      } catch {
+        applied = false
+        if (vm)
+          setScheduleHold(cfg.paths.project, context.vmId, HOLD_MAINTENANCE, { tag: 'proxy_rebind_worker_reload' })
+      }
+    }
+    return { ...result, runtime_apply: { ok: applied } }
+  }
+
+  async function archiveVendorAccount(identity, resourceId) {
+    const platform = vendorPlatform()
+    platform.requireCapability(identity, 'vendor.resource.manage')
+    const context = accountQueries.runtime(platform, identity, resourceId, { write: true })
+    if (context.row.status === 'archived') return projectResource(context.row)
+    if (context.executionKind === 'gateway_worker') {
+      let paused = null
+      try {
+        paused = await gatewayWorkerService.accountAction(resourceId, 'pause')
+      } catch {}
+      const archived = platform.updateResource(identity, resourceId, { status: 'archived' })
+      // 只有确认已暂停（或实例上已不存在）的绑定记为 archived；其余记 drifted，由心跳补停用
+      const retired = new Set(
+        (paused?.results || []).filter((item) => item.ok || item.status === 404).map((item) => item.instance_id),
+      )
+      const stamp = new Date().toISOString()
+      for (const binding of gatewayWorkerService.repo.listAccountBindings(resourceId))
+        platform.db
+          .prepare('UPDATE gateway_worker_account_bindings SET projection_status=?,updated_at=? WHERE id=?')
+          .run(retired.has(binding.gateway_instance_id) ? 'archived' : 'drifted', stamp, binding.id)
+      return archived
+    }
+    const vm = context.vmId ? getVm(cfg.paths.project, context.vmId) : null
+    const vmProxyId = vm?.proxy?.id || null
+    if (vm) {
+      patchVmRecord(cfg.paths.project, context.vmId, (next) => {
+        next.schedule_off = true
+        next.schedule_off_reason = 'vendor_archived'
+        return deriveScheduleFields(next, { preserveStatus: true })
+      })
+      if (vm.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
+        const stopped = await stopSlot(getVm(cfg.paths.project, context.vmId))
+        if (!stopped.ok) throw new VendorError('account_stop_failed', '账号已停止调度，但运行环境停止失败，请重试', 502)
+      }
+      patchVmRecord(cfg.paths.project, context.vmId, { status: 'stopped' })
+    }
+    const archived = withTransaction(platform.db, () => {
+      const archived = platform.updateResource(identity, resourceId, { status: 'archived' })
+      for (const proxy of proxyPool.state.proxies.filter((p) =>
+        (p.bound_vm_ids || [p.bound_vm_id]).includes(context.vmId),
+      ))
+        proxyPool.unbind(proxy.id, context.vmId)
+      return archived
+    })
+    if (vmProxyId && egressEnabled()) {
+      const poolProxy = proxyPool.getProxyByIdWithAuth(vmProxyId)
+      if (!(poolProxy?.bound_vm_ids || []).length) stopProxyEgress(cfg.paths.project, vmProxyId)
+    }
+    if (vm) {
+      const gone = await destroySlot(vm)
+      if (gone.ok) {
+        try {
+          fs.rmSync(path.join(cfg.paths.project, 'vms', context.vmId), { recursive: true, force: true })
+          fs.unlinkSync(path.join(cfg.paths.project, 'vms', context.vmId + '.json'))
+          invalidateVmSlotReadCache(cfg.paths.project, context.vmId)
+        } catch {}
+      }
+    }
+    return archived
+  }
+
+  function assertVendorProxyAvailable(identity, endpoint) {
+    const parsed = parseSocks5Line(vendorProxyAddress(endpoint))
+    const existing = proxyPool.findSocks(parsed)
+    if (existing && existing.vendor_id !== identity.vendor.id)
+      throw new VendorError('proxy_vendor_scope_forbidden', '此代理不属于当前供应商', 409)
+  }
+
+  function vendorProxyPoolId(identity, resource) {
+    const config = resource?.config || {}
+    const existing = proxyPool.findByVendorResource(resource.id)
+    if (existing) return existing.id
+    const secret = vendorPlatform().resourceSecret(identity, resource.id)
+    const endpoint = secret.endpoint || config.endpoint
+    if (!endpoint) throw new VendorError('proxy_endpoint_missing', '供应商代理地址不存在', 409)
+    const parsed = parseSocks5Line(endpoint)
+    const ensured = proxyPool.ensureSocks(parsed || {}, {
+      vendorId: identity.vendor.id,
+      vendorResourceId: resource.id,
+      platforms: config.platforms || [],
+    })
+    if (!ensured.ok) throw new VendorError('proxy_pool_sync_failed', '供应商代理未能加入统一代理池', 409, ensured)
+    const poolProxyId = proxyPool.findByVendorResource(resource.id)?.id || ensured.proxy?.id
+    if (!poolProxyId) throw new VendorError('proxy_pool_sync_failed', '供应商代理未能加入统一代理池', 409)
+    vendorPlatform().setResourcePoolProxy(identity, resource.id, poolProxyId)
+    return poolProxyId
   }
 
   /**
@@ -757,129 +2115,28 @@ export function createPanelHandler(ctx) {
     return { start_error: startError, official_cc_bootstrap: bootstrap, probe }
   }
 
-  async function handleVmTestSchedule(req, res, id) {
-    if (!isValidVmId(id)) {
-      return json(res, 400, { ok: false, error: { code: 'invalid_vm_id', message: 'invalid vm id' } })
-    }
-    if (!getVm(cfg.paths.project, id)) {
-      return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
-    }
-    if (req.method === 'GET') {
-      return json(res, 200, panel.ok({ schedule: vmTestSchedule.get(id) }))
-    }
-    if (req.method === 'DELETE') {
-      vmTestSchedule.remove(id)
-      return json(res, 200, panel.ok({ schedule: null }))
-    }
-    let body
-    try {
-      body = await readBody(req, 64 * 1024)
-    } catch (error) {
-      return json(res, 400, {
-        ok: false,
-        error: { code: 'invalid_request', message: String(error?.message || 'invalid JSON body') },
-      })
-    }
-    try {
-      return json(res, 200, panel.ok({ schedule: vmTestSchedule.save(id, body) }))
-    } catch (error) {
-      const typed = error instanceof VmTestScheduleError
-      return json(res, typed ? error.status : 500, {
-        ok: false,
-        error: {
-          code: error?.code || 'test_schedule_save_failed',
-          message: String(error?.message || error),
-        },
-      })
-    }
-  }
-
-  async function handleVmTestScheduleDefault(req, res) {
-    if (req.method === 'GET') {
-      return json(res, 200, panel.ok({ schedule: vmTestSchedule.getDefaultTemplate() }))
-    }
-    let body
-    try {
-      body = await readBody(req, 16 * 1024)
-    } catch (error) {
-      return json(res, 400, {
-        ok: false,
-        error: { code: 'invalid_request', message: String(error?.message || 'invalid JSON body') },
-      })
-    }
-    try {
-      if (body == null || body.schedule == null) {
-        vmTestSchedule.clearDefaultTemplate()
-        return json(res, 200, panel.ok({ schedule: null }))
-      }
-      return json(res, 200, panel.ok({ schedule: vmTestSchedule.saveDefaultTemplate(body.schedule) }))
-    } catch (error) {
-      const typed = error instanceof VmTestScheduleError
-      return json(res, typed ? error.status : 500, {
-        ok: false,
-        error: {
-          code: error?.code || 'test_schedule_default_failed',
-          message: String(error?.message || error),
-        },
-      })
-    }
-  }
-
-  async function handleVmTestScheduleSync(req, res) {
-    let body
-    try {
-      body = await readBody(req, 256 * 1024)
-    } catch (error) {
-      return json(res, 400, {
-        ok: false,
-        error: { code: 'invalid_request', message: String(error?.message || 'invalid JSON body') },
-      })
-    }
-    const ident = panelIdentity(req)
-    let vmIds = body?.vm_ids
-    if (body?.scope === 'all' && ident.role === 'user') {
-      const ownerId = normalizeOwnerId(req.panelUserId)
-      vmIds = listVms(cfg.paths.project)
-        .filter((vm) => vmOwnerId(vm) === ownerId)
-        .map((vm) => vm.id)
-      body = { ...body, scope: 'ids', vm_ids: vmIds }
-    } else if (body?.scope === 'ids' && ident.role === 'user') {
-      const ownerId = normalizeOwnerId(req.panelUserId)
-      vmIds = (Array.isArray(body.vm_ids) ? body.vm_ids : [])
-        .map((id) => String(id || '').trim())
-        .filter((id) => {
-          const vm = getVm(cfg.paths.project, id)
-          return vm && vmOwnerId(vm) === ownerId
-        })
-      body = { ...body, vm_ids: vmIds }
-    }
-    try {
-      const result = vmTestSchedule.syncSchedules({
-        scope: body?.scope,
-        vmIds: body?.vm_ids,
-        schedule: body?.schedule,
-        test: body?.test ?? null,
-      })
-      return json(res, 200, panel.ok(result))
-    } catch (error) {
-      const typed = error instanceof VmTestScheduleError
-      return json(res, typed ? error.status : 500, {
-        ok: false,
-        error: {
-          code: error?.code || 'test_schedule_sync_failed',
-          message: String(error?.message || error),
-        },
-      })
-    }
-  }
-
-  function normalizePanelApiKeyInput(body = {}, req) {
-    const normalized = { ...body }
-    if (panelIdentity(req).role !== 'admin') {
-      delete normalized.user_id
-      delete normalized.group_id
-      delete normalized.vm_pool_id
-    }
+  function normalizePanelApiKeyInput(body = {}) {
+    const allowed = [
+      'name',
+      'status',
+      'max_concurrency',
+      'quota_requests',
+      'quota',
+      'quota_usd',
+      'rate_limit_5h',
+      'rate_limit_1d',
+      'rate_limit_7d',
+      'rpm',
+      'expires_at',
+      'group_id',
+      'reset_quota',
+      'ip_whitelist',
+      'ip_blacklist',
+      'peer_sharing',
+      'codex_client_profile',
+      'codex_route',
+    ]
+    const normalized = Object.fromEntries(Object.entries(body).filter(([key]) => allowed.includes(key)))
     const hasRequestQuota = Object.prototype.hasOwnProperty.call(body, 'quota_requests')
     const hasLegacyQuota = Object.prototype.hasOwnProperty.call(body, 'quota')
     const hasUsdQuota = Object.prototype.hasOwnProperty.call(body, 'quota_usd')
@@ -890,20 +2147,6 @@ export function createPanelHandler(ctx) {
     }
     if (hasUsdQuota) normalized.quota = body.quota_usd
     return normalized
-  }
-
-  function isApiCategory(value) {
-    return (
-      String(value || '')
-        .trim()
-        .toLowerCase() === 'api'
-    )
-  }
-
-  /** Slots a key may be scoped to; a tenant's foreign slots read as missing. */
-  function keyScopeVms(req) {
-    const ident = panelIdentity(req)
-    return filterVmsForPanel(listVms(cfg.paths.project), { role: ident.role, userId: req.panelUserId })
   }
 
   function rulesFile() {
@@ -1139,6 +2382,9 @@ export function createPanelHandler(ctx) {
 
   function restoreRoutingRuntime(previous) {
     ctx.routingConfig = previous
+    const revision = currentConfigRevision()
+    if (ctx.publishRuntimeSnapshot) ctx.publishRuntimeSnapshot(previous, revision)
+    else ctx.runtimeSnapshot?.publish?.(previous, revision)
     ctx.healthMonitor?.setConfig(ctx.routingConfig.health_probe)
     ctx.usageProbeMonitor?.setConfig(ctx.routingConfig.usage_probe)
     ctx.notifyMonitor?.setConfig(ctx.routingConfig.notify)
@@ -1166,9 +2412,9 @@ export function createPanelHandler(ctx) {
       projectRoot: cfg.paths.project,
       previousEngine: previous,
       targetEngine: target,
-      commit: async () => {
+      commit: () => {
         try {
-          return await persistRoutingPatch(body)
+          return persistRoutingPatch(body)
         } catch (error) {
           restoreRoutingRuntime(previousRoutingConfig)
           if (body.pool || body.failover) initPoolRuntime()
@@ -1193,6 +2439,12 @@ export function createPanelHandler(ctx) {
     }
   }
 
+  // Supplier account list, usage and portal views poll every 15s and need buildUsage's account rows, whose
+  // billing aggregation takes 1–2s; they share one snapshot (see shared-snapshot.mjs for the freshness rule).
+  const accountUsageRows = createSharedSnapshot(
+    async () => (await panel.buildUsage({ accountQuota, cfg, requestLog }))?.data?.accounts || [],
+  )
+
   async function readUsage(kind, method, args) {
     if (!usagePoolEnabled()) return null
     try {
@@ -1210,11 +2462,1175 @@ export function createPanelHandler(ctx) {
 
   return async function handlePanel(req, res, url) {
     const p = url.pathname
-    if (!p.startsWith('/admin') && !p.startsWith('/api/panel')) return false
+    const json = (response, status, value) => ctx.json(response, status, projectPanelUsage(req, p, value))
+    const vendorJson = (status, data) =>
+      ctx.json(res, status, { ok: status < 400, ...(status < 400 ? { data } : { error: data }) })
+    const vendorError = (error) => ({
+      code: error.code || 'vendor_error',
+      message: error.message || '供应商请求失败',
+      ...(error.details ? { details: error.details } : {}),
+    })
+    const isVendorPath = p.startsWith('/api/vendor') || p.startsWith('/api/admin/vendors')
+    if (!p.startsWith('/admin') && !p.startsWith('/api/panel') && !isVendorPath) return false
+
+    if (isVendorPath) {
+      if (!requireAuth(req, res)) return true
+      const platform = vendorPlatform()
+      try {
+        const admin = p.startsWith('/api/admin/vendors')
+        const actor = req.panelUserId || 'master'
+        if (admin && panelIdentity(req).role !== 'super_admin')
+          throw new VendorError('forbidden', '只有超级管理员可以管理供应商', 403)
+        const resourcePath = admin ? p.replace('/api/admin/vendors', '/api/vendor') : p
+        let identity = null
+        const presentAccounts = async (rows) =>
+          accountPortalRows(platform, rows, {
+            usageAccounts: await accountUsageRows(),
+            readVm: (id) => {
+              const vm = getVm(cfg.paths.project, id)
+              if (!vm) return null
+              return {
+                schedulable: vm.schedulable,
+                summary: summarizeVm(vm, cfg.paths.project, ctx.routingConfig),
+              }
+            },
+          })
+        if (admin) {
+          const query = Object.fromEntries(url.searchParams.entries())
+          if (p === '/api/admin/vendors/pricing' && req.method === 'GET')
+            return vendorJson(200, listGlobalPricing(platform))
+          if (p === '/api/admin/vendors/pricing' && req.method === 'POST')
+            return vendorJson(
+              201,
+              createGlobalPricing(platform, { system_admin: true, user_id: actor }, await readBody(req, 16384)),
+            )
+          if (req.method === 'GET' && p === '/api/admin/vendors') return vendorJson(200, adminVendors(platform))
+          if (req.method === 'GET' && p === '/api/admin/vendors/account-groups') {
+            const vendorId = String(query.vendor_id || '').trim()
+            const rawPlatform = String(query.platform || '').trim() || 'anthropic'
+            const requestedPlatform = { claude: 'anthropic', codex: 'openai' }[rawPlatform] || rawPlatform
+            if (!vendorId) throw new VendorError('vendor_required', '请选择供应商')
+            if (!['anthropic', 'openai'].includes(requestedPlatform))
+              throw new VendorError('platform_invalid', '不支持的平台')
+            const identity = adminVendorIdentity(platform, vendorId, actor)
+            return vendorJson(200, {
+              items: platform.availableAccountGroups(identity, requestedPlatform).map((group) => ({
+                id: group.id,
+                name: group.name,
+                platform: group.platform,
+                supported_platforms: [requestedPlatform],
+              })),
+            })
+          }
+          if (req.method === 'POST' && p === '/api/admin/vendors') {
+            const body = await readBody(req, 32 * 1024)
+            rejectInlinePricing(body)
+            const created = withTransaction(platform.db, () => {
+              let userId = body.user_id
+              if (userId) {
+                const user = platform.db.prepare('SELECT role FROM users WHERE id=? AND deleted_at IS NULL').get(userId)
+                if (
+                  !user ||
+                  !['user', 'vendor'].includes(user.role) ||
+                  platform.db.prepare("SELECT 1 FROM vendor_members WHERE user_id=? AND status='active'").get(userId)
+                )
+                  throw new VendorError('invalid_member', '请选择未绑定供应商的普通账号')
+              } else {
+                const user = panelUsers.create({
+                  username: body.username,
+                  password: body.password,
+                  role: 'vendor',
+                  actor: panelIdentity(req).user,
+                  actorId: req.panelUserId,
+                })
+                userId = user.id
+              }
+              const vendor = platform.createRoot({ actorUserId: actor, userId, body })
+              // Validate editable policy and monetary fields in the same transaction as login creation.
+              const editable = Object.fromEntries(
+                Object.entries(body).filter(([key]) =>
+                  [
+                    'groups',
+                    'platforms',
+                    'account_limit',
+                    'proxy_limit',
+                    'child_limit',
+                    'remark',
+                    'create_child',
+                    'settlement_pay',
+                  ].includes(key),
+                ),
+              )
+              return updateAdminVendor(platform, vendor.id, editable, actor)
+            })
+            return vendorJson(201, created)
+          }
+          if (req.method === 'GET' && ['/api/admin/vendors/accounts', '/api/admin/vendors/proxies'].includes(p)) {
+            const accounts = p.endsWith('/accounts')
+            const rows = adminResources(platform, accounts ? 'account' : 'proxy', query)
+            return vendorJson(
+              200,
+              accounts ? filterAccountRows(await presentAccounts(rows), query) : rows.map(presentVendorProxy),
+            )
+          }
+          if (
+            req.method === 'POST' &&
+            [
+              '/api/admin/vendors/proxies/probe',
+              '/api/admin/vendors/proxies/quality-check',
+              '/api/admin/vendors/proxies/geo',
+            ].includes(p)
+          ) {
+            const body = await readBody(req, 16 * 1024)
+            const action = p.endsWith('/probe') ? 'probe' : p.endsWith('/quality-check') ? 'quality' : 'geo'
+            const rows = adminResources(platform, 'proxy', {
+              vendor_id: body.vendor_id || query.vendor_id || 'all',
+            })
+            const results = []
+            for (const resource of rows) {
+              const identity = adminVendorIdentity(platform, resource.vendor_id, actor)
+              try {
+                results.push({ id: resource.id, ...(await proxyCommands.action(identity, resource.id, action)) })
+              } catch (error) {
+                results.push({ id: resource.id, ok: false, error: error.code || 'proxy_action_failed' })
+              }
+            }
+            return vendorJson(200, { action, total: results.length, results })
+          }
+          const proxyAction = p.match(
+            /^\/api\/admin\/vendors\/proxies\/([^/]+)\/(probe|quality-check|geo|enable|disable|archive)$/,
+          )
+          if (proxyAction && req.method === 'POST') {
+            const row = platform.db
+              .prepare("SELECT vendor_id FROM vendor_resources WHERE id=? AND resource_type='proxy'")
+              .get(proxyAction[1])
+            if (!row) throw new VendorError('resource_not_found', '代理资源不存在', 404)
+            const identity = adminVendorIdentity(platform, row.vendor_id, actor)
+            const action = proxyAction[2] === 'quality-check' ? 'quality' : proxyAction[2]
+            return vendorJson(200, await proxyCommands.action(identity, proxyAction[1], action))
+          }
+          if (req.method === 'GET' && p === '/api/admin/vendors/usage') {
+            const resources = adminResources(platform, 'account', {
+              vendor_id: query.vendor_id || 'all',
+              include_children: true,
+            })
+            // The report runs on a pool worker while account statuses are built on this thread.
+            const [report, presented] = await Promise.all([
+              usageQueries.admin(platform.db, vendorIds(platform, query.vendor_id), query),
+              presentAccounts(resources),
+            ])
+            const statuses = new Map(presented.map((account) => [account.id, account]))
+            return vendorJson(200, {
+              ...report,
+              accounts: report.accounts.map((account) => ({
+                ...account,
+                status: statuses.get(account.resource_id)?.status || account.resource_status || null,
+                telemetry: statuses.get(account.resource_id)?.telemetry,
+              })),
+            })
+          }
+          if (req.method === 'GET' && p === '/api/admin/vendors/settlements')
+            return vendorJson(200, listSettlements(platform, query))
+          if (
+            req.method === 'POST' &&
+            ['/api/admin/vendors/settlements', '/api/admin/vendors/settlements/preview'].includes(p)
+          ) {
+            const body = await readBody(req, 16 * 1024)
+            return vendorJson(
+              p.endsWith('/preview') ? 200 : 201,
+              p.endsWith('/preview')
+                ? settlementQueries.adminPreview(platform, String(body.vendor_id || ''), body)
+                : settlementCommands.createAdmin(platform, String(body.vendor_id || ''), body, actor),
+            )
+          }
+          const settlementMatch = p.match(/^\/api\/admin\/vendors\/settlements\/([^/]+)\/(confirm|payments|void)$/)
+          if (settlementMatch && req.method === 'POST')
+            return vendorJson(
+              200,
+              settlementCommands.actionAdmin(
+                platform,
+                settlementMatch[1],
+                settlementMatch[2],
+                await readBody(req, 16 * 1024),
+                actor,
+              ),
+            )
+          const vendorMatch = p.match(/^\/api\/admin\/vendors\/([^/]+)$/)
+          if (vendorMatch && !['accounts', 'proxies', 'usage', 'settlements'].includes(vendorMatch[1])) {
+            if (req.method === 'GET')
+              return vendorJson(200, adminVendorIdentity(platform, vendorMatch[1], actor).vendor)
+            if (req.method === 'PATCH') {
+              const body = await readBody(req, 16 * 1024)
+              const updated = updateAdminVendor(platform, vendorMatch[1], body, actor)
+              if (body.status) {
+                for (const account of adminResources(platform, 'account', {
+                  vendor_id: updated.id,
+                  include_children: true,
+                })) {
+                  const pair = platform.db
+                    .prepare('SELECT config_json FROM vendor_resources WHERE id=? AND vendor_id=?')
+                    .get(account.config.vm_resource_id, account.vendor_id)
+                  const vmId = pair && JSON.parse(pair.config_json).runtime_vm_id
+                  if (!vmId) continue
+                  const owner = platform.getVendor(account.vendor_id)
+                  const parent = owner.parent_id ? platform.getVendor(owner.parent_id) : null
+                  patchVmRecord(cfg.paths.project, vmId, (vm) => {
+                    vm.vendor_disabled = owner.status !== 'active' || (!!parent && parent.status !== 'active')
+                    return deriveScheduleFields(vm, { preserveStatus: true })
+                  })
+                }
+              }
+              return vendorJson(200, updated)
+            }
+          }
+          const scopedResource = resourcePath.match(
+            /^\/api\/vendor\/(accounts|proxies)(?:\/([^/]+))?(?:\/(pause|resume|usage|groups|cooldown\/clear|profile\/refresh|bps(?:\/import)?|gateway-drafts(?:\/[^/]+\/(?:oauth\/generate-auth-url|oauth\/exchange-code|import))?))?$/,
+          )
+          if (!scopedResource) throw new VendorError('not_found', '供应商管理接口不存在', 404)
+          let vendorId = query.vendor_id
+          if (scopedResource[2]) {
+            const resource = platform.db
+              .prepare('SELECT vendor_id FROM vendor_resources WHERE id=? AND resource_type=?')
+              .get(scopedResource[2], scopedResource[1] === 'accounts' ? 'account' : 'proxy')
+            if (!resource) throw new VendorError('resource_not_found', '资源不存在', 404)
+            if (vendorId && vendorId !== resource.vendor_id)
+              throw new VendorError('vendor_scope_forbidden', '资源与供应商不匹配', 403)
+            vendorId = resource.vendor_id
+          }
+          if (!vendorId) throw new VendorError('vendor_required', '请选择供应商')
+          identity = adminVendorIdentity(platform, vendorId, actor)
+        } else identity = platform.identity(req.panelUserId)
+
+        // Supplier onboarding keeps all form data in an authorization draft. No
+        // vendor resource or runtime VM is created until the credential exchange
+        // has completed successfully.
+        if (!admin && p === '/api/vendor/account-drafts' && req.method === 'POST') {
+          const body = normalizeVendorDraft(platform, identity, await readBody(req, 32 * 1024))
+          const draft = accountCommands.createDraft(identity, body)
+          const reusedAccount = draft.result?.account?.id
+            ? platform.db
+                .prepare("SELECT status FROM vendor_resources WHERE id=? AND resource_type='account'")
+                .get(draft.result.account.id)
+            : null
+          if (draft.result?.account?.status === 'archived' || reusedAccount?.status === 'archived')
+            throw new VendorError('resource_archived', '账号已归档，不能重试开户', 409)
+          if (draft.result)
+            return vendorJson(200, { ...draft.result, reused: true, draft: accountCommands.projectDraft(draft) })
+          return vendorJson(201, {
+            draft: accountCommands.projectDraft(draft),
+            vm: { id: '', platform: body.platform, family: body.platform === 'openai' ? 'codex' : 'claude' },
+            provisioning: { state: 'awaiting_authorization', schedulable: false },
+          })
+        }
+        if (!admin) {
+          const draftAuth = p.match(
+            /^\/api\/vendor\/account-drafts\/([^/]+)\/oauth\/(generate-auth-url|exchange-code)$/,
+          )
+          const draftImport = p.match(/^\/api\/vendor\/account-drafts\/([^/]+)\/import$/)
+          if (draftAuth || draftImport) {
+            const draftId = (draftAuth || draftImport)[1]
+            const draft = accountCommands.requireDraft(identity, draftId)
+            const proxyUrl = vendorDraftProxyUrl(platform, identity, draft)
+            const fetchImpl = makeProxyFetch(proxyUrl || undefined)
+            if (draftAuth?.[2] === 'generate-auth-url' && req.method === 'POST') {
+              const body = await readBody(req, 8 * 1024)
+              if (draft.body.platform === 'openai') {
+                if (draft.body.execution_kind === 'gateway_worker') {
+                  // PKCE 会话只存在于生成链接的实例上，换票必须回到同一实例
+                  const instance = gatewayWorkerService.repo.pickInstance()
+                  if (!instance) throw new VendorError('gateway_worker_unavailable', '暂无可用 Gateway Worker', 503)
+                  const generated = await gatewayWorkerService.oauthStart(
+                    {
+                      draft_id: draftId,
+                      runtime_account_id: `gwacct_${draftId}`,
+                      proxy_url: proxyUrl,
+                      idempotency_key: draft.body.idempotency_key || `vendor-draft:${draftId}`,
+                    },
+                    instance.id,
+                  )
+                  if (!generated?.ok)
+                    throw new VendorError(
+                      generated.data?.error?.code || 'gateway_worker_unavailable',
+                      'Gateway Worker OAuth 初始化失败',
+                      generated.status || 502,
+                    )
+                  if (generated.data?.session_id) {
+                    platform.db
+                      .prepare(
+                        `INSERT INTO gateway_worker_oauth_sessions(session_id,account_resource_id,actor_user_id,gateway_instance_id,state_hash,provider,status,idempotency_key,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,'openai','pending',?,?,?,?) ON CONFLICT(gateway_instance_id,idempotency_key) DO UPDATE SET session_id=excluded.session_id,state_hash=excluded.state_hash,status='pending',expires_at=excluded.expires_at,updated_at=excluded.updated_at`,
+                      )
+                      .run(
+                        generated.data.session_id,
+                        null,
+                        identity.user_id,
+                        instance.id,
+                        generated.data.state_hash ||
+                          crypto.createHash('sha256').update(generated.data.session_id).digest('hex'),
+                        draft.body.idempotency_key || `vendor-draft:${draftId}`,
+                        generated.data.expires_at,
+                        new Date().toISOString(),
+                        new Date().toISOString(),
+                      )
+                  }
+                  return vendorJson(200, generated.data)
+                }
+                const generated = generateCodexAuthUrl({ draftId, proxyUrl, installationId: null })
+                return vendorJson(200, generated)
+              }
+              const flavor = body.flavor || body.type || 'cai'
+              if (normalizeOauthFlavor(flavor) === 'claude_code')
+                throw new VendorError(
+                  'claude_code_requires_vm',
+                  '官方 Claude Code 授权需要 VM 启动后执行，请改用 OAuth 或 Setup Token',
+                )
+              return vendorJson(200, generateAuthUrl({ draftId, proxyUrl, flavor }))
+            }
+            if (draftAuth?.[2] === 'exchange-code' && req.method === 'POST') {
+              const body = await readBody(req, 16 * 1024)
+              let credential
+              if (draft.body.platform === 'openai') {
+                if (draft.body.execution_kind === 'gateway_worker') {
+                  const idempotencyKey = draft.body.idempotency_key || `vendor-draft:${draftId}`
+                  const session = platform.db
+                    .prepare(
+                      'SELECT gateway_instance_id,actor_user_id,idempotency_key FROM gateway_worker_oauth_sessions WHERE session_id=?',
+                    )
+                    .get(String(body.session_id || body.sessionId || ''))
+                  if (
+                    !session ||
+                    String(session.actor_user_id) !== String(identity.user_id) ||
+                    session.idempotency_key !== idempotencyKey
+                  )
+                    throw new VendorError('oauth_session_mismatch', '授权会话不属于当前草稿，请重新生成授权链接', 409)
+                  // Gateway Worker 只接受带 code 与 state 的完整回调链接，不能绕过 state 校验只交 code
+                  const callback = String(
+                    body.callback || body.callback_url || body.code || body.auth_code || '',
+                  ).trim()
+                  if (!/^https?:\/\//i.test(callback))
+                    throw new VendorError('oauth_callback_required', '请粘贴包含 code 和 state 的完整回调链接', 400)
+                  const completed = await gatewayWorkerService.oauthComplete(
+                    {
+                      session_id: body.session_id || body.sessionId,
+                      callback,
+                      draft_id: draftId,
+                      expected_credential_revision: Number(body.expected_credential_revision ?? 0),
+                      idempotency_key: idempotencyKey,
+                    },
+                    session.gateway_instance_id,
+                  )
+                  if (!completed?.ok)
+                    throw new VendorError(
+                      completed.data?.error?.code || 'oauth_exchange_failed',
+                      'Gateway Worker OAuth 换票失败',
+                      completed.status || 502,
+                    )
+                  credential = {
+                    ...(completed.data?.account || {}),
+                    ...(completed.data?.identity || {}),
+                    runtime_account_id: completed.data?.account?.id,
+                    credential_revision: completed.data?.credential_revision,
+                    gateway_instance_id: completed.data?.gateway_instance_id || session.gateway_instance_id,
+                    worker_authorized: true,
+                  }
+                  try {
+                    platform.db
+                      .prepare(
+                        "UPDATE gateway_worker_oauth_sessions SET status='completed',result_json=?,updated_at=? WHERE session_id=?",
+                      )
+                      .run(
+                        JSON.stringify({
+                          identity: completed.data?.identity || {},
+                          credential_revision: completed.data?.credential_revision || null,
+                        }),
+                        new Date().toISOString(),
+                        body.session_id || body.sessionId,
+                      )
+                  } catch {}
+                } else {
+                  credential = await exchangeCodexAuthCode({
+                    sessionId: body.session_id || body.sessionId,
+                    code: body.code || body.auth_code || body.callback || body.callback_url,
+                    proxyUrl,
+                    draftId,
+                    fetchImpl,
+                  })
+                }
+              } else {
+                credential = await exchangeAuthCode({
+                  sessionId: body.session_id || body.sessionId,
+                  code: body.code || body.auth_code || '',
+                  proxyUrl,
+                  draftId,
+                  fetchImpl,
+                })
+                if (body.auth_scheme || body.authScheme) credential.auth_scheme = body.auth_scheme || body.authScheme
+                if (credential.access_token) credential = await enrichOauthIdentity(credential, { proxyUrl, fetchImpl })
+              }
+              accountCommands.authorizeDraft(identity, draftId, credential)
+              const result = await finalizeVendorDraft(identity, draft)
+              return vendorJson(200, { ...result, draft: accountCommands.projectDraft(draft) })
+            }
+            if (draftImport && req.method === 'POST') {
+              const body = await readBody(req, 1024 * 1024)
+              let credential
+              if (draft.body.platform === 'openai') {
+                const parsed = parseCodexImportPayload(body)
+                if (!parsed.ok)
+                  throw new VendorError(parsed.error || 'invalid_codex_credential', parsed.message || 'Codex 凭证无效')
+                credential = { ...parsed.account }
+                if (!credential.access_token && credential.refresh_token) {
+                  const refreshed = await refreshCodexAccessToken({
+                    refreshToken: credential.refresh_token,
+                    proxyUrl,
+                    fetchImpl,
+                  })
+                  if (!refreshed.ok) throw new VendorError('refresh_failed', 'Refresh Token 换票失败', 502)
+                  Object.assign(credential, refreshed)
+                }
+              } else {
+                const sessionKey = String(body.sessionKey || body.session_key || body.sid || '').trim()
+                const accessToken = String(body.access_token || body.token || '').trim()
+                const apiKey = String(body.api_key || body.apiKey || '').trim()
+                const wantsApiKey =
+                  looksLikeConsoleApiKey(apiKey || sessionKey || accessToken) ||
+                  String(body.type || body.credential_mode || '').toLowerCase() === 'apikey'
+                if (wantsApiKey) {
+                  if (!looksLikeConsoleApiKey(apiKey || sessionKey || accessToken))
+                    throw new VendorError('invalid_api_key', '需要 sk-ant-api03-… Console API Key')
+                  credential = {
+                    type: 'apikey',
+                    mode: 'apikey',
+                    api_key: apiKey || sessionKey || accessToken,
+                    access_token: apiKey || sessionKey || accessToken,
+                    base_url: body.base_url || body.baseUrl || 'https://api.anthropic.com',
+                    source: 'console-api-key',
+                    auth_scheme: body.auth_scheme || body.authScheme,
+                  }
+                } else if (sessionKey) {
+                  credential = await sessionKeyToOAuth(sessionKey, {
+                    proxyUrl,
+                    fetchImpl,
+                    scope: String(body.scope || body.type || '')
+                      .toLowerCase()
+                      .includes('inference')
+                      ? 'inference'
+                      : 'full',
+                  })
+                } else if (accessToken) {
+                  credential = pastedAccessTokenToOauth(accessToken, body)
+                } else {
+                  throw new VendorError('credential_required', '请填写授权凭证')
+                }
+                if (credential.access_token && credential.type !== 'apikey')
+                  credential = await enrichOauthIdentity(credential, { proxyUrl, fetchImpl })
+              }
+              accountCommands.authorizeDraft(identity, draftId, credential)
+              const result = await finalizeVendorDraft(identity, draft)
+              return vendorJson(200, { ...result, draft: accountCommands.projectDraft(draft) })
+            }
+            throw new VendorError('method_not_allowed', '请求方法不受支持', 405)
+          }
+        }
+        if (req.method === 'GET' && p === '/api/vendor/billing')
+          return vendorJson(200, settlementQueries.supplierBilling(platform, identity))
+        if (req.method === 'GET' && p === '/api/vendor/usage')
+          return vendorJson(
+            200,
+            await usageQueries.supplier(platform, identity, Object.fromEntries(url.searchParams.entries())),
+          )
+        if (req.method === 'POST' && p === '/api/vendor/settlements/preview') {
+          return vendorJson(
+            200,
+            settlementCommands.previewDownstream(platform, identity, await readBody(req, 32 * 1024)),
+          )
+        }
+        const vendorBillAction = p.match(/^\/api\/vendor\/settlements\/([^/]+)\/(confirm|payments|void)$/)
+        if (vendorBillAction && req.method === 'POST') {
+          return vendorJson(
+            200,
+            settlementCommands.mutateDownstream(
+              platform,
+              identity,
+              vendorBillAction[1],
+              vendorBillAction[2],
+              await readBody(req, 8192),
+            ),
+          )
+        }
+        if (req.method === 'POST' && p === '/api/vendor/settlements') {
+          const body = await readBody(req, 32 * 1024)
+          return vendorJson(201, settlementCommands.createDownstream(platform, identity, body))
+        }
+        if (req.method === 'GET' && p === '/api/vendor/me')
+          return vendorJson(200, {
+            user_id: identity.user_id,
+            vendor: identity.vendor,
+          })
+        if (req.method === 'GET' && p === '/api/vendor/vendors') {
+          platform.requireCapability(identity, 'vendor.create_child')
+          return vendorJson(200, platform.listVendors(identity))
+        }
+        if (req.method === 'POST' && p === '/api/vendor/vendors') {
+          const body = await readBody(req, 32 * 1024)
+          if (body.user_id != null) throw new VendorError('member_binding_forbidden', '请创建独立的供应商登录账号', 403)
+          return vendorJson(201, platform.createChild(identity, body))
+        }
+        const accountAction = resourcePath.match(
+          /^\/api\/vendor\/accounts\/([^/]+)\/(usage|groups|cooldown\/clear|profile\/refresh)$/,
+        )
+        const gatewayAction = resourcePath.match(
+          /^\/api\/vendor\/accounts\/([^/]+)\/(pause|resume|refresh|recover|reauthorize|test|quota)$/,
+        )
+        // 账号归属、执行方式、未归档与 Gateway 运行控制策略（超管不受供应商策略限制）
+        const requireGatewayRuntime = (accountId) => {
+          platform.requireCapability(identity, 'vendor.resource.manage')
+          const linked = accountQueries.runtime(platform, identity, accountId, { write: true })
+          if (linked.executionKind !== 'gateway_worker')
+            throw new VendorError('execution_kind_mismatch', '该账号不是 Gateway Worker 账号', 409)
+          if (linked.row.status === 'archived') throw new VendorError('resource_archived', '已归档账号不可修改', 409)
+          if (!identity.system_admin) {
+            const policy = platform.db
+              .prepare(
+                "SELECT allow_runtime FROM vendor_execution_policies WHERE vendor_id IN (?,?) AND platform='openai' AND execution_kind='gateway_worker' ORDER BY vendor_id=? DESC LIMIT 1",
+              )
+              .get(identity.vendor.id, identity.vendor.parent_id || identity.vendor.id, identity.vendor.id)
+            if (!policy?.allow_runtime)
+              throw new VendorError('execution_kind_forbidden', '当前供应商未开放 Gateway Worker 运行控制', 403)
+          }
+          return linked
+        }
+        // BPS 附加授权（Gateway 账号）：查看、保存设置、导入授权文件、撤销；授权链接复用 gateway-drafts（authorization_kind=bps_oauth）
+        const bpsRoute = resourcePath.match(
+          /^\/api\/vendor\/accounts\/([^/]+)\/bps(?:\/(import|models|unblock|recovery\/stop))?$/,
+        )
+        if (bpsRoute) {
+          const id = bpsRoute[1]
+          requireGatewayRuntime(id)
+          const manager = vendorGatewayAccounts()
+          const actor = `vendor:${identity.vendor?.id || 'system'}:${identity.user_id}`
+          const view = () => {
+            const account = manager.account(id)
+            return {
+              id: account.id,
+              name: account.name,
+              bps: account.config.bps || null,
+              bps_grant: account.config.bps_grant || null,
+              bps_state: account.bps_state || null,
+              bps_error: account.bps_error || null,
+              bps_blocked_at: account.bps_blocked_at || null,
+              bps_recovery: account.bps_recovery || null,
+              bps_next_probe_at: account.bps_next_probe_at || null,
+              bps_cooldown_until: account.bps_cooldown_until || null,
+              groups: manager.availableGroups(account).map((group) => ({ id: group.id, name: group.name })),
+              bps_probes: manager.repo.listBpsProbes(account.id, 10),
+              bps_catalog: account.config.bps_catalog || null,
+              bps_verification: account.config.bps_verification || null,
+            }
+          }
+          try {
+            if (!bpsRoute[2] && req.method === 'GET') return vendorJson(200, view())
+            if (!bpsRoute[2] && req.method === 'PATCH') {
+              await manager.update(actor, id, { bps: await readBody(req, 16 * 1024) })
+              return vendorJson(200, view())
+            }
+            if (!bpsRoute[2] && req.method === 'DELETE') {
+              await manager.revokeBps(actor, id)
+              return vendorJson(200, view())
+            }
+            if ((bpsRoute[2] === 'unblock' || bpsRoute[2] === 'recovery/stop') && req.method === 'POST') {
+              await manager.bpsRecoveryAction(actor, id, bpsRoute[2] === 'unblock' ? 'unblock' : 'stop')
+              return vendorJson(200, view())
+            }
+            if (bpsRoute[2] === 'models' && req.method === 'GET') {
+              const refresh = new URL(req.url, 'http://local').searchParams.get('refresh') === '1'
+              return vendorJson(200, await manager.bpsModels(id, { refresh }))
+            }
+            if (bpsRoute[2] === 'import' && req.method === 'POST') {
+              await manager.importBps(actor, id, await readBody(req, 1024 * 1024))
+              return vendorJson(200, view())
+            }
+          } catch (error) {
+            if (error instanceof VendorError) throw error
+            throw new VendorError(
+              error.code || 'gateway_account_failed',
+              error.message || 'BPS 操作失败',
+              error.status || 502,
+            )
+          }
+          throw new VendorError('method_not_allowed', '不支持的 BPS 操作', 405)
+        }
+        const reauthorizeDraft = resourcePath.match(/^\/api\/vendor\/accounts\/([^/]+)\/gateway-drafts$/)
+        const gatewayDraft = resourcePath.match(
+          /^\/api\/vendor\/accounts\/([^/]+)\/gateway-drafts\/([^/]+)\/(oauth\/generate-auth-url|oauth\/exchange-code|import)$/,
+        )
+        if ((reauthorizeDraft || gatewayDraft) && req.method === 'POST') {
+          // 草稿只属于创建它的操作者；完成时重新校验账号仍属于该供应商且策略允许
+          const manager = vendorGatewayAccounts()
+          const actor = `vendor:${identity.vendor?.id || 'system'}:${identity.user_id}`
+          const failure = (error) =>
+            new VendorError(
+              error.code || 'gateway_account_failed',
+              error.message || 'Gateway Worker 账号授权失败',
+              error.status || 502,
+            )
+          try {
+            if (reauthorizeDraft) {
+              requireGatewayRuntime(reauthorizeDraft[1])
+              const body = await readBody(req, 8 * 1024)
+              const draft = manager.createDraft(
+                actor,
+                {
+                  idempotency_key: String(body.idempotency_key || ''),
+                  ...(body.authorization_kind ? { authorization_kind: String(body.authorization_kind) } : {}),
+                },
+                reauthorizeDraft[1],
+              )
+              return vendorJson(201, { draft })
+            }
+            // 草稿必须属于路径中的账号，运营端据此确定供应商身份
+            const draftId = decodeURIComponent(gatewayDraft[2])
+            if (manager.draft(actor, draftId).resourceId !== gatewayDraft[1])
+              throw new VendorError('draft_not_found', '授权草稿不存在或已过期，请重新发起授权', 404)
+            requireGatewayRuntime(gatewayDraft[1])
+            if (gatewayDraft[3] === 'oauth/generate-auth-url')
+              return vendorJson(200, await manager.start(actor, draftId))
+            const result =
+              gatewayDraft[3] === 'import'
+                ? await manager.import(actor, draftId, await readBody(req, 1024 * 1024))
+                : await manager.complete(actor, draftId, await readBody(req, 16 * 1024))
+            // 只回传结果摘要，不把运营端账号视图（含 Worker 运行信息）交给供应商
+            return vendorJson(200, {
+              account: { id: result.account?.id, name: result.account?.name, status: result.account?.status },
+              projection_pending: !!result.projection_pending,
+              oauth_email: result.oauth_email || null,
+            })
+          } catch (error) {
+            if (error instanceof VendorError) throw error
+            throw failure(error)
+          }
+        }
+        if (gatewayAction && req.method === 'POST') {
+          requireGatewayRuntime(gatewayAction[1])
+          const result = await gatewayWorkerService.accountAction(
+            gatewayAction[1],
+            gatewayAction[2],
+            await readBody(req, 64 * 1024),
+          )
+          if (!result.ok)
+            throw new VendorError(
+              result.data?.error?.code || 'gateway_worker_unavailable',
+              'Gateway Worker 账号操作失败',
+              result.status || 502,
+            )
+          return vendorJson(200, result.data || result)
+        }
+        if (accountAction?.[2] === 'profile/refresh' && req.method === 'POST') {
+          platform.requireCapability(identity, 'vendor.resource.manage')
+          const linked = accountQueries.runtime(platform, identity, accountAction[1], { write: true })
+          if (linked.row.status === 'archived') throw new VendorError('resource_archived', '已归档账号不可修改', 409)
+          if (linked.executionKind === 'gateway_worker') {
+            const result = await gatewayWorkerService.accountAction(accountAction[1], 'refresh')
+            if (!result.ok)
+              throw new VendorError(
+                result.data?.error?.code || 'gateway_refresh_failed',
+                'Gateway Worker 账号资料刷新失败',
+                result.status || 502,
+              )
+            return vendorJson(200, result.data || result)
+          }
+          const vm = linked.vmId ? getVm(cfg.paths.project, linked.vmId) : null
+          if (!vm) throw new VendorError('vm_not_found', '账号运行环境不存在', 409)
+          const result = await refreshAccountProfile(cfg.paths.project, vm.id)
+          if (!result.ok)
+            throw new VendorError(
+              result.reason,
+              '订阅资料未更新；已保留上次获取的信息',
+              result.reason === 'profile_fetch_failed' ? 502 : 409,
+            )
+          platform.audit({
+            actorUserId: identity.user_id,
+            vendorId: linked.row.vendor_id,
+            action: 'account.profile_refreshed',
+            resourceType: 'account',
+            resourceId: linked.row.id,
+          })
+          return vendorJson(200, { ok: true, updated_at: result.updated_at })
+        }
+        if (accountAction?.[2] === 'groups' && req.method === 'GET') {
+          platform.requireCapability(identity, 'vendor.resource.manage')
+          const account = accountQueries.runtime(platform, identity, accountAction[1], { write: true })
+          return vendorJson(200, {
+            items: platform.availableAccountGroups(identity, account.config.platform).map((g) => ({
+              id: g.id,
+              name: g.name,
+              platform: g.platform,
+              supported_platforms: [account.config.platform],
+            })),
+          })
+        }
+        if (accountAction?.[2] === 'usage' && req.method === 'GET')
+          return vendorJson(
+            200,
+            await accountQueries.usage(platform, identity, accountAction[1], Object.fromEntries(url.searchParams)),
+          )
+        if (accountAction?.[2] === 'cooldown/clear' && req.method === 'POST') {
+          platform.requireCapability(identity, 'vendor.resource.manage')
+          const linked = accountQueries.runtime(platform, identity, accountAction[1], { write: true })
+          if (linked.row.status === 'archived') throw new VendorError('resource_archived', '已归档账号不可修改', 409)
+          if (linked.executionKind === 'gateway_worker') {
+            const result = await gatewayWorkerService.accountAction(accountAction[1], 'recover')
+            if (!result.ok)
+              throw new VendorError(
+                result.data?.error?.code || 'gateway_recover_failed',
+                'Gateway Worker 账号恢复失败',
+                result.status || 502,
+              )
+            platform.audit({
+              actorUserId: identity.user_id,
+              vendorId: linked.row.vendor_id,
+              action: 'account.cooldown_cleared',
+              resourceType: 'account',
+              resourceId: linked.row.id,
+            })
+            return vendorJson(200, { cleared: true, worker: result.data || result })
+          }
+          const vm = linked.vmId ? getVm(cfg.paths.project, linked.vmId) : null
+          if (!vm) throw new VendorError('vm_not_found', '账号运行环境不存在', 409)
+          const account = panel.findAccount(accountQuota, vm)
+          const key = account?.account_id || vm.claude?.account_uuid || vm.id
+          const runtime = ctx.runtimeRepo?.get(key)
+          if (
+            runtime?.vm_id &&
+            runtime.vm_id !== vm.id &&
+            proxyPool.vendorIdForVm(runtime.vm_id) !== identity.vendor.id
+          )
+            throw new VendorError('shared_account_state', '此账号状态由平台统一维护', 409)
+          const protectedReason = (reason) =>
+            /protected|manual|disabled|banned|revoked|invalid_grant|credential_refresh_failed/i.test(
+              String(reason || ''),
+            )
+          let cleared = false
+          if (runtime && !protectedReason(runtime.cooldown_reason)) {
+            cleared = !!(
+              runtime.cooldown_until ||
+              runtime.rate_limit_reset_at ||
+              runtime.overload_until ||
+              Object.values(runtime.model_states || {}).some((m) => m?.cooldown_until && !protectedReason(m.reason))
+            )
+            ctx.runtimeRepo.upsert({
+              ...runtime,
+              status: ['disabled', 'error', 'rate_limited'].includes(runtime.status) ? runtime.status : 'ready',
+              cooldown_until: null,
+              cooldown_reason: null,
+              overload_until: null,
+              model_states: Object.fromEntries(
+                Object.entries(runtime.model_states || {}).map(([model, state]) => {
+                  if (
+                    !state?.cooldown_until ||
+                    protectedReason(state.reason) ||
+                    ['disabled', 'unsupported'].includes(state.status)
+                  )
+                    return [model, state]
+                  const next = { ...state }
+                  delete next.cooldown_until
+                  delete next.reason
+                  if (next.status === 'cooldown') next.status = 'ready'
+                  return [model, next]
+                }),
+              ),
+            })
+          }
+
+          patchVmRecord(cfg.paths.project, vm.id, (next) => {
+            const reason = next.claude?.temp_unschedulable_reason || next.temp_unschedulable_reason
+            if (!protectedReason(reason)) {
+              cleared = cleared || !!(next.temp_unschedulable_until || next.claude?.temp_unschedulable_until)
+              delete next.temp_unschedulable_until
+              delete next.temp_unschedulable_reason
+              if (next.claude) {
+                delete next.claude.temp_unschedulable_until
+                delete next.claude.temp_unschedulable_reason
+              }
+            }
+            return next
+          })
+          ctx.poolScheduler?.notifyCapacity?.(key)
+          platform.audit({
+            actorUserId: identity.user_id,
+            vendorId: identity.vendor.id,
+            action: 'account.cooldown_cleared',
+            resourceType: 'account',
+            resourceId: linked.row.id,
+          })
+          return vendorJson(200, { cleared })
+        }
+        const vendorMatch = p.match(/^\/api\/vendor\/vendors\/([^/]+)$/)
+        if (vendorMatch && req.method === 'GET') {
+          platform.requireCapability(identity, 'vendor.create_child')
+          const target = platform.getVendor(vendorMatch[1])
+          if (!target || !platform.visibleVendorIds(identity, { aggregate: true }).includes(target.id))
+            throw new VendorError('vendor_scope_forbidden', '供应商不属于当前范围', 403)
+          return vendorJson(200, target)
+        }
+
+        const vendorProxyBatchActionMatch = p.match(/^\/api\/vendor\/proxies\/(probe|quality-check|geo)$/)
+        if (vendorProxyBatchActionMatch && req.method === 'POST') {
+          platform.requireActive(identity)
+          platform.requireCapability(identity, 'vendor.resource.manage')
+          const action = vendorProxyBatchActionMatch[1] === 'quality-check' ? 'quality' : vendorProxyBatchActionMatch[1]
+          const rows = platform.listResources(identity, 'proxy')
+          const results = []
+          for (const resource of rows) {
+            try {
+              results.push({ id: resource.id, ...(await proxyCommands.action(identity, resource.id, action)) })
+            } catch (error) {
+              results.push({ id: resource.id, ok: false, error: error.code || 'proxy_action_failed' })
+            }
+          }
+          return vendorJson(200, { action, total: results.length, results })
+        }
+
+        const vendorProxyActionMatch = p.match(
+          /^\/api\/vendor\/proxies\/([^/]+)\/(probe|quality-check|geo|enable|disable|archive)$/,
+        )
+        if (vendorProxyActionMatch && req.method === 'POST') {
+          const action = vendorProxyActionMatch[2] === 'quality-check' ? 'quality' : vendorProxyActionMatch[2]
+          return vendorJson(200, await proxyCommands.action(identity, vendorProxyActionMatch[1], action))
+        }
+
+        const resourceMatch = resourcePath.match(
+          /^\/api\/vendor\/(accounts|vms|proxies)(?:\/([^/]+))?(?:\/(start|stop|pause|resume))?$/,
+        )
+        if (resourceMatch) {
+          const resourceType = resourceMatch[1] === 'accounts' ? 'account' : resourceMatch[1] === 'vms' ? 'vm' : 'proxy'
+          const resourceId = resourceMatch[2]
+          const command = resourceMatch[3]
+          if (req.method === 'GET' && !resourceId) {
+            const rows = platform.listResources(identity, resourceType, {
+              vendorId: url.searchParams.get('vendor_id') || '',
+              includeArchived: resourceType === 'account',
+            })
+            return vendorJson(
+              200,
+              resourceType === 'account'
+                ? filterAccountRows(await presentAccounts(rows), Object.fromEntries(url.searchParams))
+                : rows.map(presentVendorProxy),
+            )
+          }
+          if (req.method === 'POST' && !resourceId && resourceType === 'account') {
+            if (!admin)
+              throw new VendorError('authorization_required', '请先完成授权，授权成功后系统才会创建账号和 VM', 409)
+            const body = await readBody(req, 32 * 1024)
+            if (!platform.vmProvisioner && String(body.execution_kind || 'vm') !== 'gateway_worker')
+              throw new VendorError('vm_provisioner_unavailable', '虚拟机创建服务暂不可用', 503)
+            if (body.proxy_endpoint) assertVendorProxyAvailable(identity, body.proxy_endpoint)
+            let pair
+            try {
+              pair = platform.createAccount(identity, body, {
+                requireExplicitGroup: true,
+                configure: (runtime, account) => {
+                  const proxyId = account.config?.proxy_id
+                  if (proxyId) {
+                    const proxyResource = platform.getResource(identity, proxyId, { write: true })
+                    const poolId = vendorProxyPoolId(identity, projectResource(proxyResource))
+                    proxyPool.addPlatform(poolId, account.config.platform)
+                    const bound = proxyPool.bind(poolId, runtime.id)
+                    if (!bound.ok) throw new VendorError('proxy_bind_failed', '代理不可用或已达到绑定上限', 409)
+                    runtime.proxy = proxyPool.getProxyForVm(runtime.id)
+                    runtime.proxy_required = true
+                    runtime.proxy_cli_enabled = true
+                  }
+                  const groupIds = account.config?.group_ids || []
+                  if (ctx.groupsRepo)
+                    ctx.groupsRepo.assignResource(
+                      'vm',
+                      runtime.id,
+                      groupIds,
+                      ctx.groupsRepo.resourceVersion('vm', runtime.id),
+                      identity.user_id,
+                    )
+                },
+              })
+            } catch (error) {
+              proxyPool.reload()
+              throw error
+            }
+            if (String(body.execution_kind || 'vm') === 'gateway_worker')
+              return vendorJson(201, { ...pair, runtime_boot: null, gateway_worker: { enabled: true } })
+            if (pair.reused) return vendorJson(200, { ...pair, runtime_boot: null })
+            const runtimeVmId = pair.vm.config?.runtime_vm_id || null
+            const runtime = runtimeVmId ? await startVendorRuntimeVm(runtimeVmId) : null
+            return vendorJson(201, {
+              ...pair,
+              runtime_boot: runtime
+                ? { ok: runtime.ok, code: runtime.code || null, error: runtime.error || null }
+                : null,
+            })
+          }
+          if (req.method === 'POST' && !resourceId && resourceType === 'vm') {
+            throw new VendorError('account_creation_required', '供应商 VM 必须通过账号创建流程生成', 409)
+          }
+          if (req.method === 'POST' && !resourceId) {
+            const body = await readBody(req, 32 * 1024)
+            assertVendorProxyAvailable(identity, body.config?.endpoint)
+            const resource = withTransaction(platform.db, () => {
+              const created = platform.createProxy(identity, body)
+              const poolProxyId = vendorProxyPoolId(identity, created)
+              return platform.setResourcePoolProxy(identity, created.id, poolProxyId)
+            })
+            return vendorJson(201, resource)
+          }
+          if (resourceId) {
+            const resource = platform.getResource(identity, resourceId)
+            if (resource.resource_type !== resourceType) throw new VendorError('resource_not_found', '资源不存在', 404)
+          }
+          if (!admin && resourceType === 'vm' && ['PATCH', 'DELETE'].includes(req.method))
+            throw new VendorError('vm_config_forbidden', '请通过账号操作修改授权、分组、名称、备注和代理', 403)
+          if (resourceType === 'account' && resourceId && req.method === 'DELETE')
+            return vendorJson(200, await archiveVendorAccount(identity, resourceId))
+          if (command && req.method !== 'POST') throw new VendorError('method_not_allowed', '操作必须使用 POST', 405)
+          if (resourceType === 'vm' && resourceId && ['start', 'stop'].includes(command)) {
+            platform.requireActive(identity)
+            platform.requireCapability(identity, 'vendor.resource.manage')
+            const resource = platform.getResource(identity, resourceId, { write: true })
+            const vmConfig = JSON.parse(resource.config_json || '{}')
+            const account = platform.getResource(identity, vmConfig.account_resource_id, { write: true })
+            if ([resource.status, account.status].includes('archived'))
+              throw new VendorError('resource_archived', '账号已归档', 409)
+            const vm = getVm(cfg.paths.project, vmConfig.runtime_vm_id)
+            if (!vm) throw new VendorError('vm_not_found', '配对虚拟机不存在', 404)
+            if (command === 'start') {
+              const boot = await startVendorRuntimeVm(vm.id)
+              if (!boot.ok) throw new VendorError(boot.code, boot.error, boot.status)
+              return vendorJson(200, { vm_id: vm.id, status: 'running' })
+            }
+            const halt = await stopSlot(vm)
+            if (!halt.ok) throw new VendorError('runtime_stop_failed', halt.error || '停止虚拟机失败', 500)
+            patchVmRecord(cfg.paths.project, vm.id, { status: 'stopped' })
+            return vendorJson(200, { vm_id: vm.id, status: 'stopped' })
+          }
+          if (resourceId && (req.method === 'PATCH' || req.method === 'DELETE' || command)) {
+            platform.requireActive(identity)
+            platform.requireCapability(identity, 'vendor.resource.manage')
+            const ownedResource = platform.getResource(identity, resourceId, { write: true })
+            if (ownedResource.status === 'archived')
+              throw new VendorError('resource_archived', '已归档资源不可修改', 409)
+            const body =
+              req.method === 'DELETE'
+                ? { status: 'archived' }
+                : command
+                  ? {
+                      status: command === 'start' || command === 'resume' ? 'active' : 'paused',
+                    }
+                  : await readBody(req, 32 * 1024)
+            const accountSettings = [
+              'name',
+              'notes',
+              'group_ids',
+              'proxy_id',
+              'proxy_endpoint',
+              'proxy_source',
+              'proxy_region',
+              'expected_updated_at',
+              'expected_group_version',
+              'status',
+            ]
+            if (resourceType === 'account' && body.status !== 'archived') {
+              if (Object.keys(body).some((key) => !accountSettings.includes(key)))
+                throw new VendorError('invalid_resource_patch', '账号配置字段无效')
+              return vendorJson(200, await updateVendorAccount(identity, resourceId, body))
+            }
+            if (resourceType === 'account' && body.status === 'archived') {
+              if (Object.keys(body).length !== 1)
+                throw new VendorError('invalid_resource_patch', '归档不能同时修改账号配置')
+              return vendorJson(200, await archiveVendorAccount(identity, resourceId))
+            }
+            if (resourceType === 'proxy' && body.status === 'archived') {
+              const poolId = vendorProxyPoolId(identity, projectResource(ownedResource))
+              const current = proxyPool.state.proxies.find((item) => item.id === poolId)
+              if ((current?.bound_vm_ids || []).length)
+                throw new VendorError('proxy_in_use', '代理仍绑定账号，解除绑定后才能归档', 409)
+              const result = proxyPool.setEnabled(poolId, false)
+              if (!result.ok) throw new VendorError('proxy_not_found', '统一代理池中不存在该代理', 404)
+              const updated = platform.updateProxyResource(identity, resourceId, { status: 'archived' })
+              return vendorJson(200, presentVendorProxy(updated))
+            }
+            if (resourceType === 'proxy' && body.status !== 'archived') {
+              const allowed = ['name', 'status', 'endpoint', 'username', 'password', 'clear_auth', 'platforms', 'notes']
+              if (Object.keys(body).some((key) => !allowed.includes(key)))
+                throw new VendorError('invalid_resource_patch', '代理配置字段无效')
+              if (body.status != null && !['active', 'paused'].includes(String(body.status)))
+                throw new VendorError('invalid_resource_status', '代理状态无效')
+              const poolId = vendorProxyPoolId(identity, projectResource(ownedResource))
+              const poolPatch = {}
+              if (body.endpoint != null) {
+                const parsed = parseSocks5Line(vendorProxyAddress(body.endpoint))
+                if (!parsed) throw new VendorError('invalid_proxy', '请输入有效代理地址')
+                poolPatch.host = parsed.host
+                poolPatch.port = parsed.port
+                poolPatch.username = parsed.username || ''
+                poolPatch.password = parsed.username ? parsed.password || '' : ''
+              } else {
+                for (const key of ['username', 'password']) if (Object.hasOwn(body, key)) poolPatch[key] = body[key]
+                if (body.clear_auth) {
+                  poolPatch.username = ''
+                  poolPatch.password = ''
+                }
+              }
+              if (body.status != null) poolPatch.enabled = body.status === 'active'
+              const changed = Object.keys(poolPatch).length
+                ? proxyPool.update(poolId, poolPatch)
+                : { ok: true, proxy: proxyPool.publicProxy(proxyPool.state.proxies.find((p) => p.id === poolId)) }
+              if (!changed.ok) throw new VendorError('proxy_update_failed', changed.error || '代理配置更新失败', 400)
+              const updated = platform.updateProxyResource(identity, resourceId, body)
+              const workers = []
+              if (changed.connection_changed) {
+                for (const vmId of changed.proxy.bound_vm_ids || []) {
+                  bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyForVm(vmId))
+                  const vm = getVm(cfg.paths.project, vmId)
+                  if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
+                    setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, {
+                      tag: 'vendor_proxy_edit_worker_reload',
+                    })
+                    const reloaded = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
+                      routing: ctx.routingConfig,
+                    })
+                    if (reloaded.ok) restoreSchedulableIfReady(vmId, { by: 'vendor_proxy_edit' })
+                    workers.push({ vm_id: vmId, ok: !!reloaded.ok, error: reloaded.ok ? null : reloaded.error || null })
+                  } else workers.push({ vm_id: vmId, ok: true, error: null })
+                }
+              }
+              return vendorJson(200, { ...presentVendorProxy(updated), runtime_apply: workers })
+            }
+            if (Object.keys(body).some((key) => !['name', 'status', 'notes'].includes(key)))
+              throw new VendorError('invalid_resource_patch', '仅允许修改资源名称和状态')
+            const updated = withTransaction(platform.db, () => {
+              const result = platform.updateResource(identity, resourceId, body)
+              if (resourceType === 'proxy' && body.status && result.config.pool_proxy_id) {
+                const changed = proxyPool.setEnabled(result.config.pool_proxy_id, body.status === 'active')
+                if (!changed.ok) throw new VendorError('proxy_update_failed', changed.error || '代理状态更新失败', 409)
+              }
+              return result
+            })
+            if (['account', 'vm'].includes(resourceType) && body.status) {
+              const pair =
+                resourceType === 'vm'
+                  ? updated
+                  : projectResource(platform.getResource(identity, updated.config.vm_resource_id))
+              const vmId = pair?.config?.runtime_vm_id
+              if (vmId)
+                patchVmRecord(cfg.paths.project, vmId, (vm) => {
+                  // Clean only the previous supplier-owned switch, preserving operator holds.
+                  if (vm.schedule_off_reason === 'vendor_paused') {
+                    delete vm.schedule_off
+                    delete vm.schedule_off_reason
+                  }
+                  vm.vendor_resource_paused = body.status !== 'active'
+                  return deriveScheduleFields(vm, { preserveStatus: true })
+                })
+            }
+            return vendorJson(200, updated)
+          }
+          if (resourceId && req.method === 'GET') {
+            const resource = projectResource(platform.getResource(identity, resourceId))
+            if (resourceType !== 'account') return vendorJson(200, presentVendorProxy(resource))
+            const account = (await presentAccounts([resource]))[0]
+            const linked = accountQueries.runtime(platform, identity, resourceId)
+            const owner = platform.getVendor(resource.vendor_id)
+            const currentProxy = resource.config.proxy_id
+              ? platform.db
+                  .prepare("SELECT * FROM vendor_resources WHERE id=? AND vendor_id=? AND resource_type='proxy'")
+                  .get(String(resource.config.proxy_id), resource.vendor_id)
+              : null
+            const proxyView = currentProxy ? presentVendorProxy(projectResource(currentProxy)) : null
+            const detailProxy = account.proxy
+              ? {
+                  ...account.proxy,
+                  region: proxyView?.config.region || '',
+                  country: proxyView?.config.region_name || '',
+                  city: proxyView?.config.city || '',
+                }
+              : null
+            if (linked.executionKind === 'gateway_worker') {
+              // 与虚拟机账号详情同形状：冷却取错误保护冻结与用尽的额度窗口；模型级冷却由 Worker 自管，不在此列出
+              return vendorJson(200, {
+                ...account,
+                owner: { id: resource.vendor_id, name: owner?.name || '' },
+                schedulable: account.telemetry?.state === 'available',
+                proxy: detailProxy,
+                cooldowns: account.telemetry?.cooldown_until
+                  ? [
+                      {
+                        kind: account.telemetry.restriction_reason === 'cooldown' ? 'temporary' : 'quota',
+                        until: account.telemetry.cooldown_until,
+                      },
+                    ]
+                  : [],
+                model_limits: null,
+                group_version: ctx.groupsRepo?.resourceVersion('gateway_worker_account', resourceId) || 0,
+                snapshot_at: new Date().toISOString(),
+              })
+            }
+            const vm = linked.vmId ? getVm(cfg.paths.project, linked.vmId) : null
+            const row = vm ? panel.findAccount(accountQuota, vm) : null
+            const runtime = vm ? ctx.runtimeRepo?.get(row?.account_id || vm.claude?.account_uuid || vm.id) : null
+            const asTime = (v) => {
+              const n = typeof v === 'number' ? v : Date.parse(v || '')
+              return Number.isFinite(n) && n > Date.now() ? new Date(n).toISOString() : null
+            }
+            const cooldowns = [
+              [
+                'temporary',
+                [runtime?.cooldown_until, vm?.claude?.temp_unschedulable_until, vm?.temp_unschedulable_until]
+                  .map(asTime)
+                  .filter(Boolean)
+                  .sort()
+                  .at(-1),
+              ],
+              ['rate_limit', runtime?.rate_limit_reset_at],
+              ['overload', runtime?.overload_until],
+            ]
+              .map(([kind, until]) => ({ kind, until: asTime(until) }))
+              .filter((x) => x.until)
+            const model_limits = runtime
+              ? Object.entries(runtime.model_states || {})
+                  .filter(([, m]) => asTime(m?.cooldown_until) || ['unsupported', 'disabled'].includes(m?.status))
+                  .map(([model, m]) => ({ model, until: asTime(m.cooldown_until), status: m.status || 'cooldown' }))
+              : null
+            return vendorJson(200, {
+              ...account,
+              owner: { id: resource.vendor_id, name: owner?.name || '' },
+              schedulable: account.telemetry.state === 'available',
+              proxy: detailProxy,
+              cooldowns,
+              model_limits,
+              group_version: ctx.groupsRepo?.resourceVersion('vm', linked.vmId) || 0,
+              snapshot_at: new Date().toISOString(),
+            })
+          }
+          if (resourceId && req.method === 'DELETE')
+            return vendorJson(
+              200,
+              platform.updateResource(identity, resourceId, {
+                status: 'archived',
+              }),
+            )
+        }
+        throw new VendorError('not_found', '供应商接口不存在', 404)
+      } catch (error) {
+        const e =
+          error instanceof VendorError
+            ? error
+            : error?.code && error?.status
+              ? new VendorError(error.code, error.message || '供应商请求失败', error.status)
+              : new VendorError('vendor_internal_error', '供应商操作失败，请稍后重试或联系管理员', 500)
+        return vendorJson(e.status, vendorError(e))
+      }
+    }
 
     if (p.startsWith('/admin')) {
       if (!requireAuth(req, res)) return true
-      if (panelIdentity(req).role !== 'admin') {
+      if (panelIdentity(req).role !== 'super_admin') {
         json(
           res,
           403,
@@ -1233,6 +3649,7 @@ export function createPanelHandler(ctx) {
     if (p === '/admin/routing' && req.method === 'GET') {
       if (!requireAuth(req, res)) return
       return json(res, 200, {
+        config_revision: currentConfigRevision(),
         routing: publicRoutingNotify(ctx.routingConfig),
         sticky: stickyRouter.stats(),
         pool: ctx.poolScheduler.snapshot(),
@@ -1244,8 +3661,19 @@ export function createPanelHandler(ctx) {
       const body = await readBody(req, cfg.limits.max_body_bytes)
       let applied
       try {
-        applied = await persistRoutingPatch(body)
+        applied = await persistRoutingPatch(body, { expectedRevision: body?.config_revision })
       } catch (error) {
+        if (error?.code === 'config_revision_conflict') {
+          return json(res, 409, {
+            ok: false,
+            error: {
+              type: 'conflict',
+              code: error.code,
+              message: error.message,
+              current_revision: error.current_revision ?? currentConfigRevision(),
+            },
+          })
+        }
         if (error instanceof TypeError || error instanceof RangeError) {
           return json(res, 400, {
             ok: false,
@@ -1260,6 +3688,7 @@ export function createPanelHandler(ctx) {
       }
       return json(res, 200, {
         ok: true,
+        config_revision: applied.config_revision ?? currentConfigRevision(),
         routing: publicRoutingNotify(ctx.routingConfig),
         applied_concurrency: applied.concurrency,
         applied_rpm: applied.rpm,
@@ -1346,6 +3775,8 @@ export function createPanelHandler(ctx) {
     }
 
     // ========== Panel login (public) ==========
+    if (req.method === 'GET' && p === '/api/panel/site')
+      return json(res, 200, { ok: true, data: siteBranding(panelUsers.db) })
     if (req.method === 'POST' && p === '/api/panel/login') {
       const body = await readBody(req, 4096)
       const username = body.username || body.user || body.u || ''
@@ -1398,10 +3829,33 @@ export function createPanelHandler(ctx) {
           }).body,
         )
       }
+      if (req.panelUserId && panelIdentity(req).role === 'admin') {
+        req.panelManagedUserIds = panelUsers.repo.scopeIds(req.panelUserId)
+        req.panelScopeRootId = panelUsers.repo.scopeRootId(req.panelUserId)
+      }
+      if (
+        p.startsWith('/api/panel/gateway-workers') ||
+        p.startsWith('/api/panel/codex-accounts') ||
+        p.startsWith('/api/panel/gateway-execution-policies')
+      ) {
+        return handleGatewayWorkerRoutes(req, res, url)
+      }
       if (req.method === 'GET' && p === '/api/panel/me') {
         const me = mePayload(req)
         const version = runningVersion
-        const payload = { ...me, version }
+        const user = req.panelUserId ? panelUsers.getById(req.panelUserId) : null
+        let vendor = null
+        if (req.panelUserId) {
+          try {
+            vendor = vendorPlatform().identity(req.panelUserId).vendor
+          } catch {}
+        }
+        const payload = {
+          ...me,
+          version,
+          vendor,
+          ...(user ? { display_name: user.display_name || '', email: profileView(user).email } : {}),
+        }
         return json(res, 200, { ok: true, ...payload, data: payload })
       }
       const gate = authorizePanelRoute(req.method, p, panelIdentity(req).role)
@@ -1417,20 +3871,338 @@ export function createPanelHandler(ctx) {
           }).body,
         )
       }
-      if (
-        denyIfUserMissesVm(req, res, {
-          projectRoot: cfg.paths.project,
-          json,
-          path: p,
-        }) ||
-        denyIfUserMissesProxy(req, res, { proxyPool, json, path: p })
-      ) {
-        return true
+      if (panelIdentity(req).role === 'vendor') {
+        const ownedVmPath = p.match(
+          /^\/api\/panel\/vms\/([^/]+)\/(?:start|shell-ticket|oauth\/generate-auth-url|oauth\/exchange-code|oauth\/credential|oauth\/setup-token-session)$/,
+        )
+        if (ownedVmPath) assertVendorRuntimeVm(req, decodeURIComponent(ownedVmPath[1]))
       }
+      if (p.startsWith('/api/panel/codex-client-profile') || p.startsWith('/api/panel/codex-privacy')) {
+        if (panelIdentity(req).role !== 'super_admin') {
+          return json(res, 403, {
+            ok: false,
+            error: { code: 'forbidden', message: '只有超级管理员可以管理上游客户端画像与隐私规则' },
+          })
+        }
+        const settings = settingsRepo()
+        const invalidBody = (error) =>
+          json(res, 400, {
+            ok: false,
+            error: { type: 'invalid_request_error', code: error.code || 'invalid_request', message: error.message },
+          })
+        // 预览与发布状态由在线 Worker 计算（官方发布资料与 RE2 编译都在 Worker 内）
+        const workerCall = async (path, options) => {
+          try {
+            const result = await gatewayWorkerService.internal(path, options)
+            return json(res, result.status || (result.ok ? 200 : 502), result.data || { ok: false })
+          } catch (error) {
+            return json(res, 502, {
+              ok: false,
+              error: { code: 'gateway_worker_unavailable', message: String(error.message || error) },
+            })
+          }
+        }
+        if (p === '/api/panel/codex-client-profile') {
+          if (req.method === 'GET') return json(res, 200, { ok: true, ...readClientProfileSetting(settings.db) })
+          if (req.method !== 'PUT') return false
+          const body = await readBody(req, 64 * 1024)
+          let next
+          try {
+            next = {
+              selection: validateClientProfileSelection(body?.selection || {}),
+              deployment: validateProfileDeployment(body?.deployment || {}),
+            }
+          } catch (error) {
+            return invalidBody(error)
+          }
+          const previous = settings.get(CLIENT_PROFILE_SETTING, null)
+          settings.set(CLIENT_PROFILE_SETTING, next)
+          try {
+            audit(settings.db, panelIdentity(req).user, 'codex.client_profile.update', 'global', previous, next)
+          } catch {}
+          return json(res, 200, { ok: true, ...next })
+        }
+        if (p === '/api/panel/codex-client-profile/preview' && req.method === 'POST') {
+          const body = await readBody(req, 64 * 1024)
+          let input
+          try {
+            input = {
+              selection: validateClientProfileSelection(body?.selection || {}),
+              deployment: validateProfileDeployment(body?.deployment || {}),
+            }
+          } catch (error) {
+            return invalidBody(error)
+          }
+          return workerCall('/internal/v1/profile/preview', { method: 'POST', body: input })
+        }
+        if (p === '/api/panel/codex-client-profile/releases' && req.method === 'GET') {
+          return workerCall('/internal/v1/profile/releases')
+        }
+        if (p === '/api/panel/codex-privacy') {
+          if (req.method === 'GET') return json(res, 200, { ok: true, policy: readPrivacyPolicySetting(settings.db) })
+          if (req.method !== 'PUT') return false
+          const body = await readBody(req, 512 * 1024)
+          let policy
+          try {
+            policy = validatePrivacyPolicy(body?.policy ?? body)
+          } catch (error) {
+            return invalidBody(error)
+          }
+          // 正则按 Worker 的 RE2 编译确认；没有在线 Worker 时只做结构校验
+          if (policy.rules.length) {
+            try {
+              const checked = await gatewayWorkerService.internal('/internal/v1/privacy/preview', {
+                method: 'POST',
+                body: { policy, body: {}, headers: {} },
+              })
+              if (checked.status === 400) {
+                const failure = checked.data?.error || {}
+                return json(res, 400, {
+                  ok: false,
+                  error: {
+                    type: 'invalid_request_error',
+                    code: 'invalid_privacy_policy',
+                    message: `第 ${(failure.rule_index ?? 0) + 1} 条规则：${failure.reason || '规则无效'}`,
+                  },
+                })
+              }
+            } catch {}
+          }
+          const previous = settings.get(PRIVACY_POLICY_SETTING, null)
+          settings.set(PRIVACY_POLICY_SETTING, policy)
+          try {
+            audit(
+              settings.db,
+              panelIdentity(req).user,
+              'codex.privacy.update',
+              'global',
+              previous ? { rules: previous.rules?.length || 0, enabled: previous.enabled } : null,
+              { rules: policy.rules.length, enabled: policy.enabled },
+            )
+          } catch {}
+          return json(res, 200, { ok: true, policy })
+        }
+        if (p === '/api/panel/codex-privacy/preview' && req.method === 'POST') {
+          const body = await readBody(req, 600 * 1024)
+          let policy
+          try {
+            policy = validatePrivacyPolicy(body?.policy || {})
+          } catch (error) {
+            return invalidBody(error)
+          }
+          return workerCall('/internal/v1/privacy/preview', {
+            method: 'POST',
+            body: {
+              policy,
+              body: body?.body ?? {},
+              headers: body?.headers || {},
+              turnMetadata: body?.turnMetadata ?? null,
+            },
+          })
+        }
+        return false
+      }
+      if (p === '/api/panel/codex-request-location') {
+        if (panelIdentity(req).role !== 'super_admin') {
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只有超级管理员可以管理请求位置' } })
+        }
+        const settings = settingsRepo()
+        if (req.method === 'GET') return json(res, 200, { ok: true, ...readRequestLocationSetting(settings.db) })
+        if (req.method !== 'PUT') return false
+        const body = await readBody(req, 16 * 1024)
+        let next
+        try {
+          if (body?.enabled != null && typeof body.enabled !== 'boolean')
+            throw Object.assign(new TypeError('enabled 必须是布尔'), { code: 'invalid_request_location' })
+          next = {
+            enabled: body?.enabled === true,
+            location: normalizeRequestLocation(body?.location || DEFAULT_REQUEST_LOCATION),
+          }
+        } catch (error) {
+          return json(res, 400, {
+            ok: false,
+            error: {
+              type: 'invalid_request_error',
+              code: error.code || 'invalid_request_location',
+              message: error.message,
+            },
+          })
+        }
+        const previous = settings.get(REQUEST_LOCATION_SETTING, null)
+        settings.set(REQUEST_LOCATION_SETTING, next)
+        try {
+          audit(settings.db, panelIdentity(req).user, 'codex.request_location.update', 'global', previous, next)
+        } catch {}
+        return json(res, 200, { ok: true, ...next })
+      }
+      if (p === '/api/panel/account-error-protection') {
+        if (panelIdentity(req).role !== 'super_admin') {
+          return json(res, 403, {
+            ok: false,
+            error: { code: 'forbidden', message: '只有超级管理员可以管理账号错误保护' },
+          })
+        }
+        const settings = settingsRepo()
+        if (req.method === 'GET') {
+          const raw = settings.get('account_error_protection', DEFAULT_ACCOUNT_ERROR_PROTECTION)
+          const validation = validateAccountErrorProtection(raw)
+          return json(res, 200, {
+            ok: true,
+            enabled: validation.ok ? validation.policy.enabled : false,
+            policy: validation.ok
+              ? validation.policy
+              : normalizeAccountErrorProtection(DEFAULT_ACCOUNT_ERROR_PROTECTION),
+            fingerprint: validation.ok ? compileAccountErrorProtection(validation.policy).fingerprint : null,
+            ...(validation.ok
+              ? {}
+              : { error: { code: validation.code, message: '账号错误保护配置无效，当前按关闭处理' } }),
+          })
+        }
+        if (req.method !== 'PUT') return false
+        const body = await readBody(req, 128 * 1024)
+        const candidate = body?.account_error_protection ?? body?.accountErrorProtection ?? body
+        const validation = validateAccountErrorProtection(candidate || {})
+        if (!validation.ok) {
+          return json(res, 400, {
+            ok: false,
+            error: { type: 'invalid_request_error', code: validation.code, message: '账号错误保护配置无效' },
+          })
+        }
+        const previous = settings.get('account_error_protection', DEFAULT_ACCOUNT_ERROR_PROTECTION)
+        const compiled = compileAccountErrorProtection(validation.policy)
+        settings.set('account_error_protection', compiled.policy)
+        if (typeof ctx.reloadAccountErrorProtection === 'function') ctx.reloadAccountErrorProtection(compiled)
+        else if (ctx.failoverRunner) ctx.failoverRunner.accountErrorProtection = compiled
+        try {
+          audit(
+            settings.db,
+            panelIdentity(req).user,
+            'account.error_protection.update',
+            'global',
+            previous,
+            compiled.policy,
+          )
+        } catch {}
+        return json(res, 200, { ok: true, policy: validation.policy, fingerprint: compiled.fingerprint })
+      }
+      const clearProtection = p.match(/^\/api\/panel\/accounts\/([^/]+)\/error-protection\/clear$/)
+      if (clearProtection && req.method === 'POST') {
+        if (panelIdentity(req).role !== 'super_admin') {
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只有超级管理员可以解除账号保护' } })
+        }
+        const accountId = decodeURIComponent(clearProtection[1])
+        const body = await readBody(req, 16 * 1024)
+        const expected = Number(body?.protection_generation ?? body?.protectionGeneration)
+        if (!Number.isSafeInteger(expected) || expected < 0) {
+          return json(res, 400, {
+            ok: false,
+            error: {
+              type: 'invalid_request_error',
+              code: 'invalid_protection_generation',
+              message: '需要有效的 protection_generation',
+            },
+          })
+        }
+        const current = ctx.runtimeRepo?.getProtectionState?.(accountId)
+        if (!current) {
+          return json(res, 404, {
+            ok: false,
+            error: { type: 'not_found_error', code: 'account_runtime_not_found', message: '账号运行状态不存在' },
+          })
+        }
+        if (current.generation !== expected) {
+          return json(res, 409, {
+            ok: false,
+            error: {
+              type: 'conflict',
+              code: 'protection_generation_conflict',
+              current_generation: current.generation,
+            },
+          })
+        }
+        const cleared =
+          current.state == null
+            ? null
+            : clearProtectionState(current.state, { expectedGeneration: current.state?.generation })
+        const nextGeneration = ctx.runtimeRepo.clearProtectionState?.(accountId, {
+          expectedGeneration: expected,
+          state: cleared,
+        })
+        if (nextGeneration == null) {
+          const latest = ctx.runtimeRepo.getProtectionState?.(accountId)
+          return json(res, 409, {
+            ok: false,
+            error: {
+              type: 'conflict',
+              code: 'protection_generation_conflict',
+              current_generation: latest?.generation ?? null,
+            },
+          })
+        }
+        const account = ctx.runtimeRepo.get?.(accountId)
+        const cooldownCleared = account?.cooldown_reason === 'account_error_protected'
+        if (cooldownCleared) {
+          ctx.runtimeRepo.upsert?.({
+            ...account,
+            status: 'ready',
+            cooldown_until: null,
+            cooldown_reason: null,
+          })
+        }
+        try {
+          audit(
+            getDb(),
+            panelIdentity(req).user,
+            'account.error_protection.clear',
+            accountId,
+            current.state,
+            cleared,
+            'manual account protection clear',
+          )
+        } catch {}
+        wakeOpenAIWaiter(account?.vm_id || accountId)
+        return json(res, 200, {
+          ok: true,
+          account_id: accountId,
+          protection_state: cleared,
+          protection_generation: nextGeneration,
+          cooldown_cleared: cooldownCleared,
+        })
+      }
+      if (p === '/api/panel/site' && req.method === 'PUT') {
+        try {
+          return json(res, 200, {
+            ok: true,
+            data: saveSiteBranding(panelUsers.db, await readBody(req, 1024 * 1024), panelIdentity(req).user),
+          })
+        } catch (e) {
+          return json(res, e.status || 400, { ok: false, error: { code: e.code, message: e.message } })
+        }
+      }
+      if (
+        (p === '/api/panel/me/profile' && ['GET', 'PATCH'].includes(req.method)) ||
+        (p === '/api/panel/me/password' && req.method === 'POST')
+      ) {
+        try {
+          const id = req.panelUserId
+          if (req.method === 'GET') return json(res, 200, { ok: true, data: profileView(ownProfile(panelUsers, id)) })
+          const input = await readBody(req, 4096)
+          if (p.endsWith('/password')) {
+            const username = changeOwnPassword(panelUsers, id, input)
+            revokePanelSessionsForUser(username, { exceptToken: extractPanelToken(req) })
+            return json(res, 200, { ok: true, data: { changed: true } })
+          }
+          return json(res, 200, { ok: true, data: updateOwnProfile(panelUsers, id, input) })
+        } catch (e) {
+          return json(res, e.status || 400, { ok: false, error: { code: e.code, message: e.message } })
+        }
+      }
+      if (await handleVmBulk(req, res, url)) return true
+      if (await handleRelay(req, res, url)) return true
       if ((req.method === 'GET' || req.method === 'PUT') && p === '/api/panel/onboarding') {
         if (req.method === 'PUT') {
           const body = await readBody(req, 4096).catch(() => ({}))
-          if (body?.action === 'profile' && panelIdentity(req).role !== 'admin') {
+          if (body?.action === 'profile' && panelIdentity(req).role !== 'super_admin') {
             return json(res, 403, {
               ok: false,
               error: { code: 'forbidden', message: '当前权限无法执行此操作' },
@@ -1442,7 +4214,7 @@ export function createPanelHandler(ctx) {
             const state = loadOnboardingState(settings)
             let next
             if (body?.action === 'profile') {
-              await applyUsageProfile({
+              applyUsageProfile({
                 mode: body?.mode,
                 persistRouting: (patch) => persistRoutingPatch(patch),
                 settings,
@@ -1475,13 +4247,17 @@ export function createPanelHandler(ctx) {
           dbPath: getDbPath(),
           usageCache: getUsageCache(),
         })
-        return json(res, 200, panel.ok(snapshot))
+        return json(res, 200, panel.ok({ ...snapshot, runtime: runtimeMetrics.snapshot() }))
       }
       if (req.method === 'GET' && p === '/api/panel/version') {
+        res.setHeader?.('Cache-Control', 'no-store')
+        const upgrade = await readHostUpgradeStatus()
         const status = await buildUpdateStatus({
           projectRoot: cfg?.paths?.project,
           currentVersion: runningVersion,
-          upgrade: await readHostUpgradeStatus(),
+          force: url.searchParams.get('force') === '1',
+          upgrade,
+          skipRemote: url.searchParams.get('status') === '1' || upgrade?.state === 'running',
         })
         return json(res, 200, panel.ok(status))
       }
@@ -1507,442 +4283,26 @@ export function createPanelHandler(ctx) {
         }
         return json(res, result.status, panel.ok(result.data))
       }
-      if (req.method === 'GET' && p === '/api/panel/users') {
-        return json(res, 200, panel.ok({ items: panelUsers.list() }))
-      }
-      if (req.method === 'POST' && p === '/api/panel/users') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        try {
-          const rec = panelUsers.create({
-            username: body.username || body.user,
-            password: body.password || body.pass,
-            role: body.role || 'user',
-            enabled: body.enabled !== false,
-            vm_create_quota: body.vm_create_quota,
-          })
-          return json(res, 201, panel.ok({ item: publicUserView(rec) }))
-        } catch (e) {
-          const status = e.code === 'username_exists' ? 409 : 400
-          return json(res, status, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'create_failed' },
-          })
-        }
-      }
-      if (req.method === 'PATCH' && /^\/api\/panel\/users\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        const body = await readBody(req, 8192).catch(() => ({}))
-        try {
-          const before = panelUsers.getById(id)
-          const rec = panelUsers.update(id, body || {}, { actorId: req.panelUserId })
-          if (!rec) return json(res, 404, { ok: false, error: { message: 'user not found' } })
-          // Sessions cache the role from login time, so a role or enable change must log them out.
-          if (before && (before.role !== rec.role || !!before.enabled !== !!rec.enabled)) {
-            revokePanelSessionsForUser(rec.username)
-          } else if (body?.password) {
-            revokePanelSessionsForUser(rec.username, { exceptToken: extractPanelToken(req) })
-          }
-          return json(res, 200, panel.ok({ item: publicUserView(rec) }))
-        } catch (e) {
-          const status = e.code === 'last_admin' || e.code === 'self_disable' ? 409 : 400
-          return json(res, status, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'update_failed' },
-          })
-        }
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/users\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        const existing = panelUsers.getById(id)
-        try {
-          const ok = panelUsers.remove(id, { actorId: req.panelUserId })
-          if (!ok) return json(res, 404, { ok: false, error: { message: 'user not found' } })
-          if (existing?.username) revokePanelSessionsForUser(existing.username)
-          return json(res, 200, { ok: true, deleted: id })
-        } catch (e) {
-          const status = e.code === 'last_admin' || e.code === 'self_delete' ? 409 : 400
-          return json(res, status, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'delete_failed' },
-          })
-        }
-      }
-      if (req.method === 'GET' && p === '/api/panel/vm-pools') {
-        return json(res, 200, panel.ok({ pools: vmPoolsFor(apiKeyStore.db).list() }))
-      }
-      if (req.method === 'POST' && p === '/api/panel/vm-pools') {
-        const body = await readBody(req, 64 * 1024).catch(() => ({}))
-        try {
-          const pool = createVmPool(vmPoolsFor(apiKeyStore.db), body || {}, listVms(cfg.paths.project))
-          return json(res, 201, panel.ok({ pool }))
-        } catch (e) {
-          return json(res, vmPoolHttpStatus(e.code), {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'create_failed' },
-          })
-        }
-      }
-      if (req.method === 'PATCH' && /^\/api\/panel\/vm-pools\/[^/]+$/.test(p)) {
-        const id = decodeURIComponent(p.split('/').pop())
-        const body = await readBody(req, 64 * 1024).catch(() => ({}))
-        try {
-          const pool = updateVmPool(vmPoolsFor(apiKeyStore.db), id, body || {}, listVms(cfg.paths.project))
-          if (!pool) return json(res, 404, { ok: false, error: { message: '账号池不存在', code: 'vm_pool_not_found' } })
-          return json(res, 200, panel.ok({ pool }))
-        } catch (e) {
-          return json(res, vmPoolHttpStatus(e.code), {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'update_failed' },
-          })
-        }
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/vm-pools\/[^/]+$/.test(p)) {
-        const id = decodeURIComponent(p.split('/').pop())
-        const result = deleteVmPool(vmPoolsFor(apiKeyStore.db), id)
-        if (!result.ok) {
-          return json(res, vmPoolHttpStatus(result.error), {
-            ok: false,
-            error: {
-              message: result.error === 'vm_pool_in_use' ? '仍有密钥绑定该账号池' : '账号池不存在',
-              code: result.error,
-              keys: result.keys,
-            },
-          })
-        }
-        return json(res, 200, { ok: true, deleted: id })
-      }
-      if (req.method === 'GET' && p === '/api/panel/api-keys') {
-        const snap = apiKeyStore.snapshot()
-        if (panelIdentity(req).role === 'user') {
-          const mine = (snap.keys || []).filter(
-            (k) => normalizeOwnerId(k.user_id) === normalizeOwnerId(req.panelUserId),
-          )
-          return json(res, 200, {
-            ok: true,
-            total: mine.length,
-            active: mine.filter((k) => k.status === 'active').length,
-            keys: mine,
-          })
-        }
-        return json(res, 200, { ok: true, ...snap })
-      }
-      if (req.method === 'GET' && /^\/api\/panel\/api-keys\/[^/]+\/stats$/.test(p)) {
-        const id = p.split('/')[4]
-        if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        const rec = apiKeyStore.getById(id)
-        if (!rec) return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-        const usage_stats = requestLog?.keyUsageStats?.({ apiKeyId: id, days: 30 }) || null
-        return json(res, 200, { ok: true, item: publicKeyView(rec, { reveal: false }), usage_stats })
-      }
-      if (req.method === 'POST' && p === '/api/panel/api-keys') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const ident = panelIdentity(req)
-        if (ident.role !== 'admin' && body?.vm_pool_id != null && String(body.vm_pool_id).trim() !== '') {
-          return json(res, 403, {
-            ok: false,
-            error: { code: 'key_pool_forbidden', message: '只有管理员可以设置账号池' },
-          })
-        }
-        if (ident.role !== 'admin' && isApiCategory(body?.category)) {
-          return json(res, 403, {
-            ok: false,
-            error: { code: 'key_category_forbidden', message: '只有管理员可以创建 API 直连密钥' },
-          })
-        }
-        const input = normalizePanelApiKeyInput(body, req)
-        try {
-          const scopeInput = { group_type: body?.group_type, allowed_vms: body?.allowed_vms }
-          if (ident.role === 'admin' && Object.prototype.hasOwnProperty.call(body || {}, 'vm_pool_id')) {
-            scopeInput.vm_pool_id = body.vm_pool_id
-          }
-          const scope = normalizeKeyScope(scopeInput)
-          const pools = vmPoolsFor(apiKeyStore.db)
-          if (scope.vm_pool_id) assertVmPoolExists(pools, scope.vm_pool_id)
-          else assertVmScope(keyScopeVms(req), scope)
-          const defaultConc = Number(
-            ctx.routingConfig?.concurrency?.default_key_concurrency ??
-              ctx.routingConfig?.concurrency?.default_max_per_account ??
-              20,
-          )
-          const rec = apiKeyStore.create({
-            name: body?.name,
-            key: body?.key || body?.custom_key || undefined,
-            category: body?.category,
-            user_id:
-              panelIdentity(req).role === 'user' ? req.panelUserId || null : body?.user_id || req.panelUserId || null,
-            group_id: input.group_id,
-            group_type: scope.group_type,
-            allowed_vms: scope.allowed_vms,
-            vm_pool_id: scope.vm_pool_id,
-            max_concurrency: body?.max_concurrency ?? defaultConc,
-            default_concurrency: defaultConc,
-            quota_requests: input.quota_requests,
-            quota: input.quota,
-            rate_limit_5h: body?.rate_limit_5h,
-            rate_limit_1d: body?.rate_limit_1d,
-            rate_limit_7d: body?.rate_limit_7d,
-            rpm: body?.rpm ?? body?.rate_limit_rpm,
-            expires_at:
-              body?.expires_at ||
-              (body?.expires_in_days
-                ? new Date(Date.now() + Number(body.expires_in_days) * 86400_000).toISOString()
-                : null),
-          })
-          return json(res, 201, {
-            ok: true,
-            item: publicKeyView(rec, { reveal: true }),
-            note: 'plaintext stays recoverable via POST /api/panel/api-keys/:id/reveal',
-          })
-        } catch (e) {
-          const status = vmPoolHttpStatus(e.code)
-          return json(res, status, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'create_failed' },
-          })
-        }
-      }
-      if (req.method === 'PATCH' && /^\/api\/panel\/api-keys\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const ident = panelIdentity(req)
-        if (ident.role !== 'admin' && body?.vm_pool_id != null && String(body.vm_pool_id).trim() !== '') {
-          return json(res, 403, {
-            ok: false,
-            error: { code: 'key_pool_forbidden', message: '只有管理员可以设置账号池' },
-          })
-        }
-        if (ident.role !== 'admin' && isApiCategory(body?.category)) {
-          return json(res, 403, {
-            ok: false,
-            error: { code: 'key_category_forbidden', message: '只有管理员可以创建 API 直连密钥' },
-          })
-        }
-        try {
-          const input = normalizePanelApiKeyInput(body || {}, req)
-          const currentRec = apiKeyStore.getById(id)
-          const scopeInput = { group_type: body?.group_type, allowed_vms: body?.allowed_vms }
-          if (ident.role === 'admin' && Object.prototype.hasOwnProperty.call(body || {}, 'vm_pool_id')) {
-            scopeInput.vm_pool_id = body.vm_pool_id
-          }
-          const scope = normalizeKeyScope(scopeInput, { partial: true, current: currentRec })
-          if (scope) {
-            if (ident.role !== 'admin' && currentRec?.vm_pool_id) {
-              scope.vm_pool_id = currentRec.vm_pool_id
-            }
-            const pools = vmPoolsFor(apiKeyStore.db)
-            if (scope.vm_pool_id) assertVmPoolExists(pools, scope.vm_pool_id)
-            else assertVmScope(keyScopeVms(req), scope)
-            input.group_type = scope.group_type
-            input.allowed_vms = scope.allowed_vms
-            input.vm_pool_id = scope.vm_pool_id
-          }
-          const rec = apiKeyStore.update(id, input)
-          if (!rec) {
-            return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-          }
-          return json(res, 200, { ok: true, item: publicKeyView(rec, { reveal: false }) })
-        } catch (e) {
-          return json(res, vmPoolHttpStatus(e.code), {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code },
-          })
-        }
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/api-keys\/[^/]+\/reveal$/.test(p)) {
-        const id = p.split('/')[4]
-        if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        const out = apiKeyStore.reveal(id)
-        if (!out) return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-        if (!out.ok) {
-          return json(res, 409, {
-            ok: false,
-            error: { message: '该密钥只留了哈希，无法还原明文；请换新', code: out.code },
-          })
-        }
-        return json(res, 200, { ok: true, id: out.id, name: out.name, key: out.key })
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/api-keys\/[^/]+\/rotate$/.test(p)) {
-        const id = p.split('/')[4]
-        if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        try {
-          const rec = apiKeyStore.rotate(id)
-          if (!rec) return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-          return json(res, 200, { ok: true, item: publicKeyView(rec, { reveal: true }) })
-        } catch (e) {
-          return json(res, 400, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'rotate_failed' },
-          })
-        }
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/api-keys\/[^/]+\/reset-quota$/.test(p)) {
-        const id = p.split('/')[4]
-        if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        const rec = apiKeyStore.update(id, { reset_quota: true })
-        if (!rec) return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-        return json(res, 200, { ok: true, item: publicKeyView(rec, { reveal: false }) })
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/api-keys\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        const ok = apiKeyStore.remove(id)
-        if (!ok) return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-        return json(res, 200, { ok: true, deleted: id })
-      }
-
-      if (req.method === 'GET' && p === '/api/panel/api-endpoints') {
-        return json(res, 200, {
-          ok: true,
-          items: apiEndpointStore.list({ reveal: false }),
-          presets: API_ENDPOINT_PRESETS,
-        })
-      }
-      if (req.method === 'POST' && p === '/api/panel/api-endpoints/fetch-models') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        try {
-          const saved = savedEndpointKey(apiEndpointStore, body?.key_id)
-          const proxyUrl = Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
-            ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
-            : saved?.proxy_url || body?.proxy_url
-          const result = await fetchUpstreamModels({
-            cfg,
-            kind: body?.kind,
-            protocol: body?.protocol,
-            base_url: body?.base_url || saved?.base_url,
-            api_key: body?.api_key || saved?.api_key,
-            proxy_url: proxyUrl,
-            headers: body?.headers,
-            auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
-            forward: ctx.forwardApi,
-          })
-          return json(res, 200, { ok: true, ...result })
-        } catch (e) {
-          return json(res, e.status && e.status < 600 ? e.status : 400, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'fetch_models_failed' },
-          })
-        }
-      }
-      if (req.method === 'POST' && p === '/api/panel/api-endpoints') {
-        const body = await readBody(req, 1 << 20).catch(() => ({}))
-        try {
-          const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
-          if (Array.isArray(body?.api_key_entries)) {
-            for (const entry of body.api_key_entries) {
-              if (!entry.proxy_url) entry.proxy_url = proxyUrl
-              if (body?.proxy_id != null) entry.proxy_id = String(body.proxy_id || '').trim()
-            }
-          }
-          const rec = apiEndpointStore.create(body || {})
-          apiScheduler.reload(apiEndpointStore.listRaw())
-          return json(res, 201, { ok: true, item: publicEndpointView(rec, { reveal: true }) })
-        } catch (e) {
-          return json(res, 400, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'create_failed' },
-          })
-        }
-      }
-      if (req.method === 'PATCH' && /^\/api\/panel\/api-endpoints\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        const body = await readBody(req, 1 << 20).catch(() => ({}))
-        try {
-          const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
-          const rec = apiEndpointStore.update(id, body || {})
-          if (!rec) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
-          const keyId = String(body?.key_id || '').trim()
-          const apiKey = String(body?.api_key || '').trim()
-          if (keyId) {
-            apiEndpointStore.updateKey(keyId, {
-              ...(apiKey ? { api_key: apiKey } : {}),
-              ...(body?.proxy_id != null ? { proxy_url: proxyUrl, proxy_id: String(body.proxy_id || '').trim() } : {}),
-            })
-          } else if (apiKey) {
-            apiEndpointStore.addKey(id, {
-              api_key: apiKey,
-              proxy_url: proxyUrl,
-              proxy_id: String(body?.proxy_id || '').trim(),
-            })
-          }
-          apiScheduler.reload(apiEndpointStore.listRaw())
-          const saved = apiEndpointStore.getRaw(id) || rec
-          return json(res, 200, { ok: true, item: publicEndpointView(saved) })
-        } catch (e) {
-          return json(res, 400, { ok: false, error: { message: String(e.message || e), code: e.code } })
-        }
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/api-endpoints\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        const ok = apiEndpointStore.remove(id)
-        if (!ok) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
-        apiScheduler.reload(apiEndpointStore.listRaw())
-        return json(res, 200, { ok: true, deleted: id })
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/api-endpoints\/[^/]+\/fetch-models$/.test(p)) {
-        const id = p.split('/')[4]
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const ep = apiEndpointStore.getRaw(id)
-        if (!ep) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
-        const key = (ep.api_key_entries || []).find((k) => !k.disabled && (body?.key_id ? k.id === body.key_id : true))
-        if (!key)
-          return json(res, 400, { ok: false, error: { message: '需要上游 key 才能获取模型', code: 'key_required' } })
-        try {
-          const result = await fetchUpstreamModels({
-            cfg,
-            kind: ep.kind,
-            protocol: ep.protocol,
-            base_url: ep.base_url,
-            api_key: key.api_key,
-            proxy_url: key.proxy_url,
-            headers: ep.headers,
-          })
-          const apply = body?.apply !== false
-          const rec = apply ? apiEndpointStore.mergeFetchedModels(id, result.models) : ep
-          if (apply) apiScheduler.reload(apiEndpointStore.listRaw())
-          return json(res, 200, {
-            ok: true,
-            fetched: result.models.length,
-            item: publicEndpointView(rec),
-            models: result.models,
-          })
-        } catch (e) {
-          return json(res, e.status && e.status < 600 ? e.status : 400, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'fetch_models_failed' },
-          })
-        }
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/api-endpoints\/[^/]+\/keys$/.test(p)) {
-        const id = p.split('/')[4]
-        const body = await readBody(req, 8192).catch(() => ({}))
-        try {
-          const key = apiEndpointStore.addKey(id, body || {})
-          apiScheduler.reload(apiEndpointStore.listRaw())
-          const view = publicEndpointView(apiEndpointStore.getRaw(id), { reveal: true })
-          return json(res, 201, { ok: true, item: view?.api_key_entries?.find((k) => k.id === key.id) || key })
-        } catch (e) {
-          const status = e.code === 'endpoint_not_found' ? 404 : 400
-          return json(res, status, { ok: false, error: { message: String(e.message || e), code: e.code } })
-        }
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/api-endpoints\/[^/]+\/keys\/[^/]+$/.test(p)) {
-        const kid = p.split('/').pop()
-        const ok = apiEndpointStore.removeKey(kid)
-        if (!ok) return json(res, 404, { ok: false, error: { message: 'key not found' } })
-        apiScheduler.reload(apiEndpointStore.listRaw())
-        return json(res, 200, { ok: true, deleted: kid })
-      }
-      if (req.method === 'PATCH' && /^\/api\/panel\/api-endpoints\/[^/]+\/keys\/[^/]+$/.test(p)) {
-        const kid = p.split('/').pop()
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const rec = apiEndpointStore.updateKey(kid, body || {})
-        if (!rec) return json(res, 404, { ok: false, error: { message: 'key not found' } })
-        apiScheduler.reload(apiEndpointStore.listRaw())
-        const ep = apiEndpointStore.getRaw(rec.endpoint_id)
-        const item = publicEndpointView(ep)?.api_key_entries?.find((k) => k.id === kid)
-        return json(res, 200, { ok: true, item })
-      }
+      if (await handlePanelUsers(req, res, p)) return true
+      if (await handlePanelApiKeys(req, res, p, url)) return true
+      if (await handlePanelApiEndpoints(req, res, p)) return true
+      if (await handlePanelVmReadRoutes(req, res, p)) return true
+      if (await handlePanelVmProvisionRoutes(req, res, p)) return true
+      if (await handlePanelVmImportRoutes(req, res, p)) return true
+      if (await handlePanelVmCommandRoutes(req, res, p)) return true
+      if (await handlePanelVmLifecycleRoutes(req, res, p)) return true
+      if (await handlePanelVmDiagnoseRoutes(req, res, p)) return true
+      if (await handlePanelVmProbeRoutes(req, res, p)) return true
+      if (await handlePanelVmQuotaRoutes(req, res, p)) return true
+      if (await handlePanelVmTestRoutes(req, res, p, url)) return true
+      if (await handlePanelVmCredentialRoutes(req, res, p)) return true
+      if (await handlePanelVmRuntimeRoutes(req, res, p)) return true
+      if (await handlePanelVmOauthQueryRoutes(req, res, p)) return true
+      if (await handlePanelVmOauthMutationRoutes(req, res, p)) return true
+      if (await handlePanelVmSeedRoutes(req, res, p)) return true
+      if (await handlePanelVmPackageRoutes(req, res, p)) return true
+      if (await handlePanelVmResetRoutes(req, res, p)) return true
+      if (await handlePanelVmMaintenanceRoutes(req, res, p)) return true
       if (req.method === 'POST' && p === '/api/panel/anthropic/messages') {
         const body = await readBody(req, 64 * 1024).catch(() => ({}))
         try {
@@ -1969,6 +4329,8 @@ export function createPanelHandler(ctx) {
         const u = new URL(req.url, 'http://x')
         const mode = (u.searchParams.get('mode') || 'normal').toLowerCase()
         const limit = Number(u.searchParams.get('limit') || 50)
+        if (mode === 'debug' && panelIdentity(req).role !== 'super_admin')
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '调试原文仅超级管理员可查看' } })
         if (mode === 'debug') {
           return json(res, 200, {
             ok: true,
@@ -1979,8 +4341,7 @@ export function createPanelHandler(ctx) {
               error_class: u.searchParams.get('error_class') || null,
               exclude_error_class: u.searchParams.get('exclude_error_class') || null,
               include_muted: u.searchParams.get('include_muted') === '1',
-              owner_user_id:
-                panelIdentity(req).role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null,
+              owner_user_id: logsOwner(req, u),
             }),
           })
         }
@@ -1999,7 +4360,7 @@ export function createPanelHandler(ctx) {
           since: u.searchParams.get('since') || null,
           until: u.searchParams.get('until') || null,
           q: u.searchParams.get('q') || null,
-          owner_user_id: panelIdentity(req).role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null,
+          owner_user_id: logsOwner(req, u),
         }
         const { items, total } = requestLog.queryNormal(filters)
         return json(res, 200, {
@@ -2027,15 +4388,16 @@ export function createPanelHandler(ctx) {
           start_time: listed.start_time || legacy('since'),
           end_time: listed.end_time || legacy('until'),
           status_code: listed.status_code || (/^\d+$/.test(legacyStatus || '') ? legacyStatus : null),
-          errors_only: legacyStatus === 'error',
+          errors_only: listed.errors_only || legacyStatus === 'error',
         }
         const exported =
           (await readUsage('view', 'exportRows', [filters])) ||
-          new UsageLogsView(getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses }).exportRows(filters)
+          new UsageLogsView(ctx.db || getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses }).exportRows(filters)
         const { items, total, capped } = exported
         const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')
-        const body = format === 'csv' ? logsToCsv(items) : logsToJsonl(items)
-        const filename = `vm2api-logs-${stamp}.${format}`
+        const safeItems = projectUsage(items, panelIdentity(req).role)
+        const body = format === 'csv' ? logsToCsv(safeItems) : logsToJsonl(safeItems)
+        const filename = `tapmodels-logs-${stamp}.${format}`
         res.writeHead(
           200,
           corsHeadersForRequest(req, {
@@ -2057,8 +4419,8 @@ export function createPanelHandler(ctx) {
         const bucket = (u.searchParams.get('bucket') || 'day').toLowerCase() === 'hour' ? 'hour' : 'day'
         const since = u.searchParams.get('since') || new Date(Date.now() - 7 * 86400_000).toISOString()
         const until = u.searchParams.get('until') || null
-        const tenant = panelIdentity(req).role === 'user'
-        const owner_user_id = tenant ? req.panelUserId : u.searchParams.get('user_id') || null
+        const tenant = panelIdentity(req).role !== 'super_admin'
+        const owner_user_id = logsOwner(req, u)
         let totals
         let buckets
         let window
@@ -2094,8 +4456,10 @@ export function createPanelHandler(ctx) {
         })
       }
       if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+\/attempts$/.test(p)) {
+        if (panelIdentity(req).role === 'user')
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '内部尝试仅运维可查看' } })
         const requestId = p.split('/')[4]
-        const owner_user_id = panelIdentity(req).role === 'user' ? req.panelUserId : null
+        const owner_user_id = logsOwner(req, url)
         if (owner_user_id && !requestLog.getDebug(requestId, { owner_user_id })) {
           return json(res, 404, { ok: false, error: { message: 'debug log not found' } })
         }
@@ -2113,7 +4477,7 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+$/.test(p)) {
         const id = p.split('/').pop()
-        const owner_user_id = panelIdentity(req).role === 'user' ? req.panelUserId : null
+        const owner_user_id = logsOwner(req, url)
         const rec = requestLog.getDebug(id, { owner_user_id })
         if (!rec) return json(res, 404, { ok: false, error: { message: 'debug log not found' } })
         return json(res, 200, { ok: true, item: rec })
@@ -2122,13 +4486,22 @@ export function createPanelHandler(ctx) {
       // ---- Scrolling usage logs (keyset cursor, camelCase rows) ----
       // Lives beside /request-logs (offset + snake_case, still used by error
       // collection and export); this surface never COUNTs the table.
-      const usageLogsView = () => new UsageLogsView(getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses })
+      const usageLogsView = () =>
+        new UsageLogsView(ctx.db || getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses })
       const readView = async (method, ...args) =>
         (await readUsage('view', method, args)) ?? usageLogsView()[method](...args)
-      const tenantId = () => (panelIdentity(req).role === 'user' ? req.panelUserId : null)
+      const tenantId = () => logsOwner(req, url)
       if (req.method === 'GET' && p === '/api/panel/usage-logs') {
         const u = new URL(req.url, 'http://x')
         return json(res, 200, panel.ok(await readView('listBatch', usageLogFilters(req, u))))
+      }
+      if (req.method === 'GET' && p === '/api/panel/usage-logs/ranking') {
+        const scope = (url.searchParams.get('rank_by') || url.searchParams.get('scope')) === 'user' ? 'user' : 'key'
+        if (scope === 'user' && panelIdentity(req).role === 'user')
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只能查看本人 Key 排行' } })
+        const out = await readView('ranking', usageLogFilters(req, url), scope)
+        if (panelIdentity(req).role === 'user') out.entries = out.entries.map(({ owner, ...entry }) => entry)
+        return json(res, 200, panel.ok(out))
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/summary') {
         const u = new URL(req.url, 'http://x')
@@ -2137,12 +4510,6 @@ export function createPanelHandler(ctx) {
       if (req.method === 'GET' && p === '/api/panel/usage-logs/filter-options') {
         return json(res, 200, panel.ok(await readView('filterOptions', { owner_user_id: tenantId() })))
       }
-      if (req.method === 'GET' && p === '/api/panel/usage-logs/session-suggestions') {
-        const u = new URL(req.url, 'http://x')
-        const q = u.searchParams.get('q') || ''
-        const limit = u.searchParams.get('limit')
-        return json(res, 200, panel.ok(await readView('sessionSuggestions', { q, limit, owner_user_id: tenantId() })))
-      }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/active-sessions') {
         const u = new URL(req.url, 'http://x')
         const minutes = u.searchParams.get('minutes')
@@ -2150,9 +4517,7 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok(await readView('activeSessions', { minutes, limit, owner_user_id: tenantId() })))
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/overview') {
-        const u = new URL(req.url, 'http://x')
-        const tz = u.searchParams.get('tz') || 'UTC'
-        return json(res, 200, panel.ok(await readView('overview', { tz, owner_user_id: tenantId() })))
+        return json(res, 200, panel.ok(await readView('overview', { owner_user_id: tenantId() })))
       }
 
       // ---- Statistics page ----
@@ -2176,104 +4541,7 @@ export function createPanelHandler(ctx) {
         )
       }
 
-      if (req.method === 'GET' && p === '/api/panel/billing') {
-        const u = new URL(req.url, 'http://x')
-        const ident = panelIdentity(req)
-        const ownerUserId = ident.role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null
-        const groupBy = u.searchParams.get('group_by') === 'key' ? 'key' : 'vm'
-        const since = u.searchParams.get('from') || u.searchParams.get('since') || null
-        const until = u.searchParams.get('until') || null
-        return json(res, 200, panel.ok(requestLog.ownerBilling({ ownerUserId, since, until, groupBy })))
-      }
-
-      // ---- Backups (local auto/manual, download, restore) ----
-      if (req.method === 'GET' && p === '/api/panel/backups') {
-        return json(res, 200, {
-          ok: true,
-          items: backupService.list(),
-          config: backupService.getSchedule(),
-          next_auto_at: backupService.nextAutoAt(),
-          restoring: backupService.isRestoring,
-        })
-      }
-      if (req.method === 'POST' && p === '/api/panel/backups') {
-        try {
-          const rec = await backupService.createBackup({ kind: 'manual' })
-          return json(res, 201, { ok: true, item: rec })
-        } catch (e) {
-          const status = e.code === 'backup_in_progress' ? 409 : 500
-          return json(res, status, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'backup_failed' },
-          })
-        }
-      }
-      if (req.method === 'GET' && p === '/api/panel/backups/config') {
-        return json(res, 200, {
-          ok: true,
-          config: backupService.getSchedule(),
-          next_auto_at: backupService.nextAutoAt(),
-        })
-      }
-      if (req.method === 'PUT' && p === '/api/panel/backups/config') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        try {
-          const config = backupService.updateSchedule(body || {})
-          return json(res, 200, { ok: true, config, next_auto_at: backupService.nextAutoAt() })
-        } catch (e) {
-          return json(res, 400, { ok: false, error: { message: String(e.message || e), code: e.code } })
-        }
-      }
-      if (req.method === 'GET' && /^\/api\/panel\/backups\/[^/]+\/download$/.test(p)) {
-        const id = p.split('/')[4]
-        const rec = backupService.get(id)
-        if (!rec || !rec.file_path || !fs.existsSync(rec.file_path)) {
-          return json(res, 404, { ok: false, error: { message: 'backup file not found' } })
-        }
-        res.writeHead(
-          200,
-          corsHeadersForRequest(req, {
-            'content-type': 'application/gzip',
-            'content-length': fs.statSync(rec.file_path).size,
-            'content-disposition': `attachment; filename="${rec.file_name}"`,
-            'x-kin-backup-sha256': rec.sha256 || '',
-            'access-control-expose-headers': 'content-disposition, x-kin-backup-sha256',
-          }),
-        )
-        fs.createReadStream(rec.file_path).pipe(res)
-        return
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/backups\/[^/]+\/restore$/.test(p)) {
-        const id = p.split('/')[4]
-        const body = await readBody(req, 4096).catch(() => ({}))
-        if (body?.confirm !== true) {
-          return json(res, 400, {
-            ok: false,
-            error: { message: 'restore requires {"confirm": true}', code: 'confirm_required' },
-          })
-        }
-        try {
-          const out = await backupService.restoreBackup(id)
-          return json(res, 200, { ok: true, ...out })
-        } catch (e) {
-          const map = {
-            backup_not_found: 404,
-            backup_file_missing: 404,
-            restore_in_progress: 409,
-            backup_corrupt: 422,
-            backup_not_ok: 422,
-          }
-          return json(res, map[e.code] || 500, {
-            ok: false,
-            error: { message: String(e.message || e), code: e.code || 'restore_failed' },
-          })
-        }
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/backups\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        if (!backupService.remove(id)) return json(res, 404, { ok: false, error: { message: 'backup not found' } })
-        return json(res, 200, { ok: true, deleted: id })
-      }
+      if (await handlePanelBackups(req, res, p)) return true
 
       // GET /api/panel/dashboard
       if (req.method === 'GET' && p === '/api/panel/dashboard') {
@@ -2289,24 +4557,6 @@ export function createPanelHandler(ctx) {
             requestLog,
             poolScheduler: ctx.poolScheduler,
             proxyPool,
-            clusterNodes: clusterNodesOf(ctx),
-          }),
-        )
-      }
-      if (req.method === 'GET' && p === '/api/panel/vms') {
-        const ident = panelIdentity(req)
-        return json(
-          res,
-          200,
-          await panel.buildVmList({
-            cfg,
-            accountQuota,
-            routingConfig: ctx.routingConfig,
-            poolScheduler: ctx.poolScheduler,
-            proxyPool,
-            requestLog,
-            role: ident.role,
-            ownerUserId: ident.role === 'user' ? req.panelUserId : null,
             clusterNodes: clusterNodesOf(ctx),
           }),
         )
@@ -2332,37 +4582,6 @@ export function createPanelHandler(ctx) {
                   )
               : null,
         })
-      }
-      // GET /api/panel/vms/fleet-status — must be before /vms/:id
-      if (req.method === 'GET' && p === '/api/panel/vms/fleet-status') {
-        return json(res, 200, panel.ok({ items: fleetStatus(cfg.paths.project) }))
-      }
-      // GET /api/panel/vms/create-options — same ACL as POST /vms/create; tenants cannot read cluster/local
-      if (req.method === 'GET' && p === '/api/panel/vms/create-options') {
-        const probe = typeof ctx.probeLocalKvm === 'function' ? ctx.probeLocalKvm : probeLocalKvm
-        const kvm = await probe({ routing: ctx.routingConfig })
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: normalizeVmConfig(ctx.routingConfig?.vm),
-            kvm,
-          }),
-        )
-      }
-      // POST /api/panel/vms/fleet-update
-      if (req.method === 'POST' && p === '/api/panel/vms/reconcile-fingerprints') {
-        return json(res, 200, panel.ok(reconcileOfficialFingerprints(cfg.paths.project)))
-      }
-      if (req.method === 'POST' && p === '/api/panel/vms/fleet-update') {
-        const body = await readBody(req, 32 * 1024).catch(() => ({}))
-        const report = await runFleetUpdate(cfg.paths.project, {
-          action: body.action || 'roll',
-          ids: Array.isArray(body.ids) ? body.ids : null,
-          concurrency: body.concurrency,
-          routing: ctx.routingConfig,
-        })
-        return json(res, 200, panel.ok(report))
       }
       if (req.method === 'GET' && p === '/api/panel/wrap-cli') {
         const sample = describeWrapSample(cfg.paths.project)
@@ -2394,7 +4613,7 @@ export function createPanelHandler(ctx) {
         const previous = structuredClone(ctx.routingConfig)
         try {
           if (targets.all) {
-            await persistRoutingPatch({
+            persistRoutingPatch({
               inference: {
                 ...(ctx.routingConfig.inference || {}),
                 dataplane: parsed.value,
@@ -2681,85 +4900,6 @@ export function createPanelHandler(ctx) {
           }
         }
         return json(res, 200, panel.ok({ updated: items.length, missing, failed, items }))
-      }
-      // POST /api/panel/vms/:id/reload
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/reload$/.test(p)) {
-        const id = p.split('/')[4]
-        const vm = getVm(cfg.paths.project, id)
-        if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const reloaded = await reloadSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
-        if (!reloaded.ok) {
-          return json(res, 500, {
-            ok: false,
-            error: { message: reloaded.error || 'reload failed', code: reloaded.code },
-          })
-        }
-        return json(res, 200, panel.ok({ id, reload: reloaded }))
-      }
-      // POST /api/panel/vms/:id/shell-ticket — single-use ticket for the slot terminal WebSocket
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/shell-ticket$/.test(p)) {
-        const body = await readBody(req, 1024).catch(() => ({}))
-        const issued = await ctx.slotShell.issueTicket(p.split('/')[4], { login: body.login === true })
-        if (!issued.ok) return json(res, issued.status, { ok: false, error: issued.error })
-        return json(res, 200, panel.ok({ ticket: issued.ticket, expires_in: issued.expires_in }))
-      }
-      // POST /api/panel/vms/:id/collect-identity
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/collect-identity$/.test(p)) {
-        const id = p.split('/')[4]
-        const vm = getVm(cfg.paths.project, id)
-        if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const collected = await collectSlotIdentity(cfg.paths.project, vm)
-        if (!collected.ok) {
-          return json(res, 502, {
-            ok: false,
-            error: { message: collected.error || 'collect failed', code: collected.code },
-          })
-        }
-        return json(res, 200, panel.ok(collected))
-      }
-      if (req.method === 'PATCH' && /^\/api\/panel\/vms\/[^/]+\/owner$/.test(p)) {
-        if (panelIdentity(req).role !== 'admin') {
-          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '当前权限无法执行此操作' } })
-        }
-        const id = p.split('/')[4]
-        const vm = getVm(cfg.paths.project, id)
-        if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const nextOwner =
-          body.user_id === null || body.user_id === '' ? null : normalizeOwnerId(body.user_id || body.owner_user_id)
-        if (nextOwner && !panelUsers.getById(nextOwner)) {
-          return json(res, 404, { ok: false, error: { message: 'user not found' } })
-        }
-        const currentOrigin = vm.origin || VM_ORIGIN.platform
-        if (!nextOwner && currentOrigin === VM_ORIGIN.userCreated) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: 'cannot_unassign_user_created', message: '自建 VM 不能收回进平台池，请删除' },
-          })
-        }
-        const origin = assignOriginForOwner(nextOwner, { previousOrigin: currentOrigin, actorRole: 'admin' })
-        const saved = persistVmOwner(cfg.paths.project, id, { ownerUserId: nextOwner, origin })
-        return json(res, 200, panel.ok({ vm: summarizeVm(saved, cfg.paths.project, ctx.routingConfig) }))
-      }
-
-      // GET /api/panel/vms/:id
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+$/.test(p)) {
-        const id = p.split('/').pop()
-        const ident = panelIdentity(req)
-        const result = await panel.buildVmDetail({
-          cfg,
-          accountQuota,
-          id,
-          routingConfig: ctx.routingConfig,
-          poolScheduler: ctx.poolScheduler,
-          requestLog,
-          proxyPool,
-          kernelHealth: panelKernelHealth,
-          clusterNodes: clusterNodesOf(ctx),
-          role: ident.role,
-        })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
       }
       // PATCH /api/panel/vms/:id — hot concurrency / allowed models (no VM restart)
       if (req.method === 'PATCH' && /^\/api\/panel\/vms\/[^/]+$/.test(p)) {
@@ -3095,713 +5235,10 @@ export function createPanelHandler(ctx) {
         if (memoryRaiseResult && detail?.data) detail.data.memory_raise = memoryRaiseResult
         return json(res, 200, detail)
       }
-      // POST /api/panel/vms/:id/probe
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/probe$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = await panel.buildProbeOne({
-          cfg,
-          accountQuota,
-          id,
-          hop: true,
-          force: true,
-          routingConfig: ctx.routingConfig,
-        })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
-      // POST /api/panel/vms/:id/exit-probe — geo probe through the slot's real exit.
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/exit-probe$/.test(p)) {
-        const id = p.split('/')[4]
-        const vm = getVm(cfg.paths.project, id)
-        if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const result = await probeVmExitGeo(vm)
-        if (!result.ok)
-          return json(res, 502, {
-            ok: false,
-            error: { code: result.code || 'exit_probe_failed', message: result.error },
-          })
-        return json(res, 200, panel.ok({ vm_id: id, ...result }))
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/openai-quota\/refresh$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = await panel.buildOpenaiQuotaRefresh({ cfg, id, routingConfig: ctx.routingConfig })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/openai-quota\/reset$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = await panel.buildOpenaiQuotaReset({ cfg, id, routingConfig: ctx.routingConfig })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/claude-reset\/query$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = await panel.buildClaudeResetQuery({ cfg, id })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/claude-reset\/redeem$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = await panel.buildClaudeResetRedeem({
-          cfg,
-          id,
-          idempotencyKey: req.headers['idempotency-key'],
-        })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
 
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/test-schedule$/.test(p)) {
-        return await handleVmTestSchedule(req, res, p.split('/')[4])
-      }
-      if (req.method === 'PUT' && /^\/api\/panel\/vms\/[^/]+\/test-schedule$/.test(p)) {
-        return await handleVmTestSchedule(req, res, p.split('/')[4])
-      }
-      if (req.method === 'DELETE' && /^\/api\/panel\/vms\/[^/]+\/test-schedule$/.test(p)) {
-        return await handleVmTestSchedule(req, res, p.split('/')[4])
-      }
-
-      if (req.method === 'GET' && p === '/api/panel/test-schedule/default') {
-        return await handleVmTestScheduleDefault(req, res)
-      }
-      if (req.method === 'PUT' && p === '/api/panel/test-schedule/default') {
-        return await handleVmTestScheduleDefault(req, res)
-      }
-      if (req.method === 'POST' && p === '/api/panel/test-schedule/sync') {
-        return await handleVmTestScheduleSync(req, res)
-      }
-
-      // POST /api/panel/vms/:id/test-chat — sub2api-style model connectivity test
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/test-chat$/.test(p)) {
-        const id = p.split('/')[4]
-        const body = await readBody(req, 64 * 1024).catch(() => ({}))
-        const result = await runVmTestChat({
-          projectRoot: cfg.paths.project,
-          vmId: id,
-          model: body.model || body.model_id || '',
-          prompt: body.prompt || body.message || '',
-          max_tokens: body.max_tokens,
-          reasoning_effort: body.reasoning_effort || body.effort,
-          timeoutMs: body.timeout_ms || body.timeoutMs,
-          baseUrl: `http://127.0.0.1:${cfg.port}`,
-          apiKey: cfg.api_key,
-          accountQuota,
-        })
-        return json(res, 200, panel.ok(result))
-      }
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/count-tokens$/.test(p)) {
         return json(res, 404, { ok: false, error: { code: 'not_found', message: 'not found' } })
       }
-      // GET /api/panel/test-models — models available for test dropdown
-      if (req.method === 'GET' && p === '/api/panel/test-models') {
-        const platform = url.searchParams.get('platform') || url.searchParams.get('kind') || ''
-        const vmId = url.searchParams.get('vm_id') || url.searchParams.get('vm') || ''
-        if (vmId && userMissesVmId(req, cfg.paths.project, vmId)) {
-          return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        }
-        // A live refresh rewrites the shared Codex catalog; only admins may trigger it.
-        const refresh =
-          panelIdentity(req).role === 'admin' &&
-          (url.searchParams.get('refresh') === '1' || url.searchParams.get('refresh') === 'true')
-        const payload = await resolveTestModels({
-          projectRoot: cfg.paths.project,
-          vmId,
-          platform,
-          refresh,
-        })
-        return json(res, 200, panel.ok(payload))
-      }
-
-      if (req.method === 'POST' && p === '/api/panel/vms/schedule/hold') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const reason = String(body?.reason || KERNEL_UPDATE_HOLD).slice(0, 64)
-        const ids = holdSchedulableSlots(cfg.paths.project, reason)
-        const drain = await waitForSlotDrain(ctx.poolScheduler, ids)
-        if (!drain.ok) {
-          const restored = resumeSchedulableSlots(cfg.paths.project, ids, reason)
-          return json(res, 409, {
-            ok: false,
-            error: { code: 'slots_busy', message: '在途请求未结束，已恢复调度' },
-            data: { paused: ids.length, restored: restored.length, inflight: drain.inflight, drained: false },
-          })
-        }
-        return json(res, 200, panel.ok({ paused: ids.length, inflight: 0, drained: true }))
-      }
-      if (req.method === 'POST' && p === '/api/panel/vms/schedule/resume') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const reason = String(body?.reason || KERNEL_UPDATE_HOLD).slice(0, 64)
-        const ids = (listVms(cfg.paths.project) || []).filter((vm) => isMaintenanceHold(vm, reason)).map((vm) => vm.id)
-        const restored = resumeSchedulableSlots(cfg.paths.project, ids, reason)
-        return json(res, 200, panel.ok({ restored: restored.length }))
-      }
-
-      // POST /api/panel/vms/:id/schedulable — sub2api-style schedule toggle
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/schedulable$/.test(p)) {
-        const id = p.split('/')[4]
-        if (!getVm(cfg.paths.project, id)) {
-          const e = makeError({
-            type: ErrorType.NOT_FOUND,
-            code: ErrorCode.VM_NOT_FOUND,
-            message: 'vm not found',
-            status: 404,
-          })
-          return json(res, e.status, { ok: false, error: e.body.error })
-        }
-        const body = await readBody(req, 8192).catch(() => ({}))
-        if (typeof body?.schedulable !== 'boolean') {
-          return json(res, 400, { ok: false, error: { message: 'schedulable required' } })
-        }
-        const currentVm = getVm(cfg.paths.project, id)
-        const credentialFailure =
-          /oauth_revoked|oauth_invalid_grant|invalid_grant|refresh_token_missing|token has been revoked/i.test(
-            `${currentVm?.claude?.refresh_error || ''} ${currentVm?.schedule_disabled_reason || ''}`,
-          )
-        if (body.schedulable && credentialFailure) {
-          return json(res, 409, {
-            ok: false,
-            error: { code: 'credential_unavailable', message: '凭证已失效或吊销，请重新导入凭证后再开启调度' },
-          })
-        }
-        const reason = body.schedulable ? null : body.reason || 'disabled'
-        const summary = setScheduleOff(cfg.paths.project, id, !body.schedulable, { reason, preserveStatus: true })
-        return json(
-          res,
-          200,
-          panel.ok({
-            id,
-            schedulable: summary?.schedulable !== false,
-            schedule_manual: summary?.schedule_manual === true,
-            schedule_disabled_reason: summary?.schedule_disabled_reason || null,
-            status: summary?.status || null,
-          }),
-        )
-      }
-      // POST /api/panel/vms/:id/cooldown/clear — drop 401/quota leftover so the slot re-enters
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/cooldown\/clear$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = panel.clearVmCooldown({
-          cfg,
-          accountQuota,
-          stickyRouter,
-          poolScheduler: ctx.poolScheduler,
-          id,
-        })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
-      // POST /api/panel/vms/:id/circuit/reset — close a tripped Claude unit circuit
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/circuit\/reset$/.test(p)) {
-        const id = decodeURIComponent(p.split('/')[4])
-        const result = panel.resetVmCircuit({ cfg, poolScheduler: ctx.poolScheduler, id })
-        if (result.status) return json(res, result.status, result.body)
-        return json(res, 200, result)
-      }
-      // POST /api/panel/vms/:id/activate
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/activate$/.test(p)) {
-        const id = p.split('/')[4]
-        if (!getVm(cfg.paths.project, id)) {
-          const e = makeError({
-            type: ErrorType.NOT_FOUND,
-            code: ErrorCode.VM_NOT_FOUND,
-            message: 'vm not found',
-            status: 404,
-          })
-          return json(res, e.status, { ok: false, error: e.body.error })
-        }
-        return json(res, 200, panel.ok(activateVmSlot(id)))
-      }
-
-      // POST /api/panel/vms/:id/deactivate
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/deactivate$/.test(p)) {
-        const id = p.split('/')[4]
-        if (!getVm(cfg.paths.project, id)) {
-          const e = makeError({
-            type: ErrorType.NOT_FOUND,
-            code: ErrorCode.VM_NOT_FOUND,
-            message: 'vm not found',
-            status: 404,
-          })
-          return json(res, e.status, { ok: false, error: e.body.error })
-        }
-        return json(res, 200, panel.ok(deactivateVmSlot(id)))
-      }
-
-      // POST /api/panel/vms/:id/update-claude-code — Claude CLI runtime was removed
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/update-claude-code$/.test(p)) {
-        return json(res, 410, {
-          ok: false,
-          error: {
-            code: 'claude_cli_removed',
-            message: 'Claude CLI runtime was replaced by the Go slot worker; build and roll out the worker instead',
-          },
-        })
-      }
-
-      // DELETE /api/panel/vms/:id — remove VM record, cli-home, unbind proxy
-      if (req.method === 'DELETE' && /^\/api\/panel\/vms\/[^/]+$/.test(p)) {
-        const id = p.split('/')[4]
-        if (!isValidVmId(id)) {
-          return json(res, 400, { ok: false, error: { message: 'invalid vm id' } })
-        }
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const active = getActiveVmId(cfg.paths.project)
-        if (active === id && listVms(cfg.paths.project).some((vm) => vm.id !== id)) {
-          return json(res, 409, { ok: false, error: { message: 'cannot delete active VM, switch active first' } })
-        }
-        const vm = getVm(cfg.paths.project, id)
-        if (denyIfUserCannotDeleteVm(req, res, vm, json)) return true
-        try {
-          if (vm) {
-            const gone = await destroySlot(vm)
-            // A node slot that could not be removed keeps running there with the account's credential.
-            if (!gone.ok && slotHost(vm).kind === 'node') {
-              return json(res, 409, {
-                ok: false,
-                error: { code: gone.code || 'remote_destroy_failed', message: gone.error || 'remote destroy failed' },
-              })
-            }
-          }
-        } catch {}
-        // detach this VM only — do not unbind other slots sharing the SOCKS5
-        try {
-          proxyPool.unbindVm(id)
-        } catch {}
-        // remove cli-home
-        try {
-          fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
-        } catch {}
-        fs.unlinkSync(vmPath)
-        invalidateVmSlotReadCache(cfg.paths.project, id)
-        try {
-          vmTestSchedule.remove(id)
-        } catch {}
-        if (active === id) {
-          clearActiveVm(cfg.paths.project)
-          try {
-            clearActiveVmFromDb()
-          } catch {}
-          try {
-            reloadActiveVm(cfg)
-          } catch {}
-        }
-        // drop the DB credential mirror row too
-        try {
-          removeVmFromDb(id)
-        } catch {}
-        // optional chat side files
-        try {
-          const chat = path.join(cfg.paths.project, 'vms', `${id}-chat.json`)
-          if (fs.existsSync(chat)) fs.unlinkSync(chat)
-        } catch {}
-        return json(res, 200, panel.ok({ deleted: id }))
-      }
-      // POST /api/panel/vms/:id/reset — destroy container + home, recreate same slot
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/reset$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const body = await readBody(req, 32 * 1024).catch(() => ({}))
-        const mode = body.mode === 'keep' ? 'keep' : 'traits'
-        return await withVmLock(vmPath, async () => {
-          if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-          const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-          const gone = await destroySlot(prev)
-          if (!gone.ok) {
-            return json(res, 500, { ok: false, error: { message: gone.error || 'destroy failed', code: gone.code } })
-          }
-          let { vm } = recreateVmFiles(cfg.paths.project, prev, { mode })
-          try {
-            invalidateLiveCredentialCache()
-          } catch {}
-          if (!hasBoundExit(vm.proxy)) {
-            try {
-              const allocated = proxyPool.allocateForVm(id)
-              if (allocated) {
-                bindVmProxy(cfg.paths.project, id, proxyPool.getProxyForVm(id))
-                adoptVmProxyBinding(vm, getVm(cfg.paths.project, id))
-              }
-            } catch {}
-          }
-          if (!hasBoundExit(vm.proxy)) {
-            vm =
-              (patchVmRecord(cfg.paths.project, id, { status: 'stopped' }),
-              markUnschedulable(cfg.paths.project, id, 'proxy_required'),
-              getVm(cfg.paths.project, id)) || vm
-            return json(res, 409, {
-              ok: false,
-              error: { code: 'proxy_required', message: 'No healthy SOCKS5 is available for this VM' },
-              vm: summarizeVm(vm, cfg.paths.project, ctx.routingConfig),
-              destroyed: gone.action,
-            })
-          }
-          const boot = await startSlotReady(vm, cfg.paths.project, { recreate: true, routing: ctx.routingConfig })
-          if (!boot.ok) {
-            vm =
-              (patchVmRecord(cfg.paths.project, id, { status: 'stopped' }),
-              markUnschedulable(cfg.paths.project, id, 'runtime_start_failed', {
-                message: String(boot.error || 'runtime start failed').slice(0, 240),
-              }),
-              getVm(cfg.paths.project, id)) || vm
-            if (gone.action !== 'absent') {
-              return json(res, 500, {
-                ok: false,
-                error: { message: boot.error || 'runtime start failed', code: boot.code },
-                vm: summarizeVm(vm, cfg.paths.project, ctx.routingConfig),
-                destroyed: gone.action,
-              })
-            }
-            return json(
-              res,
-              200,
-              panel.ok({
-                vm: summarizeVm(vm, cfg.paths.project, ctx.routingConfig),
-                destroyed: gone.action,
-                recreated: true,
-                mode,
-                runtime: panel.publicSlotBoot(boot),
-              }),
-            )
-          }
-          vm =
-            (patchVmRecord(cfg.paths.project, id, { status: 'running' }),
-            mode === 'keep' ? null : markUnschedulable(cfg.paths.project, id, 'no_credential'),
-            getVm(cfg.paths.project, id)) || vm
-          return json(
-            res,
-            200,
-            panel.ok({
-              vm: summarizeVm(getVm(cfg.paths.project, id) || vm),
-              destroyed: gone.action,
-              recreated: true,
-              mode,
-              boot: panel.publicSlotBoot(boot),
-            }),
-          )
-        })
-      }
-
-      // POST /api/panel/vms/:id/credential/clear - drop the account, keep the slot.
-      // local patch (patches/clear-credential): clear the credential only; the slot
-      // and its container stay exactly as they are, so a new account can be
-      // imported into the same slot afterwards.
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/credential\/clear$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'VM not found' } })
-        }
-        await readBody(req, 32 * 1024).catch(() => ({}))
-        return await withVmLock(vmPath, async () => {
-          if (!fs.existsSync(vmPath)) {
-            return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'VM not found' } })
-          }
-          const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-          prev.id = prev.id || id
-          const slotDir = path.join(cfg.paths.project, 'vms', id)
-          const removed = []
-          for (const file of [
-            path.join(slotDir, 'codex-credentials.json'),
-            path.join(slotDir, 'cli-home', '.codex', 'auth.json'),
-            path.join(slotDir, 'cli-home', '.claude', 'credentials.json'),
-            path.join(slotDir, 'cli-home', '.claude', '.credentials.json'),
-          ]) {
-            try {
-              if (fs.existsSync(file)) {
-                fs.rmSync(file, { force: true })
-                removed.push(path.relative(cfg.paths.project, file))
-              }
-            } catch {}
-          }
-          const vm =
-            patchVmRecord(cfg.paths.project, id, (record) => {
-              record.email = null
-              record.account_uuid = null
-              record.org_uuid = null
-              record.expires_at = null
-              record.codex = {}
-              record.claude = {}
-              record.worker_credential = null
-              record.refresh_status = null
-              record.refresh_error = null
-              record.restriction_reason = null
-              record.restriction_until = null
-              migrateScheduleRecord(record)
-              applyUnschedulable(record, 'no_credential')
-              return record
-            }) || prev
-          try {
-            invalidateLiveCredentialCache()
-          } catch {}
-          // The kernel still holds the old token in memory: stop it, then bring a
-          // credential-less kernel back so the slot matches an empty slot.
-          const kernel = { stopped: false, restarted: false, error: null }
-          try {
-            kernel.stopped = !!stopCodexKernel(id)
-            if (isCodexVm(vm)) {
-              const started = await ensureCodexKernel(slotExec(cfg.paths.project, getVm(cfg.paths.project, id) || vm), {
-                timeoutMs: 8000,
-              })
-              kernel.restarted = !!started?.ok
-              if (!started?.ok) kernel.error = started?.reason || 'codex_kernel_start_failed'
-            }
-          } catch (e) {
-            kernel.error = String(e?.message || e).slice(0, 160)
-          }
-          try {
-            const repo = ctx.accountQuota?.repo
-            const row = repo && typeof repo.get === 'function' ? repo.get(id) : null
-            if (row && typeof repo.save === 'function') repo.save({ ...row, email: null, name: id })
-          } catch {}
-          const saved = getVm(cfg.paths.project, id) || vm
-          return json(
-            res,
-            200,
-            panel.ok({
-              cleared: { vm_id: id, files: removed, kernel },
-              vm: summarizeVm(saved, cfg.paths.project, ctx.routingConfig),
-            }),
-          )
-        })
-      }
-      // POST /api/panel/vms/:id/reset-fingerprint
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/reset-fingerprint$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        }
-        let vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        const generated = assignComputerFingerprint(cfg.paths.project, vm, {
-          taken: takenFingerprintKeys(listVms(cfg.paths.project), { exceptId: id }),
-        })
-        vm.timezone = generated.timezone
-        vm.locale = generated.locale
-        vm.fingerprint = applyGeneratedFingerprint({}, generated)
-        vm.updated_at = generated.reset_at
-        atomicWriteJson(vmPath, vm, { mode: 0o600 })
-        writeGuestMachineIdFile(cfg.paths.project, id, generated.guest_machine_id)
-        applyOfficialFingerprintToVm(vmPath, path.join(cfg.paths.project, 'vms', id, 'cli-home'))
-        try {
-          vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        } catch {}
-        return json(res, 200, panel.ok({ id, fingerprint: vm.fingerprint }))
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/reconcile-fingerprint$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        }
-        const result = applyOfficialFingerprintToVm(vmPath, officialCcHome(cfg.paths.project, id))
-        const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm_id: id,
-            ...result,
-            identity_source: vm.fingerprint?.identity_source || null,
-            has_official_user: !!vm.fingerprint?.official_user_id,
-            has_official_machine: !!vm.fingerprint?.official_machine_id,
-          }),
-        )
-      }
-
-      // GET /api/panel/vms/:id/seed-settings
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/seed-settings$/.test(p)) {
-        const id = p.split('/')[4]
-        const vm = getVm(cfg.paths.project, id)
-        if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const observed = await readSeedSettings(cfg.paths.project, vm)
-        const seed_policy = defaultSeedPolicy(vm.seed_policy || {})
-        const debug = new URL(req.url || '/', 'http://localhost').searchParams.get('debug') === '1'
-        const payload = {
-          vm_id: id,
-          seed_policy,
-          ...seedTelemetryContract(seed_policy),
-          ...observed,
-        }
-        if (debug) {
-          try {
-            payload.telemetry_log = await readTelemetryUploadLog(cfg.paths.project, vm)
-          } catch {
-            payload.telemetry_log = []
-            payload.telemetry_log_error = 'telemetry_log_unavailable'
-          }
-        }
-        return json(res, 200, panel.ok(payload))
-      }
-      // PUT /api/panel/vms/:id/seed-settings
-      if (req.method === 'PUT' && /^\/api\/panel\/vms\/[^/]+\/seed-settings$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const body = await readBody(req, 256 * 1024)
-        return await withVmLock(`seed-settings:${vmPath}`, async () => {
-          let vm = getVm(cfg.paths.project, id)
-          if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-          const patch = { ...(body.seed_policy || {}) }
-          for (const key of [
-            'telemetry_disabled',
-            'reject_client_settings',
-            'reject_client_metadata_identity',
-            'theme',
-            'extra_env',
-            'settings_json_override',
-            'claude_setting',
-          ]) {
-            if (Object.hasOwn(body, key)) patch[key] = body[key]
-          }
-          if (Object.hasOwn(body, 'claude.setting')) patch.claude_setting = body['claude.setting']
-          if (
-            isCodexVm(vm) ||
-            (slotHost(vm).native && isTelemetryEnabled(defaultSeedPolicy({ ...(vm.seed_policy || {}), ...patch })))
-          ) {
-            return json(res, 409, {
-              ok: false,
-              error: { code: 'telemetry_unsupported', message: '此槽不支持 VM 原生遥测' },
-            })
-          }
-          const followProxyTz = body.timezone_follow_proxy === true || body.timezoneFollowProxy === true
-          const hasTimezone = Object.hasOwn(body, 'timezone')
-          const hasLocale = Object.hasOwn(body, 'locale')
-          let timezone = null
-          let locale = null
-          if (hasLocale) {
-            locale = body.locale == null || body.locale === '' ? STANDARD_LOCALE : String(body.locale)
-            if (!SLOT_LOCALES.includes(locale)) {
-              return json(res, 400, {
-                ok: false,
-                error: { code: 'invalid_locale', message: `语言必须是 ${SLOT_LOCALES.join('、')}` },
-              })
-            }
-          }
-          if (hasTimezone) {
-            timezone = validTimezone(body.timezone)
-            if (!timezone) {
-              return json(res, 400, {
-                ok: false,
-                error: {
-                  type: 'invalid_request_error',
-                  code: 'invalid_timezone',
-                  message: '时区必须是有效的 IANA 名称，如 Asia/Tokyo',
-                  param: 'timezone',
-                },
-              })
-            }
-          } else if (followProxyTz) {
-            const route = JSON.stringify({ node_id: vm.node_id, proxy: vm.proxy })
-            const synced = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, id, {
-              force: true,
-              persist: false,
-            })
-            if (!synced.ok) {
-              return json(res, 400, {
-                ok: false,
-                error: {
-                  type: 'invalid_request_error',
-                  code: synced.reason || 'proxy_timezone_unknown',
-                  message: '未能从代理节点取到时区，请先检测代理地理位置',
-                },
-              })
-            }
-            vm = getVm(cfg.paths.project, id)
-            if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-            if (route !== JSON.stringify({ node_id: vm.node_id, proxy: vm.proxy })) {
-              return json(res, 409, {
-                ok: false,
-                error: { code: 'proxy_binding_changed', message: '代理绑定已变化，请重新保存时区设置' },
-              })
-            }
-            timezone = synced.timezone
-          }
-          // Only patch owned fields on the latest record, never an object held across geo/publication awaits.
-          vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-          const next = defaultSeedPolicy({ ...(vm.seed_policy || {}), ...patch })
-          const unsupported = slotHost(vm).native || isCodexVm(vm)
-          if (isCodexVm(vm) || (unsupported && isTelemetryEnabled(next))) {
-            return json(res, 409, {
-              ok: false,
-              error: { code: 'telemetry_unsupported', message: '此槽不支持 VM 原生遥测' },
-            })
-          }
-          if (timezone) {
-            vm.timezone = timezone
-            vm.timezone_source = hasTimezone ? 'manual' : 'proxy_geo'
-            if (vm.fingerprint && typeof vm.fingerprint === 'object') vm.fingerprint.timezone = timezone
-          }
-          if (locale) vm.locale = locale
-          vm.seed_policy = next
-          vm.updated_at = new Date().toISOString()
-          atomicWriteJson(vmPath, vm, { mode: 0o600 })
-          let service
-          if (unsupported) {
-            service = await withVmLock(`seed-publication:${vmPath}`, async () => {
-              const outcome = {
-                ok: false,
-                wrote: false,
-                supported: false,
-                state: 'unsupported',
-                published: false,
-                applied: false,
-              }
-              const revision = (record) =>
-                JSON.stringify([record.node_id, record.runtime, record.seed_policy, record.timezone, record.locale])
-              try {
-                const host = slotHost(vm)
-                const existing = await host.seedFiles(vm, path.join(cfg.paths.project, 'vms', id))
-                const fresh = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-                if (revision(fresh) !== revision(vm)) throw new Error('seed_publication_superseded')
-                outcome.seed = writeSlotSeedFiles(cfg.paths.project, fresh, null, {
-                  existingSettings:
-                    existing.files['settings.json'] === null ? {} : JSON.parse(existing.files['settings.json']),
-                  replaceEnv: Object.hasOwn(body, 'extra_env') || Object.hasOwn(body, 'settings_json_override'),
-                })
-                outcome.wrote = outcome.seed.wrote === true
-                const result = await host.syncSeed(fresh, path.join(cfg.paths.project, 'vms', id))
-                outcome.published = result.published === true
-                if (revision(JSON.parse(fs.readFileSync(vmPath, 'utf8'))) !== revision(fresh))
-                  throw new Error('seed_publication_superseded')
-                outcome.ok = outcome.published
-              } catch {
-                outcome.code = 'seed_publish_failed'
-                outcome.error = '槽位种子配置尚未确认发布'
-              }
-              return outcome
-            })
-          } else {
-            service = await applyNativeTelemetry({
-              projectRoot: cfg.paths.project,
-              vm,
-              routing: ctx.routingConfig,
-              replaceEnv: Object.hasOwn(body, 'extra_env') || Object.hasOwn(body, 'settings_json_override'),
-            })
-          }
-          const { seed: written, ...publicService } = service
-          const data = {
-            vm_id: id,
-            seed_policy: next,
-            ...seedTelemetryContract(next),
-            saved: true,
-            published: service.published === true,
-            applied: service.applied === true,
-            settings_json: written?.settings || null,
-            claude_setting: written?.claude_setting ?? null,
-            kin_seed: written?.kin_seed || null,
-            service: publicService,
-          }
-          if (!service.ok) {
-            return json(res, 502, {
-              ok: false,
-              error: { code: service.code || 'telemetry_not_applied', message: service.error || 'VM 原生配置尚未生效' },
-              data,
-            })
-          }
-          return json(res, 200, panel.ok(data))
-        })
-      }
-
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/wrap-cli\/promote$/.test(p)) {
         const id = p.split('/')[4]
         const vm = getVm(cfg.paths.project, id)
@@ -3913,1137 +5350,6 @@ export function createPanelHandler(ctx) {
         )
       }
 
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/package$/.test(p)) {
-        const id = p.split('/')[4]
-        const result = exportVmPackage(cfg.paths.project, id, proxyPool)
-        if (!result.ok) return json(res, result.status || 404, { ok: false, error: result.error })
-        return json(res, 200, panel.ok(result.package))
-      }
-      if (req.method === 'PUT' && /^\/api\/panel\/vms\/[^/]+\/package$/.test(p)) {
-        const id = p.split('/')[4]
-        const body = await readBody(req, 256 * 1024).catch(() => null)
-        const result = await commitVmPackage({
-          projectRoot: cfg.paths.project,
-          parsed: parseVmPackage(body),
-          mode: 'update',
-          targetId: id,
-          owner: { role: panelIdentity(req).role, userId: req.panelUserId },
-          proxyPool,
-        })
-        if (!result.ok) return json(res, result.status, { ok: false, error: result.error })
-        await fillTimezoneFromExit(id)
-        let worker = null
-        // The package may swap credentials or exit; a running worker keeps the old ones until reloaded.
-        if (ctx.packageImportBringUp !== false && result.vm.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
-          setScheduleHold(cfg.paths.project, id, HOLD_MAINTENANCE, { tag: 'package_update_worker_reload' })
-          worker = await reloadSlotReady(getVm(cfg.paths.project, id), cfg.paths.project, {
-            routing: ctx.routingConfig,
-          })
-          if (worker.ok) restoreSchedulableIfReady(id, { by: 'credential_import' })
-        }
-        const saved = getVm(cfg.paths.project, id) || result.vm
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: summarizeVm(saved, cfg.paths.project, ctx.routingConfig),
-            worker_reload: worker ? { ok: !!worker.ok, error: worker.ok ? null : worker.error || null } : null,
-          }),
-        )
-      }
-      if (req.method === 'POST' && p === '/api/panel/vms/package') {
-        const body = await readBody(req, 256 * 1024).catch(() => null)
-        const parsed = parseVmPackage(body)
-        const ident = panelIdentity(req)
-        if (parsed.ok && ident.role === 'user') {
-          const ownerId = normalizeOwnerId(req.panelUserId)
-          const quota = clampVmCreateQuota(panelUsers.getById(ownerId)?.vm_create_quota, 0)
-          const used = countUserCreatedVms(listVms(cfg.paths.project), ownerId)
-          if (!ownerId || quota <= 0 || used >= quota) {
-            return json(res, 403, {
-              ok: false,
-              error: { code: 'vm_create_quota_exceeded', message: '自建虚拟机数量已达上限' },
-            })
-          }
-        }
-        const historic = (accountQuota?.snapshot?.().accounts || []).flatMap((a) => [
-          { id: a.vm_id },
-          { id: a.account_id },
-        ])
-        const result = await commitVmPackage({
-          projectRoot: cfg.paths.project,
-          parsed,
-          mode: 'create',
-          owner: { role: ident.role, userId: req.panelUserId },
-          proxyPool,
-          occupied: historic,
-        })
-        if (!result.ok) return json(res, result.status, { ok: false, error: result.error })
-        await fillTimezoneFromExit(result.vm.id)
-        const brought =
-          ctx.packageImportBringUp === false
-            ? { start_error: null, official_cc_bootstrap: null, probe: null }
-            : await bringUpImportedVm(result.vm.id)
-        const saved = getVm(cfg.paths.project, result.vm.id) || result.vm
-        return json(
-          res,
-          result.status,
-          panel.ok({
-            vm: summarizeVm(saved, cfg.paths.project, ctx.routingConfig),
-            renamed_from: result.renamed_from,
-            start_error: brought.start_error,
-            official_cc_bootstrap: brought.official_cc_bootstrap,
-            probe: brought.probe,
-          }),
-        )
-      }
-
-      // POST /api/panel/vms/create — configurable seed VM + pure Claude Code home
-      if (req.method === 'POST' && p === '/api/panel/vms/create') {
-        const body = await readBody(req, 32 * 1024)
-        const existing = listVms(cfg.paths.project)
-        // Usage, billing and account rows stay keyed by a deleted VM's id; handing that
-        // id to a new slot makes it show the old account and spend. Auto-numbering skips them.
-        const historic = (accountQuota?.snapshot?.().accounts || []).flatMap((a) => [
-          { id: a.vm_id },
-          { id: a.account_id },
-        ])
-        const idx = nextNumericIndex([...existing, ...historic])
-        const rawId = body.id || 'vm-' + padVm(idx)
-        const id = String(rawId).replace(/[^a-zA-Z0-9_-]/g, '')
-        if (!isValidVmId(id)) return json(res, 400, { ok: false, error: { message: 'invalid id' } })
-        const vmsDir = path.join(cfg.paths.project, 'vms')
-        fs.mkdirSync(vmsDir, { recursive: true })
-        const vmPath = path.join(vmsDir, id + '.json')
-        if (fs.existsSync(vmPath)) {
-          return json(res, 409, { ok: false, error: { message: 'vm id exists' } })
-        }
-        const ident = panelIdentity(req)
-        if (ident.role === 'user') {
-          const ownerId = normalizeOwnerId(req.panelUserId)
-          const quota = clampVmCreateQuota(panelUsers.getById(ownerId)?.vm_create_quota, 0)
-          const used = countUserCreatedVms(existing, ownerId)
-          if (!ownerId || quota <= 0 || used >= quota) {
-            return json(res, 403, {
-              ok: false,
-              error: { code: 'vm_create_quota_exceeded', message: '自建虚拟机数量已达上限' },
-            })
-          }
-        }
-        const startNow = body.start !== false && body.status !== 'stopped'
-        const wantKernel = body.kernel && OS_CATALOG[body.kernel] ? body.kernel : kernelForIndex(idx)
-        const nodeId = body.node_id ? String(body.node_id) : null
-        const vmDefaults = normalizeVmConfig(ctx.routingConfig?.vm)
-        const requestedRuntime = body.runtime_type
-        let runtime
-        if (requestedRuntime == null || requestedRuntime === '') {
-          runtime = vmDefaults.default_runtime
-        } else {
-          const kind = String(requestedRuntime).trim().toLowerCase()
-          if (kind !== 'docker' && kind !== 'kvm') {
-            return json(res, 400, {
-              ok: false,
-              error: {
-                type: 'invalid_request_error',
-                code: 'invalid_runtime_type',
-                message: 'runtime_type 必须是 docker 或 kvm',
-              },
-            })
-          }
-          runtime = kind
-        }
-        let machine
-        try {
-          machine = resolveMachineSpec({ config: vmDefaults, overrides: body.machine, runtime })
-        } catch (error) {
-          if (error?.status === 400 || error?.code === 'invalid_machine') {
-            return json(res, 400, {
-              ok: false,
-              error: { type: 'invalid_request_error', code: 'invalid_machine', message: error.message },
-            })
-          }
-          throw error
-        }
-        if (nodeId) {
-          if (ident.role !== 'admin') {
-            return json(res, 403, {
-              ok: false,
-              error: { code: 'placement_forbidden', message: '只有管理员可以把虚拟机放到集群节点' },
-            })
-          }
-          const kindProbe = { node_id: nodeId }
-          stampVmKind(kindProbe, body)
-          if (isCodexVm(kindProbe) && !slotHost(kindProbe).supports('codex')) {
-            return json(res, 400, {
-              ok: false,
-              error: { code: 'remote_unsupported', message: '集群节点上的虚拟机暂不支持此操作' },
-            })
-          }
-          let preflight
-          try {
-            preflight = await preflightNode(nodeId, { kernel: wantKernel, runtime })
-          } catch (e) {
-            return json(res, e?.status || 500, {
-              ok: false,
-              error: { code: e?.code || 'placement_failed', message: String(e?.message || e) },
-            })
-          }
-          if (!preflight.ok) {
-            return json(res, 409, {
-              ok: false,
-              error: {
-                code: 'placement_preflight_failed',
-                message: '目标节点预检未通过',
-                checks: preflight.checks,
-              },
-            })
-          }
-        }
-        // An explicit exit (e.g. local egress for a node: that VPS's own route) replaces auto-allocation.
-        let pickedProxyId = typeof body.proxy_id === 'string' ? body.proxy_id.trim() : ''
-        if (pickedProxyId && isLocalEgressId(pickedProxyId)) {
-          // Local egress is per VPS: a generic pick resolves to the target machine's own row.
-          const resolved = proxyPool.resolveLocalTarget(pickedProxyId, nodeId || null)
-          if (!resolved.ok) {
-            return json(res, 409, {
-              ok: false,
-              error: { code: resolved.error, message: LOCAL_PROXY_MISMATCH_MESSAGE },
-            })
-          }
-          pickedProxyId = resolved.id
-        }
-        if (pickedProxyId) {
-          const row = proxyPool.snapshot().proxies.find((proxy) => proxy.id === pickedProxyId)
-          const owner = ident.role === 'user' ? normalizeOwnerId(req.panelUserId) : null
-          if (!row || !canBindProxyToVm(row, { owner_user_id: owner }, { role: ident.role })) {
-            return json(res, 404, {
-              ok: false,
-              error: { code: 'proxy_not_found', message: '所选出口不存在或不能绑到此槽位' },
-            })
-          }
-          const used = Array.isArray(row.bound_vm_ids) ? row.bound_vm_ids.length : 0
-          if (!row.enabled || row.status === 'dead' || row.blocked_reason || used >= (row.bind_limit || 5)) {
-            return json(res, 409, {
-              ok: false,
-              error: { code: 'proxy_unavailable', message: '所选出口已失效或已绑满' },
-            })
-          }
-        }
-        if (runtime === RUNTIME_KVM && !nodeId) {
-          const probe = typeof ctx.probeLocalKvm === 'function' ? ctx.probeLocalKvm : probeLocalKvm
-          const kvm = await probe({ routing: ctx.routingConfig })
-          if (!kvm?.ok) {
-            return json(res, 409, {
-              ok: false,
-              error: { code: 'kvm_unavailable', message: kvm?.error || '本机 KVM 不可用' },
-            })
-          }
-        }
-        const requestedTimezone = validTimezone(body.timezone)
-        const requestedLocale = body.locale == null || body.locale === '' ? STANDARD_LOCALE : String(body.locale)
-        if (!SLOT_LOCALES.includes(requestedLocale)) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: 'invalid_locale', message: `语言必须是 ${SLOT_LOCALES.join('、')}` },
-          })
-        }
-        let generated
-        try {
-          generated = assignComputerFingerprint(
-            cfg.paths.project,
-            {
-              id,
-              kernel: wantKernel,
-              timezone: requestedTimezone,
-              locale: requestedLocale,
-              runtime: { type: runtime },
-            },
-            { taken: takenFingerprintKeys(existing) },
-          )
-        } catch (e) {
-          return json(res, 400, {
-            ok: false,
-            error: {
-              code: e.code || 'computer_create_failed',
-              message: String(e.message || e),
-            },
-          })
-        }
-        const vm = {
-          id,
-          name: body.name || padVm(idx),
-          status: startNow ? 'running' : body.status || 'stopped',
-          kernel: wantKernel,
-          timezone: requestedTimezone || null,
-          // Only an explicit zone is a pin. An empty zone stays unset so the
-          // next SOCKS5 bind can write the exit node's detected timezone.
-          timezone_source: requestedTimezone ? 'manual' : 'auto',
-          locale: generated.locale || STANDARD_LOCALE,
-          region: body.region || body.zone || null,
-          note: body.note || `${(OS_CATALOG[wantKernel] || {}).pretty || wantKernel} · Go slot worker`,
-          proxy: null,
-          policy: {
-            maxConcurrency: 0,
-            concurrencyOverride: false,
-            maxRpm: 0,
-            rpmOverride: false,
-            maxSessions: 0,
-            sessionsOverride: false,
-            weight: Math.max(1, Math.min(100, Number(body.weight ?? 1))),
-            inflight: 0,
-          },
-          claude: {},
-          fingerprint: applyGeneratedFingerprint({}, generated),
-          stats: {},
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          schedulable: false,
-          schedule_disabled_reason: 'no_credential',
-          unschedulable: { reason: 'no_credential', detail: null, at: new Date().toISOString() },
-          proxy_cli_enabled: body.proxy_cli_enabled === true,
-          proxy_required: false,
-          seed_policy: standardSeedPolicy(),
-          runtime: { type: runtime },
-          machine,
-        }
-        if (ident.role === 'user') {
-          vm.owner_user_id = normalizeOwnerId(req.panelUserId)
-          vm.origin = VM_ORIGIN.userCreated
-        } else {
-          vm.owner_user_id = null
-          vm.origin = VM_ORIGIN.platform
-        }
-        if (nodeId) vm.node_id = nodeId
-        stampVmKind(vm, body)
-        const openaiPolicy = normalizeOpenAIQuotaPolicy(ctx.routingConfig?.codex?.quota)
-        const explicitConcurrency =
-          Object.prototype.hasOwnProperty.call(body, 'max_concurrency') ||
-          Object.prototype.hasOwnProperty.call(body, 'maxConcurrency')
-        const explicitRpm =
-          Object.prototype.hasOwnProperty.call(body, 'max_rpm') || Object.prototype.hasOwnProperty.call(body, 'maxRpm')
-        const explicitSessions = Object.prototype.hasOwnProperty.call(body, 'max_sessions')
-        const readField = (snake, camel) =>
-          Object.prototype.hasOwnProperty.call(body, snake) ? body[snake] : body[camel]
-        const hasField = (snake, camel) =>
-          Object.prototype.hasOwnProperty.call(body, snake) || Object.prototype.hasOwnProperty.call(body, camel)
-        const rawConcurrency = readField('max_concurrency', 'maxConcurrency')
-        const rawRpm = readField('max_rpm', 'maxRpm')
-        const rawSessions = body.max_sessions
-        const validInteger = (value, min, max) =>
-          typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= min && value <= max
-        const invalidCreate = (value, min, max) => value !== null && !validInteger(value, min, max)
-        if (isCodexVm(vm)) {
-          if (
-            (explicitConcurrency && invalidCreate(rawConcurrency, 1, 256)) ||
-            (explicitRpm && invalidCreate(rawRpm, 0, 1e6)) ||
-            (explicitSessions && invalidCreate(rawSessions, 0, 256))
-          ) {
-            return json(res, 400, {
-              ok: false,
-              error: {
-                code: 'invalid_create_schedule',
-                message: 'OpenAI scheduling values must be finite integers in range',
-              },
-            })
-          }
-          vm.policy.maxConcurrency =
-            explicitConcurrency && rawConcurrency !== null ? rawConcurrency : openaiPolicy.max_concurrency
-          vm.policy.concurrencyOverride = explicitConcurrency && rawConcurrency !== null
-          vm.policy.maxRpm = explicitRpm && rawRpm !== null ? rawRpm : openaiPolicy.max_rpm
-          vm.policy.rpmOverride = explicitRpm && rawRpm !== null
-          vm.policy.maxSessions = explicitSessions && rawSessions !== null ? rawSessions : openaiPolicy.max_sessions
-          vm.policy.sessionsOverride = explicitSessions && rawSessions !== null
-        } else {
-          if (
-            (explicitConcurrency && invalidCreate(rawConcurrency, 0, 256)) ||
-            (explicitRpm && invalidCreate(rawRpm, 0, 1e6)) ||
-            explicitSessions
-          ) {
-            return json(res, 400, {
-              ok: false,
-              error: {
-                code: 'invalid_create_schedule',
-                message: 'Claude scheduling values are invalid or unsupported',
-              },
-            })
-          }
-          vm.policy.maxConcurrency = explicitConcurrency
-            ? rawConcurrency
-            : Number(ctx.routingConfig?.concurrency?.default_max_per_account ?? 2)
-          vm.policy.concurrencyOverride = explicitConcurrency
-          vm.policy.maxRpm = explicitRpm ? rawRpm : Number(ctx.routingConfig?.concurrency?.default_max_rpm ?? 0)
-          vm.policy.rpmOverride = explicitRpm
-        }
-        atomicWriteJson(vmPath, vm, { mode: 0o600 })
-        writeGuestMachineIdFile(cfg.paths.project, id, generated.guest_machine_id)
-        try {
-          seedFreshCliHome(cfg.paths.project, vm)
-        } catch (e) {}
-        let allocated = null
-        let proxyError = null
-        const wantProxy = body.auto_allocate_proxy === true || startNow || !!pickedProxyId
-        // px-local 没有 SOCKS URL，但它是合法出口；不要把它当成"未绑定"。
-        const hasExit = (v) => !!(v?.proxy?.url || isLocalEgressProxy(v?.proxy))
-        if (wantProxy && !hasExit(vm)) {
-          if (pickedProxyId) {
-            const bound = proxyPool.bind(pickedProxyId, id)
-            if (bound.ok) allocated = bound.proxy
-            else proxyError = bound.error || 'proxy_bind_failed'
-          } else {
-            try {
-              allocated = proxyPool.allocateForVm(id, {
-                ownerUserId: vm.owner_user_id || null,
-                role: ident.role,
-              })
-            } catch (e) {}
-          }
-          if (allocated) {
-            bindVmProxy(cfg.paths.project, id, proxyPool.getProxyForVm(id))
-            adoptVmProxyBinding(vm, getVm(cfg.paths.project, id))
-          }
-        }
-        // vm is written again below; carry the exit's zone so that write keeps it.
-        const zoned = await fillTimezoneFromExit(id)
-        if (zoned?.applied) {
-          vm.timezone = zoned.timezone
-          vm.timezone_source = 'proxy_geo'
-          if (vm.fingerprint && typeof vm.fingerprint === 'object') vm.fingerprint.timezone = zoned.timezone
-        }
-        if (body.activate === true) {
-          try {
-            activateVmSlot(id)
-          } catch (e) {}
-        }
-        let startError = null
-        if (startNow && hasExit(vm)) {
-          let boot
-          try {
-            boot = await startSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
-          } catch (e) {
-            boot = { ok: false, error: String(e?.message || e) }
-          }
-          if (!boot.ok) {
-            // Slot JSON is already on disk. 500 here makes the console treat
-            // create as a no-op, so the new row never refetches into the list.
-            patchVmRecord(cfg.paths.project, id, { status: 'error' })
-            markUnschedulable(cfg.paths.project, id, 'runtime_start_failed', {
-              message: String(boot.error || 'runtime start failed').slice(0, 240),
-            })
-            startError = boot.error || 'runtime start failed'
-          } else {
-            patchVmRecord(cfg.paths.project, id, { status: 'running' })
-          }
-        } else if (startNow) {
-          patchVmRecord(cfg.paths.project, id, { status: 'stopped' })
-        }
-        const saved = getVm(cfg.paths.project, id) || vm
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: panel.publicVmBootView(summarizeVm(saved, cfg.paths.project, ctx.routingConfig)),
-            allocated_proxy: panel.publicAllocatedProxy(proxyPool, allocated, {
-              nodeId: saved.node_id || nodeId || null,
-              role: ident.role,
-              nodes: clusterNodesOf(ctx),
-            }),
-            ...(startError ? { start_error: startError } : {}),
-            ...(proxyError ? { proxy_error: proxyError } : {}),
-          }),
-        )
-      }
-      // POST /api/panel/vms/:id/start
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/start$/.test(p)) {
-        const id = p.split('/')[4]
-        const started = await powerOnSlot({
-          projectRoot: cfg.paths.project,
-          id,
-          proxyPool,
-          routing: ctx.routingConfig,
-          fillTimezone: fillTimezoneFromExit,
-          by: 'start',
-        })
-        if (!started.ok) {
-          return json(res, started.status, { ok: false, error: { code: started.code, message: started.error } })
-        }
-        const { vm, bound, boot } = started
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: panel.publicVmBootView(summarizeVm(vm, cfg.paths.project, ctx.routingConfig)),
-            allocated_proxy: panel.publicAllocatedProxy(proxyPool, bound, {
-              nodeId: vm.node_id || null,
-              role: panelIdentity(req).role,
-              nodes: clusterNodesOf(ctx),
-            }),
-            runtime: panel.publicRuntimeView(vm.runtime) || GATEWAY_CAPABILITIES.runtime,
-            kernel: GATEWAY_CAPABILITIES.kernel,
-            boot: panel.publicSlotBoot(boot),
-          }),
-        )
-      }
-      // GET /api/panel/vms/:id/diagnose — read-only check of every service the slot hop needs
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/diagnose$/.test(p)) {
-        const vm = getVm(cfg.paths.project, p.split('/')[4])
-        if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
-        const diagnosis = await diagnoseSlotServices(vm, {
-          projectRoot: cfg.paths.project,
-          routing: ctx.routingConfig,
-          watchdog: ctx.kernelWatchdog,
-          internal: panelIdentity(req).role === 'admin',
-        })
-        return json(res, 200, panel.ok(diagnosis))
-      }
-      // POST /api/panel/vms/:id/recover — power cycle (stop → start) plus a fresh diagnosis
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/recover$/.test(p)) {
-        const recovered = await recoverSlot({
-          projectRoot: cfg.paths.project,
-          id: p.split('/')[4],
-          proxyPool,
-          routing: ctx.routingConfig,
-          fillTimezone: fillTimezoneFromExit,
-          watchdog: ctx.kernelWatchdog,
-          internal: panelIdentity(req).role === 'admin',
-        })
-        if (!recovered.ok) {
-          return json(res, recovered.status, { ok: false, error: { code: recovered.code, message: recovered.error } })
-        }
-        return json(res, 200, panel.ok(recovered.report))
-      }
-      // POST /api/panel/vms/:id/stop
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/stop$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        const halt = await stopSlot(vm)
-        if (!halt.ok) return json(res, 500, { ok: false, error: { message: halt.error || 'runtime stop failed' } })
-        vm.status = 'stopped'
-        migrateScheduleRecord(vm)
-        applyScheduleOff(vm, true, { reason: 'stopped' })
-        atomicWriteJson(vmPath, vm, { mode: 0o600 })
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: summarizeVm(vm, cfg.paths.project, ctx.routingConfig),
-            runtime: panel.publicRuntimeView(vm.runtime) || GATEWAY_CAPABILITIES.runtime,
-            kernel: GATEWAY_CAPABILITIES.kernel,
-            halt: panel.publicSlotBoot(halt),
-          }),
-        )
-      }
-
-      // POST /api/panel/vms/import
-      // workflow: create VM → allocate proxy → start guest/CLI → exchange in guest → import
-      if (req.method === 'POST' && p === '/api/panel/vms/import') {
-        const body = await readBody(req, 1024 * 1024)
-        const sessionKey = body.sessionKey || body.session_key || body.sid || ''
-        const accessToken = body.access_token || body.token || ''
-        const apiKeyRaw = body.api_key || body.apiKey || ''
-        const requestedType = body.type || body.credential_mode || body.scope || ''
-        const vmId = body.vm_id || body.id || null
-        const exportDoc = body.sub2api || body.account || body
-        try {
-          if (!vmId) {
-            return json(res, 400, { ok: false, error: { message: 'vm_id required (先创建虚拟机)' } })
-          }
-          const vmPath = path.join(cfg.paths.project, 'vms', `${vmId}.json`)
-          if (!fs.existsSync(vmPath) || userMissesVmId(req, cfg.paths.project, vmId)) {
-            return json(res, 404, { ok: false, error: { message: 'vm not found, 请先创建种子虚拟机' } })
-          }
-          const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-          existing.id = existing.id || vmId
-          if (isCodexVm(existing)) {
-            const parsed = parseCodexImportPayload(body)
-            if (!parsed.ok) {
-              return json(res, 400, {
-                ok: false,
-                error: { code: parsed.error || 'invalid_codex_credential', message: parsed.message },
-              })
-            }
-            const account = { ...parsed.account }
-            if (!account.access_token && account.refresh_token) {
-              const slotProxy = requireSlotProxy(existing, body)
-              if (!slotProxy.ok) {
-                return json(res, slotProxy.status, {
-                  ok: false,
-                  error: { code: 'proxy_required', message: slotProxy.message },
-                })
-              }
-              const tok = await refreshCodexAccessToken({
-                refreshToken: account.refresh_token,
-                proxyUrl: slotProxy.proxyUrl,
-              })
-              if (!tok.ok) {
-                return json(res, 502, {
-                  ok: false,
-                  error: {
-                    code: tok.error || 'refresh_failed',
-                    message: 'Refresh Token 换票失败，请检查 RT 或改用 OAuth / 账号文件。',
-                  },
-                })
-              }
-              account.access_token = tok.access_token
-              account.refresh_token = tok.refresh_token || account.refresh_token
-              account.id_token = tok.id_token || account.id_token
-              account.expires_at = tok.expires_at || account.expires_at
-            }
-            const committed = await commitImportedCodexVm({
-              cfg,
-              vmPath,
-              existing,
-              account,
-              catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
-              routingConfig: ctx.routingConfig,
-            })
-            return json(res, 200, panel.ok(committed))
-          }
-
-          const slotProxy = requireSlotProxy(existing, body)
-          const wantsApiKey =
-            looksLikeConsoleApiKey(apiKeyRaw || sessionKey || accessToken) ||
-            String(requestedType).toLowerCase() === 'apikey' ||
-            String(requestedType).toLowerCase() === 'console'
-          if ((sessionKey || wantsApiKey) && !slotProxy.ok) {
-            return json(res, slotProxy.status, { ok: false, error: { message: slotProxy.message } })
-          }
-          const proxyUrl = slotProxy.proxyUrl
-          let oauth = null
-          let oauthFromVm = false
-          if (wantsApiKey) {
-            const apiKey = String(apiKeyRaw || sessionKey || accessToken).trim()
-            if (!looksLikeConsoleApiKey(apiKey)) {
-              return json(res, 400, { ok: false, error: { message: '需要 sk-ant-api03-… Console API Key' } })
-            }
-            oauth = {
-              type: 'apikey',
-              mode: 'apikey',
-              api_key: apiKey,
-              access_token: apiKey,
-              base_url: body.base_url || body.baseUrl || 'https://api.anthropic.com',
-              source: 'console-api-key',
-              auth_scheme: body.auth_scheme || body.authScheme,
-            }
-          } else if (sessionKey) {
-            const inference =
-              String(requestedType).toLowerCase() === 'inference' ||
-              String(requestedType).toLowerCase() === 'setup-token' ||
-              String(requestedType).toLowerCase() === 'setup_token' ||
-              String(body.scope || '').toLowerCase() === 'inference'
-            oauth = await sessionKeyToOAuth(String(sessionKey).trim(), {
-              proxyUrl,
-              scope: inference ? 'inference' : 'full',
-              exec: slotExec(cfg.paths.project, existing),
-              projectRoot: cfg.paths.project,
-              routing: ctx.routingConfig,
-            })
-            oauthFromVm = true
-            if (inference) {
-              oauth.type = 'setup-token'
-              oauth.mode = 'setup-token'
-            }
-          } else if (isSub2apiAccountExport(exportDoc)) {
-            oauth = sub2apiAccountToOauth(exportDoc, existing)
-          } else if (accessToken) {
-            const inference =
-              String(requestedType).toLowerCase() === 'inference' ||
-              String(requestedType).toLowerCase() === 'setup-token' ||
-              String(requestedType).toLowerCase() === 'setup_token' ||
-              String(body.scope || '').toLowerCase() === 'inference'
-            oauth = {
-              access_token: String(accessToken).trim(),
-              refresh_token: body.refresh_token || null,
-              expires_at: body.expires_at || null,
-              email: body.email || null,
-              account_uuid: body.account_uuid || null,
-              org_uuid: body.org_uuid || null,
-              scope: body.scope || (inference ? 'user:inference' : null),
-              source: body.source || (inference ? 'claude-setup-token' : 'access-token'),
-            }
-            if (looksLikeOfficialSetupToken(accessToken) || (inference && !String(body.refresh_token || '').trim())) {
-              oauth.type = 'official-setup-token'
-              oauth.mode = 'official-setup-token'
-              oauth.refresh_token = ''
-              oauth.scope = 'user:inference'
-              oauth.source = body.source || 'claude-setup-token'
-              if (!oauth.expires_at) oauth.expires_at = Date.now() + 365 * 24 * 60 * 60 * 1000
-            } else if (inference) {
-              oauth.type = 'setup-token'
-              oauth.mode = 'setup-token'
-            }
-          } else {
-            return json(res, 400, { ok: false, error: { message: 'sessionKey or access_token required' } })
-          }
-          if (body.auth_scheme || body.authScheme) oauth.auth_scheme = body.auth_scheme || body.authScheme
-          if (oauth.access_token && !wantsApiKey && !oauthFromVm) {
-            oauth = await enrichOauthIdentity(oauth, { proxyUrl })
-          }
-          const committed = await commitImportedOauth({
-            vmId,
-            vmPath,
-            existing,
-            oauth,
-            source: oauth.source || 'sessionKey-cookie-auth',
-            name: body.name,
-          })
-          if (!committed.ok) {
-            return json(res, committed.status || 502, { ok: false, error: committed.error })
-          }
-          return json(
-            res,
-            200,
-            panel.ok({
-              vm: summarizeVm(existing, cfg.paths.project, ctx.routingConfig),
-              proxy_used: !!proxyUrl,
-              oauth_email: existing.claude.email,
-              has_refresh: existing.claude.has_refresh,
-              official_cc_bootstrap: committed.official_cc_bootstrap || null,
-              ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
-            }),
-          )
-        } catch (e) {
-          const fail = panelImportErrorPayload(e)
-          return json(res, fail.status, { ok: false, error: fail.error })
-        }
-      }
-
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/oauth\/generate-auth-url$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { message: 'vm not found, 请先创建种子虚拟机' } })
-        }
-        const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        existing.id = existing.id || id
-        const body = await readBody(req, 8 * 1024)
-        const slotProxy = requireSlotProxy(existing, body)
-        if (!slotProxy.ok) {
-          return json(res, slotProxy.status, {
-            ok: false,
-            error: { code: 'proxy_required', message: slotProxy.message },
-          })
-        }
-        try {
-          if (isCodexVm(existing)) {
-            const generated = generateCodexAuthUrl({
-              vmId: id,
-              proxyUrl: slotProxy.proxyUrl,
-              installationId: existing.device_id || existing.codex?.installation_id,
-            })
-            const px = existing.proxy || {}
-            return json(
-              res,
-              200,
-              panel.ok({
-                ...generated,
-                proxy_hint: slotProxyHint(px, proxyPool?.labelOf(px.id)),
-              }),
-            )
-          }
-          const flavor = body.flavor || body.type || 'cai'
-          if (normalizeOauthFlavor(flavor) === 'claude_code') {
-            const generated = await startClaudeAuthLoginSession({
-              vm: existing,
-              projectRoot: cfg.paths.project,
-              routing: ctx.routingConfig,
-              force: body.force === true || body.force === 'true' || body.force === 1,
-            })
-            const px = existing.proxy || {}
-            return json(
-              res,
-              200,
-              panel.ok({
-                ...generated,
-                proxy_hint: slotProxyHint(px, proxyPool?.labelOf(px.id)),
-              }),
-            )
-          }
-          const generated = generateAuthUrl({
-            vmId: id,
-            proxyUrl: slotProxy.proxyUrl,
-            flavor,
-          })
-          const px = existing.proxy || {}
-          return json(
-            res,
-            200,
-            panel.ok({
-              ...generated,
-              proxy_hint: slotProxyHint(px, proxyPool?.labelOf(px.id)),
-            }),
-          )
-        } catch (e) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: e.code || 'generate_auth_url_failed', message: String(e.message || e).slice(0, 240) },
-          })
-        }
-      }
-
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/oauth\/setup-token-session$/.test(p)) {
-        const id = p.split('/')[4]
-        const session = readSetupTokenSession(cfg.paths.project, id)
-        if (!session?.auth_url || session.expired || !session.alive) {
-          return json(res, 200, panel.ok({ active: false, vm_id: id }))
-        }
-        return json(
-          res,
-          200,
-          panel.ok({
-            active: true,
-            session_id: session.session_id,
-            auth_url: session.auth_url,
-            expires_at: session.expires_at,
-            vm_id: id,
-            flavor: SETUP_TOKEN_FLAVOR,
-            source: session.source,
-            status: session.status,
-            error: session.error || null,
-            retryable: true,
-          }),
-        )
-      }
-
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/oauth\/exchange-code$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { message: 'vm not found, 请先创建种子虚拟机' } })
-        }
-        const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        existing.id = existing.id || id
-        const body = await readBody(req, 16 * 1024)
-        const slotProxy = requireSlotProxy(existing, body)
-        if (!slotProxy.ok) {
-          return json(res, slotProxy.status, {
-            ok: false,
-            error: { code: 'proxy_required', message: slotProxy.message },
-          })
-        }
-        try {
-          if (isCodexVm(existing)) {
-            const oauth = await exchangeCodexAuthCode({
-              sessionId: body.session_id || body.sessionId,
-              code: body.code || body.auth_code || body.callback || body.callback_url,
-              proxyUrl: slotProxy.proxyUrl,
-              vmId: id,
-            })
-            const committed = await commitImportedCodexVm({
-              cfg,
-              vmPath,
-              existing,
-              catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
-              routingConfig: ctx.routingConfig,
-              account: {
-                access_token: oauth.access_token,
-                refresh_token: oauth.refresh_token,
-                id_token: oauth.id_token,
-                expires_at: oauth.expires_at,
-              },
-            })
-            return json(res, 200, panel.ok({ ...committed, source: oauth.source, flavor: 'codex' }))
-          }
-          const code = body.code || body.auth_code || ''
-          const flavor = body.flavor || body.type || ''
-          const loginSession = readAuthLoginSession(cfg.paths.project, id)
-          const sessionKey = String(body.session_id || body.sessionId || '')
-          const officialLogin =
-            normalizeOauthFlavor(flavor) === 'claude_code' ||
-            (loginSession?.alive &&
-              !loginSession.expired &&
-              loginSession.session_id &&
-              loginSession.session_id === sessionKey)
-          let oauth
-          let oauthFromVm = false
-          if (looksLikeOfficialSetupToken(code)) {
-            oauth = await completeClaudeSetupToken({
-              projectRoot: cfg.paths.project,
-              vmId: id,
-              sessionId: sessionKey,
-              code,
-            })
-          } else if (officialLogin) {
-            oauth = await completeClaudeAuthLogin({
-              projectRoot: cfg.paths.project,
-              vmId: id,
-              sessionId: sessionKey,
-              code,
-            })
-          } else {
-            oauthFromVm = true
-            oauth = await exchangeAuthCode({
-              sessionId: sessionKey,
-              code,
-              vmId: id,
-              exec: slotExec(cfg.paths.project, existing),
-              projectRoot: cfg.paths.project,
-              routing: ctx.routingConfig,
-            })
-          }
-          if (looksLikeOfficialSetupToken(code) || oauth.flavor === SETUP_TOKEN_FLAVOR) {
-            oauth.type = 'official-setup-token'
-            oauth.mode = 'official-setup-token'
-          } else if (oauth.flavor === AUTH_LOGIN_FLAVOR || oauth.source === AUTH_LOGIN_SOURCE) {
-            oauth.type = 'oauth'
-            oauth.mode = 'oauth'
-          } else if (
-            normalizeOauthFlavor(flavor) === 'setup_token' ||
-            oauth.flavor === 'setup_token' ||
-            oauth.flavor === 'setup-token'
-          ) {
-            oauth.type = 'setup-token'
-            oauth.mode = 'setup-token'
-          }
-          if (body.auth_scheme || body.authScheme) oauth.auth_scheme = body.auth_scheme || body.authScheme
-          if (oauth.access_token && !oauthFromVm) {
-            oauth = await enrichOauthIdentity(oauth, { proxyUrl: slotProxy.proxyUrl })
-          }
-          const committed = await commitImportedOauth({
-            vmId: id,
-            vmPath,
-            existing,
-            oauth,
-            source: oauth.source || 'oauth-auth-url',
-            name: body.name,
-          })
-          if (!committed.ok) {
-            return json(res, committed.status || 502, { ok: false, error: committed.error })
-          }
-          return json(
-            res,
-            200,
-            panel.ok({
-              vm: summarizeVm(existing, cfg.paths.project, ctx.routingConfig),
-              proxy_used: !!slotProxy.proxyUrl,
-              oauth_email: existing.claude?.email,
-              has_refresh: existing.claude?.has_refresh,
-              official_cc_bootstrap: committed.official_cc_bootstrap || null,
-              ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
-              source: oauth.source || 'oauth-auth-url',
-              flavor: oauth.flavor || null,
-            }),
-          )
-        } catch (e) {
-          const status =
-            e.code === 'session_expired' || e.code === 'session_vm_mismatch' || e.code === 'code_required' ? 400 : 502
-          return json(res, status, {
-            ok: false,
-            error: { code: e.code || 'exchange_code_failed', message: String(e.message || e).slice(0, 240) },
-          })
-        }
-      }
-
-      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/oauth\/credential$/.test(p)) {
-        const id = p.split('/')[4]
-        const vm = getVm(cfg.paths.project, id)
-        if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'VM not found' } })
-        const homeDir = path.join(cfg.paths.project, 'vms', id, 'cli-home')
-        const cred = readWorkerCredentialFile(homeDir)
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm_id: id,
-            has_token: !!(cred?.access_token || cred?.refresh_token || cred?.api_key),
-            source: cred ? 'slot-credentials.json' : null,
-            export: oauthToSub2apiExport(
-              {
-                ...vm,
-                email: vm.email || vm.claude?.email,
-                account_uuid: vm.account_uuid || vm.claude?.account_uuid,
-                org_uuid: vm.org_uuid || vm.claude?.org_uuid,
-                max_concurrency: vm.max_concurrency ?? vm.policy?.maxConcurrency,
-              },
-              cred || {},
-            ),
-          }),
-        )
-      }
-      if (req.method === 'PUT' && /^\/api\/panel\/vms\/[^/]+\/oauth\/credential$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'VM not found' } })
-        }
-        const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        existing.id = existing.id || id
-        const body = await readBody(req, 256 * 1024)
-        const oauth = parseCredentialEdit(body)
-        if (!oauth?.access_token && !oauth?.refresh_token && !oauth?.api_key) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: 'credential_required', message: 'sub2api JSON 需要 access_token、refresh_token 或 api_key' },
-          })
-        }
-        const committed = await commitImportedOauth({
-          vmId: id,
-          vmPath,
-          existing,
-          oauth,
-          source: oauth.source || 'sub2api-account-export',
-          skipOfficialCc: true,
-        })
-        if (!committed.ok) {
-          return json(res, committed.status || 502, { ok: false, error: committed.error })
-        }
-        try {
-          invalidateLiveCredentialCache()
-        } catch {}
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: summarizeVm(existing, cfg.paths.project, ctx.routingConfig),
-            oauth_email: existing.claude?.email || null,
-            has_refresh: existing.claude?.has_refresh,
-            official_cc_bootstrap: committed.official_cc_bootstrap || null,
-            ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
-          }),
-        )
-      }
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/oauth\/to-setup-token$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'VM not found' } })
-        }
-        const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        existing.id = existing.id || id
-        if (isCodexVm(existing)) {
-          return json(res, 409, {
-            ok: false,
-            error: {
-              code: 'credential_kind_mismatch',
-              message: 'Codex 槽不能转为 Claude Setup Token',
-            },
-          })
-        }
-        const homeDir = path.join(cfg.paths.project, 'vms', id, 'cli-home')
-        const cred = readWorkerCredentialFile(homeDir)
-        if (isApiKeyMode(existing.claude?.mode) || isApiKeyMode(cred?.type || cred?.mode)) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: 'credential_kind_mismatch', message: 'Console API Key 不能转为 Setup Token' },
-          })
-        }
-        if (isOfficialSetupTokenMode(existing.claude?.mode) || isOfficialSetupTokenMode(cred?.type || cred?.mode)) {
-          return json(res, 400, {
-            ok: false,
-            error: {
-              code: 'credential_kind_mismatch',
-              message: '官方 Setup Token 只有 inference，不能转为完整 Setup Token',
-            },
-          })
-        }
-        if (isSetupTokenMode(existing.claude?.mode) || isSetupTokenMode(cred?.type || cred?.mode)) {
-          return json(
-            res,
-            200,
-            panel.ok({
-              vm: summarizeVm(existing, cfg.paths.project, ctx.routingConfig),
-              oauth_email: existing.claude?.email || null,
-              has_refresh: existing.claude?.has_refresh,
-              official_cc_bootstrap: { scheduled: false, reason: 'already_setup_token' },
-            }),
-          )
-        }
-        let oauth
-        try {
-          oauth = liveOauthToSetupToken(cred || {})
-        } catch (e) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: e.code || 'credential_required', message: String(e.message || e).slice(0, 240) },
-          })
-        }
-        const committed = await commitImportedOauth({
-          vmId: id,
-          vmPath,
-          existing,
-          oauth,
-          source: 'oauth-to-setup-token',
-          skipOfficialCc: true,
-        })
-        if (!committed.ok) {
-          return json(res, committed.status || 502, { ok: false, error: committed.error })
-        }
-        try {
-          invalidateLiveCredentialCache()
-        } catch {}
-        return json(
-          res,
-          200,
-          panel.ok({
-            vm: summarizeVm(existing, cfg.paths.project, ctx.routingConfig),
-            oauth_email: existing.claude?.email || null,
-            has_refresh: existing.claude?.has_refresh,
-            official_cc_bootstrap: committed.official_cc_bootstrap || null,
-            ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
-          }),
-        )
-      }
-
-      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/oauth\/refresh$/.test(p)) {
-        const id = p.split('/')[4]
-        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
-        if (!fs.existsSync(vmPath)) {
-          return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'VM not found' } })
-        }
-        const vm = getVm(cfg.paths.project, id)
-        if (isCodexVm(vm)) {
-          const first = readCodexAccounts(cfg.paths.project, id)[0] || {}
-          const refreshToken = String(first.refresh_token || '').trim()
-          if (!refreshToken) {
-            return json(res, 400, {
-              ok: false,
-              error: { code: 'credential_mode_unsupported', message: 'GPT 槽没有 refresh_token，请重新导入 OAuth' },
-            })
-          }
-          const tok = await refreshCodexAccessToken({
-            refreshToken,
-            proxyUrl: hostProxyUrlForVm(vm),
-          })
-          if (!tok.ok) {
-            return json(res, 502, {
-              ok: false,
-              error: { code: tok.error || 'refresh_failed', message: 'GPT OAuth 刷新失败，请重新导入' },
-            })
-          }
-          upsertCodexAccount(cfg.paths.project, id, {
-            access_token: tok.access_token,
-            refresh_token: tok.refresh_token,
-            id_token: tok.id_token || first.id_token,
-            expires_at: tok.expires_at || first.expires_at,
-          })
-          return json(res, 200, panel.ok({ ok: true, refreshed: true, platform: 'openai' }))
-        }
-        if (isApiKeyMode(vm?.claude?.mode)) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: 'credential_mode_unsupported', message: 'Console API Key 不能刷新' },
-          })
-        }
-        if (
-          isOfficialSetupTokenMode(vm?.claude?.mode) ||
-          (isSetupTokenMode(vm?.claude?.mode) && !vm?.claude?.has_refresh)
-        ) {
-          return json(res, 400, {
-            ok: false,
-            error: { code: 'credential_mode_unsupported', message: '官方 Setup Token（无 refresh）不能刷新' },
-          })
-        }
-        const data = await refreshWorkerCredentialForVm({
-          vmId: id,
-          vmPath,
-          homeDir: path.join(cfg.paths.project, 'vms', id, 'cli-home'),
-          vm,
-          force: true,
-        })
-        if (!data.ok) return json(res, 502, { ok: false, error: data.error, data })
-        return json(res, 200, panel.ok(data))
-      }
       if (req.method === 'GET' && p === '/api/panel/oauth') {
         return json(res, 200, panel.ok(await oauthStatusWithWorker()))
       }
@@ -5054,6 +5360,12 @@ export function createPanelHandler(ctx) {
         const hop = body?.hop ?? true
         const force = body?.force ?? true
         const result = await panel.buildProbeAll({ cfg, accountQuota, hop, force })
+        // Gateway Worker 账号没有 VM 槽，额度由 Worker 读取上游 /wham/usage
+        const gatewayItems = await gatewayWorkerService.probeAccountQuotas().catch(() => [])
+        if (gatewayItems.length && result?.data) {
+          result.data.items = [...(result.data.items || []), ...gatewayItems]
+          result.data.total = result.data.items.length
+        }
         return json(res, 200, result)
       }
       if (req.method === 'GET' && p === '/api/panel/health-probe') {
@@ -5102,7 +5414,7 @@ export function createPanelHandler(ctx) {
       }
       // GET /api/panel/usage
       if (req.method === 'GET' && p === '/api/panel/usage') {
-        return json(res, 200, panel.buildUsage({ accountQuota, cfg, requestLog }))
+        return json(res, 200, await panel.buildUsage({ accountQuota, cfg, requestLog }))
       }
       // GET /api/panel/models
       if (req.method === 'GET' && p === '/api/panel/models') {
@@ -5267,6 +5579,7 @@ export function createPanelHandler(ctx) {
           projectRoot: cfg.paths.project,
           vmId: body?.vm_id || body?.vmId || url.searchParams.get('vm_id') || '',
           rotate: true,
+          gatewayWorker: gatewayWorkerService,
           catalogClientVersion:
             body?.catalog_client_version ||
             body?.catalogClientVersion ||
@@ -5317,7 +5630,13 @@ export function createPanelHandler(ctx) {
           ...ctx.routingConfig,
           compatibility: canonicalPersonaCompat(ctx.routingConfig?.compatibility),
         }
-        return json(res, 200, panel.buildRouting({ routingConfig, stickyRouter }))
+        const response = panel.buildRouting({ routingConfig, stickyRouter })
+        const configRevision = currentConfigRevision()
+        return json(res, 200, {
+          ...response,
+          config_revision: configRevision,
+          data: response.data ? { ...response.data, config_revision: configRevision } : response.data,
+        })
       }
       // GET /api/panel/outbound-profile — read-only outbound reference for the global preset
       if (req.method === 'GET' && p === '/api/panel/outbound-profile') {
@@ -5376,6 +5695,31 @@ export function createPanelHandler(ctx) {
             },
           })
         }
+        if (Object.prototype.hasOwnProperty.call(body || {}, 'config_revision')) {
+          const expectedRevision = numericRevision(body.config_revision)
+          const currentRevision = currentConfigRevision()
+          if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+            return json(res, 400, {
+              ok: false,
+              error: {
+                type: 'invalid_request_error',
+                code: 'invalid_config_revision',
+                message: 'config_revision must be a positive integer',
+              },
+            })
+          }
+          if (expectedRevision !== currentRevision) {
+            return json(res, 409, {
+              ok: false,
+              error: {
+                type: 'conflict',
+                code: 'config_revision_conflict',
+                message: `Configuration revision ${expectedRevision} is stale; current revision is ${currentRevision}`,
+                current_revision: currentRevision,
+              },
+            })
+          }
+        }
         const engineRuntime = await prepareInheritedInferenceEngine(body)
         if (!engineRuntime.ok) {
           return json(res, 503, {
@@ -5390,8 +5734,31 @@ export function createPanelHandler(ctx) {
         const { applied: appliedDuringSwitch, ...publicEngineRuntime } = engineRuntime
         let applied
         try {
-          applied = appliedDuringSwitch ?? (await persistRoutingPatch(body))
+          applied =
+            appliedDuringSwitch ?? (await persistRoutingPatch(body, { expectedRevision: body?.config_revision }))
         } catch (error) {
+          if (error?.code === 'config_revision_conflict') {
+            restoreRoutingRuntime(previousRoutingConfig)
+            return json(res, 409, {
+              ok: false,
+              error: {
+                type: 'conflict',
+                code: error.code,
+                message: error.message,
+                current_revision: error.current_revision ?? currentConfigRevision(),
+              },
+            })
+          }
+          if (error instanceof TypeError || error instanceof RangeError) {
+            return json(res, 400, {
+              ok: false,
+              error: {
+                type: 'invalid_request_error',
+                code: error.code || 'invalid_request',
+                message: error.message,
+              },
+            })
+          }
           restoreRoutingRuntime(previousRoutingConfig)
           return json(res, 503, {
             ok: false,
@@ -5402,6 +5769,7 @@ export function createPanelHandler(ctx) {
           res,
           200,
           panel.ok({
+            config_revision: applied.config_revision ?? currentConfigRevision(),
             ...publicRoutingNotify(ctx.routingConfig),
             applied_concurrency: applied.concurrency,
             applied_rpm: applied.rpm,
@@ -5505,7 +5873,7 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok(requestLog.protocolEntryStats()))
       }
       if (req.method === 'GET' && p === '/api/panel/jev-usage') {
-        if (panelIdentity(req).role !== 'admin')
+        if (panelIdentity(req).role !== 'super_admin')
           return json(res, 403, { ok: false, error: { code: 'forbidden', message: '仅管理员可查看审核用量' } })
         try {
           const repo = new JevUsageRepo()
@@ -5573,12 +5941,7 @@ export function createPanelHandler(ctx) {
         return json(
           res,
           200,
-          panel.ok(
-            ctx.notifyMonitor?.getStatus?.() || {
-              config: publicNotifyConfig(ctx.routingConfig.notify),
-              snapshot: null,
-            },
-          ),
+          panel.ok(notificationStatus(ctx.notifyMonitor, publicNotifyConfig(ctx.routingConfig.notify))),
         )
       }
       if (req.method === 'POST' && p === '/api/panel/notify/check') {
@@ -5609,11 +5972,7 @@ export function createPanelHandler(ctx) {
             },
           })
         }
-        const trial = mergeNotifyConfig(ctx.routingConfig.notify, {
-          email: body.email,
-          telegram: body.telegram,
-          wecom: body.wecom,
-        })
+        const trial = notificationTestConfig(ctx.routingConfig.notify, body, mergeNotifyConfig)
         try {
           const result = await sendNotifyTest(trial, channel, {
             baseUrl: cfg.base_url,
@@ -5648,8 +6007,14 @@ export function createPanelHandler(ctx) {
           ownerUserId: ident.role === 'user' ? req.panelUserId : undefined,
           vms: listVms(cfg.paths.project, ctx.routingConfig),
           nodes: clusterNodesOf(ctx),
+          vendorId: ident.role === 'super_admin' ? url.searchParams.get('vendor_id') || '' : '',
+          platform: ident.role === 'super_admin' ? url.searchParams.get('platform') || '' : '',
         })
-        if (ident.role !== 'admin') delete snap.config.dns_primary
+        if (ident.role === 'super_admin')
+          snap.vendors = getDb()
+            .prepare('SELECT id, name, tier FROM vendors WHERE deleted_at IS NULL ORDER BY tier, name')
+            .all()
+        if (ident.role !== 'super_admin') delete snap.config.dns_primary
         return json(res, 200, panel.ok(snap))
       }
       if (req.method === 'POST' && p === '/api/panel/proxies/local') {
@@ -5663,18 +6028,27 @@ export function createPanelHandler(ctx) {
         const body = await readBody(req, 2 * 1024 * 1024)
         const text = body.text || body.lines || (Array.isArray(body) ? body.join('\n') : '')
         const ident = panelIdentity(req)
-        const bindVmId = String(body.bind_vm_id || body.vm_id || '').trim()
-        if (bindVmId && userMissesVmId(req, cfg.paths.project, bindVmId)) {
-          return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+        let result
+        try {
+          result = proxyPool.importLines(text, {
+            fields: body.proxies || body.entries || null,
+            host: body.host,
+            expires_at: body.expires_at,
+            fallback_mode: body.fallback_mode || 'none',
+            backup_proxy_id: body.backup_proxy_id,
+            label: body.label ?? body.name,
+            port: body.port,
+            username: body.username ?? body.user,
+            password: body.password ?? body.pass,
+            ownerUserId: ident.role === 'user' ? req.panelUserId : null,
+          })
+        } catch (e) {
+          return json(res, 400, {
+            ok: false,
+            error: { code: e.message || 'invalid_proxy', message: '代理配置无效，请检查有效期或备用代理' },
+          })
         }
-        const result = proxyPool.importLines(text, {
-          fields: body.proxies || body.entries || null,
-          host: body.host,
-          port: body.port,
-          username: body.username ?? body.user,
-          password: body.password ?? body.pass,
-          ownerUserId: ident.role === 'user' ? req.panelUserId : null,
-        })
+        const bindVmId = String(body.bind_vm_id || body.vm_id || '').trim()
         let bound = null
         let worker = null
         let timezone = null
@@ -5713,7 +6087,7 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'GET' && p === '/api/panel/proxies/config') {
         const config = proxyPool.snapshot().config
-        if (panelIdentity(req).role !== 'admin') delete config.dns_primary
+        if (panelIdentity(req).role !== 'super_admin') delete config.dns_primary
         return json(res, 200, panel.ok(config))
       }
       if (req.method === 'PUT' && p === '/api/panel/proxies/config') {
@@ -5759,7 +6133,21 @@ export function createPanelHandler(ctx) {
         // Forward only the keys the caller actually sent — update() reads
         // presence, not value, to tell "leave alone" from "clear".
         const patch = {}
-        for (const key of ['host', 'port', 'username', 'password', 'label', 'domain_forward']) {
+        for (const key of [
+          'host',
+          'port',
+          'username',
+          'password',
+          'label',
+          'domain_forward',
+          'enabled',
+          'expires_at',
+          'fallback_mode',
+          'backup_proxy_id',
+          'max_websocket_connections',
+          'request_location_mode',
+          'location',
+        ]) {
           if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key]
         }
         const result = proxyPool.update(id, patch)
@@ -5785,7 +6173,8 @@ export function createPanelHandler(ctx) {
         }
         // A label is display-only; reloading every bound worker for it would
         // pull live slots out of scheduling for nothing.
-        if (!result.connection_changed) return json(res, 200, panel.ok({ proxy: result.proxy, workers: [], egress }))
+        if (!result.connection_changed && !result.metadata_changed)
+          return json(res, 200, panel.ok({ proxy: result.proxy, workers: [], egress }))
         // The pool store is only one of three places the credentials live
         // (pool -> vms/<id>.json -> worker.json). Without this the edit looks
         // like it worked while every bound slot keeps dialing the old proxy.
@@ -5793,7 +6182,7 @@ export function createPanelHandler(ctx) {
         for (const vmId of result.proxy.bound_vm_ids || []) {
           bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyByIdWithAuth(id))
           const vm = getVm(cfg.paths.project, vmId)
-          if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
+          if (result.connection_changed && vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
             setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: 'proxy_edit_worker_reload' })
             const reloaded = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
               routing: ctx.routingConfig,
@@ -5825,22 +6214,52 @@ export function createPanelHandler(ctx) {
         // a caller to render into the DOM piecemeal.
         return json(res, 200, { ok: true, id: full.id, uri: full.url })
       }
+      if (req.method === 'POST' && /^\/api\/panel\/proxies\/[^/]+\/quality-check$/.test(p)) {
+        const controller = new AbortController()
+        const abort = () => {
+          if (!res.writableEnded) controller.abort()
+        }
+        res.on('close', abort)
+        try {
+          const result = await proxyPool.qualityById(p.split('/')[4], { signal: controller.signal })
+          if (!result.ok)
+            return json(res, result.error === 'proxy_not_found' ? 404 : 409, {
+              ok: false,
+              error: {
+                code: result.error,
+                message:
+                  result.error === 'quality_check_busy'
+                    ? '检测进行中，请稍后重试'
+                    : '代理配置已改变或当前出口不可用，请刷新后重试',
+              },
+            })
+          return json(res, 200, panel.ok(result))
+        } finally {
+          res.off('close', abort)
+        }
+      }
       if (req.method === 'POST' && /^\/api\/panel\/proxies\/[^/]+\/probe$/.test(p)) {
         const id = p.split('/')[4]
-        const result = await proxyPool.probeById(id)
+        const result = await proxyPool.probeById(id, { connectivity: true })
         if (result.probe?.scope === 'policy') {
           return json(res, 409, {
             ok: false,
             error: {
               code: result.probe.error,
-              message: 'IPv6 已关闭，请在设置 → SOCKS5 开启 IPv6 代理出口',
+              message:
+                result.probe.error === 'proxy_expired'
+                  ? '代理已到期'
+                  : 'IPv6 已关闭，请在设置 → SOCKS5 开启 IPv6 代理出口',
             },
           })
         }
         if (!result.ok)
-          return json(res, 404, {
+          return json(res, result.error === 'proxy_not_found' ? 404 : 409, {
             ok: false,
-            error: { type: 'not_found_error', code: result.error, message: result.error },
+            error: {
+              code: result.error,
+              message: result.error === 'proxy_changed_during_check' ? '代理配置已修改，请重新测试' : '代理不存在',
+            },
           })
         return json(res, 200, panel.ok(result))
       }
