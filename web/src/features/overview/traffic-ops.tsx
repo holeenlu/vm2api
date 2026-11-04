@@ -1,6 +1,8 @@
 import type { OpsModelRow, OpsWindow } from '@/types/panel-overview'
-import { fmtMs, fmtNum, fmtRate } from '@/lib/format'
+import { useTranslation } from 'react-i18next'
+import { fmtNum, fmtRate } from '@/lib/format'
 import { cacheHitPct, fmtHitPct } from '@/lib/vm-usage'
+import { formatMetricDuration as fmtMs } from '@/features/logs/display-time'
 import { PanelCard, StatCell } from '@/features/overview/panel-card'
 
 type OpsTone = 'ok' | 'warn' | 'bad' | 'neutral'
@@ -113,6 +115,8 @@ export function TrafficOps({
   ops: OpsWindow | undefined
   showModels?: boolean
 }) {
+  const { t: translate } = useTranslation('overview')
+
   const o = ops && !ops.error ? ops : {}
   const sla = o.sla != null ? o.sla * 100 : null
   const err = o.error_rate != null ? o.error_rate * 100 : null
@@ -136,7 +140,7 @@ export function TrafficOps({
   if (ops?.error) {
     return (
       <p className='rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground'>
-        统计加载失败：{ops.error}
+        {translate('overview:statsError', { error: ops.error })}
       </p>
     )
   }
@@ -148,64 +152,94 @@ export function TrafficOps({
     tone?: OpsTone
   }[] = [
     {
-      label: '成功率',
+      label: translate('overview:successRate'),
       value: sla == null ? '—' : `${sla.toFixed(1)}%`,
-      hint: `${fmtNum(o.success || 0)} / ${fmtNum(o.requests || 0)} · 错 ${fmtNum(o.errors || 0)}`,
+      hint: translate('overview:requestSuccessSummary', {
+        p0: fmtNum(o.success || 0),
+        p1: fmtNum(o.requests || 0),
+        p2: fmtNum(o.errors || 0),
+      }),
       tone: slaTone(o.sla),
     },
     {
-      label: '错误率',
+      label: translate('overview:errorRate'),
       value: err == null ? '—' : `${err.toFixed(1)}%`,
       hint: `429 ${fmtNum(o.status_429 || 0)} · 503 ${fmtNum(o.status_503 || 0)} · 529 ${fmtNum(o.status_529 || 0)}`,
       tone: errTone(o.error_rate),
     },
     {
-      label: '首字 p50',
+      label: translate('overview:ttftMedian'),
       value: fmtMs(ttft.p50_ms),
-      hint: `avg ${fmtMs(ttft.avg_ms)} · ${fmtNum(ttft.samples || 0)} 样本`,
+      hint: translate('overview:averageSamples', {
+        p0: fmtMs(ttft.avg_ms),
+        p1: fmtNum(ttft.samples || 0),
+      }),
       tone: ttftTone(ttft.p95_ms),
     },
     {
-      label: '首字 p95',
+      label: translate('overview:ttftP95'),
       value: fmtMs(ttft.p95_ms),
-      hint: `p99 ${fmtMs(ttft.p99_ms)} · 最大 ${fmtMs(ttft.max_ms)}`,
+      hint: translate('overview:p99AndMaximum', {
+        p0: fmtMs(ttft.p99_ms),
+        p1: fmtMs(ttft.max_ms),
+      }),
       tone: ttftTone(ttft.p95_ms),
     },
     {
-      label: '耗时 p50',
+      label: translate('overview:durationMedian'),
       value: fmtMs(dur.p50_ms),
-      hint: `p95 ${fmtMs(dur.p95_ms)} · avg ${fmtMs(dur.avg_ms)}`,
+      hint: translate('overview:durationDistribution', {
+        p95: fmtMs(dur.p95_ms),
+        average: fmtMs(dur.avg_ms),
+      }),
     },
     {
       label: 'QPS',
       value: fmtRate(o.qps?.avg),
-      hint: `当前 ${fmtRate(o.qps?.current)} · 峰值 ${fmtRate(o.qps?.peak)}`,
+      hint: translate('overview:currentAndPeak', {
+        p0: fmtRate(o.qps?.current),
+        p1: fmtRate(o.qps?.peak),
+      }),
     },
     {
       label: 'TPS',
       value: fmtRate(o.tps?.avg, 1),
-      hint: `入 ${fmtNum(o.input_tokens || 0)} / 出 ${fmtNum(o.output_tokens || 0)}`,
+      hint: translate('overview:inputAndOutput', {
+        p0: fmtNum(o.input_tokens || 0),
+        p1: fmtNum(o.output_tokens || 0),
+      }),
     },
     {
-      label: '流式占比',
+      label: translate('overview:streamingShare'),
       value: streamPct == null ? '—' : `${streamPct}%`,
-      hint: `流式 ${fmtNum(o.stream_requests || 0)}`,
+      hint: translate('overview:streamingCount', {
+        p0: fmtNum(o.stream_requests || 0),
+      }),
     },
     {
-      label: '缓存命中',
+      label: translate('overview:cacheHit'),
       value: hitPct == null ? '—' : fmtHitPct(hitPct),
-      hint: `读 ${fmtNum(o.cache_read_tokens || 0)} · 写 ${fmtNum(o.cache_creation_tokens || 0)}`,
+      hint: translate('overview:cacheReadAndWrite', {
+        p0: fmtNum(o.cache_read_tokens || 0),
+        p1: fmtNum(o.cache_creation_tokens || 0),
+      }),
     },
     {
-      label: '粘性调度',
+      label: translate('overview:stickyScheduling'),
       value: stickyPct == null ? '—' : fmtHitPct(stickyPct),
-      hint: `sticky ${fmtNum(sticky.hits || 0)} / ${fmtNum(sticky.selections || 0)} 次选号`,
+      hint: translate('overview:stickySelections', {
+        p0: fmtNum(sticky.hits || 0),
+        p1: fmtNum(sticky.selections || 0),
+      }),
     },
   ]
 
   return (
     <div className='space-y-3'>
-      <PanelCard title='服务质量' meta='近 1 小时'>
+      <PanelCard
+        title={translate('overview:serviceQuality')}
+        meta={translate('overview:lastHour')}
+      >
         {/* 10 格：2 列与 5 列都整除，避免 gap-px 网格尾行漏底色。 */}
         <div className='grid grid-cols-2 gap-px bg-border/60 xl:grid-cols-5'>
           {cells.map((c) => (
@@ -220,13 +254,24 @@ export function TrafficOps({
         </div>
       </PanelCard>
       {models.length ? (
-        <PanelCard title='模型家族' meta='近 1 小时'>
+        <PanelCard
+          title={translate('overview:modelFamily')}
+          meta={translate('overview:lastHour')}
+        >
           <div className='flex h-8 items-center bg-muted/30 px-4 text-[11px] font-medium text-muted-foreground/80'>
-            <div className='flex-[2]'>模型家族</div>
-            <div className='flex-1 text-right'>请求</div>
-            <div className='flex-1 text-right'>错误</div>
-            <div className='flex-1 text-right'>首字 avg</div>
-            <div className='flex-1 text-right'>耗时 avg</div>
+            <div className='flex-[2]'>{translate('overview:modelFamily')}</div>
+            <div className='flex-1 text-right'>
+              {translate('overview:requests')}
+            </div>
+            <div className='flex-1 text-right'>
+              {translate('overview:errors')}
+            </div>
+            <div className='flex-1 text-right'>
+              {translate('overview:averageTtft')}
+            </div>
+            <div className='flex-1 text-right'>
+              {translate('overview:averageDuration')}
+            </div>
           </div>
           {models.map((m) => (
             <div

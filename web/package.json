@@ -1,5 +1,5 @@
 {
-  "name": "vm2api-web",
+  "name": "tapmodels-web",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,8 @@
     "format": "prettier --write src package.json vite.config.ts eslint.config.js",
     "format:check": "prettier --check src package.json vite.config.ts eslint.config.js",
     "test:contract": "vitest run src/features/vm/engine-contract.test.ts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:i18n": "vitest run src/i18n src/features/**/i18n*.test.*"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -45,6 +46,7 @@
     "clsx": "^2.1.1",
     "cmdk": "1.1.1",
     "date-fns": "^4.1.0",
+    "i18next": "^26.5.3",
     "input-otp": "1.4.2",
     "lucide-react": "^0.544.0",
     "radix-ui": "^1.6.7",
@@ -52,6 +54,7 @@
     "react-day-picker": "9.14.0",
     "react-dom": "^19.2.5",
     "react-hook-form": "^7.72.1",
+    "react-i18next": "^17.1.0",
     "react-top-loading-bar": "^3.0.2",
     "recharts": "^3.8.1",
     "sonner": "^2.0.7",

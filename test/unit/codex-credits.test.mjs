@@ -204,8 +204,31 @@ test('no credits, stale credits, or an explicit park keep the existing parking',
   const parkedUntil = new Date(NOW + 60_000).toISOString()
   const refused = slot({ extra: { ...WEEK_SPENT, codex_limited_until: parkedUntil }, credits: credits() })
   assert.equal(isCodexSlotParked(refused, NOW), true, 'an explicit park outranks credits')
-  assert.equal(codexQuotaWindowReason(refused, NOW), 'quota_5h_header')
+  assert.equal(codexQuotaWindowReason(refused, NOW), 'rate_limited')
   assert.equal(evaluateCodexQuotaSchedule(refused, NOW).until, Date.parse(parkedUntil))
+})
+
+test('a 429 park with no window at its cap is a rate limit, not a 5h limit, and clears on expiry', () => {
+  // Pro reading seen in production: only the 7d window is metered, the other side is 0 minutes.
+  const proWeek = {
+    codex_primary_used_percent: 64,
+    codex_primary_window_minutes: 10080,
+    codex_primary_reset_at: WEEK_RESET,
+    codex_secondary_used_percent: 0,
+    codex_secondary_window_minutes: 0,
+  }
+  const parkedUntil = NOW + 60_000
+  const parked = slot({ extra: { ...proWeek, codex_limited_until: new Date(parkedUntil).toISOString() } })
+  assert.equal(codexQuotaWindowReason(parked, NOW), 'rate_limited')
+  assert.deepEqual(evaluateCodexQuotaSchedule(parked, NOW), {
+    action: 'restrict',
+    reason: 'rate_limited',
+    until: parkedUntil,
+  })
+  const later = parkedUntil + 1
+  const restricted = { temp_unschedulable_reason: 'rate_limited', temp_unschedulable_until: parkedUntil }
+  assert.equal(codexQuotaWindowReason(parked, later), null)
+  assert.equal(evaluateCodexQuotaSchedule({ ...parked, ...restricted }, later).action, 'clear')
 })
 
 test('/wham/usage credits are persisted next to, not inside, reset credits and reach the pool summary', async (t) => {

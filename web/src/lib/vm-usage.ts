@@ -1,8 +1,11 @@
+import { t } from '@/i18n'
 import type { BillingAccountRow } from '@/types/panel-overview'
 import type { WindowEstimate } from '@/types/panel-pricing'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm, VmClosedWindow } from '@/types/panel-vm'
 import { fmtNum, fmtUsd } from '@/lib/format'
+import { fixedNumber } from '@/lib/locale-format'
+import { systemDateTime } from '@/lib/system-time'
 
 function num(v: unknown): number {
   const n = Number(v)
@@ -169,7 +172,7 @@ export function vmCacheHitPct(
 
 export function fmtHitPct(p: number | null): string {
   if (p == null || !Number.isFinite(p)) return '—'
-  return `${p.toFixed(p >= 10 ? 1 : 2)}%`
+  return `${fixedNumber(p, p >= 10 ? 1 : 2)}%`
 }
 
 export function vmTodayStats(vm: Vm, accounts?: UsageAccountRow[]) {
@@ -286,32 +289,47 @@ export function vmCostLedger(
     { key: '7d', label: '7D', cost: cost.d7, tokens: tok.d7 },
     {
       key: 'total',
-      label: '总计',
+      label: t('lib:usage.total'),
       cost: vmTotalCost(vm, accounts),
       tokens: vmTotalTokens(vm, accounts),
     },
   ]
 }
 
-export const ESTIMATE_STATUS_ZH: Record<WindowEstimate['status'], string> = {
-  ok: '估算有效',
-  no_data: '无用量读数',
-  no_reset: '无重置时间',
-  log_gap: '日志未覆盖窗口',
-  low_usage: '用量<5%',
-  unpriced: '窗口内有未定价请求',
-}
-
-const ESTIMATE_CAVEAT = '按官方价估算；账号在网关外使用会偏低'
+export const ESTIMATE_STATUS_LABELS: Record<WindowEstimate['status'], string> =
+  {
+    get ok() {
+      return t('lib:usage.estimateValid')
+    },
+    get no_data() {
+      return t('lib:usage.noReadings')
+    },
+    get no_reset() {
+      return t('lib:usage.noReset')
+    },
+    get log_gap() {
+      return t('lib:usage.logGap')
+    },
+    get low_usage() {
+      return t('lib:usage.lowUsage')
+    },
+    get unpriced() {
+      return t('lib:usage.unpriced')
+    },
+  }
 
 export function estimateTooltip(
   est: WindowEstimate | null | undefined
 ): string {
-  const bits = [est ? ESTIMATE_STATUS_ZH[est.status] : '暂无估算']
+  const bits = [
+    est ? ESTIMATE_STATUS_LABELS[est.status] : t('lib:usage.noEstimate'),
+  ]
   if (est?.total_tokens != null && Number.isFinite(est.total_tokens)) {
-    bits.push(`约 ${fmtNum(est.total_tokens)} tok`)
+    bits.push(
+      t('lib:usage.estimatedTokens', { tokens: fmtNum(est.total_tokens) })
+    )
   }
-  bits.push(ESTIMATE_CAVEAT)
+  bits.push(t('lib:usage.estimateCaveat'))
   return bits.join('\n')
 }
 
@@ -342,7 +360,7 @@ export function formatWindowSpend(
   const remain =
     est.remaining_usd == null || !Number.isFinite(est.remaining_usd)
       ? '—'
-      : `余 ${fmtUsd(est.remaining_usd, 2)}`
+      : t('lib:usage.remaining', { amount: fmtUsd(est.remaining_usd, 2) })
   return {
     costText: `${spentUsd} / ≈${total}`,
     remainText: remain,
@@ -350,14 +368,13 @@ export function formatWindowSpend(
   }
 }
 
-/** 窗口起止 `MM-DD HH:mm – HH:mm`；跨天时结束端也带日期。本地时区，与重置时刻同口径。 */
+/** 窗口起止 `MM-DD HH:mm – HH:mm`；跨天时结束端也带日期。UTC+8，与重置时刻同口径。 */
 export function fmtWindowSpan(start: string, end: string): string {
   const a = new Date(start)
   const b = new Date(end)
   if (!Number.isFinite(a.getTime()) || !Number.isFinite(b.getTime())) return '—'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const day = (d: Date) => `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  const clock = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const day = (d: Date) => systemDateTime(d).slice(5, 10)
+  const clock = (d: Date) => systemDateTime(d).slice(11, 16)
   const tail = day(a) === day(b) ? clock(b) : `${day(b)} ${clock(b)}`
   return `${day(a)} ${clock(a)} – ${tail}`
 }
