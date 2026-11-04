@@ -25,11 +25,11 @@ for (const [kernel, meta] of Object.entries(OS_CATALOG)) {
   // Tags are mutable: --pull refreshes an existing image so guest fixes reach cached hosts.
   if (pull && spawnSync('docker', ['pull', meta.image], { stdio: 'inherit' }).status === 0) continue
   if (!force && imageExists(meta.image)) {
-    console.log(`vm2api: keep existing ${meta.image}`)
+    console.log(`tapmodels: keep existing ${meta.image}`)
     continue
   }
   if (pullOnly) {
-    console.warn(`vm2api: ${meta.image} not pulled; will build on first slot start`)
+    console.warn(`tapmodels: ${meta.image} not pulled; will build on first slot start`)
     continue
   }
   const r = spawnSync('docker', ['build', '-t', meta.image, path.join(root, meta.dir)], { stdio: 'inherit' })

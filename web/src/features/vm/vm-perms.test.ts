@@ -8,7 +8,7 @@ import {
 
 describe('vmPermsFor follows panel-acl roles', () => {
   it('admin can do everything', () => {
-    expect(vmPermsFor('admin')).toEqual({
+    expect(vmPermsFor('super_admin')).toEqual({
       known: true,
       admin: true,
       dashboard: true,
@@ -20,30 +20,21 @@ describe('vmPermsFor follows panel-acl roles', () => {
     })
   })
 
-  it('tenant cannot read dashboard, delete slots, or manage the slot, but can power, test and import', () => {
+  it('customer has no infrastructure privileges', () => {
     const p = vmPermsFor('user')
     expect(p.known).toBe(true)
     expect(p.admin).toBe(false)
     expect(p.dashboard).toBe(false)
-    expect(p.power).toBe(true)
-    expect(p.test).toBe(true)
+    expect(p.power).toBe(false)
+    expect(p.test).toBe(false)
     // The backend only serves GET /api/panel/test-models to admins.
     expect(p.testModels).toBe(false)
-    expect(p.credential).toBe(true)
+    expect(p.credential).toBe(false)
     expect(p.remove).toBe(false)
   })
 
-  it('super only reads dashboard and toggles scheduling', () => {
-    const p = vmPermsFor('super')
-    expect(p).toMatchObject({
-      known: true,
-      admin: false,
-      dashboard: true,
-      power: false,
-      test: false,
-      credential: false,
-      remove: false,
-    })
+  it('AD has no infrastructure privileges', () => {
+    expect(vmPermsFor('admin')).toEqual(vmPermsFor('user'))
   })
 
   it('unknown role (me still loading) grants nothing so no 403 is fired', () => {
@@ -57,7 +48,7 @@ describe('vmPermsFor follows panel-acl roles', () => {
 
 describe('vmDetailTabs', () => {
   it('ops and seed are admin only; test needs test permission', () => {
-    expect(vmDetailTabs(vmPermsFor('admin'))).toEqual([
+    expect(vmDetailTabs(vmPermsFor('super_admin'))).toEqual([
       'overview',
       'account',
       'proxy',
@@ -65,25 +56,16 @@ describe('vmDetailTabs', () => {
       'ops',
       'seed',
     ])
-    expect(vmDetailTabs(vmPermsFor('user'))).toEqual([
-      'overview',
-      'account',
-      'proxy',
-      'test',
-    ])
-    expect(vmDetailTabs(vmPermsFor('super'))).toEqual([
-      'overview',
-      'account',
-      'proxy',
-    ])
+    expect(vmDetailTabs(vmPermsFor('user'))).toEqual([])
+    expect(vmDetailTabs(vmPermsFor('admin'))).toEqual([])
   })
 
   it('falls back to overview when the remembered tab is hidden', () => {
     const tabs = vmDetailTabs(vmPermsFor('user'))
     expect(visibleTab('ops', tabs)).toBe('overview')
     expect(visibleTab('seed', tabs)).toBe('overview')
-    expect(visibleTab('test', tabs)).toBe('test')
-    expect(visibleTab('proxy', tabs)).toBe('proxy')
+    expect(visibleTab('test', tabs)).toBe('overview')
+    expect(visibleTab('proxy', tabs)).toBe('overview')
   })
 })
 
