@@ -23,7 +23,7 @@ import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mj
 import { ensureSlotComputer, rememberComputer } from '../identity/slot-computer.mjs'
 import { coerceRfc4122Uuid } from '../identity/rfc4122-uuid.mjs'
 import { boundProxyUrl, ensureProxyEgress, isLocalEgressProxy, slotNetworkForVm } from './egress.mjs'
-import { socksProxyEndpoint } from './socks-address.mjs'
+import { proxyEndpointOf } from './proxy-address.mjs'
 import { assertProxyAllowed } from './proxy-policy.mjs'
 import { toHostPath } from './host-path.mjs'
 import { fileURLToPath } from 'node:url'
@@ -118,6 +118,20 @@ export function nextNumericIndex(vms) {
   let n = 1
   while (used.has(n)) n++
   return n
+}
+
+/** Shared operator/supplier naming, including retained account history. */
+export function newVmNaming(existing, historic, requestedName, projectRoot = null) {
+  let reserved = []
+  if (projectRoot) {
+    try {
+      reserved = fs.readdirSync(path.join(projectRoot, 'vms')).map((name) => ({ id: name.replace(/\.json$/, '') }))
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+  const index = nextNumericIndex([...existing, ...historic, ...reserved])
+  return { index, id: 'vm-' + padVm(index), name: String(requestedName || '').trim() || 'vm-' + padVm(index) }
 }
 
 function sh(argv, opts = {}) {
@@ -367,11 +381,11 @@ function workerProxyUrl(vm) {
 
 /** host:port only — never include userinfo. */
 export function proxyEndpointFromUrl(raw) {
-  return socksProxyEndpoint({ url: raw })
+  return proxyEndpointOf({ url: raw })
 }
 
 export function proxyEndpointFromVm(vm) {
-  return socksProxyEndpoint(vm?.proxy)
+  return proxyEndpointOf(vm?.proxy)
 }
 
 export function readWorkerProxyEndpoint(projectRoot, vmId) {

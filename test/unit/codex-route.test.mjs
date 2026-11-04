@@ -6,6 +6,7 @@ import {
   isCodexProtocolAllowed,
   isCodexVm,
   listCodexVms,
+  normalizeCodexResetCredit,
   normalizeCodexRouting,
   validateInferenceWebsocketPatch,
 } from '../../src/lib/protocol/codex-route.mjs'
@@ -121,5 +122,17 @@ test('PUT websocket patch rejects non-booleans and illegal transport', () => {
       client_features: { enabled: false },
       analytics: { enabled: false },
     },
+  })
+})
+
+test('reset-credit automation settings default to a 10 minute lead and no weekly cap', () => {
+  assert.deepEqual(normalizeCodexRouting().reset_credit, { lead_minutes: 10, max_weekly_remaining_percent: null })
+  assert.deepEqual(normalizeCodexResetCredit({ lead_minutes: 30, max_weekly_remaining_percent: 20 }), {
+    lead_minutes: 30,
+    max_weekly_remaining_percent: 20,
+  })
+  assert.deepEqual(normalizeCodexResetCredit({ lead_minutes: 0, max_weekly_remaining_percent: 101 }), {
+    lead_minutes: 10,
+    max_weekly_remaining_percent: null,
   })
 })

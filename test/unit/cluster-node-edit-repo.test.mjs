@@ -20,10 +20,10 @@ const NODE = {
 }
 
 function setup(t, secret) {
-  const env = { VM2API_DB_SECRET: process.env.VM2API_DB_SECRET, KIN_DB_SECRET: process.env.KIN_DB_SECRET }
-  delete process.env.VM2API_DB_SECRET
+  const env = { TAPMODELS_DB_SECRET: process.env.TAPMODELS_DB_SECRET, KIN_DB_SECRET: process.env.KIN_DB_SECRET }
+  delete process.env.TAPMODELS_DB_SECRET
   delete process.env.KIN_DB_SECRET
-  if (secret) process.env.VM2API_DB_SECRET = secret
+  if (secret) process.env.TAPMODELS_DB_SECRET = secret
   t.after(() => {
     for (const [key, value] of Object.entries(env)) {
       if (value === undefined) delete process.env[key]
@@ -82,7 +82,7 @@ test('label-only edits preserve encrypted credential bytes even when the current
   const stored = credentials.get(NODE.id)
   for (const value of Object.values(stored)) assert.match(value, /^enc:v1:/)
 
-  process.env.VM2API_DB_SECRET = 'different-test-database-key'
+  process.env.TAPMODELS_DB_SECRET = 'different-test-database-key'
   assert.throws(() => repo.getSecrets(NODE.id))
   const saved = repo.updateLabel(NODE.id, 'Renamed without credentials', original.updated_at)
   assert.deepEqual(saved, { ...original, label: 'Renamed without credentials', updated_at: saved.updated_at })
