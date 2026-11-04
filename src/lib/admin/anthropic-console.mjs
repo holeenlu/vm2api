@@ -78,6 +78,9 @@ function directKeys(input = {}, store = null) {
       label: label || `key ${keys.length + 1}`,
       api_key: apiKey,
       proxy_id: chosen(source, 'proxy_id', 'proxyId', saved?.proxy_id || ''),
+      // A saved key may only carry a typed proxy_url (no pool id); keep using it
+      // unless the caller picks a proxy explicitly.
+      saved_proxy_url: savedProxyUrl(source, saved),
       base_url: chosen(source, 'base_url', 'baseUrl', saved?.base_url || ''),
       auth_scheme: chosen(source, 'auth_scheme', 'authScheme', saved?.auth_scheme || ''),
     })
@@ -89,6 +92,13 @@ function directKeys(input = {}, store = null) {
     throw Object.assign(new Error(`一次最多 ${MAX_KEYS} 把 key`), { code: 'too_many_keys', status: 400 })
   }
   return keys
+}
+
+function savedProxyUrl(source, saved) {
+  if (!saved || saved.proxy_id) return ''
+  const has = (name) => Object.prototype.hasOwnProperty.call(source, name)
+  if (has('proxy_id') || has('proxyId')) return ''
+  return String(saved.proxy_url || '').trim()
 }
 
 function chosen(source, snake, camel, fallback) {
@@ -104,6 +114,11 @@ export function savedEndpointKey(store, keyId) {
     const key = (endpoint.api_key_entries || []).find((item) => item.id === id)
     if (!key) continue
     return {
+      endpoint,
+      key,
+      kind: endpoint.kind,
+      protocol: endpoint.protocol,
+      headers: endpoint.headers,
       api_key: key.api_key,
       proxy_id: key.proxy_id || '',
       proxy_url: key.proxy_url || '',
@@ -160,7 +175,7 @@ export function buildAnthropicConsoleRequest(input = {}, picked = null, proxyPoo
   const baseUrl = scheduled ? endpoint.base_url : input.base_url || input.baseUrl || ANTHROPIC_CONSOLE_URL
   const proxyUrl = scheduled
     ? anthropicProxyUrl(picked.key?.proxy_url)
-    : resolveConsoleProxyUrl(proxyPool, input.proxy_id || input.proxyId)
+    : resolveConsoleProxyUrl(proxyPool, input.proxy_id || input.proxyId) || anthropicProxyUrl(input.saved_proxy_url)
   const extra = headerMap(scheduled ? endpoint.headers : input.headers)
   const headers = {
     'content-type': 'application/json',
@@ -275,7 +290,7 @@ export async function runAnthropicConsole({
         status: error.status && error.status < 600 ? error.status : 502,
         text: '',
         error: String(error.message || error).slice(0, 300),
-        proxy: Boolean(key.proxy_id),
+        proxy: Boolean(key.proxy_id || key.saved_proxy_url),
         key_id: null,
       })
     }

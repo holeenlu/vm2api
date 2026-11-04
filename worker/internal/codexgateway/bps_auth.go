@@ -1,0 +1,387 @@
+package codexgateway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/dofastted/kin-gateway/worker/internal/basispoints"
+)
+
+// grantBPS 是 OAuth 会话的授权类型：Excel（Basispoints）附加授权。
+const grantBPS = "bps"
+
+var (
+	errBPSNeedsNativeAuthorization = errors.New("BPS authorization requires an account that has completed OAuth")
+	errBPSIdentityMismatch         = errors.New("BPS authorization belongs to a different ChatGPT account")
+)
+
+// bpsTokens 是一次 Excel 授权（换码或导入）得到的令牌与身份。
+type bpsTokens struct {
+	AccessToken      string
+	RefreshToken     string
+	IDToken          string
+	ExpiresAt        int64
+	ChatGPTAccountID string
+}
+
+// saveBPSGrant 把 Excel 授权写入已有 OAuth 账号：身份须与原生授权同一 ChatGPT 账号；
+// expected ≥ 0 时按 BPS 授权代次做 CAS。新授权清除 BPS 的失效、冷却与 403 停用状态。
+func (s *Server) saveBPSGrant(accountID string, tokens bpsTokens, expected int64) (map[string]any, error) {
+	if tokens.AccessToken == "" {
+		return nil, errors.New("BPS authorization is missing access_token")
+	}
+	var conflict error
+	saved, err := s.store.UpdateBPS(accountID, func(account *Account) bool {
+		if account.AccessToken == "" {
+			conflict = errBPSNeedsNativeAuthorization
+			return false
+		}
+		if account.ChatGPTAccountID != "" && tokens.ChatGPTAccountID != "" && account.ChatGPTAccountID != tokens.ChatGPTAccountID {
+			conflict = errBPSIdentityMismatch
+			return false
+		}
+		revision := int64(0)
+		if account.BPS != nil {
+			revision = account.BPS.Revision
+		}
+		if expected >= 0 && expected != revision {
+			conflict = fmt.Errorf("BPS revision conflict: expected %d, got %d", expected, revision)
+			return false
+		}
+		grant := &BPSGrant{AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, IDToken: tokens.IDToken, Revision: revision + 1}
+		if tokens.ExpiresAt > 0 {
+			grant.ExpiresAt = time.Unix(tokens.ExpiresAt, 0).UTC()
+		} else if exp, ok := jwtClaims(tokens.AccessToken)["exp"].(float64); ok && exp > 0 {
+			grant.ExpiresAt = time.Unix(int64(exp), 0).UTC()
+		}
+		account.BPS = grant
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if conflict != nil {
+		return nil, conflict
+	}
+	return map[string]any{"ok": true, "gateway_instance_id": s.cfg.InstanceID, "account": publicAccount(saved), "bps_revision": saved.BPS.Revision}, nil
+}
+
+// validateBPSTokens 校验导入的 Excel 授权：AT 签发给 Excel 客户端（client_id 或 azp），id_token 的 aud 含 Excel 客户端；
+// 返回令牌中的 ChatGPT 账号 ID 与套餐（sub2api openai_excel_oauth.go）。
+func (s *Server) validateBPSTokens(tokens bpsTokens) (string, string, error) {
+	access := jwtClaims(tokens.AccessToken)
+	if issued := firstString(access["client_id"], access["azp"]); issued != "" && issued != s.cfg.BPSClientID {
+		return "", "", errors.New("BPS authorization was issued to another client")
+	}
+	identity := jwtClaims(tokens.IDToken)
+	if tokens.IDToken != "" && !audienceIncludes(identity["aud"], s.cfg.BPSClientID) {
+		return "", "", errors.New("BPS id_token audience does not include the Excel client")
+	}
+	auth, _ := identity["https://api.openai.com/auth"].(map[string]any)
+	accessAuth, _ := access["https://api.openai.com/auth"].(map[string]any)
+	accountID := firstString(tokens.ChatGPTAccountID, auth["chatgpt_account_id"], accessAuth["chatgpt_account_id"])
+	plan := firstString(auth["chatgpt_plan_type"], accessAuth["chatgpt_plan_type"])
+	if strings.EqualFold(plan, "free") {
+		return "", "", errors.New("BPS requires a paid ChatGPT plan")
+	}
+	return accountID, plan, nil
+}
+
+func audienceIncludes(value any, client string) bool {
+	switch aud := value.(type) {
+	case nil:
+		return true
+	case string:
+		return aud == client
+	case []any:
+		for _, item := range aud {
+			if item == client {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// accountBPSAction 处理 /internal/v1/accounts/{id}/bps[/import|/models]：导入 Excel 授权（POST import）、查询模型目录（GET models）、撤销（DELETE）。
+func (s *Server) accountBPSAction(w http.ResponseWriter, r *http.Request, accountID string, parts []string) bool {
+	if len(parts) < 2 || parts[1] != "bps" {
+		return false
+	}
+	switch {
+	case len(parts) == 3 && parts[2] == "import" && r.Method == http.MethodPost:
+		var body struct {
+			AccessToken      string `json:"access_token"`
+			RefreshToken     string `json:"refresh_token"`
+			IDToken          string `json:"id_token"`
+			ExpiresAt        int64  `json:"expires_at"`
+			ChatGPTAccountID string `json:"chatgpt_account_id"`
+			ExpectedRevision *int64 `json:"expected_bps_revision"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return true
+		}
+		tokens := bpsTokens{AccessToken: body.AccessToken, RefreshToken: body.RefreshToken, IDToken: body.IDToken, ExpiresAt: body.ExpiresAt, ChatGPTAccountID: body.ChatGPTAccountID}
+		accountIDClaim, _, err := s.validateBPSTokens(tokens)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bps_authorization_invalid", err.Error())
+			return true
+		}
+		tokens.ChatGPTAccountID = accountIDClaim
+		expected := int64(-1)
+		if body.ExpectedRevision != nil {
+			expected = *body.ExpectedRevision
+		}
+		result, err := s.saveBPSGrant(accountID, tokens, expected)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, errBPSNeedsNativeAuthorization) || strings.Contains(err.Error(), "conflict") {
+				status = http.StatusConflict
+			}
+			writeError(w, status, "bps_authorization_rejected", err.Error())
+			return true
+		}
+		writeJSON(w, http.StatusOK, result)
+	case len(parts) == 3 && parts[2] == "unblock" && r.Method == http.MethodPost:
+		// 运营手动解除：清除 403 停用、恢复探测状态与全部 BPS 冷却（不改授权令牌）
+		saved, err := s.store.UpdateBPS(accountID, func(account *Account) bool {
+			grant := account.BPS
+			if grant == nil {
+				return false
+			}
+			if grant.State == bpsStateBlocked {
+				grant.State = ""
+			}
+			grant.BlockedAt, grant.ProbedAt, grant.RecoveryStopped, grant.LastError = time.Time{}, time.Time{}, false, ""
+			grant.CooldownUntil, grant.ScopedCooldowns, grant.PolicyBackoff, grant.ModelCooldowns = time.Time{}, nil, nil, nil
+			return true
+		})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "account_not_found", "account not found")
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": publicAccount(saved)})
+	case len(parts) == 4 && parts[2] == "recovery" && parts[3] == "stop" && r.Method == http.MethodPost:
+		saved, err := s.store.UpdateBPS(accountID, func(account *Account) bool {
+			if account.BPS == nil || account.BPS.State != bpsStateBlocked || account.BPS.RecoveryStopped {
+				return false
+			}
+			account.BPS.RecoveryStopped = true
+			return true
+		})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "account_not_found", "account not found")
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": publicAccount(saved)})
+	case len(parts) == 3 && parts[2] == "models" && r.Method == http.MethodGet:
+		account, ok := s.store.Get(accountID)
+		if !ok {
+			writeError(w, http.StatusNotFound, "account_not_found", "account not found")
+			return true
+		}
+		catalog, err := s.bpsModelCatalog(r.Context(), account, r.URL.Query().Get("refresh") == "1")
+		if errors.Is(err, errBPSNotAuthorized) {
+			writeError(w, http.StatusConflict, "bps_not_authorized", err.Error())
+			return true
+		}
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "bps_models_unavailable", err.Error())
+			return true
+		}
+		writeJSON(w, http.StatusOK, catalog)
+	case len(parts) == 2 && r.Method == http.MethodDelete:
+		saved, err := s.store.UpdateBPS(accountID, func(account *Account) bool {
+			if account.BPS == nil {
+				return false
+			}
+			account.BPS = nil
+			return true
+		})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "account_not_found", "account not found")
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": publicAccount(saved)})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "unsupported BPS action")
+	}
+	return true
+}
+
+// bpsRefreshDue：BPS 授权有刷新令牌、状态可用，且 AT 已过期或进入提前刷新窗口。
+func bpsRefreshDue(grant *BPSGrant, now time.Time) bool {
+	if grant == nil || grant.RefreshToken == "" || (grant.State != "" && grant.State != bpsStateBlocked) || grant.ExpiresAt.IsZero() {
+		return false
+	}
+	return grant.ExpiresAt.Sub(now) <= refreshMargin
+}
+
+// refreshBPS 用 Excel 客户端刷新账号的 BPS 授权（表单正文带 scope，与 sub2api Excel 刷新一致）；
+// 刷新令牌被拒时 BPS 判 invalid，需要重新授权，原生授权不受影响。
+func (s *Server) refreshBPS(ctx context.Context, accountID string) error {
+	account, ok := s.store.Get(accountID)
+	if !ok || account.BPS == nil || account.BPS.RefreshToken == "" {
+		return errBPSNotAuthorized
+	}
+	revision := account.BPS.Revision
+	form := url.Values{"client_id": {s.cfg.BPSClientID}, "grant_type": {"refresh_token"}, "refresh_token": {account.BPS.RefreshToken}, "scope": {bpsRefreshScope}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.OAuthTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	client, err := s.clientFor(account)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, refreshResponseMaxSize))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		terminal := resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized
+		_, _ = s.store.UpdateBPS(accountID, func(account *Account) bool {
+			if account.BPS == nil || account.BPS.Revision != revision {
+				return false
+			}
+			account.BPS.LastError = fmt.Sprintf("refresh_%d", resp.StatusCode)
+			if terminal {
+				account.BPS.State = bpsStateInvalid
+			}
+			return true
+		})
+		return fmt.Errorf("BPS refresh returned %d", resp.StatusCode)
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(data, &token); err != nil || token.AccessToken == "" {
+		return errors.New("invalid BPS refresh response")
+	}
+	_, err = s.store.UpdateBPS(accountID, func(account *Account) bool {
+		grant := account.BPS
+		if grant == nil || grant.Revision != revision {
+			return false
+		}
+		grant.AccessToken = token.AccessToken
+		if token.RefreshToken != "" {
+			grant.RefreshToken = token.RefreshToken
+		}
+		if token.IDToken != "" {
+			grant.IDToken = token.IDToken
+		}
+		grant.ExpiresAt = time.Time{}
+		if exp, ok := jwtClaims(token.AccessToken)["exp"].(float64); ok && exp > 0 {
+			grant.ExpiresAt = time.Unix(int64(exp), 0).UTC()
+		} else if token.ExpiresIn > 0 {
+			grant.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).UTC()
+		}
+		if grant.State == bpsStateExpired {
+			grant.State = ""
+		}
+		grant.LastError = ""
+		return true
+	})
+	return err
+}
+
+func (s *Server) refreshDueBPS(ctx context.Context, now time.Time) {
+	for _, account := range s.store.snapshot() {
+		if ctx.Err() != nil {
+			return
+		}
+		if bpsRefreshDue(account.BPS, now) {
+			_ = s.refreshBPS(ctx, account.ID)
+		}
+	}
+}
+
+// probeBlockedBPS 对 403 停用且开启自动恢复的账号，按间隔用名单中第一个模型发一次极小的 BPS 请求探测；
+// 成功即恢复 BPS（sub2api openai_excel_bps_recovery.go）。探测消耗不进入使用记录。
+func (s *Server) probeBlockedBPS(ctx context.Context, now time.Time) {
+	for _, account := range s.store.snapshot() {
+		if ctx.Err() != nil {
+			return
+		}
+		grant, settings := account.BPS, account.BPSSettings
+		if grant == nil || grant.State != bpsStateBlocked || grant.RecoveryStopped || settings == nil || !settings.AutoRecoverOn403 || len(settings.Models) == 0 {
+			continue
+		}
+		last := grant.ProbedAt
+		if last.IsZero() {
+			last = grant.BlockedAt
+		}
+		if now.Sub(last) < settings.recoveryInterval() {
+			continue
+		}
+		ok := s.probeBPS(ctx, account, settings.Models[0])
+		_, _ = s.store.UpdateBPS(account.ID, func(current *Account) bool {
+			if current.BPS == nil || current.BPS.Revision != grant.Revision || current.BPS.State != bpsStateBlocked {
+				return false
+			}
+			current.BPS.ProbedAt = now
+			if ok {
+				current.BPS.State, current.BPS.BlockedAt, current.BPS.LastError = "", time.Time{}, ""
+			}
+			return true
+		})
+	}
+}
+
+// probeBPS 用名单中第一个模型发一次极小的 BPS 请求，并把结果与用量记入待上报的探测记录。
+func (s *Server) probeBPS(ctx context.Context, account Account, model string) bool {
+	started := time.Now()
+	record := bpsProbeRecord{AccountID: account.ID, ProbedAt: started.UTC(), Model: model}
+	defer func() {
+		record.DurationMS = time.Since(started).Milliseconds()
+		s.recordBPSProbe(record)
+	}()
+	raw, _ := json.Marshal(map[string]any{"model": model, "stream": true, "input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "ping"}}}}})
+	body, _, err := basispoints.Prepare(raw, "", nil)
+	if err != nil {
+		record.ErrorCode = "probe_prepare_failed"
+		return false
+	}
+	client, err := s.clientFor(account)
+	if err != nil {
+		record.ErrorCode = "probe_transport_unavailable"
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	resp, _, err := s.postBPS(ctx, client, account, body)
+	if err != nil {
+		record.ErrorCode = "probe_transport_error"
+		return false
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	record.Status = resp.StatusCode
+	usage, code := bpsProbeUsage(data)
+	record.InputTokens, record.OutputTokens, record.TotalTokens = usageInt(usage, "input_tokens"), usageInt(usage, "output_tokens"), usageInt(usage, "total_tokens")
+	if record.TotalTokens == 0 {
+		record.TotalTokens = record.InputTokens + record.OutputTokens
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// 记录上游声明的错误码（协议包会把未知码归为通用码）
+		code = firstString(parseUpstreamError(data).code, fmt.Sprintf("http_%d", resp.StatusCode))
+	}
+	record.ErrorCode = code
+	record.OK = resp.StatusCode >= 200 && resp.StatusCode < 300 && code == ""
+	return record.OK
+}
