@@ -53,7 +53,7 @@ seed([
   { session_id: 's9', user_id: 'u2', api_key_id: 'k2', status: 500, error_code: 'upstream_error' },
 ])
 
-async function exportLogs(query, { role = 'admin', userId = null, headers = {} } = {}) {
+async function exportLogs(query, { role = 'super_admin', userId = null, headers = {} } = {}) {
   const out = {}
   const handlePanel = createPanelHandler({
     cfg: { paths: { project: root }, vm: { id: null } },

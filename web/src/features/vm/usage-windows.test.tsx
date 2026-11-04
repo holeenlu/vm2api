@@ -1,7 +1,8 @@
 import type { Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { VmUsageWindows } from './usage-windows'
+import { vmForecastRow } from '@/lib/vm-usage'
+import { VmCostLedger, VmUsageWindows } from './usage-windows'
 
 function render(five: number | null, seven: number | null) {
   const vm: Vm = {
@@ -39,5 +40,41 @@ describe('Codex quota readings after a quota error', () => {
     expect(html).toContain('2%')
     expect(html).toContain('32%')
     expect(html).not.toContain('>—<')
+  })
+})
+
+describe('7D capacity forecast row in the list cost ledger', () => {
+  const base: Vm = {
+    id: 'vm-forecast',
+    platform: 'openai',
+    family: 'codex',
+    has_token: true,
+  }
+  const estimate = (status: 'ok' | 'resampling', total: number | null) => ({
+    status,
+    spent_usd: 3,
+    total_usd: total,
+    remaining_usd: total == null ? null : total - 3,
+    total_tokens: total == null ? null : 90100,
+    used_ratio: 0.4,
+  })
+
+  it('shows the sampled capacity with an approximate sign only when opted in', () => {
+    const vm = { ...base, estimate_7d: estimate('ok', 9.01) }
+    const html = renderToStaticMarkup(<VmCostLedger vm={vm} forecast />)
+    expect(html).toContain('≈$9.01')
+    expect(html).toContain('≈90.1K')
+    expect(renderToStaticMarkup(<VmCostLedger vm={vm} />)).not.toContain(
+      '≈$9.01'
+    )
+  })
+
+  it('renders a dash and explains why when the forecast has no number', () => {
+    const vm = { ...base, estimate_7d: estimate('resampling', 12) }
+    const html = renderToStaticMarkup(<VmCostLedger vm={vm} forecast />)
+    expect(html).not.toContain('≈')
+    expect(html).toContain('>—<')
+    expect(vmForecastRow(vm).tooltip).toContain('\n')
+    expect(vmForecastRow({}).cost).toBeNull()
   })
 })

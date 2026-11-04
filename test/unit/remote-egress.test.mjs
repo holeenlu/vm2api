@@ -6,7 +6,7 @@ import { canReuseRemoteEgress, remoteEgressContainer } from '../../src/lib/clust
 const base = {
   vmId: 'vm-01',
   proxyId: 'px-1',
-  dir: '/root/.vm2api/slots/vm-01/egress',
+  dir: '/root/.tapmodels/slots/vm-01/egress',
   imageRef: 'kin-os-ubuntu:24.04',
   body: '{"proxy_id":"px-1"}\n',
 }

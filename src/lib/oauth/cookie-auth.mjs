@@ -18,7 +18,7 @@ function findOAuthAuthBin() {
   const candidates = [
     named,
     path.join(__dirname, '..', '..', '..', 'bin', 'kin-oauth-auth'),
-    '/opt/vm2api/bin/kin-oauth-auth',
+    '/opt/tapmodels/bin/kin-oauth-auth',
     '/opt/kin-gateway/bin/kin-oauth-auth',
   ].filter(Boolean)
   return candidates.find((item) => fs.existsSync(item)) || null
@@ -184,7 +184,7 @@ export function panelImportErrorPayload(err) {
   const cf =
     !stale && !proxyAuth && (code === 'cloudflare_challenge' || /just a moment|cloudflare|doctype html/i.test(raw))
   return {
-    status: stale || proxyAuth ? 400 : cf ? 502 : 500,
+    status: stale || proxyAuth ? 400 : cf ? 502 : err?.status >= 400 && err?.status < 500 ? err.status : 500,
     error: {
       code: stale
         ? code === 'authorize_no_code'
