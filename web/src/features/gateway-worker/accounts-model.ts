@@ -1,0 +1,394 @@
+import { queryOptions } from '@tanstack/react-query'
+import type {
+  Vm,
+  VmBillingModelRow,
+  VmBillingPeriod,
+  VmProxySnap,
+} from '@/types/panel-vm'
+import { api } from '@/lib/api'
+import type { VendorUsageReport } from '@/features/vendor/portal-model'
+
+export type GatewayAccountUsage = {
+  today_requests: number
+  today_cost: number
+  today_tokens: number
+  today_input_tokens: number
+  today_output_tokens: number
+  today_cache_read_tokens: number
+  today_cache_creation_tokens: number
+  window_5h_requests: number
+  window_5h_cost: number
+  window_5h_tokens: number
+  window_5h_input_tokens: number
+  window_5h_output_tokens: number
+  window_5h_cache_read_tokens: number
+  window_5h_cache_creation_tokens: number
+  window_7d_requests: number
+  window_7d_success: number
+  window_7d_errors: number
+  window_7d_cost: number
+  window_7d_tokens: number
+  window_7d_input_tokens: number
+  window_7d_output_tokens: number
+  window_7d_cache_read_tokens: number
+  window_7d_cache_creation_tokens: number
+  requests: number
+  total_cost: number
+  total_tokens: number
+}
+export type GatewayAccount = {
+  id: string
+  name: string
+  vendor_id: string | null
+  vendor_name?: string | null
+  status: string
+  created_at?: string
+  config: {
+    email?: string | null
+    notes?: string
+    plan?: string
+    group_ids: number[]
+    proxy_id?: string
+    proxy_endpoint?: string
+    auth_method?: string
+    max_concurrency?: number
+    max_rpm?: number
+    weight?: number
+    model_access?: ModelAccess
+    reset_credit_auto?: boolean
+  }
+  runtime_account_id?: string | null
+  credential_revision?: number | null
+  projection_status?: string | null
+  runtime_status?: string | null
+  /** 在线 Worker 心跳上报的在途请求数（各实例之和） */
+  inflight?: number
+  gateway_instance_count?: number
+  synced_instance_count?: number
+  quota?: GatewayQuota | null
+  usage?: GatewayAccountUsage
+  last_error?: string | null
+  /** Worker 心跳上报的凭据终态（expired/invalid/banned/unverified），null 表示可用 */
+  credential_state?: string | null
+  /** 凭据终态对应的 Worker 最近错误，如 credential_refresh_failed */
+  credential_error?: string | null
+}
+export type GatewayQuotaWindow = {
+  used_percent?: number
+  reset_at?: string
+  window_minutes?: number
+}
+export type GatewayCredits = {
+  has_credits?: boolean
+  unlimited?: boolean
+  balance?: string | null
+}
+// 默认 codex 桶以外的具名额度桶（Worker 解析响应头与 /wham/usage），只作展示
+export type GatewayQuotaBucket = {
+  limit_name?: string
+  allowed?: boolean
+  limit_reached?: boolean
+  primary_window?: GatewayQuotaWindow
+  secondary_window?: GatewayQuotaWindow
+}
+export type GatewayQuota = {
+  primary_window?: GatewayQuotaWindow
+  secondary_window?: GatewayQuotaWindow
+  credits?: GatewayCredits
+  plan_type?: string
+  updated_at?: string
+  buckets?: Record<string, GatewayQuotaBucket>
+}
+// Worker 账号错误保护运行态（POST /status 只读返回，见 worker protection.go）
+export type GatewayAccountRuntime = {
+  protection?: {
+    count?: number
+    frozen_until?: string
+    requires_probe?: boolean
+    rules?: { id: string; name: string }[]
+    last_probe_at?: string
+    last_probe_error?: string
+  } | null
+  /** 其他 Worker 对同一上游账号的冻结（经控制面共享），本实例同样暂停接单 */
+  peer_freeze?: { until: string; source?: string; reason?: string } | null
+  /** 最近一次凭据刷新失败（脱敏的上游状态、错误码与信息），成功刷新后清除 */
+  last_refresh_failure?: {
+    at: string
+    operation?: string
+    status?: number
+    code?: string
+    message?: string
+  } | null
+}
+export type GatewayQuotaForecast = {
+  period: 'weekly' | 'monthly'
+  extrapolated: boolean
+  unavailable_reason: string | null
+  low_sample: boolean
+  incomplete_cost: boolean
+  incomplete_tokens: boolean
+  estimated_tokens: number | null
+  estimated_usd: number | null
+}
+export type GatewayResetCredits = {
+  available_count: number
+  credits: { id?: string; expires_at?: string }[]
+}
+export type GatewayQuotaResult = {
+  quota?: GatewayQuota
+  credits?: GatewayCredits
+  reset_credits?: GatewayResetCredits
+  plan_type?: string
+  warning?: string
+}
+// 5h/7d 按窗口时长判断，不按 primary/secondary 位置（与 VM 槽的 normalizeCodexLimits 相同口径）
+export function quotaWindows(quota?: GatewayQuota | null) {
+  const primary = quota?.primary_window
+  const secondary = quota?.secondary_window
+  const pm = primary?.window_minutes
+  const sm = secondary?.window_minutes
+  let fiveFromPrimary: boolean
+  if (pm != null && sm != null) fiveFromPrimary = pm < sm
+  else if (pm != null) fiveFromPrimary = pm <= 360
+  else if (sm != null) fiveFromPrimary = sm > 360
+  else fiveFromPrimary = false
+  return fiveFromPrimary
+    ? { fiveHour: primary, sevenDay: secondary }
+    : { fiveHour: secondary, sevenDay: primary }
+}
+export type ModelAccess = {
+  mode: 'all' | 'allowlist' | 'denylist'
+  models: string[]
+}
+export type GatewayCatalog = {
+  groups: { id: number; name: string }[]
+  proxies: { id: string; name: string; host: string; port: number }[]
+  worker_available: boolean
+}
+export const accountBase = '/api/panel/codex-accounts'
+export const accountQueryKey = ['gateway-workers', 'accounts'] as const
+
+/** 账号列表（列表页与详情页的切换下拉共用缓存），5 秒轮询。 */
+export const accountsQueryOptions = (archived: boolean) =>
+  queryOptions({
+    queryKey: [...accountQueryKey, archived],
+    queryFn: () =>
+      api<{ items: GatewayAccount[] }>(
+        `${accountBase}?archived=${archived ? 'all' : 'active'}`
+      ),
+    refetchInterval: 5000,
+  })
+
+export const accountCatalogQueryOptions = () =>
+  queryOptions({
+    queryKey: ['gateway-account-catalog'],
+    queryFn: () => api<GatewayCatalog>(`${accountBase}/catalog`),
+  })
+
+export const groupNamesOf = (catalog?: GatewayCatalog) =>
+  new Map(catalog?.groups.map((group) => [group.id, group.name]) || [])
+
+export type GatewayAccountState = 'active' | 'paused' | 'pending' | 'archived'
+
+export function gatewayAccountState(
+  account: GatewayAccount
+): GatewayAccountState {
+  if (account.status === 'archived') return 'archived'
+  if (account.status === 'paused') return 'paused'
+  if (!account.runtime_account_id || account.projection_status !== 'synced')
+    return 'pending'
+  return 'active'
+}
+
+const ratio = (pct?: number) =>
+  pct == null || !Number.isFinite(Number(pct)) ? null : Number(pct) / 100
+
+// Worker 凭据终态 → 与 VM 相同的后端原因文案（backendStatusLabel 本地化）
+const CREDENTIAL_STATE_TEXT: Record<string, string> = {
+  expired: 'oauth_expired',
+  invalid: 'oauth_invalid_grant',
+  banned: 'oauth_revoked',
+  unverified: 'credential_blocked',
+}
+
+function credentialStateText(account: GatewayAccount): string {
+  if (account.credential_error === 'credential_refresh_failed')
+    return 'credential_refresh_failed'
+  return (
+    CREDENTIAL_STATE_TEXT[account.credential_state || ''] ||
+    'oauth_invalid_grant'
+  )
+}
+
+/**
+ * Present a Gateway account in the VM row shape so the account list reuses the
+ * Codex VM list cells (status, requests, quota windows, cost ledger) as-is.
+ * 5h/7d windows come from `quotaWindows` (by window length, like VM slots).
+ */
+/**
+ * 账号出站代理的代理池记录（与 VM 的 `vm.proxy` 同形，供 ProxyChip 显示健康与延迟）。
+ * `proxy_id` 可能是平台代理池 id 或供应商代理资源 id；手填地址按主机端口匹配，
+ * 池里没有时只返回主机端口。
+ */
+export function gatewayAccountProxy(
+  account: GatewayAccount,
+  pool: VmProxySnap[] = []
+): VmProxySnap | null {
+  const { proxy_id: id, proxy_endpoint: endpoint } = account.config
+  let host = ''
+  let port = ''
+  if (endpoint) {
+    try {
+      const url = new URL(endpoint)
+      host = url.hostname
+      port = url.port
+    } catch {
+      /* Stored summaries are protocol//host; anything else has no host. */
+    }
+  }
+  const pooled =
+    (id &&
+      pool.find((row) => row.id === id || row.vendor_resource_id === id)) ||
+    (host &&
+      pool.find(
+        (row) => row.host === host && String(row.port ?? '') === port
+      )) ||
+    null
+  if (pooled) return pooled
+  return host ? { host, port: port || undefined } : null
+}
+
+/** 账号列表里的今日 / 5H / 7D 汇总，转成 VM 详情页「计费窗口」的 billing 形态。 */
+export function gatewayAccountBilling(account: GatewayAccount) {
+  const usage = account.usage
+  const period = (prefix: string): VmBillingPeriod | null => {
+    if (!usage) return null
+    const row = usage as unknown as Record<string, number>
+    return {
+      requests: row[`${prefix}_requests`] || 0,
+      input_tokens: row[`${prefix}_input_tokens`] || 0,
+      output_tokens: row[`${prefix}_output_tokens`] || 0,
+      cache_read_tokens: row[`${prefix}_cache_read_tokens`] || 0,
+      cache_creation_tokens: row[`${prefix}_cache_creation_tokens`] || 0,
+      total_cost: row[`${prefix}_cost`] || 0,
+    }
+  }
+  return {
+    today: period('today'),
+    window_5h: period('window_5h'),
+    window_7d: period('window_7d'),
+  }
+}
+
+export function gatewayAccountAsVm(
+  account: GatewayAccount,
+  groupNames: Map<number, string>,
+  proxies?: VmProxySnap[]
+): Vm {
+  const state = gatewayAccountState(account)
+  const { fiveHour: w5, sevenDay: w7 } = quotaWindows(account.quota)
+  const hasToken = Number(account.credential_revision || 0) > 0
+  const now = Date.now()
+  const limited = [w5, w7].some(
+    (w) => Number(w?.used_percent) >= 100 && Date.parse(w?.reset_at || '') > now
+  )
+  const off = state === 'paused' || state === 'archived'
+  const availability: NonNullable<Vm['availability']> = !hasToken
+    ? { key: 'none', usable: false }
+    : account.credential_state
+      ? // 与 VM 一致：凭证失效先于调度开关判断；过期但仍有 refresh token 时 Worker 发送前会再试刷新
+        {
+          key: 'bad',
+          usable: account.credential_state === 'expired',
+          reason: `credential_${account.credential_state}`,
+          text: credentialStateText(account),
+        }
+      : off
+        ? { key: 'off', usable: false }
+        : state === 'pending'
+          ? { key: 'cool', usable: true, reason: 'projection_pending' }
+          : limited
+            ? {
+                key: 'quota',
+                usable: true,
+                reason:
+                  Number(w5?.used_percent) >= 100 ? 'quota_5h' : 'quota_7d',
+              }
+            : { key: 'ok', usable: true }
+  const usage = account.usage
+  return {
+    id: account.id,
+    name: account.name,
+    email: account.config.email || null,
+    platform: 'openai',
+    family: 'codex',
+    codex_kernel: true,
+    runtime_type: 'gateway',
+    status: off ? 'stopped' : 'running',
+    has_token: hasToken,
+    has_refresh: hasToken,
+    credential_mode: 'oauth',
+    plan_type: account.config.plan || null,
+    vendor_id: account.vendor_id,
+    vendor_name: account.vendor_name,
+    groups: (account.config.group_ids || []).map((id) => ({
+      id,
+      name: groupNames.get(id) || `#${id}`,
+      status: 'active',
+    })),
+    schedulable: !off,
+    schedule_state: off ? 'off' : 'on',
+    // 权重 1–100 与 VM 调度等级同为「高者优先」，列表优先级标签直接显示权重。
+    schedule_level: account.config.weight ?? 1,
+    schedule_level_mode: 'manual',
+    availability,
+    max_concurrency: account.config.max_concurrency,
+    max_rpm: account.config.max_rpm,
+    utilization_5h: ratio(w5?.used_percent),
+    utilization_7d: ratio(w7?.used_percent),
+    reset_5h: w5?.reset_at,
+    reset_7d: w7?.reset_at,
+    codex_usage: {
+      windows: [
+        {
+          id: '5h',
+          used_percent: w5?.used_percent ?? null,
+          reset_at: w5?.reset_at ?? null,
+        },
+        {
+          id: '7d',
+          used_percent: w7?.used_percent ?? null,
+          reset_at: w7?.reset_at ?? null,
+        },
+      ],
+    },
+    ...(usage || {}),
+    proxy: gatewayAccountProxy(account, proxies) ?? undefined,
+    proxy_id: account.config.proxy_id || undefined,
+    inflight: Number(account.inflight) || 0,
+    created_at: account.created_at,
+  } as Vm
+}
+
+/** 账号用量报表的按模型汇总，转成 VM 详情页「按模型成本」表的行。 */
+export function usageModelRows(
+  report?: Pick<VendorUsageReport, 'models'> | null
+): VmBillingModelRow[] | undefined {
+  return report?.models.map((row) => ({
+    model: row.model,
+    requests: row.requests,
+    unpriced_requests: row.unpriced_requests,
+    input_tokens: row.input_tokens,
+    output_tokens: row.output_tokens,
+    cache_read_tokens: row.cache_read_tokens,
+    cache_creation_tokens: row.cache_creation_tokens,
+    total_cost: Number(row.cost_usd) || 0,
+  }))
+}
+
+/** 代理芯片点击探测：池内代理查出口地理，池外手填地址没有可测记录。 */
+export function gatewayExitProbePath(vm: Pick<Vm, 'proxy'>): string | null {
+  return vm.proxy?.id
+    ? `/api/panel/proxies/${encodeURIComponent(vm.proxy.id)}/geo`
+    : null
+}

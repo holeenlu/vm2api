@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import {
@@ -15,13 +16,15 @@ type LogsPaneProps = {
 }
 
 export function LogsPane({ value: logging, onChange }: LogsPaneProps) {
+  const { t } = useTranslation('settings')
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>日志</CardTitle>
+        <CardTitle>{t('logs.title')}</CardTitle>
       </CardHeader>
       <CardContent className='divide-y'>
-        <SettingRow label='记录模式'>
+        <SettingRow label={t('logs.mode')}>
           <Select
             value={String(logging.mode || 'normal')}
             onValueChange={(mode) => onChange({ ...logging, mode })}
@@ -30,13 +33,13 @@ export function LogsPane({ value: logging, onChange }: LogsPaneProps) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value='off'>关闭</SelectItem>
-              <SelectItem value='normal'>普通</SelectItem>
+              <SelectItem value='off'>{t('off')}</SelectItem>
+              <SelectItem value='normal'>{t('normal')}</SelectItem>
               <SelectItem value='debug'>Debug</SelectItem>
             </SelectContent>
           </Select>
         </SettingRow>
-        <SettingRow label='保留天数'>
+        <SettingRow label={t('logs.retentionDays')}>
           <Input
             className='w-24'
             type='number'
@@ -52,8 +55,8 @@ export function LogsPane({ value: logging, onChange }: LogsPaneProps) {
           />
         </SettingRow>
         <SettingRow
-          label='Debug 保留天数'
-          desc='request_log_debug 行。不超过上面的保留天数。'
+          label={t('logs.debugRetentionDays')}
+          desc={t('logs.debugRetentionHelp')}
         >
           <Input
             className='w-24'
@@ -69,10 +72,7 @@ export function LogsPane({ value: logging, onChange }: LogsPaneProps) {
             }
           />
         </SettingRow>
-        <SettingRow
-          label='存储上限 MB'
-          desc='0 表示不按体积清理。超出删最旧 debug 行。'
-        >
+        <SettingRow label={t('logs.storageLimit')} desc={t('logs.storageHelp')}>
           <Input
             className='w-24'
             type='number'

@@ -5,6 +5,17 @@ export const SKIP_GPT =
 
 export const GPT_ID_PREFIX = /^gpt/i
 
+/** GPT model family helper. Context values are configured in the OpenAI model policy. */
+export function isAstraSolModel(id) {
+  const slug =
+    String(id || '')
+      .trim()
+      .split('/')
+      .filter(Boolean)
+      .pop() || ''
+  return /^gpt-\d+(?:\.\d+)?-(?:astra|sol)(?:-|$)/i.test(slug)
+}
+
 export function isGptSeriesId(id) {
   const s = String(id || '').trim()
   return GPT_ID_PREFIX.test(s) && !SKIP_GPT.test(s)
