@@ -62,6 +62,9 @@ export function createStreamTiming(startedAt = Date.now()) {
       )
         terminalAt = at
     },
+    firstTokenSeen() {
+      return firstTokenAt != null
+    },
     snapshot() {
       const generationMs = firstByteAt != null && terminalAt != null ? terminalAt - firstByteAt : null
       return {

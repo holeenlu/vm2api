@@ -1,5 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import {
   Dialog,
@@ -20,17 +21,27 @@ export function VmReauthDialog({
   vm: Vm | null
   onOpenChange: (open: boolean) => void
 }) {
+  useTranslation('vm')
+
   const qc = useQueryClient()
   return (
     <Dialog open={vm != null} onOpenChange={onOpenChange}>
       <DialogContent className='flex max-h-[88vh] flex-col gap-3 sm:max-w-xl'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2 text-base'>
-            重新授权
-            {vm ? <SlotIdentity vm={vm} compact /> : null}
+            <Trans
+              ns='vm'
+              i18nKey='vmReauthDialog.reauthorize'
+              components={{
+                part0: <>{vm ? <SlotIdentity vm={vm} compact /> : null}</>,
+              }}
+            />
           </DialogTitle>
           <DialogDescription>
-            生成授权链接换取新凭证，写入后覆盖当前槽位的令牌。
+            <Trans
+              ns='vm'
+              i18nKey='vmReauthDialog.generateAnAuthorizationLinkForNewCredentialsSavingReplaces'
+            />
           </DialogDescription>
         </DialogHeader>
         <div className='-me-3 min-h-0 flex-1 overflow-y-auto pe-3'>

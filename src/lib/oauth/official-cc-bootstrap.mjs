@@ -47,6 +47,8 @@ import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { atomicWriteJson, listVmRecordFiles } from '../vm/vm-file.mjs'
 import { CONTAINER_CLI_NODE_BIN, normalizeOfficialCcInference, resolveOfficialCcInference } from '../vm/slot-engine.mjs'
 import { getVm } from '../vm/vm-registry.mjs'
+import { flattenOauthIdentity } from './oauth-identity.mjs'
+import { persistAccountProfile } from './account-profile.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { CRS_OFFICIAL_CLI_SYSTEM } from '../identity/crs-persona.mjs'
 
@@ -1015,6 +1017,7 @@ export async function collectOfficialCcAccount(exec, { slotOauth } = {}) {
   const list = Array.isArray(models?.body?.data) ? models.body.data : []
   return {
     account_tier: tier,
+    profile_identity: profile?.ok ? flattenOauthIdentity(profile.body) : null,
     profile_ok: !!profile?.ok,
     profile_error: profile?.ok ? null : profile?.body?.error?.code || `http_${profile?.status || 0}`,
     available_models: models?.ok ? list.map((m) => String(m?.id || '')).filter(Boolean) : null,
@@ -1223,7 +1226,14 @@ export async function runOfficialCcBootstrap(rawOpts = {}) {
       force,
       step: 'profile',
     })
-    const account = await collectOfficialCcAccount({ vmId, homeDir, vm }, { slotOauth })
+    const profileVm = getVm(projectRoot, vmId) || vm
+    const account = await collectOfficialCcAccount({ vmId, homeDir, vm: profileVm }, { slotOauth })
+    if (account.profile_identity)
+      await persistAccountProfile(
+        path.join(projectRoot, 'vms', `${vmId}.json`),
+        account.profile_identity,
+        profileVm.claude || {},
+      )
     let tierSource = null
     if (stats?.limits_present === true && !stats.account_tier) {
       const accountTier = inferTierFromOfficialStats('', stats)

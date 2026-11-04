@@ -107,6 +107,52 @@ export class RequestAttemptsRepo {
     return this.list(requestId).find((item) => item.attempt_no === attemptNo) || null
   }
 
+  /** 一次写入结果已知的尝试（免去 begin + complete 两次写入）。 */
+  record({
+    requestId,
+    attemptNo,
+    vmId,
+    accountId,
+    model,
+    selectionReason,
+    waitMs = 0,
+    queueWaitMs = null,
+    schedulingMs = null,
+    ...result
+  }) {
+    const at = new Date().toISOString()
+    const write = () => {
+      this._insert.run(
+        requestId,
+        attemptNo,
+        vmId ?? null,
+        accountId ?? null,
+        model ?? null,
+        selectionReason ?? null,
+        at,
+        at,
+        result.upstreamStatus ?? null,
+        result.errorScope ?? null,
+        result.action ?? null,
+        result.cooldownUntil ?? null,
+        result.downstreamCommitted ? 1 : 0,
+        result.terminalState ?? null,
+        result.usage != null ? JSON.stringify(result.usage) : null,
+        waitMs ?? 0,
+        result.ttftMs ?? null,
+        result.latencyMs ?? null,
+        queueWaitMs,
+        schedulingMs,
+      )
+    }
+    if (writeBehindArmed()) {
+      enqueueWrite(write)
+      return null
+    }
+    write()
+    return this.list(requestId).find((item) => item.attempt_no === attemptNo) || null
+  }
+
   complete(requestId, attemptNo, result = {}) {
     const completedAt = new Date().toISOString()
     const write = () => {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import {
   PROXY_LATENCY_WARN_MS,
   proxyFieldClass,
@@ -43,4 +44,12 @@ describe('vmProxyTone', () => {
   it('keeps empty slots without a proxy as none', () => {
     expect(vmProxyTone({ has_token: false })).toBe('none')
   })
+})
+
+const initialLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(initialLanguage)
 })
