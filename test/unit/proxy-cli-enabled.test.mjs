@@ -231,7 +231,7 @@ test('package import with a proxy keeps proxy_cli_enabled even if the spec says 
     parsed,
     mode: 'create',
     proxyPool: pool,
-    owner: { role: 'admin', userId: null },
+    owner: { role: 'super_admin', userId: null },
   })
   assert.equal(result.ok, true, result.error?.message)
   const saved = getVm(root, 'vm-pkg')

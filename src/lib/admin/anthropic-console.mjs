@@ -104,6 +104,11 @@ export function savedEndpointKey(store, keyId) {
     const key = (endpoint.api_key_entries || []).find((item) => item.id === id)
     if (!key) continue
     return {
+      endpoint,
+      key,
+      kind: endpoint.kind,
+      protocol: endpoint.protocol,
+      headers: endpoint.headers,
       api_key: key.api_key,
       proxy_id: key.proxy_id || '',
       proxy_url: key.proxy_url || '',

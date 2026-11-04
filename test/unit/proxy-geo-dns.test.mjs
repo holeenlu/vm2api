@@ -25,16 +25,16 @@ for (const scheme of ['socks5', 'socks5h', 'http', 'https', '']) {
     assert.equal((await lookupProxyGeoV6(url, { fetchImpl })).ok, true)
     assert.equal(agents.length, 3)
     for (const agent of agents) {
-      if (scheme.startsWith('socks')) assert.equal(agent.shouldLookup, false)
+      if (scheme.startsWith('socks')) assert.equal(agent.shouldLookup, scheme === 'socks5')
       else if (scheme) assert.equal(agent.constructor.name, 'HttpsProxyAgent')
       else assert.equal(agent, undefined)
     }
-    // Only geo opts into remote DNS; explicit SOCKS5 elsewhere retains its semantics.
+    // Every consumer honors the selected SOCKS DNS mode.
     if (scheme === 'socks5') assert.equal(createProxyAgent(url).shouldLookup, true)
   })
 }
 
-test('geo succeeds through loopback SOCKS5 when local destination DNS is unavailable', async (t) => {
+test('geo succeeds through loopback SOCKS5H when local destination DNS is unavailable', async (t) => {
   const sockets = new Set()
   const requestedHosts = []
   const server = net.createServer((socket) => {
@@ -99,7 +99,7 @@ test('geo succeeds through loopback SOCKS5 when local destination DNS is unavail
       )
       req.on('error', reject)
     })
-  const result = await lookupProxyGeo(`socks5://127.0.0.1:${server.address().port}`, {
+  const result = await lookupProxyGeo(`socks5h://127.0.0.1:${server.address().port}`, {
     endpoint: 'http://geo.invalid/json',
     fetchImpl,
     timeoutMs: 1500,
