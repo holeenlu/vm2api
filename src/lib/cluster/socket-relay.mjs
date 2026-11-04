@@ -65,7 +65,7 @@ export class SocketRelay {
       this.server = null
       this.error =
         err.code === 'ENOTSUP'
-          ? `${err.message}（该文件系统不支持 unix socket，设置 VM2API_CLUSTER_SOCKET_DIR）`
+          ? `${err.message}（该文件系统不支持 unix socket，设置 TAPMODELS_CLUSTER_SOCKET_DIR）`
           : err.message
       throw err
     }

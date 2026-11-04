@@ -27,6 +27,8 @@ import { unitCircuit } from '../pool/unit-circuit.mjs'
 import { RateLimitService } from '../pool/rate-limit-service.mjs'
 import { AccountRuntimeRepo } from '../db/repos/account-runtime-repo.mjs'
 import { RequestAttemptsRepo } from '../db/repos/request-attempts-repo.mjs'
+import { SettingsRepo } from '../db/repos/settings-repo.mjs'
+import { compileAccountErrorProtection } from '../pool/account-error-protection.mjs'
 import { normalizeOfficialCcConfig } from '../oauth/official-cc-bootstrap.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
@@ -54,6 +56,49 @@ import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { telemetryUploadInterval } from '../vm/native-telemetry.mjs'
 
 export function createRoutingRuntime(ctx) {
+  let localConfigRevision = 1
+  const numericRevision = (value) => {
+    if (value == null || typeof value === 'boolean' || (typeof value === 'string' && value.trim() === '')) return NaN
+    return Number(value)
+  }
+  const readRevision = (value, fallback = 1) => {
+    const revision = numericRevision(value)
+    return Number.isSafeInteger(revision) && revision >= 1 ? revision : fallback
+  }
+  function currentConfigRevision() {
+    try {
+      if (typeof ctx.getConfigRevision === 'function') {
+        localConfigRevision = readRevision(ctx.getConfigRevision(), localConfigRevision)
+        return localConfigRevision
+      }
+    } catch {}
+    try {
+      const revision = ctx.runtimeSnapshot?.revision?.()
+      if (revision != null) {
+        localConfigRevision = readRevision(revision, localConfigRevision)
+        return localConfigRevision
+      }
+    } catch {}
+    return localConfigRevision
+  }
+  function advanceConfigRevision(expectedRevision) {
+    if (typeof ctx.advanceConfigRevision === 'function') {
+      const next = ctx.advanceConfigRevision(expectedRevision)
+      if (next == null) return null
+      localConfigRevision = readRevision(next, expectedRevision + 1)
+      return localConfigRevision
+    }
+    localConfigRevision = readRevision(expectedRevision, localConfigRevision) + 1
+    return localConfigRevision
+  }
+  function publishRuntimeSnapshot(nextRouting, revision) {
+    try {
+      return (
+        ctx.publishRuntimeSnapshot?.(nextRouting, revision) || ctx.runtimeSnapshot?.publish?.(nextRouting, revision)
+      )
+    } catch {}
+    return null
+  }
   const getRouting = () => (typeof ctx.getRoutingConfig === 'function' ? ctx.getRoutingConfig() : ctx.routingConfig)
   const setRouting = (next) => {
     if (typeof ctx.setRoutingConfig === 'function') ctx.setRoutingConfig(next)
@@ -79,6 +124,7 @@ export function createRoutingRuntime(ctx) {
     if (typeof ctx.setFailoverRunner === 'function') ctx.setFailoverRunner(next)
     else ctx.failoverRunner = next
   }
+  const getFailover = () => (typeof ctx.getFailoverRunner === 'function' ? ctx.getFailoverRunner() : ctx.failoverRunner)
 
   function applyVmConcurrency(id, n, { override = true } = {}) {
     const vmPath = path.join(ctx.cfg.paths.project, 'vms', `${id}.json`)
@@ -431,7 +477,30 @@ export function createRoutingRuntime(ctx) {
     return applied
   }
 
-  async function persistRoutingPatch(body = {}) {
+  async function persistRoutingPatch(body = {}, options = {}) {
+    const currentRevision = currentConfigRevision()
+    const hasExpectedRevision =
+      (Object.prototype.hasOwnProperty.call(options, 'expectedRevision') && options.expectedRevision != null) ||
+      Object.prototype.hasOwnProperty.call(body || {}, 'config_revision')
+    const rawExpectedRevision = Object.prototype.hasOwnProperty.call(options, 'expectedRevision')
+      ? options.expectedRevision
+      : body?.config_revision
+    const expectedRevision = hasExpectedRevision ? numericRevision(rawExpectedRevision) : currentRevision
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      const error = new TypeError('config_revision must be a positive integer')
+      error.code = 'invalid_config_revision'
+      error.status = 400
+      throw error
+    }
+    if (expectedRevision !== currentRevision) {
+      const error = new Error(
+        `Configuration revision ${expectedRevision} is stale; current revision is ${currentRevision}`,
+      )
+      error.code = 'config_revision_conflict'
+      error.status = 409
+      error.current_revision = currentRevision
+      throw error
+    }
     const hasCodexQuota = body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')
     if (hasCodexQuota) validateOpenAIQuotaPatch(body.codex.quota)
     validateInferenceWebsocketPatch(body)
@@ -478,6 +547,12 @@ export function createRoutingRuntime(ctx) {
     }
     if (body.codex) {
       const nextCodex = { ...(routingConfig.codex || {}), ...body.codex }
+      if (body.codex.scheduling)
+        nextCodex.scheduling = {
+          ...routingConfig.codex?.scheduling,
+          ...body.codex.scheduling,
+          smart_weights: { ...routingConfig.codex?.scheduling?.smart_weights, ...body.codex.scheduling.smart_weights },
+        }
       if (hasCodexQuota) {
         nextCodex.quota = mergeOpenAIQuotaPolicy(routingConfig.codex?.quota, body.codex.quota)
       }
@@ -519,6 +594,15 @@ export function createRoutingRuntime(ctx) {
     }
     fs.mkdirSync(path.dirname(ctx.routingConfigPath), { recursive: true })
     fs.writeFileSync(ctx.routingConfigPath, JSON.stringify(routingConfig, null, 2))
+    const configRevision = advanceConfigRevision(currentRevision)
+    if (configRevision == null) {
+      const error = new Error(`Configuration revision ${currentRevision} is stale`)
+      error.code = 'config_revision_conflict'
+      error.status = 409
+      error.current_revision = currentConfigRevision()
+      throw error
+    }
+    publishRuntimeSnapshot(routingConfig, configRevision)
     ctx.stickyRouter.reloadConfig(routingConfig)
     ctx.accountQuota.reloadConfig(routingConfig)
     getPool()?.reloadConfig?.(poolSchedulerConfig())
@@ -557,6 +641,7 @@ export function createRoutingRuntime(ctx) {
         kernel_persona: kernelPersona,
         kernel_reload: kernelReload,
         telemetry_sync: telemetrySync,
+        config_revision: configRevision,
       }
     } catch (err) {
       console.error(
@@ -571,6 +656,7 @@ export function createRoutingRuntime(ctx) {
         kernel_persona: kernelPersona,
         kernel_reload: kernelReload,
         telemetry_sync: telemetrySync,
+        config_revision: configRevision,
       }
     }
   }
@@ -690,6 +776,12 @@ export function createRoutingRuntime(ctx) {
     const routingConfig = getRouting()
     const runtimeRepo = new AccountRuntimeRepo()
     const attemptsRepo = new RequestAttemptsRepo()
+    let accountErrorProtection = null
+    try {
+      accountErrorProtection = compileAccountErrorProtection(new SettingsRepo().get('account_error_protection', {}))
+    } catch (error) {
+      console.warn('[account-protection] invalid policy disabled:', error?.message || error)
+    }
     setRuntimeRepo(runtimeRepo)
     setAttemptsRepo(attemptsRepo)
     ctx.accountQuota.attachRuntimeRepo(runtimeRepo)
@@ -726,6 +818,8 @@ export function createRoutingRuntime(ctx) {
       scheduler: poolScheduler,
       stickyRouter: ctx.stickyRouter,
       attemptsRepo,
+      accountRuntimeRepo: runtimeRepo,
+      accountErrorProtection,
       rateLimitService,
       config: routingConfig.failover || {},
       onProxyFailure: (vmId, reason) => {
@@ -787,6 +881,12 @@ export function createRoutingRuntime(ctx) {
     setFailover(failoverRunner)
   }
 
+  function reloadAccountErrorProtection(raw) {
+    const compiled = compileAccountErrorProtection(raw?.policy || raw || {})
+    getFailover?.()?.reloadAccountProtection?.(compiled)
+    return compiled
+  }
+
   return {
     persistRoutingPatch,
     applyOfficialCcRoutingBody,
@@ -810,5 +910,6 @@ export function createRoutingRuntime(ctx) {
     applyVmQuotaOverride,
     storedAccountTier,
     vmTierKey,
+    reloadAccountErrorProtection,
   }
 }

@@ -29,8 +29,8 @@ test('resolveLogMode: env + header overrides', () => {
   assert.equal(resolveLogMode('off', { headers: { 'x-kin-log': 'normal' } }), 'normal')
 })
 
-test('newRequestId keeps incoming X-Request-ID', () => {
-  assert.equal(newRequestId({ headers: { 'x-request-id': 'rid-1' } }), 'rid-1')
+test('newRequestId is server generated and never trusts caller collisions', () => {
+  assert.notEqual(newRequestId({ headers: { 'x-request-id': 'rid-1' } }), 'rid-1')
   assert.match(newRequestId({ headers: {} }), /^[0-9a-f-]{36}$/i)
 })
 
@@ -280,7 +280,7 @@ test('keyUsageStats counts only that key and ranks VMs', () => {
   const store = tmpStore('normal')
   const insert = store.db.prepare(`
     INSERT INTO usage_logs (id, request_id, created_at, path, model, upstream_model, status,
-      vm_id, api_key_id, input_tokens, output_tokens, total_cost, duration_ms)
+      vm_id, api_key_id, input_tokens, output_tokens, actual_cost, duration_ms)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 50, ?, ?)
   `)
   const now = new Date().toISOString()
@@ -346,8 +346,9 @@ test('zero group multiplier keeps usage and key counters but charges no USD', ()
   assert.equal(stored.usage_5h, 0)
 })
 
-test('billingStats Extra window excludes older logs outside reset-5h', () => {
+test('billingStats Extra window excludes older logs outside reset-5h', async (t) => {
   const store = tmpStore('normal')
+  t.after(() => store.pauseStatistics())
   const now = Date.parse('2026-09-26T12:00:00.000Z')
   const ctxOld = store.start(
     { method: 'POST', headers: {}, socket: {} },
@@ -380,19 +381,20 @@ test('billingStats Extra window excludes older logs outside reset-5h', () => {
     )
     .run()
   const reset5h = '2026-09-26T16:00:00.000Z'
-  const bill = store.billingStats({
+  const bill = await store.billingStats({
     now,
     accountWindows: [{ account_id: 'acc-1', vm_id: 'vm-01', reset_5h: reset5h }],
   })
   assert.equal(bill.accounts[0].window_5h_requests, 1)
   assert.ok(bill.accounts[0].window_5h_cost < 2)
   assert.equal(bill.accounts[0].window_5h_cost, bill.window_5h.total_cost)
-  const rolling = store.billingStats({ now })
+  const rolling = await store.billingStats({ now })
   assert.equal(rolling.accounts[0].window_5h_requests, 2)
 })
 
-test('billingStats aggregates official cost per account and today', () => {
+test('billingStats aggregates official cost per account and today', async (t) => {
   const store = tmpStore('normal')
+  t.after(() => store.pauseStatistics())
   const ctx = store.start(
     { method: 'POST', headers: {}, socket: {} },
     { protocol: 'anthropic.messages', pathName: '/v1/messages' },
@@ -405,7 +407,7 @@ test('billingStats aggregates official cost per account and today', () => {
     account_id: 'acc-1',
     usage: { input_tokens: 1_000_000, output_tokens: 0 },
   })
-  const bill = store.billingStats()
+  const bill = await store.billingStats()
   assert.equal(bill.currency, 'USD')
   assert.equal(bill.total.total_cost, 5)
   assert.equal(bill.today.total_cost, 5)
@@ -633,6 +635,20 @@ test('debug mode stores full redacted body', () => {
   assert.deepEqual(dbg[0].hop_meta.params.dropped, ['max_tokens'])
 })
 
+test('debug header provenance and envelope remain private in usage projections', async () => {
+  const { projectUsage } = await import('../../src/lib/admin/usage-projection.mjs')
+  const diagnostics = {
+    outbound_headers: { accept: 'application/json' },
+    outbound_headers_source: 'cli_final',
+    worker_envelope_headers: { 'x-app': 'internal' },
+  }
+  const record = { request_id: 'req', ...diagnostics, nested: { ...diagnostics } }
+  for (const role of ['user', 'admin']) {
+    assert.deepEqual(projectUsage(record, role), { request_id: 'req', nested: {} })
+  }
+  assert.deepEqual(projectUsage(record, 'super_admin'), record)
+})
+
 test('debug records retain final header provenance and a separate redacted worker envelope', () => {
   const store = tmpStore('debug')
   const ctx = store.start({ method: 'POST', headers: {}, socket: {} }, { protocol: 'anthropic.messages' })
@@ -715,6 +731,14 @@ function logOne(store, extra = {}) {
   const ctx = store.start({ method: 'POST', headers: {}, socket: {} }, { pathName: extra.path || '/v1/messages' })
   return store.finish(ctx, { status: 200, ...extra })
 }
+
+test('summary error_message never stores a slot credential', () => {
+  const store = tmpStore('normal')
+  const token = 'sk-ant-oat01-' + 'b'.repeat(60) + '_x9 GX-\u0445\u00d7'
+  logOne(store, { status: 502, error_code: 'cli_error', error_message: `invalid value: 'Bearer ${token}'` })
+  const [row] = store.listNormal({ limit: 1 })
+  assert.equal(row.error_message, "invalid value: 'Bearer ***REDACTED***'")
+})
 
 test('summaries persist in sqlite across store re-open', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-rlog-'))
@@ -1169,7 +1193,7 @@ test('debug response body masks credentials that fit inside the capture window',
   assert.match(body, /REDACTED/)
 })
 
-test('tenant log scope follows the slot owner at write time, not the current owner', () => {
+test('caller log scope never grants VM owners access to platform diagnostics', () => {
   const store = tmpStore()
   store.db.exec(`
     INSERT INTO users (id, email, username, password_hash) VALUES ('alice', 'a@x', 'alice', 'x'), ('bob', 'b@x', 'bob', 'x');
@@ -1177,16 +1201,16 @@ test('tenant log scope follows the slot owner at write time, not the current own
   `)
   logOne(store, { user_id: 'bob', vm_id: 'vm-a', error_code: 'upstream_error', status: 500 })
   store.db.exec(`UPDATE vms SET owner_user_id = 'alice', origin = 'admin_assigned' WHERE id = 'vm-a'`)
-  const testChat = logOne(store, { api_key_kind: 'master', vm_id: 'vm-a', error_code: 'upstream_error', status: 500 })
+  logOne(store, { api_key_kind: 'master', vm_id: 'vm-a', error_code: 'upstream_error', status: 500 })
 
   const mine = store.queryNormal({ owner_user_id: 'alice' })
   assert.deepEqual(
     mine.items.map((r) => r.request_id),
-    [testChat.request_id],
+    [],
   )
   assert.deepEqual(
     store.windowStats({ owner_user_id: 'alice' }).error_collection.recent.map((r) => r.request_id),
-    [testChat.request_id],
+    [],
   )
   assert.equal(store.queryNormal({}).total, 2)
 })
@@ -1292,4 +1316,93 @@ test('repriceRange re-prices image usage from the stored JSON and keeps actual_c
   assert.equal(rows.log_img_only.pricing_model, 'gpt-image-2.5-sunburst')
   assert.ok(Math.abs(rows.log_img_only.total_cost - 0.0321) < 1e-9)
   assert.equal(rows.log_img_only.actual_cost, 5)
+})
+
+test('response model persists without changing Codex prices or public projections', async () => {
+  const { projectUsage } = await import('../../src/lib/admin/usage-projection.mjs')
+  const store = tmpStore('normal')
+  const save = (actual) =>
+    store.finish(
+      store.start(
+        { method: 'POST', headers: {}, socket: {} },
+        { protocol: 'openai.responses', pathName: '/v1/responses' },
+      ),
+      {
+        status: 200,
+        model: 'gpt-6-astra',
+        requested_model: 'gpt-6-astra',
+        upstream_model: 'gpt-6-astra',
+        via: 'codex-kernel',
+        response_model: actual,
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    )
+  const original = save(null)
+  const observed = save('gpt-5.6-luna')
+  assert.equal(observed.upstream_model, original.upstream_model)
+  assert.equal(observed.pricing_model, original.pricing_model)
+  assert.equal(observed.total_cost, original.total_cost)
+  assert.equal(observed.model_mismatch, 1)
+  assert.equal(original.model_mismatch, null)
+  const row = store.queryNormal({ limit: 10 }).items.find((r) => r.id === observed.id)
+  assert.equal(row.response_model, 'gpt-5.6-luna')
+  const dto = new UsageLogsView(store.db).listBatch({}).logs.find((r) => r.id === observed.id)
+  assert.equal(dto.originalModel, 'gpt-6-astra')
+  assert.equal(dto.actualResponseModel, 'gpt-5.6-luna')
+  for (const role of ['admin', 'user', 'vendor']) {
+    assert.equal(projectUsage(row, role).response_model, undefined)
+    assert.equal(projectUsage(dto, role).actualResponseModel, undefined)
+  }
+  assert.equal(projectUsage(dto, 'super_admin').actualResponseModel, 'gpt-5.6-luna')
+})
+
+test('model mismatch follows the client request when billing model was remapped', () => {
+  const store = tmpStore('normal')
+  const sum = store.finish(
+    store.start(
+      { method: 'POST', headers: {}, socket: {} },
+      { protocol: 'openai.responses', pathName: '/v1/responses' },
+    ),
+    {
+      status: 200,
+      via: 'api-kernel',
+      model: 'gpt-5.6-terra',
+      requested_model: 'gpt-6-astra',
+      upstream_model: 'gpt-5.6-terra',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  )
+  assert.equal(sum.model, 'gpt-5.6-terra')
+  assert.equal(sum.requested_model, 'gpt-6-astra')
+  assert.equal(sum.upstream_model, 'gpt-5.6-terra')
+  assert.equal(sum.model_mismatch, 1)
+})
+
+test('Gateway request diagnostics are stored, mapped and visible only to super admins', async () => {
+  const { toUsageLogRow } = await import('../../src/lib/db/repos/usage-logs-view.mjs')
+  const { projectUsage } = await import('../../src/lib/usage/public-usage-projection.mjs')
+  const row = toUsageLogRow(
+    {
+      id: 'r1',
+      request_id: 'r1',
+      created_at: '2026-11-04T00:00:00Z',
+      error_kind: 'transport',
+      upstream_error_json: JSON.stringify({ code: 'bad', close_reason: 'gone' }),
+      websocket_close_code: 1006,
+      continuation_unavailable_reason: 'connection_lost',
+      upstream_connection_exit_reason: 'closed_by_upstream',
+      retry_after_ms: 2000,
+    },
+    {},
+  )
+  assert.equal(row.errorKind, 'transport')
+  assert.deepEqual(row.upstreamError, { code: 'bad', close_reason: 'gone' })
+  assert.equal(row.websocketCloseCode, 1006)
+  assert.equal(row.retryAfterMs, 2000)
+  for (const role of ['user', 'admin']) {
+    const projected = projectUsage(row, role)
+    for (const key of ['errorKind', 'upstreamError', 'websocketCloseCode', 'continuationUnavailableReason', 'upstreamConnectionExitReason', 'retryAfterMs'])
+      assert.equal(key in projected, false, `${key} leaked to ${role}`)
+  }
+  assert.equal(projectUsage(row, 'super_admin').websocketCloseCode, 1006)
 })

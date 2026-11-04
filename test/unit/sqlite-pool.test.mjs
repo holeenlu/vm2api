@@ -6,6 +6,8 @@ import test from 'node:test'
 import { closeDatabase, getDb, openDatabase } from '../../src/lib/db/database.mjs'
 import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
 import { readAll, usageRead } from '../../src/lib/db/sqlite-pool.mjs'
+import { readVendorUsage, readVendorUsagePooled } from '../../src/lib/vendor/vendor-account-usage.mjs'
+import { createUsageQueryService } from '../../src/lib/vendor/queries/usage-query-service.mjs'
 
 test('usage reads run on read-only workers and leave the event loop free', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-sqlite-pool-'))
@@ -31,6 +33,41 @@ test('usage reads run on read-only workers and leave the event loop free', async
     const local = new UsageLogsRepo(getDb()).totals()
     const remote = await usageRead({ kind: 'repo', method: 'totals' })
     assert.equal(Number(remote.requests), Number(local.requests))
+  } finally {
+    closeDatabase()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('supplier usage reports run on the read-only workers and keep input errors typed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-sqlite-pool-vendor-'))
+  openDatabase({ dataDir: dir, pooled: true })
+  try {
+    const db = getDb()
+    const now = Date.parse('2026-10-30T00:00:00Z')
+    const add = (id) =>
+      db
+        .prepare(
+          "INSERT INTO usage_logs(id,request_id,vm_id,created_at,status,total_cost,model,input_tokens,output_tokens) VALUES (?,?,'vm-pool','2026-10-29T12:00:00.000Z',200,1,'claude-fable-5',10,2)",
+        )
+        .run(id, id)
+    add('committed')
+    assert.deepEqual(await readVendorUsagePooled(db, ['vm-pool'], {}, now), readVendorUsage(db, ['vm-pool'], {}, now))
+    // A worker connection only sees committed rows; the main connection also sees its own open transaction.
+    db.exec('BEGIN')
+    try {
+      add('uncommitted')
+      assert.equal(readVendorUsage(db, ['vm-pool'], {}, now).summary.requests, 2)
+      assert.equal((await readVendorUsagePooled(db, ['vm-pool'], {}, now)).summary.requests, 1)
+    } finally {
+      db.exec('ROLLBACK')
+    }
+    await assert.rejects(readVendorUsagePooled(db, ['vm-pool'], { range: 'bogus' }, now), {
+      code: 'invalid_usage_range',
+    })
+    await assert.rejects(createUsageQueryService().admin(db, ['none'], { start_date: 'bogus' }), {
+      code: 'invalid_period',
+    })
   } finally {
     closeDatabase()
     fs.rmSync(dir, { recursive: true, force: true })
