@@ -1,3 +1,5 @@
+import { t } from '@/i18n'
+
 // Vendor inference for model call names.
 // Ported from the cch-plus.com official website pricing pipeline (registry.ts)
 // so that this project shares the exact same regex-based matching rules used to
@@ -320,7 +322,9 @@ export function inferVendorFromModelName(modelName: string): string {
  * 云端价格表 providers 字典有同名条目时以云端为准。
  */
 export const VENDOR_DISPLAY_NAMES: Record<string, string> = {
-  other: 'Other',
+  get other() {
+    return t('lib:common.other')
+  },
   anthropic: 'Anthropic',
   openai: 'OpenAI',
   google: 'Google',

@@ -1,3 +1,4 @@
+import { normalizeCodexScheduling } from '../pool/codex-scheduling-policy.mjs'
 /**
  * Codex hop routing. Claude traffic never reads this object.
  */
@@ -40,7 +41,44 @@ export const DEFAULT_CODEX_ROUTING = Object.freeze({
     unknown: 'allow',
   },
   quota: normalizeOpenAIQuotaPolicy(),
+  gateway_worker: { preference: 'auto' },
+  warmup: { enabled: false, times: [], model: '' },
+  reset_credit: { lead_minutes: 10, max_weekly_remaining_percent: null },
+  credit_overage: false,
+  bps_enabled: true,
 })
+
+// Gateway Worker 账号预热（对齐 CPR warmup 策略）：在本地时刻（UTC+8，"HH:MM"）对 OAuth 账号发起最小请求，
+// 提前激活 5h 额度窗口。缺少模型或时刻时视为关闭。
+export function normalizeCodexWarmup(raw) {
+  const src = asObject(raw) || {}
+  const times = [
+    ...new Set(
+      (Array.isArray(src.times) ? src.times : [])
+        .map((value) => String(value || '').trim())
+        .filter((value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value)),
+    ),
+  ]
+    .sort()
+    .slice(0, 24)
+  const model = typeof src.model === 'string' ? src.model.trim().slice(0, 128) : ''
+  return { enabled: src.enabled === true && times.length > 0 && !!model, times, model }
+}
+
+// Gateway 账号自动使用重置卡（对齐 CPR runtime_settings.reset_credit_*）：到期前 lead 分钟消费，
+// 可选“剩余周额度上限”（null 不限）。是否开启按账号配置 reset_credit_auto 决定。
+export function normalizeCodexResetCredit(raw) {
+  const src = asObject(raw) || {}
+  const lead = Number(src.lead_minutes)
+  const max = src.max_weekly_remaining_percent
+  return {
+    lead_minutes: Number.isInteger(lead) && lead >= 1 && lead <= 1440 ? lead : 10,
+    max_weekly_remaining_percent:
+      max !== null && max !== '' && Number.isInteger(Number(max)) && Number(max) >= 0 && Number(max) <= 100
+        ? Number(max)
+        : null,
+  }
+}
 
 function typedError(message, code) {
   const error = new TypeError(message)
@@ -85,6 +123,7 @@ export function validateInferenceWebsocketPatch(body = {}) {
   if (!Object.prototype.hasOwnProperty.call(body, 'codex')) return
   if (!asObject(body.codex)) throw typedError('codex 必须是对象', 'invalid_codex_websocket')
   const codex = body.codex
+  if (Object.hasOwn(codex, 'scheduling')) normalizeCodexScheduling(codex.scheduling, { strict: true })
   if (Object.prototype.hasOwnProperty.call(codex, 'websocket')) {
     validateEnabledToggle(codex.websocket, 'codex.websocket', 'invalid_codex_websocket')
   }
@@ -148,6 +187,18 @@ export function normalizeCodexRouting(raw = {}) {
     },
     clients,
     quota: normalizeOpenAIQuotaPolicy(src.quota),
+    gateway_worker: {
+      preference: ['auto', 'vm', 'gateway_worker'].includes(src.gateway_worker?.preference)
+        ? src.gateway_worker.preference
+        : 'auto',
+    },
+    scheduling: normalizeCodexScheduling(src.scheduling),
+    warmup: normalizeCodexWarmup(src.warmup),
+    reset_credit: normalizeCodexResetCredit(src.reset_credit),
+    // 窗口用尽后是否靠 ChatGPT 官方点数继续出量（默认关闭：停放到窗口重置，避免消耗点数）
+    credit_overage: src.credit_overage === true,
+    // BPS 总开关（默认开启，与 sub2api 新装默认一致）：关闭时所有请求只走原生通道；是否走 BPS 由账号的 BPS 模型名单决定
+    bps_enabled: src.bps_enabled !== false,
     model_mappings: normalizeCodexModelMappings(src.model_mappings),
   }
 }

@@ -6,9 +6,11 @@ import {
   useRef,
   useState,
 } from 'react'
+import { t } from '@/i18n'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
+import { useTranslation } from 'react-i18next'
 import { api } from '@/lib/api'
 import { captureLoginAuthUrl } from '@/lib/login-terminal'
 import { apiBase } from '@/lib/session'
@@ -40,11 +42,11 @@ function withBuiltins(own: SlashCommand[]): SlashCommand[] {
     ...own,
     {
       name: '/help',
-      desc: '列出快捷指令',
+      desc: t('common:terminalListCommands'),
       run: async () =>
         list.map((c) => `  ${c.name.padEnd(10)}${DIM}${c.desc}${RESET}`),
     },
-    { name: '/clear', desc: '清屏', run: async () => [] },
+    { name: '/clear', desc: t('common:terminalClear'), run: async () => [] },
   ]
   return list
 }
@@ -81,6 +83,7 @@ export const WsTerminal = forwardRef<
   },
   ref
 ) {
+  useTranslation('common')
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const sendRef = useRef<(data: string) => void>(() => {})
@@ -105,7 +108,7 @@ export const WsTerminal = forwardRef<
     const cmd = withBuiltins(commandsRef.current).find((c) => c.name === name)
     if (!term || !cmd || busyRef.current) return
     if (term.buffer.active.type !== 'normal') {
-      setNote('全屏程序运行中，退出后再执行快捷指令')
+      setNote(t('common:terminalBusy'))
       return
     }
     const line = lineRef.current
@@ -266,9 +269,11 @@ export const WsTerminal = forwardRef<
             code?: number | null
             message?: string
           }
-          if (msg.t === 'exit') setNote(`会话退出（code ${msg.code ?? '—'}）`)
+          if (msg.t === 'exit')
+            setNote(t('common:terminalExit', { code: msg.code ?? '—' }))
           if (msg.t === 'login') onLoginRef.current?.()
-          if (msg.t === 'error') setNote(msg.message || '终端错误')
+          if (msg.t === 'error')
+            setNote(msg.message || t('common:terminalError'))
         }
         ws.onclose = () => {
           if (!disposed) setPhase('closed')
@@ -309,10 +314,10 @@ export const WsTerminal = forwardRef<
       <div className='flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground'>
         <span>
           {phase === 'connecting'
-            ? '连接中…'
+            ? t('common:connecting')
             : phase === 'open'
-              ? `已连接${note ? ` · ${note}` : ''}`
-              : `已断开${note ? ` · ${note}` : ''}`}
+              ? t('common:connected') + (note ? ' · ' + note : '')
+              : t('common:disconnected') + (note ? ' · ' + note : '')}
         </span>
         <div className='flex flex-wrap items-center gap-1.5'>
           {commands?.map((c) => (
@@ -338,7 +343,7 @@ export const WsTerminal = forwardRef<
               className='h-7'
               onClick={() => setSession((n) => n + 1)}
             >
-              重新打开
+              {t('common:reopen')}
             </Button>
           ) : null}
         </div>

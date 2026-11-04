@@ -187,3 +187,43 @@ test('managed key cannot access panel admin APIs', async () => {
     await gw.stop()
   }
 })
+
+test('bulk key HTTP route saves selected fields atomically and rejects malformed patches', async () => {
+  const gw = await startGateway({ disableWatchdog: true })
+  try {
+    const keys = []
+    for (const name of ['bulk-one', 'bulk-two']) {
+      const r = await api(gw, 'POST', '/api/panel/api-keys', { body: { name, quota_usd: 9, rpm: 5 } })
+      assert.equal(r.status, 201, r.text)
+      keys.push(r.json.item)
+    }
+    const update = (ids, patch) => api(gw, 'PATCH', '/api/panel/api-keys/bulk', { body: { ids, patch } })
+    assert.equal((await update([keys[0].id, 'missing'], { rpm: 10 })).status, 404)
+    assert.equal(
+      (
+        await update(
+          keys.map((k) => k.id),
+          { quota_usd: null },
+        )
+      ).status,
+      400,
+    )
+    const saved = await update(
+      keys.map((k) => k.id),
+      { quota_usd: 12.5, rate_limit_5h: 1, rpm: 0 },
+    )
+    assert.equal(saved.status, 200, saved.text)
+    assert.deepEqual(saved.json, { ok: true, updated: 2 })
+    const listed = await api(gw, 'GET', '/api/panel/api-keys')
+    for (const key of keys) {
+      const row = listed.json.keys.find((k) => k.id === key.id)
+      assert.equal(row.quota_usd, 12.5)
+      assert.equal(row.rate_limit_5h, 1)
+      assert.equal(row.rpm, 0)
+      assert.equal(row.name, key.name)
+      assert.ok(row.key.includes('…'))
+    }
+  } finally {
+    await gw.stop()
+  }
+})

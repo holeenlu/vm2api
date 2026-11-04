@@ -21,6 +21,7 @@ import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
 export const CHATGPT_RESET_CONSUME_URL = `${CHATGPT_RESET_CREDITS_URL}/consume`
+export const CHATGPT_ACCOUNTS_CHECK_URL = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
 export const OPENAI_QUOTA_TIMEOUT_MS = 20_000
 const CODEX_BETA = 'codex-1'
 
@@ -99,17 +100,16 @@ export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
   const extra = {
     codex_usage_updated_at: new Date(now).toISOString(),
   }
-  if (primary) {
-    extra.codex_primary_used_percent = primary.used_percent
-    extra.codex_primary_reset_after_seconds = primary.reset_after_seconds
-    extra.codex_primary_window_minutes = primary.window_minutes
-    extra.codex_primary_reset_at = primary.reset_at
-  }
-  if (secondary) {
-    extra.codex_secondary_used_percent = secondary.used_percent
-    extra.codex_secondary_reset_after_seconds = secondary.reset_after_seconds
-    extra.codex_secondary_window_minutes = secondary.window_minutes
-    extra.codex_secondary_reset_at = secondary.reset_at
+  // WHAM is a complete snapshot. An absent window must clear earlier headers,
+  // unlike a partial inference response where missing headers mean no update.
+  for (const [role, window] of [
+    ['primary', primary],
+    ['secondary', secondary],
+  ]) {
+    extra[`codex_${role}_used_percent`] = window?.used_percent ?? null
+    extra[`codex_${role}_reset_after_seconds`] = window?.reset_after_seconds ?? null
+    extra[`codex_${role}_window_minutes`] = window?.window_minutes ?? null
+    extra[`codex_${role}_reset_at`] = window?.reset_at ?? null
   }
   const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
   extra.codex_5h_used_percent = limits.used_5h_percent
@@ -306,6 +306,39 @@ async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
   return { ...slot, access: tok.access_token, refresh: tok.refresh_token || slot.refresh }
 }
 
+/**
+ * Subscription facts from accounts/check for the slot's workspace: plan, end and
+ * renewal dates, payment channel. Ids, names and feature lists are not kept.
+ */
+export function parseChatgptSubscription(payload, accountId = '') {
+  const accounts = payload?.accounts && typeof payload.accounts === 'object' ? payload.accounts : null
+  if (!accounts) return null
+  const order = Array.isArray(payload.account_ordering) ? payload.account_ordering : []
+  const key = [accountId, ...order].find((id) => id && accounts[id]) || Object.keys(accounts)[0]
+  const row = accounts[key]
+  if (!row || typeof row !== 'object') return null
+  const entitlement = row.entitlement || {}
+  const last = row.last_active_subscription || {}
+  const account = row.account || {}
+  const text = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null)
+  const flag = (value) => (typeof value === 'boolean' ? value : null)
+  return {
+    plan_type: text(account.plan_type),
+    subscription_plan: text(entitlement.subscription_plan),
+    has_active_subscription: flag(entitlement.has_active_subscription),
+    expires_at: text(entitlement.expires_at),
+    renews_at: text(entitlement.renews_at),
+    cancels_at: text(entitlement.cancels_at),
+    will_renew: flag(last.will_renew),
+    purchase_origin_platform: text(last.purchase_origin_platform),
+    billing_currency: text(entitlement.billing_currency),
+    billing_period: text(entitlement.billing_period),
+    is_delinquent: flag(entitlement.is_delinquent),
+    is_trial: flag(account.is_trial),
+    is_deactivated: flag(account.is_deactivated),
+  }
+}
+
 function publicUsage(extra, resetCredits, credits, usagePayload = {}) {
   const view = buildCodexUsageView(extraToCodexSnapshot(extra))
   return {
@@ -342,13 +375,12 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
         upstream_status: usage.status,
       })
     }
-    const details = await quotaFetch(CHATGPT_RESET_CREDITS_URL, {
-      headers: headersOf(access),
-      proxyUrl: current.proxyUrl,
-      fetchImpl,
-      direct: current.direct,
-    })
-    return { usage, details }
+    const [details, account] = await Promise.all(
+      [CHATGPT_RESET_CREDITS_URL, CHATGPT_ACCOUNTS_CHECK_URL].map((url) =>
+        quotaFetch(url, { headers: headersOf(access), proxyUrl: current.proxyUrl, fetchImpl, direct: current.direct }),
+      ),
+    )
+    return { usage, details, account }
   }
 
   let pack = await run(current.access)
@@ -382,10 +414,14 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   )
   const persistable = resetCredits.available_count <= 0 || resetCredits.credits.length > 0 ? resetCredits : null
   const credits = normalizeCodexCredits(pack.usage.payload?.credits)
+  // Best effort: a failed account check keeps the last subscription snapshot.
+  const subscription = pack.account?.ok ? parseChatgptSubscription(pack.account.payload, current.accountId) : null
   persistCodexQuotaSnapshot(projectRoot, vmId, {
     extra,
     credits,
-    planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType,
+    planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType || subscription?.plan_type,
+    email: pack.usage.payload?.email,
+    subscription,
     ...(persistable ? { resetCredits: persistable } : {}),
   })
   syncCodexQuotaSchedule(projectRoot, getVm(projectRoot, vmId), {
@@ -447,13 +483,20 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     })
   }
 
+  const windowsReset = int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0
+  if (windowsReset > 0) {
+    // A redeemed credit starts a new billing interval even if WHAM keeps the
+    // old reset timestamp or the follow-up usage query fails.
+    const at = new Date().toISOString()
+    persistCodexQuotaSnapshot(projectRoot, vmId, { clearedWindows: { '5h': at, '7d': at } })
+  }
   const after = await queryUpstream(current, { fetchImpl, rotate: false, projectRoot, vmId, policy })
   if (!after.ok) {
     return {
       ok: true,
       warning: 'reset_credit_cache_refresh_failed',
       code: res.payload?.code || 'ok',
-      windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+      windows_reset: windowsReset,
       reset_credits: null,
       credits: null,
       usage: null,
@@ -464,7 +507,7 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
   return {
     ok: true,
     code: res.payload?.code || 'ok',
-    windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+    windows_reset: windowsReset,
     ...after,
   }
 }

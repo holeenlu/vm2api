@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { RefusalGuardConfig } from '@/types/panel-routing'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
-import { fmtExpiresAt } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { formatTimestamp as fmtExpiresAt } from '@/features/logs/display-time'
 import { Group, ToggleItem, ToggleList } from './blocks'
 import { refusalGuardsQueryOptions } from './queries'
 
@@ -20,6 +21,8 @@ function shortFp(fp: string) {
 
 /** Changes here save immediately: each switch and list action is one PUT/DELETE. */
 export function RefusalSettings() {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const q = useQuery(refusalGuardsQueryOptions())
   const [clearOpen, setClearOpen] = useState(false)
@@ -34,7 +37,7 @@ export function RefusalSettings() {
         body: JSON.stringify(patch),
       }),
     onSuccess: async (data) => {
-      toast.success('已保存拒答设置')
+      toast.success(translate('risk:refusalSettingsSaved'))
       qc.setQueryData(refusalGuardsQueryOptions().queryKey, data)
     },
     onError: (error: Error) => toast.error(error.message),
@@ -46,7 +49,7 @@ export function RefusalSettings() {
         method: 'DELETE',
       }),
     onSuccess: async () => {
-      toast.success('已删除指纹')
+      toast.success(translate('risk:fingerprintDeleted'))
       setDeleteFp(null)
       await qc.invalidateQueries({
         queryKey: refusalGuardsQueryOptions().queryKey,
@@ -62,7 +65,7 @@ export function RefusalSettings() {
         body: JSON.stringify({ confirm: true }),
       }),
     onSuccess: async () => {
-      toast.success('已清空拒答缓存')
+      toast.success(translate('risk:refusalCacheCleared'))
       setClearOpen(false)
       await qc.invalidateQueries({
         queryKey: refusalGuardsQueryOptions().queryKey,
@@ -78,7 +81,7 @@ export function RefusalSettings() {
         body: JSON.stringify({ device_id: deviceId }),
       }),
     onSuccess: async () => {
-      toast.success('已解除 device 封禁')
+      toast.success(translate('risk:deviceUnblocked'))
       setUnblockId(null)
       await qc.invalidateQueries({
         queryKey: refusalGuardsQueryOptions().queryKey,
@@ -94,7 +97,7 @@ export function RefusalSettings() {
         body: JSON.stringify({ confirm: true }),
       }),
     onSuccess: async () => {
-      toast.success('已清空 device 封禁')
+      toast.success(translate('risk:allDevicesUnblocked'))
       setClearDevicesOpen(false)
       await qc.invalidateQueries({
         queryKey: refusalGuardsQueryOptions().queryKey,
@@ -120,18 +123,24 @@ export function RefusalSettings() {
   return (
     <div className='space-y-8 p-4'>
       <Group
-        title='何时拦截'
-        hint='上游拒答过的正文记成指纹。精确命中直接 503；近似只比较用户正文，短于 512 字不做。改动立即生效。'
+        title={translate('risk:whenToBlock')}
+        hint={translate('risk:refusalSettingsDescription')}
       >
         <ToggleList>
-          <ToggleItem label='拦截重复拒答' desc='REFUSAL_GUARD=0 会关掉整关'>
+          <ToggleItem
+            label={translate('risk:blockRepeatedRefusals')}
+            desc={translate('risk:refusalEnvironmentHint')}
+          >
             <Switch
               checked={data.enabled}
               disabled={save.isPending}
               onCheckedChange={(v) => save.mutate({ enabled: v })}
             />
           </ToggleItem>
-          <ToggleItem label='近似拦截' desc='不含共享 system'>
+          <ToggleItem
+            label={translate('risk:blockSimilar')}
+            desc={translate('risk:excludeSharedSystem')}
+          >
             <Switch
               checked={data.similarity_enabled !== false}
               disabled={save.isPending || !data.enabled}
@@ -139,8 +148,8 @@ export function RefusalSettings() {
             />
           </ToggleItem>
           <ToggleItem
-            label='封禁 device'
-            desc='命中任一关后，这个 device 的任意 prompt 都不再 hop'
+            label={translate('risk:blockedDevice')}
+            desc={translate('risk:banDeviceHint')}
           >
             <Switch
               checked={data.device_block_enabled !== false}
@@ -148,10 +157,13 @@ export function RefusalSettings() {
               onCheckedChange={(v) => save.mutate({ device_block_enabled: v })}
             />
           </ToggleItem>
-          <ToggleItem label='相似度' desc='越高越不容易误伤'>
+          <ToggleItem
+            label={translate('risk:similarity')}
+            desc={translate('risk:similarityHint')}
+          >
             <div
               role='radiogroup'
-              aria-label='相似度'
+              aria-label={translate('risk:similarity')}
               className='flex rounded-lg bg-muted p-0.5'
             >
               {SIMILARITY_CHOICES.map((choice) => (
@@ -178,13 +190,16 @@ export function RefusalSettings() {
 
       <div className='grid gap-8 xl:grid-cols-2'>
         <Group
-          title='已封禁 device'
+          title={translate('risk:bannedDevices')}
           hint={
             deviceCount
               ? devices.length < deviceCount
-                ? `显示最近 ${devices.length} / ${deviceCount}`
-                : `${deviceCount} 个`
-              : '还没有'
+                ? translate('risk:showRecentCount', {
+                    p0: devices.length,
+                    p1: deviceCount,
+                  })
+                : translate('risk:deviceCount', { count: deviceCount })
+              : translate('risk:noneYet')
           }
           action={
             <Button
@@ -194,7 +209,7 @@ export function RefusalSettings() {
               disabled={!deviceCount || clearDevices.isPending}
               onClick={() => setClearDevicesOpen(true)}
             >
-              全部解除
+              {translate('risk:unblockAll')}
             </Button>
           }
         >
@@ -210,8 +225,11 @@ export function RefusalSettings() {
                       {item.device_id}
                     </p>
                     <p className='text-xs text-muted-foreground tabular-nums'>
-                      {item.reason || 'refusal_guard'} · 命中 {item.hit_count} ·{' '}
-                      {fmtExpiresAt(item.last_seen_at)}
+                      {translate('risk:deviceHitDetails', {
+                        reason: item.reason || 'refusal_guard',
+                        count: item.hit_count,
+                        lastSeen: fmtExpiresAt(item.last_seen_at),
+                      })}
                     </p>
                   </div>
                   <Button
@@ -220,7 +238,7 @@ export function RefusalSettings() {
                     className='cursor-pointer'
                     onClick={() => setUnblockId(item.device_id)}
                   >
-                    解除
+                    {translate('risk:unblock')}
                   </Button>
                 </li>
               ))}
@@ -228,13 +246,16 @@ export function RefusalSettings() {
           ) : null}
         </Group>
         <Group
-          title='拒答指纹'
+          title={translate('risk:refusalFingerprints')}
           hint={
             data.count
               ? data.items.length < data.count
-                ? `显示最近 ${data.items.length} / ${data.count}`
-                : `${data.count} 条`
-              : '还没有上游拒答'
+                ? translate('risk:showRecentCount', {
+                    p0: data.items.length,
+                    p1: data.count,
+                  })
+                : translate('risk:itemCount', { count: data.count })
+              : translate('risk:noRefusalsYet')
           }
           action={
             <Button
@@ -244,7 +265,7 @@ export function RefusalSettings() {
               disabled={!data.count || clear.isPending}
               onClick={() => setClearOpen(true)}
             >
-              清空指纹
+              {translate('risk:clearFingerprints')}
             </Button>
           }
         >
@@ -260,7 +281,7 @@ export function RefusalSettings() {
                       className='line-clamp-3 text-sm break-words'
                       title={item.preview || undefined}
                     >
-                      {item.preview || '（无预览）'}
+                      {item.preview || translate('risk:noPreview')}
                     </p>
                     {item.error_message ? (
                       <p
@@ -271,8 +292,12 @@ export function RefusalSettings() {
                       </p>
                     ) : null}
                     <p className='truncate font-mono text-xs text-muted-foreground tabular-nums'>
-                      {item.model || '—'} · {shortFp(item.fingerprint)} · 命中{' '}
-                      {item.hit_count} · {fmtExpiresAt(item.last_seen_at)}
+                      {translate('risk:fingerprintHitDetails', {
+                        model: item.model || '—',
+                        fingerprint: shortFp(item.fingerprint),
+                        count: item.hit_count,
+                        lastSeen: fmtExpiresAt(item.last_seen_at),
+                      })}
                     </p>
                   </div>
                   <Button
@@ -281,7 +306,7 @@ export function RefusalSettings() {
                     className='cursor-pointer'
                     onClick={() => setDeleteFp(item.fingerprint)}
                   >
-                    删除
+                    {translate('risk:delete')}
                   </Button>
                 </li>
               ))}
@@ -292,10 +317,10 @@ export function RefusalSettings() {
       <ConfirmDialog
         open={clearOpen}
         onOpenChange={setClearOpen}
-        title='清空拒答缓存'
-        desc='清空后同样请求会再次 hop 上游。已封禁的 device 不会一起解除。'
-        confirmText='清空'
-        cancelBtnText='取消'
+        title={translate('risk:clearRefusalCache')}
+        desc={translate('risk:clearRefusalCacheHint')}
+        confirmText={translate('risk:clear')}
+        cancelBtnText={translate('risk:cancel')}
         destructive
         isLoading={clear.isPending}
         handleConfirm={() => clear.mutate()}
@@ -303,10 +328,10 @@ export function RefusalSettings() {
       <ConfirmDialog
         open={clearDevicesOpen}
         onOpenChange={setClearDevicesOpen}
-        title='解除全部 device 封禁'
-        desc='解除后这些 device 可以再次请求。拒答指纹还在，相同或足够近似的正文仍会被拦。'
-        confirmText='全部解除'
-        cancelBtnText='取消'
+        title={translate('risk:unblockAllDevices')}
+        desc={translate('risk:unblockAllDevicesHint')}
+        confirmText={translate('risk:unblockAll')}
+        cancelBtnText={translate('risk:cancel')}
         destructive
         isLoading={clearDevices.isPending}
         handleConfirm={() => clearDevices.mutate()}
@@ -316,10 +341,12 @@ export function RefusalSettings() {
         onOpenChange={(open) => {
           if (!open) setDeleteFp(null)
         }}
-        title='删除这条指纹'
-        desc={`删除后「${deleting?.preview || shortFp(deleteFp || '')}」会再次打上游。`}
-        confirmText='删除'
-        cancelBtnText='取消'
+        title={translate('risk:deleteFingerprint')}
+        desc={translate('risk:deleteFingerprintHint', {
+          p0: deleting?.preview || shortFp(deleteFp || ''),
+        })}
+        confirmText={translate('risk:delete')}
+        cancelBtnText={translate('risk:cancel')}
         destructive
         isLoading={remove.isPending}
         handleConfirm={() => {
@@ -331,10 +358,10 @@ export function RefusalSettings() {
         onOpenChange={(open) => {
           if (!open) setUnblockId(null)
         }}
-        title='解除这个 device'
-        desc={`解除后 ${unblockId || ''} 的新请求不再因为 device 封禁被拦。`}
-        confirmText='解除'
-        cancelBtnText='取消'
+        title={translate('risk:unblockDevice')}
+        desc={translate('risk:unblockDeviceHint', { p0: unblockId || '' })}
+        confirmText={translate('risk:unblock')}
+        cancelBtnText={translate('risk:cancel')}
         destructive
         isLoading={unblock.isPending}
         handleConfirm={() => {
