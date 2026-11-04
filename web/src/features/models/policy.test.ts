@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest'
-import { catalogFacts, fastAliasState } from './policy'
+import { i18n } from '@/i18n'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { catalogFacts, effectiveContextWindow, fastAliasState } from './policy'
+
+const originalLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(originalLanguage)
+})
 
 describe('catalogFacts', () => {
   it('reports 未同步 instead of seed constants', () => {
@@ -82,5 +91,19 @@ describe('fastAliasState', () => {
       available: true,
       reason: '',
     })
+  })
+})
+
+describe('effectiveContextWindow', () => {
+  it('follows the upstream catalog until an explicit gateway override is set', () => {
+    const model = {
+      id: 'gpt-6-astra',
+      capabilities: { context_window: 500000 },
+      catalog: { context_window: 272000 },
+    }
+    expect(effectiveContextWindow(model)).toBe(272000)
+    expect(
+      effectiveContextWindow({ ...model, context_window_override: 500000 })
+    ).toBe(500000)
   })
 })

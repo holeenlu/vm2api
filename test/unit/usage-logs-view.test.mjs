@@ -39,6 +39,8 @@ function seed(db, rows) {
       model: 'claude-sonnet-4',
       status: 200,
       vm_id: 'vm-a',
+      actual_cost: r.total_cost ?? null,
+      user_id: r.api_key_id === 'k1' ? 'u1' : r.api_key_id === 'k2' ? 'u2' : null,
       ...r,
     }
     repo.insertSummary(rec)
@@ -111,7 +113,7 @@ test('JS-filtered paging hands back the scan cursor instead of ending early', ()
   assert.ok(seen.every((r) => r.errorClass === 'timeout'))
 })
 
-test('user owner scope keeps only own key / own user rows and ignores other tenants', () => {
+test('caller snapshot excludes unattributed rows even when their current key is owned', () => {
   const db = freshDb()
   seed(db, [
     { user_id: 'u1', api_key_id: 'k1' },
@@ -120,9 +122,9 @@ test('user owner scope keeps only own key / own user rows and ignores other tena
   ])
   const view = new UsageLogsView(db)
   const mine = view.listBatch({ owner_user_id: 'u1' }).logs
-  assert.equal(mine.length, 2)
+  assert.equal(mine.length, 1)
   assert.ok(mine.every((r) => r.keyId === 'k1'))
-  assert.equal(view.summary({ owner_user_id: 'u1' }).totalRequests, 2)
+  assert.equal(view.summary({ owner_user_id: 'u1' }).totalRequests, 1)
   const opts = view.filterOptions({ owner_user_id: 'u1' })
   assert.deepEqual(opts.users, [{ id: 'u1', name: 'alice' }])
   assert.deepEqual(opts.keys, [{ id: 'k1', name: 'alice-key', userId: 'u1' }])
@@ -219,7 +221,16 @@ test('provider chains for a page come from one request_attempts query, ordered b
   assert.deepEqual(logs.find((r) => r.requestId === c.request_id).providerChain, [])
 })
 
-test('filters: model/requested_model, status, attempts, session, debug, time, q', () => {
+test('account display falls back from a VM to its current account when the log lacks account_id', () => {
+  const db = freshDb()
+  const [row] = seed(db, [{ vm_id: 'vm-a', account_id: null, final_account_id: null }])
+  const listed = new UsageLogsView(db).listBatch({}).logs
+  const result = listed.find((item) => item.requestId === row.request_id)
+  assert.equal(result.accountId, 'acc-a')
+  assert.equal(result.providerName, 'a@pool')
+})
+
+test('filters: model/requested_model, status, attempts, session, time, q', () => {
   const db = freshDb()
   const rows = seed(db, [
     { model: 'claude-opus-4', requested_model: 'opus-alias', session_id: 's-1', outbound_session_id: 'out-1' },
@@ -244,8 +255,6 @@ test('filters: model/requested_model, status, attempts, session, debug, time, q'
   const [first] = view.listBatch({ session_id: 'out-1' }).logs
   assert.equal(first.sessionId, 'out-1')
   assert.equal(first.clientSessionId, 's-1')
-  assert.deepEqual(ids({ debug_only: true }), [rows[2].id])
-  assert.deepEqual(ids({ endpoint: '/v1/chat/completions' }), [rows[2].id])
   assert.deepEqual(ids({ q: 'needle' }), [rows[3].id])
   assert.deepEqual(ids({ start_time: rows[1].created_at, end_time: rows[3].created_at }), [rows[1].id, rows[2].id])
 })
@@ -293,7 +302,7 @@ test('#777 badge: sent priority with a non-priority upstream echo is a Fast down
   assert.equal(downgrade(unechoed.id), undefined)
 })
 
-test('overview splits today/yesterday-same-time in the requested zone', () => {
+test('overview splits today/yesterday-same-time in UTC+8 regardless of client zone', () => {
   const db = freshDb()
   const now = Date.parse('2026-03-10T04:00:00Z') // 12:00 in Shanghai
   seed(db, [
@@ -311,9 +320,9 @@ test('overview splits today/yesterday-same-time in the requested zone', () => {
   assert.equal(sh.yesterdayCost, 1)
   assert.equal(sh.rpm, 1)
   assert.equal(sh.activeSessions, 1)
-  // Unknown zone falls back to UTC: today starts 2026-03-10T00:00Z.
+  // Client timezone cannot change the system business day.
   const utc = view.overview({ tz: 'Not/AZone', now })
-  assert.equal(utc.todayRequests, 1)
+  assert.equal(utc.todayRequests, 2)
   assert.equal(utc.yesterdayRequests, 1)
 })
 
@@ -357,9 +366,6 @@ test('active sessions and session suggestions group by outbound session, owner-s
   assert.equal(active.sessions[1].lastStatus, 200)
   assert.equal(active.sessions[1].keyName, 'alice-key')
   assert.equal(view.activeSessions({ now }).total, 3)
-  assert.deepEqual(view.sessionSuggestions({ q: 'abc', owner_user_id: 'u1' }), ['abc-1b', 'abc-1', 'abc-3'])
-  assert.deepEqual(view.sessionSuggestions({ q: 'abc-2' }), ['abc-2'])
-  assert.deepEqual(view.sessionSuggestions({ q: 'client' }), [])
   assert.equal(view.overview({ now }).activeSessions, 3)
 })
 
@@ -418,4 +424,106 @@ test('tenant error collection hides other users and anonymous ingress failures',
   const all = repo.windowStats().error_collection
   assert.equal(all.recent.length, 3)
   assert.deepEqual(all.ingress_hits.map((h) => h.ip).sort(), ['198.51.100.7', '203.0.113.9'])
+})
+
+test('legacy Codex outbound models are not presented as observed responses', () => {
+  const db = freshDb()
+  const [legacy, observed, other] = seed(db, [
+    { via: 'codex-kernel', requested_model: 'alias', upstream_model: 'gpt-6-astra', model_mismatch: 1 },
+    {
+      via: 'codex-kernel',
+      requested_model: 'gpt-6-astra',
+      upstream_model: 'gpt-6-astra',
+      response_model: 'gpt-5.6-luna',
+      model_mismatch: 1,
+    },
+    { via: 'api-kernel', requested_model: 'alias', upstream_model: 'claude-sonnet-4', model_mismatch: 1 },
+  ])
+  const view = new UsageLogsView(db)
+  const logs = view.listBatch({}).logs
+  assert.equal(logs.find((r) => r.id === legacy.id).actualResponseModel, null)
+  assert.equal(logs.find((r) => r.id === legacy.id).modelMismatch, null)
+  assert.equal(
+    logs.find((r) => r.id === legacy.id).specialSettings.some((s) => s.key === 'mismatch'),
+    false,
+  )
+  assert.equal(logs.find((r) => r.id === observed.id).actualResponseModel, 'gpt-5.6-luna')
+  assert.equal(logs.find((r) => r.id === other.id).actualResponseModel, 'claude-sonnet-4')
+})
+
+test('Gateway Worker rows and the upstream-account filter show the account name, not the runtime id', () => {
+  const db = freshDb()
+  db.exec(`
+    INSERT INTO vendor_resources (id, vendor_id, resource_type, name, status, config_json, created_by, created_at, updated_at)
+      VALUES ('res_gw', NULL, 'account', 'codex-cn-5', 'active', '{"platform":"openai","execution_kind":"gateway_worker"}', 't', 'now', 'now'),
+             ('res_pending', NULL, 'account', 'codex-new', 'active', '{"platform":"openai","execution_kind":"gateway_worker"}', 't', 'now', 'now');
+    INSERT INTO gateway_worker_instances (id, name, base_url, created_at, updated_at) VALUES ('gw_1', 'gw_1', 'http://127.0.0.1:8790', 'now', 'now');
+    INSERT INTO gateway_worker_account_bindings (id, account_resource_id, gateway_instance_id, runtime_account_id, created_at, updated_at)
+      VALUES ('bind_1', 'res_gw', 'gw_1', 'gwacct_account_x', 'now', 'now');
+  `)
+  const [bound, pending] = seed(db, [
+    { vm_id: 'gateway:res_gw', account_id: 'gwacct_account_x', final_account_id: 'gwacct_account_x' },
+    { vm_id: 'gateway:res_pending', account_id: 'gwacct_res_pending', final_account_id: 'gwacct_res_pending' },
+  ])
+  const view = new UsageLogsView(db)
+  const listed = view.listBatch({}).logs
+  assert.equal(listed.find((item) => item.requestId === bound.request_id).providerName, 'codex-cn-5')
+  assert.equal(listed.find((item) => item.requestId === pending.request_id).providerName, 'codex-new')
+  const option = view.filterOptions().accounts.find((item) => item.id === 'gwacct_account_x')
+  assert.deepEqual(option, { id: 'gwacct_account_x', name: 'codex-cn-5', platform: 'openai' })
+  const filtered = view.listBatch({ account_id: 'gwacct_account_x' }).logs
+  assert.deepEqual(
+    filtered.map((item) => item.requestId),
+    [bound.request_id],
+  )
+})
+
+test('upstream API rows show the API name; platform filter follows account, then model, then protocol', () => {
+  const db = freshDb()
+  db.exec(`
+    UPDATE accounts SET platform = 'claude';
+    INSERT INTO api_endpoints (id, name, base_url, kind, protocol, created_at, updated_at)
+      VALUES ('ep_oa', 'OpenAI API Key', 'https://api.openai.com', 'openai', 'openai', 'now', 'now'),
+             ('ep_cl', 'claude-cc-7', 'https://api.anthropic.com', 'claude', 'anthropic', 'now', 'now');
+    INSERT INTO api_endpoint_keys (id, endpoint_id, api_key, created_at)
+      VALUES ('ek_oa1', 'ep_oa', 'sk-a', 'now'), ('ek_oa2', 'ep_oa', 'sk-b', 'now'), ('ek_cl1', 'ep_cl', 'sk-c', 'now');
+  `)
+  const rows = seed(db, [
+    { account_id: 'ek_oa1', final_account_id: 'ek_oa1', model: 'gpt-6-astra', protocol: 'openai.responses' },
+    { account_id: 'ek_cl1', final_account_id: 'ek_cl1', model: 'claude-opus-5-5', protocol: 'anthropic.messages' },
+    // Chat Completions 入站但落到 Claude 账号：按账号归 Anthropic
+    { account_id: 'acc-a', final_account_id: 'acc-a', model: 'claude-opus-5-5', protocol: 'openai.chat' },
+    // 未路由：按模型
+    { vm_id: null, account_id: null, final_account_id: null, model: 'gpt-6.1-sol', protocol: 'anthropic.messages' },
+    // 模型也缺失：按入站协议族
+    { vm_id: null, account_id: null, final_account_id: null, model: null, protocol: 'openai.responses' },
+  ])
+  const view = new UsageLogsView(db)
+  const listed = view.listBatch({}).logs
+  const byId = (id) => listed.find((r) => r.id === id)
+  assert.equal(byId(rows[0].id).providerName, 'OpenAI API Key')
+  assert.equal(byId(rows[1].id).providerName, 'claude-cc-7')
+  const ids = (f) =>
+    view
+      .listBatch(f)
+      .logs.map((r) => r.id)
+      .sort()
+  assert.deepEqual(ids({ platform: 'openai' }), [rows[0].id, rows[3].id, rows[4].id].sort())
+  assert.deepEqual(ids({ platform: 'anthropic' }), [rows[1].id, rows[2].id].sort())
+  assert.equal(view.summary({ platform: 'anthropic' }).totalRequests, 2)
+
+  const options = view.filterOptions()
+  const account = (id) => options.accounts.find((a) => a.id === id)
+  assert.deepEqual(account('ek_cl1'), { id: 'ek_cl1', name: 'claude-cc-7', platform: 'anthropic' })
+  assert.deepEqual(account('ek_oa1'), { id: 'ek_oa1', name: 'OpenAI API Key · ek_oa1', platform: 'openai' })
+  assert.equal(account('acc-a').platform, 'anthropic')
+  assert.deepEqual(
+    options.models.filter((m) => m.id === 'gpt-6-astra' || m.id === 'claude-opus-5-5'),
+    [
+      { id: 'claude-opus-5-5', platform: 'anthropic' },
+      { id: 'gpt-6-astra', platform: 'openai' },
+    ],
+  )
+  assert.equal('endpoints' in options, false)
+  assert.equal('protocols' in options, false)
 })

@@ -18,10 +18,8 @@ describe('log export query', () => {
       {
         sessionId: 's1',
         statusCode: 502,
-        endpoint: '/v1/messages',
-        mismatch: true,
+        platform: 'openai',
         minRetry: 1,
-        debugOnly: true,
         keyId: 'k1',
         startTime: Date.UTC(2026, 0, 1),
       },
@@ -29,11 +27,9 @@ describe('log export query', () => {
     )
     expect(Object.fromEntries(qs)).toEqual({
       session_id: 's1',
+      platform: 'openai',
       status_code: '502',
-      endpoint: '/v1/messages',
-      model_mismatch: '1',
       min_attempt_count: '2',
-      log_mode: 'debug',
       key_id: 'k1',
       start_time: '2026-01-01T00:00:00.000Z',
       exclude_error_class: 'auth',
@@ -66,4 +62,20 @@ describe('log export query', () => {
     expect(errors.get('error_class')).toBe('timeout')
     expect(errors.has('session_id')).toBe(false)
   })
+})
+
+it('keeps errors tab and personal scope in exports', () => {
+  const current = exportQuery(
+    base,
+    { scope: 'mine', accountId: 'a1', groupId: '2' },
+    [],
+    true
+  )
+  expect(current.get('errors_only')).toBe('1')
+  expect(current.get('account_id')).toBe('a1')
+  expect(current.get('group_id')).toBe('2')
+  expect(current.get('scope')).toBe('mine')
+  expect(
+    exportQuery({ ...base, scope: 'all' }, { scope: 'mine' }, []).get('scope')
+  ).toBe('mine')
 })

@@ -510,6 +510,35 @@ test('queue timeout is pool_queue_timeout', async (t) => {
   held.release()
 })
 
+test('a wait the queue cannot drain in time answers at once with the estimate as Retry-After', async (t) => {
+  const pool = setup(t, [{ id: 'vm-01', policy: { sessionSlots: 1, maxConcurrency: 1 } }], { fallback: 2000 })
+  for (let i = 0; i < 5; i++) pool.holdTimes.note('vm-01', 60_000)
+  const held = await seat(pool, 'd1')
+  const started = Date.now()
+  const late = await seat(pool, 'd2')
+  assert.ok(Date.now() - started < 500)
+  assert.equal(late.ok, false)
+  assert.equal(late.reason, 'pool_wait_estimate_exceeded')
+  assert.equal(late.estimated_wait_ms, 60_000)
+  assert.equal(late.retry_after_ms, 60_000)
+  assert.equal(pool.planner.pending(), 0)
+  held.release()
+})
+
+test('a wait that fits the budget still queues and is served', async (t) => {
+  const pool = setup(t, [{ id: 'vm-01', policy: { sessionSlots: 1, maxConcurrency: 1 } }], { fallback: 2000 })
+  for (let i = 0; i < 5; i++) pool.holdTimes.note('vm-01', 100)
+  const held = await seat(pool, 'd1')
+  const next = seat(pool, 'd2')
+  await waitFor(() => pool.planner.globalQueue.length === 1)
+  held.release()
+  pool.planner.free(pool.planner.seatOf(planned('d1')))
+  const got = await next
+  assert.equal(got.ok, true)
+  got.release()
+  pool.planner.free(pool.planner.seatOf(planned('d2')))
+})
+
 test('queue_max=2: the 3rd waiter is refused at once; a freed place admits the next', async (t) => {
   const pool = setup(t, [{ id: 'vm-01', policy: { sessionSlots: 1 } }], { queue_max: 2 })
   const held = await seat(pool, 'd1')

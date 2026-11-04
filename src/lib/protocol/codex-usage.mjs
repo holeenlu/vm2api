@@ -7,6 +7,9 @@
  * Normalize() maps primary/secondary by window_minutes like sub2api.
  */
 
+import { routingConfigFile } from '../core/config.mjs'
+import { readJsonCached } from '../vm/vm-file.mjs'
+
 function num(value) {
   if (value == null || value === '') return null
   const n = Number(value)
@@ -141,14 +144,29 @@ export function codexCreditsFromHeaders(headers = {}, now = Date.now()) {
 }
 
 /**
- * A fresh reading that says the account can still buy past its 5h/7d windows.
+ * routing.codex.credit_overage (default false): whether a slot whose 5h/7d
+ * window is spent may keep serving on paid ChatGPT credits. Read from the
+ * shared routing file (mtime-cached) so every process sees a panel save; an
+ * unreadable file counts as disabled.
+ */
+export function codexCreditOverageAllowed() {
+  try {
+    return readJsonCached(routingConfigFile())?.codex?.credit_overage === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A fresh reading that says the account can still buy past its 5h/7d windows,
+ * and the operator allows spending credits once the windows are used up.
  * It only earns the slot another try; the upstream 429 stays the authority.
  */
 export function hasSpendableCodexCredits(vm, now = Date.now()) {
   const credits = vm?.codex?.credits ?? vm?.codex_credits
   const fetchedAt = Date.parse(credits?.fetched_at || '')
   if (!Number.isFinite(fetchedAt) || now - fetchedAt > CODEX_CREDITS_TTL_MS) return false
-  return credits.unlimited === true || credits.has_credits === true
+  return (credits.unlimited === true || credits.has_credits === true) && codexCreditOverageAllowed()
 }
 
 function lowerHeaders(headers) {
@@ -201,6 +219,18 @@ function emptySnapshot() {
 }
 
 export function normalizeCodexLimits(snapshot = {}) {
+  // A zero-length window is explicitly disabled, not an empty active 5h quota.
+  for (const role of ['primary', 'secondary']) {
+    const minutes = num(snapshot[`${role}_window_minutes`])
+    if (minutes == null || minutes > 0) continue
+    snapshot = {
+      ...snapshot,
+      [`${role}_used_percent`]: null,
+      [`${role}_reset_after_seconds`]: null,
+      [`${role}_window_minutes`]: null,
+      [`${role}_reset_at`]: null,
+    }
+  }
   const primaryMins = num(snapshot.primary_window_minutes)
   const secondaryMins = num(snapshot.secondary_window_minutes)
   const hasPrimary = primaryMins != null

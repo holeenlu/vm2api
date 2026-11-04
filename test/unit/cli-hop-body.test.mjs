@@ -11,6 +11,7 @@ import {
   CRS_OFFICIAL_CLI_SYSTEM,
   parkableSystemText,
 } from '../../src/lib/identity/crs-persona.mjs'
+import { validateCacheBreakpoints } from '../../src/lib/protocol/cache-ttl.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 
 test('prepareCliHopBody drops metadata and CLI-owned system but keeps official agent leftover', () => {
@@ -381,46 +382,66 @@ test('cli-hop short history only marks the last message', () => {
 })
 
 test('cli-hop does not mark thinking blocks', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      thinking: { type: 'adaptive' },
-      messages: [
-        {
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'answer' },
-            { type: 'thinking', thinking: 'hidden', signature: 'sig_real_1234567890abcdef' },
-          ],
-        },
-      ],
-    },
-    { cacheTtl: '1h' },
-  )
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    thinking: { type: 'adaptive' },
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'answer' },
+          { type: 'thinking', thinking: 'hidden', signature: 'sig_real_1234567890abcdef' },
+        ],
+      },
+    ],
+  })
   assert.equal(body.messages.at(-1).content[0].cache_control, undefined)
   assert.equal(body.messages.at(-1).content[1].type, 'thinking')
   assert.equal(body.messages.at(-1).content[1].cache_control, undefined)
 })
 
-test('cli-hop uses the inbound session TTL on both message anchors', () => {
-  const body = prepareCliHopBody(
-    {
-      model: 'claude-sonnet-5',
-      max_tokens: 256,
-      messages: [
-        { role: 'user', content: 'u1' },
-        { role: 'assistant', content: 'a1' },
-        { role: 'user', content: 'u2' },
-        { role: 'assistant', content: 'a2' },
-      ],
-    },
-    { cacheTtl: '1h' },
-  )
+test('cli-hop defaults its only message anchor to one-hour TTL', () => {
+  const body = prepareCliHopBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+      { role: 'assistant', content: 'a2' },
+    ],
+  })
   assert.deepEqual(
     messageMarkers(body).map((hit) => hit.ttl),
     ['1h', '1h'],
   )
+})
+
+test('cli-hop uses selected TTL for the official identity, caller prompt and latest user without mutating input', () => {
+  const input = {
+    model: 'claude-sonnet-5',
+    max_tokens: 256,
+    system: [{ type: 'text', text: 'caller' }],
+    messages: [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+    ],
+  }
+  const before = structuredClone(input)
+  for (const ttl of ['5m', '1h']) {
+    const body = prepareCliHopBody(input, { cacheTtl: ttl })
+    assert.deepEqual(
+      body.system.map((block) => block.cache_control),
+      [
+        { type: 'ephemeral', ttl },
+        { type: 'ephemeral', ttl },
+      ],
+    )
+    assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl }])
+    assert.deepEqual(input, before)
+  }
 })
 
 test('Claude Code turns stay a content prefix of the next one, from turn 1 on', () => {

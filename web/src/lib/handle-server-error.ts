@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import { toast } from 'sonner'
 import { ApiError } from '@/lib/api'
 
@@ -7,6 +8,6 @@ export function handleServerError(error: unknown) {
       ? error.message
       : error instanceof Error
         ? error.message
-        : '请求失败'
+        : t('lib:api.requestFailed')
   toast.error(message)
 }
