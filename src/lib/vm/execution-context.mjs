@@ -27,6 +27,29 @@ export const GATEWAY_CAPABILITIES = {
   stream_delivery_optional: 'verified',
 }
 
+/** Build the immutable per-attempt execution context used by transport code. */
+export function createExecutionContext({ projectRoot, vm, accountId = null, credential = null } = {}) {
+  const homeDir = vmCliHomePath(projectRoot, vm?.id)
+  const slot = credential || {}
+  return Object.freeze({
+    vmId: vm?.id || null,
+    accountId: accountId || null,
+    vm,
+    vmPath: vm?.id ? vmJsonPath(projectRoot, vm.id) : null,
+    homeDir,
+    oauth: Object.freeze({
+      email: slot.email || vm?.claude?.email || null,
+      account_uuid: slot.account_uuid || accountId || vm?.claude?.account_uuid || null,
+      org_uuid: slot.org_uuid || vm?.claude?.org_uuid || null,
+      expires_at: slot.expires_at || vm?.claude?.expires_at || null,
+    }),
+    proxyUrl: vm?.proxy?.url || null,
+    timezone: vm?.timezone || 'UTC',
+    locale: vm?.locale || 'en_US.UTF-8',
+    kernel: vm?.kernel || null,
+  })
+}
+
 export function vmJsonPath(projectRoot, vmId) {
   return path.join(projectRoot, 'vms', `${vmId}.json`)
 }

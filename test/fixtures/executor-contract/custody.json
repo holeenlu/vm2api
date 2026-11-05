@@ -1,0 +1,20 @@
+{
+  "instance_id": "gw-fixture",
+  "account_id": "acct_fixture",
+  "private_key": "6LAfDCCoxL5lCfwwveteH6gRr-On1FHqMHQFtzxKbmM",
+  "public_key": "-OUPvERtEi-mcbuc4Iu3aKRwc33OQd8ogEJxgoJ9C2Y",
+  "bundle": {
+    "access_token": "at_fixture",
+    "refresh_token": "rt_fixture",
+    "id_token": "id_fixture",
+    "bps_access_token": "bps_at_fixture",
+    "bps_refresh_token": "bps_rt_fixture"
+  },
+  "custody_bundle": "v1.E7lsxDt9SJyn2GA7155ypQcaCtiQthn42jIprZf3sU4.Ml5JqG9OxHdKCMpAmIxQ81LH2XXrGZpoD2cmidehS3JgP_MG8SeJ_ysyfV7ZN45gm8qvj6NYml0NNLK9Xspoi-2r0Fcc05m9iGuS_qFQG2dWYA7EWQlV3tNMzaYEehj_Dv0mFBpwUmdt-7LlZMt5VIvMrYTQYb9vR5RtNBhNmgmV9yFanpO4T5trnHPzJ-kymUDbwDvQ0mGbyPdip3koYur3SYgGvBCJ7CKsyMrqrQQsZNMzq_qX",
+  "bundle_key": "fixture-bundle-key",
+  "credential_bundle": "MZmhFzomMDuMHuAk9nwrlJDUTmhpBc5l45SOj0_C-9Nu8g5hp6g1Jecgvka91NHbNsjzxbJH6SxBKOYshj83FN6HP6VGnhFZcS_Vlb-UckjXLk6cxl_CkyNDk8LhAcMyQtF6Nblf11dbKDY0b1EbyhQ84yP3dHyqKydt_UZSDIeyUawWvekVLB99GGr5GQI6QpwKBMJNG51mITY6hRqdeQGIL9fX4ja_7I7kf8b_ltxkIeuVL9xB",
+  "revisions": {
+    "credential_revision": 7,
+    "bps_generation": 2
+  }
+}

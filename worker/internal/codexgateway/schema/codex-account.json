@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "scope": "codex.account.bps",
+  "i18n_namespace": "common",
+  "groups": [
+    { "id": "bps", "label": "codexBpsTitle", "help": "codexBpsHelp" },
+    { "id": "advanced", "label": "codexBpsAdvanced" }
+  ],
+  "fields": [
+    {
+      "key": "enabled",
+      "group": "bps",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBpsEnabled",
+      "help": "codexBpsEnabledHelp"
+    },
+    {
+      "key": "models",
+      "group": "bps",
+      "type": "string_list",
+      "max_items": 100,
+      "max_length": 256,
+      "no_wildcard": true,
+      "unique": true,
+      "default": [],
+      "label": "codexBpsModels",
+      "help": "codexBpsModelsHelp",
+      "widget": "bps_models"
+    },
+    {
+      "key": "omit_unsupported_tools",
+      "group": "advanced",
+      "type": "boolean",
+      "default": false,
+      "label": "codexBpsOmitTools",
+      "help": "codexBpsOmitToolsHelp"
+    },
+    {
+      "key": "ignore_encrypted_content",
+      "group": "advanced",
+      "type": "boolean",
+      "default": false,
+      "label": "codexBpsIgnoreEncrypted",
+      "help": "codexBpsIgnoreEncryptedHelp"
+    },
+    {
+      "key": "cache_creation_as_input",
+      "group": "advanced",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBpsCacheAsInput",
+      "help": "codexBpsCacheAsInputHelp"
+    },
+    {
+      "key": "auto_disable_on_403",
+      "group": "advanced",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBpsAutoDisable",
+      "help": "codexBpsAutoDisableHelp"
+    },
+    {
+      "key": "auto_recover_on_403",
+      "group": "advanced",
+      "type": "boolean",
+      "default": true,
+      "requires": "auto_disable_on_403",
+      "label": "codexBpsAutoRecover",
+      "help": "codexBpsAutoRecoverHelp",
+      "visible_when": { "key": "auto_disable_on_403", "equals": true }
+    },
+    {
+      "key": "recovery_interval_minutes",
+      "group": "advanced",
+      "type": "integer",
+      "min": 1,
+      "max": 10080,
+      "default": 1,
+      "label": "codexBpsRecoveryInterval",
+      "visible_when": { "key": "auto_recover_on_403", "equals": true }
+    },
+    {
+      "key": "rate_limit_cooldown_seconds",
+      "group": "advanced",
+      "type": "integer",
+      "min": 1,
+      "max": 600,
+      "default": 5,
+      "label": "codexBpsRateLimitCooldown",
+      "help": "codexBpsRateLimitCooldownHelp"
+    },
+    {
+      "key": "auto_move_on_403",
+      "group": "advanced",
+      "type": "boolean",
+      "default": false,
+      "control_plane_only": true,
+      "label": "codexBpsAutoMove",
+      "help": "codexBpsAutoMoveHelp"
+    },
+    {
+      "key": "target_group_id",
+      "group": "advanced",
+      "type": "group_ref",
+      "nullable": true,
+      "allow_zero": true,
+      "required_when": { "key": "auto_move_on_403", "equals": true },
+      "control_plane_only": true,
+      "default": null,
+      "label": "codexBpsTargetGroup",
+      "widget": "group_select",
+      "visible_when": { "key": "auto_move_on_403", "equals": true }
+    }
+  ]
+}
