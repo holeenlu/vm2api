@@ -9,6 +9,7 @@ import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
 import { BackupService, tarAvailable } from '../../src/lib/admin/backup-service.mjs'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { RequestLogStore } from '../../src/lib/admin/request-log.mjs'
 import { stopVmWatch, initVmDbSync } from '../../src/lib/vm/vm-db-sync.mjs'
 import { setVmWriteHook } from '../../src/lib/vm/vm-file.mjs'
 
@@ -104,10 +105,19 @@ test('createBackup does not block the main thread (gateway keeps ticking)', asyn
   assert.ok(ticks > 0, `event loop should tick during backup, got ${ticks}`)
 })
 
-test('restoreBackup rolls data back and creates pre_restore record', async () => {
+test('restoreBackup rolls data back and creates pre_restore record', async (t) => {
   seedVm()
   initVmDbSync(root, { watch: false })
   const keys = new ApiKeyStore({ db: getDb() })
+  const logs = new RequestLogStore({ db: getDb() })
+  t.after(() => logs.pauseStatistics())
+  await logs.billingStats()
+  let paused = false
+  svc.onBeforeRestore(async () => {
+    await logs.pauseStatistics()
+    paused = true
+    return () => logs.resumeStatistics()
+  })
   const kept = keys.create({ name: 'kept-key' })
 
   const rec = await svc.createBackup({ kind: 'manual' })
@@ -118,13 +128,16 @@ test('restoreBackup rolls data back and creates pre_restore record', async () =>
   // wire the rebind like the server does
   let reboundDb = null
   svc.onRestored((db) => {
+    assert.equal(paused, true, 'old statistics connection closed before DB replacement')
     reboundDb = db
     keys.rebind(db)
+    logs.rebind(db)
   })
 
   const out = await svc.restoreBackup(rec.id)
   assert.equal(out.ok, true)
   assert.ok(reboundDb, 'rebind callback should fire')
+  assert.equal((await logs.billingStats()).total.requests, 0)
 
   // state rolled back
   assert.ok(keys.getById(kept.id), 'pre-backup key survives')

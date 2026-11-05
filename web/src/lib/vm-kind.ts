@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 
 export type VmKind = 'claude' | 'codex'
@@ -70,16 +71,26 @@ export function kindFromModel(
   return 'claude'
 }
 
+/** Account name the slot was added under; the default `name = id` is no name. */
+function slotAccountName(vm?: { id?: string | null; name?: string | null }) {
+  const name = String(vm?.name || '').trim()
+  return name && name !== String(vm?.id || '').trim() ? name : ''
+}
+
 /** Account line on rack cards: credential presence is independent of the email. */
 export function slotCredentialLabel(
-  vm?: Pick<Vm, 'email' | 'has_token' | 'has_refresh'>,
+  vm?: Partial<Pick<Vm, 'id' | 'name' | 'email' | 'has_token' | 'has_refresh'>>,
   compact = false
 ): string {
   const email = String(vm?.email || '').trim()
   if (email) return compact ? email.split('@')[0] : email
-  return vm?.has_token || vm?.has_refresh ? '已导入账号 · 邮箱未知' : '空槽'
+  if (!vm?.has_token && !vm?.has_refresh) return t('lib:slot.empty')
+  const name = slotAccountName(vm)
+  if (name) return compact ? name.split('@')[0] : name
+  return t('lib:slot.importedEmailUnknown')
 }
 
+/** Subscription account = subscription email; without an email the account name stands in for it. */
 export function slotAccountLabel(
   vm?: Vm,
   fallback?: {
@@ -91,11 +102,13 @@ export function slotAccountLabel(
 ): string {
   const email = String(vm?.email || fallback?.email || '').trim()
   if (email) return email
+  const name = slotAccountName(vm)
+  if (name) return name
   const id = String(fallback?.vmId || vm?.id || '').trim()
-  return id || fallback?.emptyLabel || '未绑定账号'
+  return id || fallback?.emptyLabel || t('lib:slot.unbound')
 }
 
-/** `vm-01` without an email is unbound. A custom slot id is the name and stays visible. */
+/** `vm-01` without an email or account name is unbound. A custom slot id is the name and stays visible. */
 export function slotNameLabel(vm?: {
   id?: string | null
   name?: string | null
@@ -103,9 +116,13 @@ export function slotNameLabel(vm?: {
 }): string {
   const name = String(vm?.name || vm?.id || '').trim()
   const email = String(vm?.email || '').trim()
-  if (email || (name && !/^vm-\d+$/i.test(String(vm?.id || '').trim())))
-    return name || '未绑定账号'
-  return '未绑定账号'
+  if (
+    email ||
+    slotAccountName(vm) ||
+    (name && !/^vm-\d+$/i.test(String(vm?.id || '').trim()))
+  )
+    return name || t('lib:slot.unbound')
+  return t('lib:slot.unbound')
 }
 
 /** 卡片 / 表格用：本地段优先，域名过长只留尾标。完整地址走 title。 */

@@ -1,5 +1,6 @@
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import {
   expiresAtToMs,
   fmtResetClock,
@@ -8,12 +9,13 @@ import {
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
-import { vmCostLedger } from '@/lib/vm-usage'
+import { vmCostLedger, vmForecastRow } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { ClaudeResetActions } from '@/features/vm/claude-reset-actions'
 import { OpenaiQuotaActions } from '@/features/vm/openai-quota-actions'
 import { riskFg, UsageMeter } from '@/features/vm/usage-meter'
 import { vmWindows, type WindowReadout } from '@/features/vm/vm-rack-model'
+import { useLogCoverageStart } from './use-log-coverage'
 
 /**
  * 请求 / 用量窗口 / 成本三块共用的行高。列表里三列并排时，
@@ -26,7 +28,7 @@ const MUTED_NUM = 'text-[color:var(--text-tertiary)]'
 const WINDOW_GRID =
   'grid grid-cols-[2.25rem_minmax(2.5rem,1fr)_2.25rem_3.25rem] items-center gap-x-1'
 
-function WindowRow({
+export function QuotaWindowRow({
   w,
   now,
   hasToken,
@@ -37,11 +39,13 @@ function WindowRow({
   hasToken: boolean
   quiet: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   // 无凭证槽没有窗口，倒计时无意义；有票才算。
   const reset = hasToken ? resetCountdown(w.reset, now) : null
   const clock =
     hasToken && expiresAtToMs(w.reset)
-      ? `重置于 ${fmtResetClock(w.reset)}`
+      ? tVm('vm:usageWindows.resetsAt', { value1: fmtResetClock(w.reset) })
       : undefined
   const pct = w.pct
   return (
@@ -74,7 +78,9 @@ function WindowRow({
                 : // 分诊面上绿色数字铺满一屏是噪声，颜色只留给越过 70% 的档。
                   (!quiet || pct >= 70) && riskFg(pct)
             )}
-            title={pct == null ? '未探测' : undefined}
+            title={
+              pct == null ? tVm('vm:detailAccountTab.notProbed') : undefined
+            }
           >
             {pct == null ? '—' : `${pct.toFixed(0)}%`}
           </span>
@@ -92,6 +98,8 @@ function WindowRow({
 
 /** GPT 槽：查询 / 重置券；Claude 完整 OAuth：原生限额查询 / 重置。 */
 export function VmQuotaActions({ vm, now }: { vm: Vm; now: number }) {
+  useTranslation('vm')
+
   return isCodexVm(vm) ? (
     <OpenaiQuotaActions vm={vm} compact />
   ) : (
@@ -117,11 +125,13 @@ export function VmUsageWindows({
   quotaActions?: boolean
   className?: string
 }) {
+  useTranslation('vm')
+
   const hasToken = Boolean(vm.has_token)
   return (
     <div className={cn('grid min-w-0 gap-1', className)}>
       {vmWindows(vm).map((w) => (
-        <WindowRow
+        <QuotaWindowRow
           key={w.key}
           w={w}
           now={now}
@@ -145,15 +155,21 @@ const LEDGER_GRID =
 export function VmCostLedger({
   vm,
   accounts,
+  forecast = false,
   className,
 }: {
   vm: Vm
   accounts?: UsageAccountRow[]
+  /** 列表行加一行 7D 容量预测。 */
+  forecast?: boolean
   className?: string
 }) {
+  useTranslation('vm')
+  const coverageStart = useLogCoverageStart()
+
   return (
     <div className={cn(LEDGER_GRID, 'min-w-0', className)}>
-      {vmCostLedger(vm, accounts).map((r) => {
+      {vmCostLedger(vm, accounts, coverageStart).map((r) => {
         const total = r.key === 'total'
         return (
           <div
@@ -166,9 +182,12 @@ export function VmCostLedger({
           >
             <span
               className={cn(
-                'text-xs font-medium',
-                total ? 'text-foreground' : 'text-muted-foreground'
+                'text-xs font-medium whitespace-nowrap',
+                total ? 'text-foreground' : 'text-muted-foreground',
+                r.hint &&
+                  'cursor-help underline decoration-dotted underline-offset-2'
               )}
+              title={r.hint}
             >
               {r.label}
             </span>
@@ -191,11 +210,56 @@ export function VmCostLedger({
               )}
             >
               {fmtNum(r.tokens)}
-              <span className={MUTED_NUM}> tok</span>
+              <span className={MUTED_NUM}>
+                {' '}
+                <Trans ns='vm' i18nKey='units.tokensShort' />
+              </span>
             </span>
           </div>
         )
       })}
+      {forecast ? <ForecastLedgerRow vm={vm} /> : null}
+    </div>
+  )
+}
+
+/** 第四行：7D 窗口容量预测（与机架合计无关，只在列表里逐台显示）。 */
+function ForecastLedgerRow({ vm }: { vm: Vm }) {
+  const { t } = useTranslation('lib')
+  const row = vmForecastRow(vm)
+  return (
+    <div
+      className={cn(
+        'col-span-3 grid grid-cols-subgrid items-center',
+        METRIC_ROW
+      )}
+      title={row.tooltip}
+    >
+      <span className='text-xs font-medium text-muted-foreground'>
+        {t('lib:usage.forecast')}
+      </span>
+      <span
+        className={cn(
+          'text-right font-mono text-xs whitespace-nowrap tabular-nums',
+          row.cost == null ? MUTED_NUM : 'text-foreground/80'
+        )}
+      >
+        {row.cost == null ? '—' : `≈${fmtUsd(row.cost, 2)}`}
+      </span>
+      <span
+        className={cn(
+          'text-right font-mono text-xs whitespace-nowrap tabular-nums',
+          row.tokens == null ? MUTED_NUM : 'text-muted-foreground'
+        )}
+      >
+        {row.tokens == null ? '' : `≈${fmtNum(row.tokens)}`}
+        {row.tokens == null ? null : (
+          <span className={MUTED_NUM}>
+            {' '}
+            <Trans ns='vm' i18nKey='units.tokensShort' />
+          </span>
+        )}
+      </span>
     </div>
   )
 }
@@ -211,19 +275,28 @@ export function VmUsagePanel({
   vm: Vm
   accounts?: UsageAccountRow[]
 }) {
+  useTranslation('vm')
+
   const now = useNow()
   return (
     <div className='grid gap-x-5 gap-y-3 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]'>
       <div className='min-w-0'>
-        <h3 className={PANEL_HEAD}>用量窗口</h3>
+        <h3 className={PANEL_HEAD}>
+          <Trans ns='vm' i18nKey='usageWindows.usageWindows' />
+        </h3>
         <VmUsageWindows vm={vm} now={now} quotaActions />
       </div>
       <div className='min-w-0 sm:border-s sm:border-[color:var(--hairline)] sm:ps-5'>
         <h3 className={PANEL_HEAD}>
-          成本
-          <span className='text-[11px] font-normal text-[color:var(--text-tertiary)]'>
-            官方价
-          </span>
+          <Trans
+            ns='vm'
+            i18nKey='usageWindows.costOfficialPrice'
+            components={{
+              part0: (
+                <span className='text-[11px] font-normal text-[color:var(--text-tertiary)]' />
+              ),
+            }}
+          />
         </h3>
         <VmCostLedger vm={vm} accounts={accounts} />
       </div>

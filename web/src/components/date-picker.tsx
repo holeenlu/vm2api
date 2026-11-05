@@ -1,12 +1,6 @@
-import { format } from 'date-fns'
-import { Calendar as CalendarIcon } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Calendar } from '@/components/ui/calendar'
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover'
+import { t } from '@/i18n'
+import { useTranslation } from 'react-i18next'
+import { SingleDatePicker } from '@/components/date-range-picker'
 
 type DatePickerProps = {
   selected: Date | undefined
@@ -17,35 +11,31 @@ type DatePickerProps = {
 export function DatePicker({
   selected,
   onSelect,
-  placeholder = 'Pick a date',
+  placeholder = t('common:pickDate'),
 }: DatePickerProps) {
+  useTranslation('common')
+  const value = selected
+    ? `${selected.getFullYear()}-${String(selected.getMonth() + 1).padStart(2, '0')}-${String(selected.getDate()).padStart(2, '0')}`
+    : ''
   return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <Button
-          variant='outline'
-          data-empty={!selected}
-          className='w-60 justify-start text-start font-normal data-[empty=true]:text-muted-foreground'
-        >
-          {selected ? (
-            format(selected, 'MMM d, yyyy')
-          ) : (
-            <span>{placeholder}</span>
-          )}
-          <CalendarIcon className='ms-auto h-4 w-4 opacity-50' />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent className='w-auto p-0'>
-        <Calendar
-          mode='single'
-          captionLayout='dropdown'
-          selected={selected}
-          onSelect={onSelect}
-          disabled={(date: Date) =>
-            date > new Date() || date < new Date('1900-01-01')
-          }
-        />
-      </PopoverContent>
-    </Popover>
+    <SingleDatePicker
+      value={value}
+      onChange={(next) => {
+        if (!next) {
+          onSelect(undefined)
+          return
+        }
+        const [year, month, day] = next.split('-').map(Number)
+        onSelect(new Date(year, month - 1, day))
+      }}
+      labels={{
+        empty: placeholder,
+        clear: t('common:reset'),
+        cancel: t('common:cancel'),
+        confirm: t('common:confirm'),
+        selectRange: placeholder,
+      }}
+      disableFuture
+    />
   )
 }

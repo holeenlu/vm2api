@@ -14,7 +14,8 @@ import net from 'node:net'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ProxiesRepo } from '../db/repos/proxies-repo.mjs'
-import { canBindProxyToVm, normalizeOwnerId, proxyOwnerId, vmOwnerId } from '../admin/resource-owner.mjs'
+import { findRuntimeVmVendor } from '../vendor/repos/resources-repo.mjs'
+import { normalizeOwnerId, proxyOwnerId, vmOwnerId } from '../admin/resource-owner.mjs'
 import { validTimezone } from '../core/timezone.mjs'
 import { lookupProxyGeo, lookupProxyGeoV6 } from './proxy-geo.mjs'
 import {
@@ -30,6 +31,12 @@ import {
 import { normalizeSocksHost, socksEndpoint, socksProxyUrl, socksProxyFamily } from './socks-address.mjs'
 import { proxyBlockedReason } from './proxy-policy.mjs'
 import { canRevealClusterNodes, annotatePublicLocalProxy } from './local-proxy-nodes.mjs'
+import { checkProxyQuality } from './proxy-quality.mjs'
+import {
+  PROXY_LOCATION_MODES,
+  normalizeRequestLocation,
+  proxyRequestLocation,
+} from '../gateway-worker/request-location.mjs'
 
 export const MAX_VMS_PER_PROXY = 5
 export const BIND_LIMIT_MIN = 1
@@ -195,6 +202,7 @@ function hydrateProxy(proxy) {
   const ids = parseBoundVmIds(proxy.bound_vm_ids?.length ? proxy.bound_vm_ids : proxy.bound_vm_id)
   return {
     ...proxy,
+    platforms: Array.isArray(proxy.platforms) ? [...new Set(proxy.platforms.map((value) => String(value)))] : [],
     host: normalizeSocksHost(proxy.host) || proxy.host,
     bound_vm_ids: ids,
     bound_vm_id: ids[0] || null,
@@ -233,18 +241,19 @@ function localEgressRecord(nodeId = null) {
   }
 }
 
-function socks5Record({ host, port, username = null, password = null, raw = '' }) {
+function socks5Record({ host, port, username = null, password = null, label = null }) {
   host = normalizeSocksHost(host)
   if (!looksLikeHost(host) || !isSocksPort(port)) return null
   const user = username == null || username === '' ? null : String(username)
   const pass = user == null ? null : password == null ? '' : String(password)
   return {
     scheme: 'socks5',
+    label: label == null ? null : String(label).trim().slice(0, PROXY_LABEL_MAX),
     host: String(host).trim(),
     port: Number(port),
     username: user,
     password: pass,
-    raw: String(raw || socksEndpoint(host, port)),
+    raw: `socks5://${socksEndpoint(host, port)}`,
   }
 }
 
@@ -255,8 +264,25 @@ export function parseSocks5Fields(fields = {}) {
     port: fields.port,
     username: fields.username ?? fields.user,
     password: fields.password ?? fields.pass,
-    raw: fields.raw,
+    label: fields.label ?? fields.name,
   })
+}
+
+function lifetimeFields(input, current = {}) {
+  const has = (key) => Object.hasOwn(input, key)
+  const raw = has('expires_at') ? input.expires_at : current.expires_at
+  if (raw != null && raw !== '' && (typeof raw !== 'string' || !Number.isFinite(Date.parse(raw))))
+    throw new Error('invalid_expires_at')
+  const expires_at = raw == null || raw === '' ? null : new Date(raw).toISOString()
+  const fallback_mode = has('fallback_mode') ? input.fallback_mode : current.fallback_mode || 'none'
+  if (!['none', 'proxy', 'direct'].includes(fallback_mode)) throw new Error('invalid_fallback_mode')
+  const backup_proxy_id =
+    fallback_mode === 'proxy'
+      ? String(has('backup_proxy_id') ? input.backup_proxy_id || '' : current.backup_proxy_id || '')
+      : null
+  if (fallback_mode === 'proxy' && !backup_proxy_id) throw new Error('backup_proxy_required')
+  if (has('enabled') && typeof input.enabled !== 'boolean') throw new Error('invalid_enabled')
+  return { expires_at, fallback_mode, backup_proxy_id }
 }
 
 /** Parse line forms:
@@ -272,8 +298,12 @@ export function parseSocks5Line(line) {
   if (!raw || raw.startsWith('#')) return null
   raw = raw.replace(/^['"]|['"]$/g, '').trim()
   try {
-    if (/^socks5h?:\/\//i.test(raw)) {
+    if (raw.includes('://')) {
+      // Any other scheme would fall through to the user:pass@host:port form below and import
+      // `http://u:p@h:80` as a SOCKS5 proxy with the user name "http".
+      if (!/^socks5h?:\/\//i.test(raw)) return null
       const u = new URL(raw.replace(/^socks5h:\/\//i, 'socks5://'))
+      if ((u.pathname && u.pathname !== '/') || u.search || u.hash) return null
       return socks5Record({
         host: u.hostname,
         port: u.port || 1080,
@@ -346,6 +376,7 @@ export class ProxyPool extends EventEmitter {
     onDisableVm,
     onDisconnectVm,
     onEnableVm,
+    onRebindVm,
     egressCheck,
     repairEgress,
     geoLookup,
@@ -361,6 +392,7 @@ export class ProxyPool extends EventEmitter {
     this.repo = new ProxiesRepo(this.db)
     this.onDisableVm = onDisableVm // (vmId, reason, proxyId) => void
     this.onDisconnectVm = onDisconnectVm // (vmId, reason, proxyId) => void — experimental tear-down
+    this.onRebindVm = onRebindVm
     this.onEnableVm = onEnableVm // (vmId, reason, proxyId) => void
     this.egressCheck = egressCheck
     this.repairEgress = repairEgress
@@ -377,6 +409,7 @@ export class ProxyPool extends EventEmitter {
     this._probeSockets = new Map()
     // Node exits are not pool rows: px-local's geo is the control plane's, a node slot leaves elsewhere.
     this._exitGeo = new Map()
+    this._qualityRunning = new Set()
     this.load()
   }
 
@@ -478,7 +511,14 @@ export class ProxyPool extends EventEmitter {
    * attaches per-node bound groups for admin and redacts node names / other
    * tenants' VM ids for `user`.
    */
-  panelSnapshot({ role = 'admin', ownerUserId = undefined, vms = [], nodes = [] } = {}) {
+  panelSnapshot({
+    role = 'super_admin',
+    ownerUserId = undefined,
+    vms = [],
+    nodes = [],
+    vendorId = '',
+    platform = '',
+  } = {}) {
     const reveal = canRevealClusterNodes(role)
     const owner = role === 'user' ? normalizeOwnerId(ownerUserId) : undefined
     const snap = this.snapshot({ ownerUserId: owner ? ownerUserId : undefined })
@@ -495,6 +535,46 @@ export class ProxyPool extends EventEmitter {
     snap.proxies = snap.proxies
       .map((p) => annotatePublicLocalProxy(p, { reveal, nodes: nodeList, ownerVmIds }))
       .filter(Boolean)
+    const vmById = new Map(vmList.map((vm) => [String(vm.id), vm]))
+    snap.proxies = snap.proxies.map((proxy) => {
+      const platforms = new Set(Array.isArray(proxy.platforms) ? proxy.platforms : [])
+      for (const id of proxy.bound_vm_ids || []) {
+        const vm = vmById.get(String(id))
+        const value = String(
+          vm?.platform || (vm?.family === 'codex' ? 'openai' : vm?.family === 'claude' ? 'anthropic' : ''),
+        ).trim()
+        if (value) platforms.add(value)
+      }
+      return { ...proxy, platforms: [...platforms] }
+    })
+    const wantedVendor = String(vendorId || '').trim()
+    const wantedPlatform = String(platform || '')
+      .trim()
+      .toLowerCase()
+    if (wantedVendor) snap.proxies = snap.proxies.filter((proxy) => String(proxy.vendor_id || '') === wantedVendor)
+    if (wantedPlatform)
+      snap.proxies = snap.proxies.filter((proxy) =>
+        (proxy.platforms || []).map((value) => String(value).toLowerCase()).includes(wantedPlatform),
+      )
+    if (wantedVendor || wantedPlatform) {
+      const limit = Number(snap.config.bind_limit || 5)
+      const available = snap.proxies.filter((proxy) => !proxy.blocked_reason)
+      snap.totals = {
+        ...snap.totals,
+        total: snap.proxies.length,
+        free: available.filter(
+          (proxy) => proxy.enabled && !(proxy.bound_vm_ids || []).length && proxy.status !== 'dead',
+        ).length,
+        open: available.filter((proxy) => proxy.enabled && proxy.status !== 'dead' && (proxy.bound_count || 0) < limit)
+          .length,
+        bound: snap.proxies.filter((proxy) => (proxy.bound_count || 0) > 0).length,
+        ok: available.filter((proxy) => proxy.enabled && proxy.status === 'ok').length,
+        dead: snap.proxies.filter((proxy) => !proxy.enabled || proxy.status === 'dead').length,
+        blocked: snap.proxies.filter((proxy) => !!proxy.blocked_reason).length,
+        slots_used: snap.proxies.reduce((sum, proxy) => sum + Number(proxy.bound_count || 0), 0),
+        slots_cap: snap.proxies.length * limit,
+      }
+    }
     return snap
   }
 
@@ -513,6 +593,9 @@ export class ProxyPool extends EventEmitter {
       blocked_reason: blocked,
       address_family: socksProxyFamily(p) || null,
       owner_user_id: proxyOwnerId(p),
+      vendor_id: p.vendor_id || null,
+      vendor_resource_id: p.vendor_resource_id || null,
+      platforms: Array.isArray(p.platforms) ? p.platforms.slice() : [],
       bound_vm_id: ids[0] || null,
       bound_vm_ids: ids,
       bound_count: ids.length,
@@ -523,12 +606,55 @@ export class ProxyPool extends EventEmitter {
       last_error: p.last_error || null,
       created_at: p.created_at,
       kind: isLocalEgressProxy(p) ? 'local' : 'socks5',
+      expires_at: p.expires_at || null,
+      fallback_mode: p.fallback_mode || 'none',
+      backup_proxy_id: p.backup_proxy_id || null,
+      max_websocket_connections: Number(p.max_websocket_connections) || 0,
+      request_location_mode: p.request_location_mode || 'inherit',
+      location: p.location_country
+        ? {
+            country: p.location_country,
+            region: p.location_region,
+            city: p.location_city,
+            timezone: p.location_timezone,
+          }
+        : null,
+      // Gateway Worker 实际使用的代理位置（auto 时来自探测，冲突或不完整时为空）
+      effective_request_location: proxyRequestLocation(p),
       node_id: isLocalEgressProxy(p) ? localEgressNodeId(p.id) : undefined,
       scheme: isLocalEgressProxy(p) ? 'local' : p.scheme || 'socks5',
       domain_forward: !!p.domain_forward,
       geo: proxyGeoOf(p),
       geo_v6: proxyGeoV6Of(p),
+      quality: p.quality_json ? JSON.parse(p.quality_json) : null,
     }
+  }
+
+  findByVendorResource(vendorResourceId) {
+    const id = String(vendorResourceId || '').trim()
+    if (!id) return null
+    return this.state.proxies.find((proxy) => String(proxy.vendor_resource_id || '') === id) || null
+  }
+
+  setVendorMetadata(proxyId, { vendorId = undefined, vendorResourceId = undefined, platforms = undefined } = {}) {
+    const proxy = this.state.proxies.find((item) => item.id === proxyId)
+    if (!proxy) return { ok: false, error: 'proxy_not_found' }
+    if (vendorId !== undefined) proxy.vendor_id = vendorId ? String(vendorId) : null
+    if (vendorResourceId !== undefined) proxy.vendor_resource_id = vendorResourceId ? String(vendorResourceId) : null
+    if (platforms !== undefined) {
+      if (!Array.isArray(platforms)) return { ok: false, error: 'invalid_platforms' }
+      proxy.platforms = [...new Set(platforms.map((value) => String(value).trim()).filter(Boolean))]
+    }
+    this.save()
+    return { ok: true, proxy: this.publicProxy(proxy) }
+  }
+
+  addPlatform(proxyId, platform) {
+    const value = String(platform || '').trim()
+    const proxy = this.state.proxies.find((item) => item.id === proxyId)
+    if (!proxy) return { ok: false, error: 'proxy_not_found' }
+    if (!value) return { ok: true, proxy: this.publicProxy(proxy) }
+    return this.setVendorMetadata(proxyId, { platforms: [...(proxy.platforms || []), value] })
   }
 
   /** The control plane's local row (`px-local`). */
@@ -661,12 +787,19 @@ export class ProxyPool extends EventEmitter {
    * Return the SOCKS row with this host/port/username/password, creating it
    * when absent. Same credentials must not allocate a second id.
    */
-  ensureSocks(fields = {}, { ownerUserId = null, label = null } = {}) {
+  ensureSocks(
+    fields = {},
+    { ownerUserId = null, label = null, vendorId = null, vendorResourceId = null, platforms = [] } = {},
+  ) {
     const parsed = parseSocks5Fields(fields)
     if (!parsed) return { ok: false, error: 'invalid_proxy' }
     const found = this._findSocksRow(parsed)
-    if (found) return { ok: true, created: false, proxy: this._withAuth(found) }
-    const imported = this.importParsed([parsed], { ownerUserId })
+    if (found) {
+      if (vendorResourceId && String(found.vendor_resource_id || '') !== String(vendorResourceId))
+        return { ok: false, error: found.vendor_id ? 'proxy_owned_by_supplier' : 'proxy_already_in_pool' }
+      return { ok: true, created: false, proxy: this._withAuth(found) }
+    }
+    const imported = this.importParsed([parsed], { ownerUserId, vendorId, vendorResourceId, platforms })
     const id = imported.items[0]?.id
     const row = this.state.proxies.find((p) => p.id === id)
     if (!row) return { ok: false, error: 'proxy_import_failed' }
@@ -681,7 +814,7 @@ export class ProxyPool extends EventEmitter {
   importLines(text, extra = {}) {
     const parsed = []
     for (const line of String(text || '').split(/\r?\n/)) {
-      if (!String(line || '').trim()) continue
+      if (!String(line || '').trim() || String(line).trim().startsWith('#')) continue
       parsed.push(parseSocks5Line(line) || { __invalid: String(line).trim() })
     }
     const fields = extra.fields || extra.proxies || extra.entries || []
@@ -698,6 +831,9 @@ export class ProxyPool extends EventEmitter {
   importParsed(records = [], extra = {}) {
     const added = []
     const skipped = []
+    const lifetime = lifetimeFields(extra)
+    if (lifetime.backup_proxy_id && !this.state.proxies.some((p) => p.id === lifetime.backup_proxy_id))
+      throw new Error('backup_proxy_not_found')
     // Credentials can select distinct proxies at the same endpoint. Encode a
     // tuple so colons inside credentials cannot collide with field separators.
     const proxyKey = (p) => JSON.stringify([p.host, p.port, p.username || '', p.password || ''])
@@ -707,7 +843,7 @@ export class ProxyPool extends EventEmitter {
         const label = parsed?.__invalid || ''
         if (label)
           skipped.push({
-            line: label,
+            line: '[invalid proxy]',
             reason: 'parse_failed',
             message: 'Invalid SOCKS5 endpoint; IPv6 requires [host]:port or socks5h://[host]:port',
           })
@@ -721,7 +857,9 @@ export class ProxyPool extends EventEmitter {
       existing.add(key)
       const proxy = {
         id: uid('px'),
+        ...lifetime,
         scheme: 'socks5',
+        label: parsed.label || null,
         host: parsed.host,
         port: parsed.port,
         username: parsed.username,
@@ -730,6 +868,11 @@ export class ProxyPool extends EventEmitter {
         status: 'unknown',
         enabled: true,
         owner_user_id: normalizeOwnerId(extra.ownerUserId || extra.owner_user_id),
+        vendor_id: extra.vendorId ? String(extra.vendorId) : null,
+        vendor_resource_id: extra.vendorResourceId ? String(extra.vendorResourceId) : null,
+        platforms: Array.isArray(extra.platforms)
+          ? [...new Set(extra.platforms.map((value) => String(value).trim()).filter(Boolean))]
+          : [],
         bound_vm_id: null,
         bound_vm_ids: [],
         consecutive_failures: 0,
@@ -764,13 +907,22 @@ export class ProxyPool extends EventEmitter {
     return this.allocateForVm(vmId)
   }
 
+  vendorIdForVm(vmId) {
+    return findRuntimeVmVendor(this.db, String(vmId || ''))?.vendor_id || null
+  }
+
   /** Allocate one healthy proxy with remaining capacity and bind to vmId */
-  allocateForVm(vmId, { ownerUserId = null, role = 'admin' } = {}) {
+  allocateForVm(vmId, { ownerUserId = null, role = 'super_admin' } = {}) {
     if (!vmId) return null
     if (this.state.proxies.some((p) => proxyHasVm(p, vmId) && proxyBlockedReason(p, this.state.config.ipv6_enabled)))
       return null
+    const vendorId = this.vendorIdForVm(vmId)
     const existing = this.state.proxies.find(
-      (p) => p.enabled && !proxyBlockedReason(p, this.state.config.ipv6_enabled) && proxyHasVm(p, vmId),
+      (p) =>
+        (p.vendor_id || null) === vendorId &&
+        p.enabled &&
+        !proxyBlockedReason(p, this.state.config.ipv6_enabled) &&
+        proxyHasVm(p, vmId),
     )
     if (existing) return this.publicProxy(existing)
 
@@ -781,6 +933,7 @@ export class ProxyPool extends EventEmitter {
       this.ensureLocalForNode(localEgressNodeId(localTarget))
     }
     const candidates = this.state.proxies.filter((p) => {
+      if ((p.vendor_id || null) !== vendorId) return false
       if (isLocalEgressProxy(p) && p.id !== localTarget) return false
       if (!p.enabled || p.status === 'dead' || p.status === 'fail') return false
       if (proxyBlockedReason(p, this.state.config.ipv6_enabled)) return false
@@ -809,11 +962,15 @@ export class ProxyPool extends EventEmitter {
     }
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
+    if ((p.vendor_id || null) !== this.vendorIdForVm(vm)) return { ok: false, error: 'proxy_vendor_scope_forbidden' }
     // Migration moves a slot onto its node row even while that row is marked down.
     if (!force && (!p.enabled || p.status === 'dead')) return { ok: false, error: 'proxy_disabled' }
     const blocked = proxyBlockedReason(p, this.state.config.ipv6_enabled)
     if (blocked) return { ok: false, error: blocked }
     if (!vm) return { ok: false, error: 'vm_id_required' }
+    const currentIds = boundVmIdsOf(p)
+    if (!force && !currentIds.includes(vm) && currentIds.length >= this.bindLimit())
+      return { ok: false, error: 'proxy_bind_limit', max: this.bindLimit(), bound_vm_ids: currentIds }
     for (const x of this.state.proxies) {
       if (x.id === proxyId) continue
       const ids = boundVmIdsOf(x)
@@ -868,6 +1025,7 @@ export class ProxyPool extends EventEmitter {
     p.enabled = !!enabled
     if (!enabled) {
       p.status = 'dead'
+      p.last_error = null
       this._cascadeDisableVm(p, 'proxy_manually_disabled')
     } else {
       p.status = 'unknown'
@@ -882,6 +1040,12 @@ export class ProxyPool extends EventEmitter {
     const idx = this.state.proxies.findIndex((x) => x.id === proxyId)
     if (idx < 0) return { ok: false, error: 'proxy_not_found' }
     const [p] = this.state.proxies.splice(idx, 1)
+    for (const row of this.state.proxies) {
+      if (row.backup_proxy_id === proxyId) {
+        row.backup_proxy_id = null
+        row.fallback_mode = 'none'
+      }
+    }
     this.save()
     return { ok: true, removed: this.publicProxy(p) }
   }
@@ -900,10 +1064,103 @@ export class ProxyPool extends EventEmitter {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
     const has = (k) => Object.prototype.hasOwnProperty.call(patch, k)
+    let lifetime
+    try {
+      lifetime = lifetimeFields(patch, p)
+    } catch (e) {
+      return { ok: false, error: e.message || 'invalid_expiry' }
+    }
+    if (isLocalEgressProxy(p) && (lifetime.expires_at || lifetime.fallback_mode !== 'none'))
+      return { ok: false, error: 'local_lifetime_readonly' }
+    if (lifetime.backup_proxy_id) {
+      const seen = new Set([p.id])
+      let next = lifetime.backup_proxy_id
+      while (next) {
+        if (seen.has(next)) return { ok: false, error: 'proxy_fallback_cycle' }
+        seen.add(next)
+        const target = this.state.proxies.find((v) => v.id === next)
+        if (!target) return { ok: false, error: 'backup_proxy_not_found' }
+        next = target.fallback_mode === 'proxy' ? target.backup_proxy_id : null
+      }
+    }
+    const metadataChanged = lifetime.expires_at !== (p.expires_at || null)
+    const applyLifetime = () => {
+      Object.assign(p, lifetime)
+      if (p.status === 'expired' && !proxyBlockedReason(p, this.state.config.ipv6_enabled)) p.status = 'unknown'
+      if (has('enabled') && p.enabled !== patch.enabled) {
+        p.enabled = patch.enabled
+        p.status = patch.enabled ? 'unknown' : 'dead'
+        p.consecutive_failures = 0
+        if (!patch.enabled) {
+          p.last_error = null
+          this._cascadeDisableVm(p, 'proxy_manually_disabled')
+        }
+      }
+    }
     const connection = ['host', 'port', 'username', 'password'].some(has)
-    if (!connection && !has('label') && !has('domain_forward')) {
+    if (isLocalEgressProxy(p) && connection) return { ok: false, error: 'local_endpoint_readonly' }
+    if (
+      !connection &&
+      ![
+        'label',
+        'domain_forward',
+        'enabled',
+        'expires_at',
+        'fallback_mode',
+        'backup_proxy_id',
+        'max_websocket_connections',
+        'request_location_mode',
+        'location',
+      ].some(has)
+    ) {
       return { ok: false, error: 'no_editable_fields' }
     }
+    // Gateway Worker 按代理共享的上游 Codex WS 物理连接上限，0 不限
+    let maxWebsocket = Number(p.max_websocket_connections) || 0
+    if (has('max_websocket_connections')) {
+      const value = Number(patch.max_websocket_connections)
+      if (!Number.isInteger(value) || value < 0 || value > 10_000)
+        return { ok: false, error: 'invalid_max_websocket_connections' }
+      maxWebsocket = value
+    }
+    // Gateway Worker 请求位置：inherit 回退全局，manual 使用手动位置，auto 跟随探测到的出口
+    const location = {
+      request_location_mode: p.request_location_mode || 'inherit',
+      location_country: p.location_country || null,
+      location_region: p.location_region || null,
+      location_city: p.location_city || null,
+      location_timezone: p.location_timezone || null,
+    }
+    if (has('request_location_mode')) {
+      if (!PROXY_LOCATION_MODES.includes(patch.request_location_mode))
+        return { ok: false, error: 'invalid_request_location_mode' }
+      location.request_location_mode = patch.request_location_mode
+    }
+    if (has('location')) {
+      if (patch.location == null) {
+        Object.assign(location, {
+          location_country: null,
+          location_region: null,
+          location_city: null,
+          location_timezone: null,
+        })
+      } else {
+        let normalized
+        try {
+          normalized = normalizeRequestLocation(patch.location)
+        } catch (error) {
+          return { ok: false, error: 'invalid_request_location', message: error.message }
+        }
+        Object.assign(location, {
+          location_country: normalized.country,
+          location_region: normalized.region,
+          location_city: normalized.city,
+          location_timezone: normalized.timezone,
+        })
+      }
+    }
+    if (location.request_location_mode === 'manual' && !location.location_country)
+      return { ok: false, error: 'request_location_required' }
     let label = p.label || null
     if (has('label')) {
       if (patch.label != null && typeof patch.label !== 'string') return { ok: false, error: 'invalid_label' }
@@ -918,10 +1175,23 @@ export class ProxyPool extends EventEmitter {
     }
     const domainChanged = domainForward !== !!p.domain_forward
     if (!connection) {
+      applyLifetime()
+      Object.assign(p, location)
+      p.max_websocket_connections = maxWebsocket
       p.label = label
       p.domain_forward = domainForward
+      if (domainChanged) {
+        p.quality_json = null
+        p.quality_version = (p.quality_version || 0) + 1
+      }
       this.save()
-      return { ok: true, proxy: this.publicProxy(p), connection_changed: false, domain_forward_changed: domainChanged }
+      return {
+        ok: true,
+        proxy: this.publicProxy(p),
+        connection_changed: false,
+        metadata_changed: metadataChanged,
+        domain_forward_changed: domainChanged,
+      }
     }
     const username = has('username') ? patch.username : p.username
     // SOCKS5 has no password-only auth: socks5Record() drops the password
@@ -940,6 +1210,9 @@ export class ProxyPool extends EventEmitter {
       password: has('password') ? patch.password : username ? p.password : null,
     })
     if (!next) return { ok: false, error: 'invalid_proxy' }
+    applyLifetime()
+    Object.assign(p, location)
+    p.max_websocket_connections = maxWebsocket
     p.host = next.host
     p.port = next.port
     p.username = next.username
@@ -950,8 +1223,50 @@ export class ProxyPool extends EventEmitter {
     p.raw = socksEndpoint(next.host, next.port)
     p.label = label
     p.domain_forward = domainForward
+    p.quality_json = null
+    p.quality_version = (p.quality_version || 0) + 1
     this.save()
-    return { ok: true, proxy: this.publicProxy(p), connection_changed: true, domain_forward_changed: domainChanged }
+    return {
+      ok: true,
+      proxy: this.publicProxy(p),
+      connection_changed: true,
+      metadata_changed: metadataChanged,
+      domain_forward_changed: domainChanged,
+    }
+  }
+
+  async exitUrl(p) {
+    let url = isLocalEgressProxy(p) ? '' : this._withAuth(p).url
+    const nodeId = isLocalEgressProxy(p) ? localEgressNodeId(p.id) : null
+    if (nodeId) {
+      if (!this.localExitUrl) throw new Error('node_egress_unavailable')
+      url = await this.localExitUrl(nodeId)
+      if (!url) throw new Error('node_egress_unavailable')
+    }
+    return url
+  }
+
+  async qualityById(proxyId, { signal, check = checkProxyQuality } = {}) {
+    const p = this.state.proxies.find((v) => v.id === proxyId)
+    if (!p) return { ok: false, error: 'proxy_not_found' }
+    const blocked = proxyBlockedReason(p, this.state.config.ipv6_enabled)
+    if (blocked) return { ok: false, error: blocked }
+    if (this._qualityRunning.has(proxyId) || this._qualityRunning.size >= 4)
+      return { ok: false, error: 'quality_check_busy' }
+    const version = p.quality_version || 0
+    this._qualityRunning.add(proxyId)
+    try {
+      const url = await this.exitUrl(p)
+      const result = await check({ proxyId, proxyUrl: url, geoLookup: this.geoLookup, signal })
+      signal?.throwIfAborted()
+      if (!this.state.proxies.includes(p) || (p.quality_version || 0) !== version)
+        return { ok: false, error: 'proxy_changed_during_check' }
+      p.quality_json = JSON.stringify(result)
+      this.save()
+      return { ok: true, report: result }
+    } finally {
+      this._qualityRunning.delete(proxyId)
+    }
   }
 
   updateConfig(patch = {}) {
@@ -1106,14 +1421,14 @@ export class ProxyPool extends EventEmitter {
     if (socks.scope === 'policy') return socks
     if (!socks.ok) return { ...socks, scope: 'socks' }
     if (typeof this.egressCheck !== 'function') return { ...socks, scope: 'socks' }
-    let eg = this.egressCheck(proxy)
+    let eg = await this.egressCheck(proxy)
     if (!eg?.ok && typeof this.repairEgress === 'function') {
       try {
         await this.repairEgress(proxy)
       } catch {
         /* keep egress failure */
       }
-      eg = this.egressCheck(proxy)
+      eg = await this.egressCheck(proxy)
     }
     if (eg?.ok) return { ...socks, scope: 'socks' }
     return {
@@ -1255,10 +1570,30 @@ export class ProxyPool extends EventEmitter {
     })
   }
 
-  async probeById(proxyId) {
+  async probeById(proxyId, { connectivity = false } = {}) {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
-    const result = await this.probeOne(p)
+    const version = p.quality_version || 0
+    let geoResult
+    let result
+    if (connectivity && !proxyBlockedReason(p, this.state.config.ipv6_enabled)) {
+      const begin = Date.now()
+      try {
+        const geo = await this.geoLookup(await this.exitUrl(p), { timeoutMs: this.state.config.geo_timeout_ms })
+        if (geo.ok) geoResult = geo
+        result = {
+          ok: !!geo.ok,
+          scope: 'exit',
+          latency_ms: Date.now() - begin,
+          error: geo.ok ? null : geo.error || 'connection_failed',
+        }
+      } catch {
+        result = { ok: false, scope: 'exit', latency_ms: Date.now() - begin, error: 'proxy_connection_failed' }
+      }
+    } else result = await this.probeOne(p)
+    if (!this.state.proxies.includes(p) || (p.quality_version || 0) !== version)
+      return { ok: false, error: 'proxy_changed_during_check' }
+    if (geoResult) this._applyGeoResult(p, geoResult)
     this._applyProbeResult(p, result)
     this.save()
     return { ok: true, proxy: this.publicProxy(p), probe: result }
@@ -1433,6 +1768,11 @@ export class ProxyPool extends EventEmitter {
   }
 
   _applyProbeResultInner(p, result, { cascade = true } = {}) {
+    if (!p.enabled && p.status === 'dead' && !p.last_error) {
+      p.latency_ms = result.latency_ms
+      p.last_probe_at = new Date().toISOString()
+      return
+    }
     // Disabled by policy is not a failed probe and must not damage health/history.
     if (result.scope === 'policy' || proxyBlockedReason(p, this.state.config.ipv6_enabled)) return
     if (result.scope === 'pending') return
@@ -1454,7 +1794,7 @@ export class ProxyPool extends EventEmitter {
     }
     if (result.ok) {
       const resume =
-        /egress_down|proxy_probe_failed/.test(String(p.last_error || '')) ||
+        /egress_down|proxy_probe_failed|proxy_expired/.test(String(p.last_error || '')) ||
         p.status === 'fail' ||
         (p.status === 'dead' && !!p.last_error)
       p.status = 'ok'
@@ -1480,8 +1820,56 @@ export class ProxyPool extends EventEmitter {
     this.emit('change')
   }
 
+  async sweepExpired() {
+    if (this._expiryRunning) return
+    this._expiryRunning = true
+    let dirty = false
+    try {
+      for (const source of this.state.proxies.slice()) {
+        if (!source.enabled || proxyBlockedReason(source, this.state.config.ipv6_enabled) !== 'proxy_expired') continue
+        if (source.status !== 'expired') {
+          source.status = 'expired'
+          source.last_error = 'proxy_expired'
+          dirty = true
+          this._cascadeDisableVm(source, 'proxy_expired')
+        }
+        if (!this.onRebindVm || source.fallback_mode === 'none') continue
+        for (const vmId of boundVmIdsOf(source).slice()) {
+          let target
+          if (source.fallback_mode === 'direct') {
+            target = this.localTargetForVm(vmId)
+            this.ensureLocalForNode(localEgressNodeId(target))
+          } else target = source.backup_proxy_id
+          const destination = this.state.proxies.find((p) => p.id === target)
+          if (
+            !destination ||
+            !destination.enabled ||
+            ['dead', 'fail', 'expired'].includes(destination.status) ||
+            proxyBlockedReason(destination, this.state.config.ipv6_enabled)
+          )
+            continue
+          const result = this.bind(target, vmId)
+          if (!result.ok) continue
+          try {
+            await this.onRebindVm(vmId, this.getProxyForVm(vmId), source.id)
+          } catch {
+            this.onDisableVm?.(vmId, 'proxy_expiry_rebind_failed', target)
+          }
+        }
+      }
+      if (dirty) this.save()
+    } finally {
+      this._expiryRunning = false
+    }
+  }
+
   startScheduler() {
     this.stopScheduler()
+    void this.sweepExpired().catch(() => {})
+    this._expiryTimer = setInterval(() => {
+      void this.sweepExpired().catch(() => {})
+    }, 30000)
+    this._expiryTimer.unref?.()
     if (!this.state.config.enabled) return
     const min = this.state.config.probe_interval_min || 10
     const ms = min * 60 * 1000
@@ -1493,6 +1881,10 @@ export class ProxyPool extends EventEmitter {
   }
 
   stopScheduler() {
+    if (this._expiryTimer) {
+      clearInterval(this._expiryTimer)
+      this._expiryTimer = null
+    }
     if (this._timer) {
       clearInterval(this._timer)
       this._timer = null
@@ -1505,8 +1897,10 @@ export class ProxyPool extends EventEmitter {
 
   /** For upstream: get socks URL for a VM */
   getProxyForVm(vmId) {
+    const vendorId = this.vendorIdForVm(vmId)
     const p = this.state.proxies.find(
       (x) =>
+        (x.vendor_id || null) === vendorId &&
         proxyHasVm(x, vmId) &&
         x.enabled &&
         x.status !== 'dead' &&
@@ -1553,6 +1947,7 @@ export class ProxyPool extends EventEmitter {
     return {
       id: p.id,
       url: socksProxyUrl(p, 'socks5'),
+      expires_at: p.expires_at || null,
       host: p.host,
       port: p.port,
       username: p.username || null,

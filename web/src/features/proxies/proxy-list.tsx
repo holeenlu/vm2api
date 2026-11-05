@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { t as translate } from '@/i18n'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import {
   ArrowDown,
@@ -8,6 +9,7 @@ import {
   Search,
   X,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -33,28 +35,87 @@ import {
 } from './proxy-sort'
 
 const SORT_LABEL: Record<ProxySortKey, string> = {
-  status: '状态',
-  latency: '延迟',
-  seats: '已绑数',
-  geo: '出口地区',
-  host: '地址',
+  get status() {
+    return translate('proxies:status')
+  },
+  get latency() {
+    return translate('proxies:latency')
+  },
+  get seats() {
+    return translate('proxies:boundCount')
+  },
+  get geo() {
+    return translate('proxies:exitRegion')
+  },
+  get host() {
+    return translate('proxies:address')
+  },
 }
 
 const SEAT_FILTERS: { key: ProxyFilter; label: string }[] = [
-  { key: 'all', label: '全部' },
-  { key: 'open', label: '有空位' },
-  { key: 'full', label: '已满' },
+  {
+    key: 'all',
+    get label() {
+      return translate('proxies:all')
+    },
+  },
+  {
+    key: 'open',
+    get label() {
+      return translate('proxies:hasCapacity')
+    },
+  },
+  {
+    key: 'full',
+    get label() {
+      return translate('proxies:full')
+    },
+  },
 ]
 
 /** 表头：可排序的列给按钮，其余只是标签。顺序与 `PROXY_ROW_GRID` 一一对应。 */
-const COLUMNS: { label: string; sort?: ProxySortKey }[] = [
-  { label: '节点', sort: 'host' },
-  { label: '地区', sort: 'geo' },
-  { label: '状态', sort: 'status' },
-  { label: '延迟', sort: 'latency' },
-  { label: '席位', sort: 'seats' },
-  { label: '已绑槽位' },
-  { label: '操作' },
+const COLUMNS: { label: string; sort?: ProxySortKey; kind?: 'actions' }[] = [
+  {
+    get label() {
+      return translate('proxies:node')
+    },
+    sort: 'host',
+  },
+  {
+    get label() {
+      return translate('proxies:region')
+    },
+    sort: 'geo',
+  },
+  {
+    get label() {
+      return translate('proxies:status')
+    },
+    sort: 'status',
+  },
+  {
+    get label() {
+      return translate('proxies:latency')
+    },
+    sort: 'latency',
+  },
+  {
+    get label() {
+      return translate('proxies:seats')
+    },
+    sort: 'seats',
+  },
+  {
+    get label() {
+      return translate('proxies:boundSlots')
+    },
+  },
+  {
+    kind: 'actions',
+    get label() {
+      return translate('proxies:actions')
+    },
+  },
 ]
 
 export function ProxyList({
@@ -106,6 +167,8 @@ export function ProxyList({
   pending: ProxyRowPending
   actions: ProxyRowActions
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const searchRef = useRef<HTMLInputElement>(null)
   const healthFilter = !SEAT_FILTERS.some((f) => f.key === filter)
   const narrowed = !!query || filter !== 'all' || !!regionText
@@ -127,7 +190,7 @@ export function ProxyList({
 
   return (
     <section
-      aria-label='代理列表'
+      aria-label={translate('proxies:proxyList')}
       className='@container/plist min-w-0 rounded-xl border bg-card'
     >
       <div className='flex flex-wrap items-center gap-2 border-b px-4 py-3'>
@@ -147,8 +210,8 @@ export function ProxyList({
                 onQuery('')
               }
             }}
-            placeholder='筛选可用节点：地址、名称、槽位、国家或时区'
-            aria-label='筛选可用节点'
+            placeholder={translate('proxies:filterNodesPlaceholder')}
+            aria-label={translate('proxies:filterNodes')}
             className='h-8 ps-8 pe-8 text-sm'
           />
           <kbd className='pointer-events-none absolute top-1/2 right-2 hidden -translate-y-1/2 rounded border bg-muted px-1 font-mono text-[10px] text-muted-foreground sm:block'>
@@ -158,7 +221,7 @@ export function ProxyList({
 
         <div
           role='group'
-          aria-label='按席位筛选'
+          aria-label={translate('proxies:filterSeats')}
           className='flex items-center gap-0.5 rounded-lg bg-muted/60 p-0.5'
         >
           {SEAT_FILTERS.map((f) => {
@@ -200,21 +263,21 @@ export function ProxyList({
         ) : null}
 
         {/* 宽屏用表头排序；表头隐藏时才需要这组下拉。 */}
-        <div className='ms-auto flex items-center gap-1 @3xl/plist:hidden'>
+        <div className='ms-auto flex items-center gap-1 @5xl/plist:hidden'>
           <Select
             value={sortKey}
             onValueChange={(v) => onSortKey(v as ProxySortKey)}
           >
             <SelectTrigger
               className='h-8 w-[112px] text-xs'
-              aria-label='排序字段'
+              aria-label={translate('proxies:sortField')}
             >
               <SelectValue />
             </SelectTrigger>
             <SelectContent align='end'>
               {(Object.keys(SORT_LABEL) as ProxySortKey[]).map((k) => (
                 <SelectItem key={k} value={k}>
-                  按{SORT_LABEL[k]}
+                  {translate('proxies:sortOption', { field: SORT_LABEL[k] })}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -226,10 +289,14 @@ export function ProxyList({
             onClick={onSortDir}
             aria-label={
               sortDir === 'asc'
-                ? '当前升序，切换为降序'
-                : '当前降序，切换为升序'
+                ? translate('proxies:switchToDescending')
+                : translate('proxies:switchToAscending')
             }
-            title={sortDir === 'asc' ? '升序' : '降序'}
+            title={
+              sortDir === 'asc'
+                ? translate('proxies:ascending')
+                : translate('proxies:descending')
+            }
           >
             {sortDir === 'asc' ? (
               <ArrowUpNarrowWide />
@@ -262,7 +329,7 @@ export function ProxyList({
               ) : (
                 <span
                   key={c.label}
-                  className={cn(c.label === '操作' && 'sr-only')}
+                  className={cn(c.kind === 'actions' && 'text-center')}
                 >
                   {c.label}
                 </span>
@@ -291,9 +358,9 @@ export function ProxyList({
           <p className='text-sm text-muted-foreground'>
             {all.length
               ? query
-                ? '没有匹配的可用节点（已满、禁用或失效的不参与筛选）。'
-                : '没有符合条件的代理。'
-              : '还没有代理。点右上角「添加代理」粘贴 SOCKS5 行导入，或添加本地代理。'}
+                ? translate('proxies:noAvailableNodeMatches')
+                : translate('proxies:noProxyMatches')
+              : translate('proxies:noProxies')}
           </p>
           {all.length && narrowed ? (
             <Button
@@ -305,7 +372,7 @@ export function ProxyList({
                 onClearRegion()
               }}
             >
-              清除筛选
+              {translate('proxies:clearFilters')}
             </Button>
           ) : null}
         </div>
@@ -313,21 +380,27 @@ export function ProxyList({
 
       <p className='border-t px-4 py-2 text-[11px] text-muted-foreground'>
         {rows.length === all.length
-          ? `${all.length} 条`
-          : `显示 ${rows.length} / ${all.length} 条`}
-        。账密不在列表里回显，「复制」按需取回并直接写入剪贴板。
+          ? translate('proxies:proxyCount', { count: all.length })
+          : translate('proxies:shownProxyCount', {
+              p0: rows.length,
+              p1: all.length,
+            })}
+        {' · '}
+        {translate('proxies:credentialsNotShown')}
       </p>
     </section>
   )
 }
 
 function ClearChip({ label, onClear }: { label: string; onClear: () => void }) {
+  const { t: translate } = useTranslation('proxies')
+
   return (
     <button
       type='button'
       onClick={onClear}
       className='inline-flex h-7 items-center gap-1 rounded-md bg-primary/10 px-2 text-xs font-medium text-primary transition-colors hover:bg-primary/15'
-      aria-label={`清除筛选：${label}`}
+      aria-label={translate('proxies:clearNamedFilter', { p0: label })}
     >
       {label}
       <X className='size-3' aria-hidden='true' />
@@ -348,6 +421,8 @@ function SortHeader({
   className?: string
   onClick: () => void
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const Arrow = dir === 'asc' ? ArrowUp : ArrowDown
   return (
     <button
@@ -355,8 +430,14 @@ function SortHeader({
       onClick={onClick}
       aria-label={
         active
-          ? `按${label}排序，当前${dir === 'asc' ? '升序' : '降序'}，点击翻转`
-          : `按${label}排序`
+          ? translate('proxies:toggleSort', {
+              p0: label,
+              p1:
+                dir === 'asc'
+                  ? translate('proxies:ascending')
+                  : translate('proxies:descending'),
+            })
+          : translate('proxies:sortByField', { p0: label })
       }
       className={cn(
         'group -mx-1 inline-flex h-6 w-fit items-center gap-1 rounded px-1 text-start transition-colors hover:text-foreground',

@@ -74,6 +74,7 @@ export class BackupService {
     this._timer = null
     this._bootTimer = null
     this._rebindStores = null // set via onRestored()
+    this._prepareRestore = null
   }
 
   _repo() {
@@ -96,6 +97,11 @@ export class BackupService {
   /** Register the callback that re-binds stores to the new DB after restore. */
   onRestored(fn) {
     this._rebindStores = typeof fn === 'function' ? fn : null
+  }
+
+  /** Stop auxiliary DB readers/writers before swapping the database files. */
+  onBeforeRestore(fn) {
+    this._prepareRestore = typeof fn === 'function' ? fn : null
   }
 
   // ---------- schedule config ----------
@@ -278,6 +284,7 @@ export class BackupService {
 
     this.isRestoring = true
     let tmp = null
+    let resume = null
     try {
       // 0. safety net snapshot of the current state
       const pre = await this.createBackup({ kind: 'pre_restore', note: `before restore of ${rec.id}` })
@@ -305,6 +312,7 @@ export class BackupService {
       if (!fs.existsSync(dbFile)) throw new Error('no db snapshot inside backup')
 
       // 2. swap the live database
+      resume = await this._prepareRestore?.()
       const dbPath = getDbPath()
       closeDatabase()
       const keep = `${dbPath}.pre-restore`
@@ -382,11 +390,12 @@ export class BackupService {
       // 7. re-bind stores to the fresh connection. A failed rebind leaves the
       //    process partially attached to the closed database, so it must make
       //    the restore fail instead of reporting a false success.
-      if (this._rebindStores) this._rebindStores(db)
+      if (this._rebindStores) await this._rebindStores(db)
 
       return { ok: true, restored: rec.id, pre_restore: pre.id }
     } finally {
       this.isRestoring = false
+      resume?.()
       if (tmp) {
         try {
           fs.rmSync(tmp, { recursive: true, force: true })

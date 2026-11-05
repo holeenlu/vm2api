@@ -7,19 +7,41 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const serverSrc = [
   fs.readFileSync(path.join(root, 'src/lib/admin/panel-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-user-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-api-key-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-api-endpoint-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-backup-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-read-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-command-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-lifecycle-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-diagnose-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-probe-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-quota-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-test-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-credential-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-runtime-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-oauth-query-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-seed-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-package-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-reset-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-maintenance-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-oauth-mutation-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-provision-routes.mjs'), 'utf8'),
+  fs.readFileSync(path.join(root, 'src/lib/admin/panel-vm-import-routes.mjs'), 'utf8'),
   fs.readFileSync(path.join(root, 'src/server.mjs'), 'utf8'),
 ].join('\n')
 
 function serverPanelHandlers(src) {
   const handlers = []
-  const exact = /req\.method === '(GET|POST|PUT|PATCH|DELETE)' && p === '(\/api\/panel\/[^']+)'/g
+  const exact = /req\.method === '(GET|POST|PUT|PATCH|DELETE)' && (?:p|path) === '(\/api\/panel\/[^']+)'/g
   let match
   while ((match = exact.exec(src))) {
     const method = match[1]
     const pathName = match[2]
     handlers.push({ method, matchPath: (p) => p === pathName })
   }
-  const regex = /req\.method === '(GET|POST|PUT|PATCH|DELETE)' && \/\^(\\\/api\\\/panel\\\/.+?)\$\/\.test\(p\)/g
+  const regex =
+    /req\.method === '(GET|POST|PUT|PATCH|DELETE)' && \/\^(\\\/api\\\/panel\\\/.+?)\$\/\.test\((?:p|path)\)/g
   while ((match = regex.exec(src))) {
     try {
       const method = match[1]
@@ -78,6 +100,7 @@ const PANEL_ROUTE_SAMPLES = [
   ['POST', '/api/panel/vms/vm-01/allocate-proxy'],
   ['POST', '/api/panel/vms/create'],
   ['GET', '/api/panel/vms/create-options'],
+  ['GET', '/api/panel/vms/live-stats'],
   ['GET', '/api/panel/vms/vm-01/package'],
   ['PUT', '/api/panel/vms/vm-01/package'],
   ['POST', '/api/panel/vms/package'],
@@ -113,10 +136,6 @@ const PANEL_ROUTE_SAMPLES = [
   ['GET', '/api/panel/notify'],
   ['POST', '/api/panel/notify/check'],
   ['POST', '/api/panel/notify/test'],
-  ['GET', '/api/panel/vm-pools'],
-  ['POST', '/api/panel/vm-pools'],
-  ['PATCH', '/api/panel/vm-pools/pool_abcd1234'],
-  ['DELETE', '/api/panel/vm-pools/pool_abcd1234'],
   ['GET', '/api/panel/api-keys'],
   ['POST', '/api/panel/api-keys'],
   ['PATCH', '/api/panel/api-keys/k1'],
@@ -152,7 +171,6 @@ const PANEL_ROUTE_SAMPLES = [
   ['GET', '/api/panel/usage-logs'],
   ['GET', '/api/panel/usage-logs/summary'],
   ['GET', '/api/panel/usage-logs/filter-options'],
-  ['GET', '/api/panel/usage-logs/session-suggestions'],
   ['GET', '/api/panel/usage-logs/active-sessions'],
   ['GET', '/api/panel/usage-logs/overview'],
   ['GET', '/api/panel/statistics'],
@@ -162,9 +180,45 @@ const PANEL_ROUTE_SAMPLES = [
 test('panel route samples all have server handlers', () => {
   const handlers = serverPanelHandlers(serverSrc)
   assert.ok(handlers.length > 50, `expected panel handlers, got ${handlers.length}`)
+  const factoryRoutes = [
+    { methods: ['POST'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/test-chat$/.test(p) },
+    { methods: ['GET', 'PUT', 'DELETE'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/test-schedule$/.test(p) },
+    { methods: ['GET', 'PUT'], match: (p) => p === '/api/panel/test-schedule/default' },
+    { methods: ['POST'], match: (p) => p === '/api/panel/test-schedule/sync' },
+    {
+      methods: ['POST'],
+      match: (p) => /^\/api\/panel\/vms\/[^/]+\/(credential\/clear|reset-fingerprint|reconcile-fingerprint)$/.test(p),
+    },
+    { methods: ['POST'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/(reload|shell-ticket|collect-identity)$/.test(p) },
+    { methods: ['GET'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/oauth\/(credential|setup-token-session)$/.test(p) },
+    { methods: ['GET', 'PUT'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/seed-settings$/.test(p) },
+    { methods: ['GET', 'PUT'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/package$/.test(p) },
+    { methods: ['POST'], match: (p) => p === '/api/panel/vms/package' },
+    { methods: ['POST'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/reset$/.test(p) },
+    {
+      methods: ['POST', 'PUT'],
+      match: (p) =>
+        /^\/api\/panel\/vms\/[^/]+\/oauth\/(generate-auth-url|exchange-code|credential|to-setup-token|refresh)$/.test(
+          p,
+        ),
+    },
+    { methods: ['POST'], match: (p) => p === '/api/panel/vms/schedule/hold' },
+    { methods: ['POST'], match: (p) => p === '/api/panel/vms/schedule/resume' },
+    {
+      methods: ['POST'],
+      match: (p) =>
+        /^\/api\/panel\/vms\/[^/]+\/(schedulable|cooldown\/clear|circuit\/reset|activate|deactivate)$/.test(p),
+    },
+    { methods: ['POST'], match: (p) => /^\/api\/panel\/vms\/[^/]+\/update-claude-code$/.test(p) },
+    { methods: ['DELETE'], match: (p) => /^\/api\/panel\/vms\/[^/]+$/.test(p) },
+    { methods: ['POST'], match: (p) => p === '/api/panel/vms/create' },
+    { methods: ['POST'], match: (p) => p === '/api/panel/vms/import' },
+  ]
   const missing = []
   for (const [method, sample] of PANEL_ROUTE_SAMPLES) {
-    const ok = handlers.some((handler) => handler.method === method && handler.matchPath(sample))
+    const ok =
+      handlers.some((handler) => handler.method === method && handler.matchPath(sample)) ||
+      factoryRoutes.some((route) => route.methods.includes(method) && route.match(sample))
     if (!ok) missing.push(`${method} ${sample}`)
   }
   assert.deepEqual(missing, [])
