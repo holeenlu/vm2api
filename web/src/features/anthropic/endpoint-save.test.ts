@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { PROXY_SAVED } from '@/features/proxies/proxy-picker'
 import {
   DEFAULT_URL,
   DIRECT,
   draftFromStored,
   endpointSaveRequest,
+  proxyIdField,
 } from './endpoint-save'
 
 const stored = draftFromStored({
@@ -40,6 +42,21 @@ describe('anthropic console endpoint save', () => {
     })
     expect(req.body).not.toHaveProperty('models')
     expect(req.body).not.toHaveProperty('name')
+  })
+
+  it('keeps a saved typed proxy URL: never sends proxy_id until the user picks one', () => {
+    const legacy = draftFromStored({
+      id: 'ep_2',
+      api_key_entries: [{ id: 'ek_2', proxy_id: '', has_proxy: true }],
+    })
+    expect(legacy.proxyId).toBe(PROXY_SAVED)
+    expect(proxyIdField(legacy.proxyId)).toEqual({})
+    expect(
+      endpointSaveRequest({ ...legacy, apiKey: 'sk-new' }, 'm1').body
+    ).toEqual({ key_id: 'ek_2', api_key: 'sk-new' })
+    expect(
+      endpointSaveRequest({ ...legacy, proxyId: 'px_3' }, 'm1').body
+    ).toEqual({ key_id: 'ek_2', proxy_id: 'px_3' })
   })
 
   it('creates a new endpoint with its first key and model', () => {

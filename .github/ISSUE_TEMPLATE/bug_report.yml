@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈。请先阅读 [Issue 提交指南](https://github.com/dofastted/vm2api/blob/main/ISSUE_GUIDE.md)，里面有版本、环境、日志的收集命令。
+        感谢反馈。请先阅读 [Issue 提交指南](https://github.com/holeenlu/vm2api/blob/main/ISSUE_GUIDE.md)，里面有版本、环境、日志的收集命令。
 
         > ⚠️ Issue 公开可见。API Key、OAuth / setup-token、sessionKey、Cookie、代理账号密码、公网 IP **全部打码**；不要上传 `.env`、`vms/*.json`、数据库。
 
@@ -44,7 +44,7 @@ body:
     id: version
     attributes:
       label: 1. 使用的版本
-      description: "`cat /opt/vm2api/VERSION`；升级后出现的问题写“旧版本 → 新版本”"
+      description: "`cat /opt/tapmodels/VERSION`；升级后出现的问题写“旧版本 → 新版本”"
       placeholder: "1.3.102（从 1.3.100 升级后出现）"
     validations:
       required: true
@@ -74,11 +74,11 @@ body:
     id: repro
     attributes:
       label: 2. 可复现路线
-      description: 照做就能复现的最小步骤。请求类问题附最小 curl（密钥替换为 $VM2API_API_KEY）。
+      description: 照做就能复现的最小步骤。请求类问题附最小 curl（密钥替换为 $TAPMODELS_API_KEY）。
       placeholder: |
         前置：2 个 VM，Claude Max OAuth，Docker 槽位，每 VM 独立 SOCKS5
         1. 管理台 → 虚拟机 → 新建 …
-        2. curl -sS -D - http://127.0.0.1:8787/v1/messages -H "Authorization: Bearer $VM2API_API_KEY" …
+        2. curl -sS -D - http://127.0.0.1:8787/v1/messages -H "Authorization: Bearer $TAPMODELS_API_KEY" …
         3. …
     validations:
       required: true
@@ -152,7 +152,7 @@ body:
     attributes:
       label: 4.1 VM 创建 / 槽位日志
       description: |
-        管理台报错原文或接口响应体；`docker logs --since 30m --timestamps vm2api 2>&1 | tail -n 300`；
+        管理台报错原文或接口响应体；`docker logs --since 30m --timestamps tapmodels 2>&1 | tail -n 300`；
         `docker logs --since 30m --timestamps kin-01 2>&1 | tail -n 300`（vm-01 → kin-01）。日志较长请上传附件。
       render: shell
     validations:

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import type { VmProxySnap } from '@/types/panel-vm'
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
+import type { RequestLocation, VmProxySnap } from '@/types/panel-vm'
+import { Eye, EyeOff } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -15,8 +17,21 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
+import { RequestLocationFields } from '@/features/settings/request-location-fields'
+import { EMPTY_LIFETIME, expiryDate, expiryISO } from './proxy-lifetime'
+import { ProxyLifetimeFields } from './proxy-lifetime-fields'
 import { type ProxyEditResult, editOutcome } from './proxy-results'
 import { proxyBoundIds } from './proxy-sort'
+
+type LocationMode = 'inherit' | 'manual' | 'auto'
+const EMPTY_LOCATION: RequestLocation = {
+  country: '',
+  region: '',
+  city: '',
+  timezone: '',
+}
+const describeLocation = (value: RequestLocation) =>
+  [value.city, value.region, value.country, value.timezone].join(' · ')
 
 /** 与网关 PROXY_LABEL_MAX 一致。 */
 const PROXY_LABEL_MAX = 64
@@ -35,7 +50,13 @@ export function ProxyEditDialog({
   proxy: VmProxySnap | null
   onOpenChange: (open: boolean) => void
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const qc = useQueryClient()
+  const proxies = useQuery(proxiesQueryOptions())
+  const [lifetime, setLifetime] = useState(EMPTY_LIFETIME)
+  const [enabled, setEnabled] = useState(true)
+  const [showPassword, setShowPassword] = useState(false)
   const [host, setHost] = useState('')
   const [port, setPort] = useState('')
   const [username, setUsername] = useState('')
@@ -43,6 +64,9 @@ export function ProxyEditDialog({
   const [clearAuth, setClearAuth] = useState(false)
   const [label, setLabel] = useState('')
   const [domainForward, setDomainForward] = useState(false)
+  const [maxWebsocket, setMaxWebsocket] = useState('0')
+  const [locationMode, setLocationMode] = useState<LocationMode>('inherit')
+  const [location, setLocation] = useState<RequestLocation>(EMPTY_LOCATION)
 
   const boundCount = proxyBoundIds(proxy || undefined).length
   // 代理名称只影响显示：只改名称时网关不会重载已绑槽位的 worker。
@@ -54,6 +78,13 @@ export function ProxyEditDialog({
   const proxyId = proxy?.id || ''
   useEffect(() => {
     if (!proxyId) return
+    setEnabled(proxy?.enabled !== false)
+    setShowPassword(false)
+    setLifetime({
+      expires_at: expiryDate(proxy?.expires_at),
+      fallback_mode: proxy?.fallback_mode || 'none',
+      backup_proxy_id: proxy?.backup_proxy_id || '',
+    })
     setHost(String(proxy?.host || ''))
     setPort(String(proxy?.port || ''))
     setUsername('')
@@ -61,6 +92,9 @@ export function ProxyEditDialog({
     setClearAuth(false)
     setLabel(String(proxy?.label || ''))
     setDomainForward(proxy?.domain_forward === true)
+    setMaxWebsocket(String(proxy?.max_websocket_connections ?? 0))
+    setLocationMode(proxy?.request_location_mode || 'inherit')
+    setLocation(proxy?.location || EMPTY_LOCATION)
     // proxy 的其余字段刻意不入依赖：只有换了目标才该重置表单。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [proxyId])
@@ -74,6 +108,18 @@ export function ProxyEditDialog({
       if (port.trim() && port.trim() !== String(proxy?.port ?? '')) {
         patch.port = Number(port.trim())
       }
+      if (enabled !== (proxy?.enabled !== false)) patch.enabled = enabled
+      if (!localProxy) {
+        if (lifetime.expires_at !== expiryDate(proxy?.expires_at))
+          patch.expires_at = expiryISO(lifetime.expires_at)
+        if (
+          lifetime.fallback_mode !== (proxy?.fallback_mode || 'none') ||
+          lifetime.backup_proxy_id !== (proxy?.backup_proxy_id || '')
+        ) {
+          patch.fallback_mode = lifetime.fallback_mode
+          patch.backup_proxy_id = lifetime.backup_proxy_id || null
+        }
+      }
       if (clearAuth) {
         patch.username = ''
       } else {
@@ -83,6 +129,12 @@ export function ProxyEditDialog({
       if (labelChanged) patch.label = label.trim()
       if (!localProxy && domainForward !== (proxy?.domain_forward === true)) {
         patch.domain_forward = domainForward
+      }
+      if (websocketChanged)
+        patch.max_websocket_connections = Number(maxWebsocket.trim())
+      if (locationChanged) {
+        patch.request_location_mode = locationMode
+        if (locationMode === 'manual') patch.location = location
       }
       return api<EditResult>(
         `/api/panel/proxies/${encodeURIComponent(String(proxy?.id || ''))}`,
@@ -106,111 +158,194 @@ export function ProxyEditDialog({
   // 空值也算不合法：清空输入框并不表示「删除端口」，而且清空后 patch 里既不
   // 会带 host/port 也不带账密，提交出去只会换回一个 no_editable_fields 400。
   const portBad =
-    !port.trim() || !Number.isInteger(portNum) || portNum < 1 || portNum > 65535
-  const hostBad = !host.trim()
-  // SOCKS5 没有「只有密码」的认证方式，后端 socks5Record() 见用户名为空就把
+    !localProxy &&
+    (!port.trim() ||
+      !Number.isInteger(portNum) ||
+      portNum < 1 ||
+      portNum > 65535)
+  const hostBad = !localProxy && !host.trim()
+  // 代理表单不接受「只有密码」；后端 socks5Record() 见用户名为空就把
   // 密码一并丢掉。原本无账密的代理若只填密码，网关会以
   // password_without_username 拒掉 —— 在这里先拦住，别让用户白填一遍。
   const passwordWithoutUser =
     !clearAuth && !!password && !username.trim() && !proxy?.has_auth
-  const connectionChanged = !(
-    host.trim() === String(proxy?.host || '') &&
-    port.trim() === String(proxy?.port ?? '') &&
-    !username.trim() &&
-    !password &&
-    !clearAuth
-  )
+  const connectionChanged =
+    !localProxy &&
+    !(
+      host.trim() === String(proxy?.host || '') &&
+      port.trim() === String(proxy?.port ?? '') &&
+      !username.trim() &&
+      !password &&
+      !clearAuth
+    )
   const domainChanged =
     !localProxy && domainForward !== (proxy?.domain_forward === true)
-  const nothingChanged = !connectionChanged && !labelChanged && !domainChanged
+  const websocketNum = Number(maxWebsocket.trim())
+  const websocketBad =
+    !Number.isInteger(websocketNum) || websocketNum < 0 || websocketNum > 10000
+  const websocketChanged =
+    !websocketBad && websocketNum !== (proxy?.max_websocket_connections ?? 0)
+  const locationChanged =
+    locationMode !== (proxy?.request_location_mode || 'inherit') ||
+    (locationMode === 'manual' &&
+      JSON.stringify(location) !==
+        JSON.stringify(proxy?.location || EMPTY_LOCATION))
+  const lifetimeChanged =
+    !localProxy &&
+    (lifetime.expires_at !== expiryDate(proxy?.expires_at) ||
+      lifetime.fallback_mode !== (proxy?.fallback_mode || 'none') ||
+      lifetime.backup_proxy_id !== (proxy?.backup_proxy_id || ''))
+  const nothingChanged =
+    !connectionChanged &&
+    !labelChanged &&
+    !domainChanged &&
+    !websocketChanged &&
+    !locationChanged &&
+    !lifetimeChanged &&
+    enabled === (proxy?.enabled !== false)
 
   return (
     <Dialog open={!!proxy} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>编辑代理</DialogTitle>
+      <DialogContent className='flex max-h-[90svh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl'>
+        <DialogHeader className='border-b px-6 py-5'>
+          <DialogTitle>{translate('proxies:editProxy')}</DialogTitle>
         </DialogHeader>
-        <div className='space-y-3'>
-          <div className='space-y-1'>
-            <Label>代理名称</Label>
+        <div className='min-h-0 space-y-5 overflow-y-auto px-6 py-5'>
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-label'>
+              {translate('proxies:name')}
+            </Label>
             <Input
+              id='proxy-edit-label'
               value={label}
               maxLength={PROXY_LABEL_MAX}
               onChange={(e) => setLabel(e.target.value)}
-              placeholder='如：东京-2 号机、xx 机房'
+              placeholder={translate('proxies:nameExample')}
             />
           </div>
-          <div className='grid gap-3 sm:grid-cols-[2fr_1fr]'>
-            <div className='space-y-1'>
-              <Label>主机</Label>
-              <Input
-                value={host}
-                onChange={(e) => setHost(e.target.value)}
-                aria-invalid={hostBad}
-              />
+          {localProxy ? (
+            <div className='rounded-lg bg-muted/40 p-4 text-sm'>
+              <p className='font-medium'>{translate('proxies:localVpsExit')}</p>
+              <p className='mt-1 leading-6 text-muted-foreground'>
+                {translate('proxies:localEditHint')}
+              </p>
             </div>
-            <div className='space-y-1'>
-              <Label>端口</Label>
-              <Input
-                value={port}
-                inputMode='numeric'
-                onChange={(e) => setPort(e.target.value)}
-                aria-invalid={portBad}
-              />
-            </div>
-          </div>
-          {hostBad ? (
-            <p className='text-xs text-[color:var(--status-bad)]'>
-              主机不能为空。
-            </p>
-          ) : null}
-          {portBad ? (
-            <p className='text-xs text-[color:var(--status-bad)]'>
-              端口需在 1–65535 之间。
-            </p>
-          ) : null}
+          ) : (
+            <>
+              <div className='grid gap-4 sm:grid-cols-2'>
+                <div className='space-y-1'>
+                  <Label htmlFor='proxy-edit-host'>
+                    {translate('proxies:host')}
+                  </Label>
+                  <Input
+                    id='proxy-edit-host'
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    aria-invalid={hostBad}
+                  />
+                </div>
+                <div className='space-y-1'>
+                  <Label htmlFor='proxy-edit-port'>
+                    {translate('proxies:port')}
+                  </Label>
+                  <Input
+                    id='proxy-edit-port'
+                    value={port}
+                    inputMode='numeric'
+                    onChange={(e) => setPort(e.target.value)}
+                    aria-invalid={portBad}
+                  />
+                </div>
+              </div>
+              {hostBad ? (
+                <p className='text-xs text-[color:var(--status-bad)]'>
+                  {translate('proxies:hostRequired')}
+                </p>
+              ) : null}
+              {portBad ? (
+                <p className='text-xs text-[color:var(--status-bad)]'>
+                  {translate('proxies:portRange')}
+                </p>
+              ) : null}
 
-          <div className='space-y-1'>
-            <Label>用户名</Label>
-            <Input
-              value={username}
-              disabled={clearAuth}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder={proxy?.has_auth ? '留空则不修改' : '（当前无账密）'}
-            />
-          </div>
-          <div className='space-y-1'>
-            <Label>密码</Label>
-            <Input
-              type='password'
-              value={password}
-              disabled={clearAuth}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={proxy?.has_auth ? '留空则不修改' : '（当前无账密）'}
-            />
-          </div>
-          {proxy?.has_auth ? (
-            <label className='flex items-center gap-2 text-sm'>
-              <input
-                type='checkbox'
-                checked={clearAuth}
-                onChange={(e) => {
-                  setClearAuth(e.target.checked)
-                  // 勾上就把两个框清空：留着已输入的账密既不会提交（patch 只发
-                  // username: ''），取消勾选后又会突然复活，看着像输入被吞了。
-                  if (e.target.checked) {
-                    setUsername('')
-                    setPassword('')
+              <div className='space-y-1'>
+                <Label htmlFor='proxy-edit-username'>
+                  {translate('proxies:optionalUsername')}
+                </Label>
+                <Input
+                  id='proxy-edit-username'
+                  value={username}
+                  autoComplete='off'
+                  disabled={clearAuth}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder={
+                    proxy?.has_auth
+                      ? translate('proxies:emptyKeepsValue')
+                      : translate('proxies:noCredentials')
                   }
-                }}
-              />
-              清除账密（改为免认证）
-            </label>
-          ) : null}
+                />
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='proxy-edit-password'>
+                  {translate('proxies:optionalPassword')}
+                </Label>
+                <div className='relative'>
+                  <Input
+                    autoComplete='new-password'
+                    className='pr-10'
+                    type={showPassword ? 'text' : 'password'}
+                    id='proxy-edit-password'
+                    value={password}
+                    disabled={clearAuth}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={
+                      proxy?.has_auth
+                        ? translate('proxies:emptyKeepsValue')
+                        : translate('proxies:noCredentials')
+                    }
+                  />
+                  <button
+                    type='button'
+                    aria-label={
+                      showPassword
+                        ? translate('proxies:hidePassword')
+                        : translate('proxies:showPassword')
+                    }
+                    className='absolute inset-y-0 right-3 text-muted-foreground'
+                    onClick={() => setShowPassword(!showPassword)}
+                  >
+                    {showPassword ? (
+                      <EyeOff className='size-4' />
+                    ) : (
+                      <Eye className='size-4' />
+                    )}
+                  </button>
+                </div>
+              </div>
+              {proxy?.has_auth ? (
+                <label className='flex items-center gap-2 text-sm'>
+                  <input
+                    type='checkbox'
+                    checked={clearAuth}
+                    onChange={(e) => {
+                      setClearAuth(e.target.checked)
+                      // 勾上就把两个框清空：留着已输入的账密既不会提交（patch 只发
+                      // username: ''），取消勾选后又会突然复活，看着像输入被吞了。
+                      if (e.target.checked) {
+                        setUsername('')
+                        setPassword('')
+                      }
+                    }}
+                  />
+                  {translate('proxies:clearCredentials')}
+                </label>
+              ) : null}
 
-          <p className='text-xs text-muted-foreground'>
-            账密不会回显。留空表示保持原值。
-          </p>
+              <p className='text-xs text-muted-foreground'>
+                {translate('proxies:credentialsHint')}
+              </p>
+            </>
+          )}
           {localProxy ? null : (
             <label className='flex items-center gap-2 text-sm'>
               <input
@@ -218,23 +353,101 @@ export function ProxyEditDialog({
                 checked={domainForward}
                 onChange={(e) => setDomainForward(e.target.checked)}
               />
-              域名转发（IPv6-only 出口按主机名 CONNECT，不回落 IPv4）
+              {translate('proxies:domainForwarding')}
             </label>
+          )}
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-max-websocket'>
+              {translate('proxies:maxWebsocketConnections')}
+            </Label>
+            <Input
+              id='proxy-edit-max-websocket'
+              type='number'
+              min={0}
+              max={10000}
+              value={maxWebsocket}
+              onChange={(e) => setMaxWebsocket(e.target.value)}
+              aria-invalid={websocketBad}
+            />
+            <p className='text-xs text-muted-foreground'>
+              {translate('proxies:maxWebsocketConnectionsHint')}
+            </p>
+          </div>
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-request-location'>
+              {translate('proxies:requestLocation')}
+            </Label>
+            <select
+              id='proxy-edit-request-location'
+              className='h-9 w-full rounded border bg-background px-2 text-sm'
+              value={locationMode}
+              onChange={(e) => setLocationMode(e.target.value as LocationMode)}
+            >
+              <option value='inherit'>
+                {translate('proxies:requestLocationInherit')}
+              </option>
+              <option value='auto'>
+                {translate('proxies:requestLocationAuto')}
+              </option>
+              <option value='manual'>
+                {translate('proxies:requestLocationManual')}
+              </option>
+            </select>
+            {locationMode === 'manual' ? (
+              <RequestLocationFields
+                idPrefix='proxy-edit-location'
+                value={location}
+                onChange={setLocation}
+              />
+            ) : null}
+            <p className='text-xs text-muted-foreground'>
+              {locationMode === 'auto'
+                ? proxy?.effective_request_location
+                  ? translate('proxies:requestLocationDetected', {
+                      value: describeLocation(proxy.effective_request_location),
+                    })
+                  : translate('proxies:requestLocationUndetected')
+                : translate('proxies:requestLocationHint')}
+            </p>
+          </div>
+          <div className='space-y-2'>
+            <Label htmlFor='proxy-edit-enabled'>
+              {translate('proxies:status')}
+            </Label>
+            <select
+              id='proxy-edit-enabled'
+              className='h-10 w-full rounded-md border bg-background px-3'
+              value={enabled ? 'active' : 'inactive'}
+              onChange={(e) => setEnabled(e.target.value === 'active')}
+            >
+              <option value='active'>{translate('proxies:enable')}</option>
+              <option value='inactive'>
+                {translate('proxies:deactivate')}
+              </option>
+            </select>
+          </div>
+          {!localProxy && (
+            <ProxyLifetimeFields
+              currentId={proxyId}
+              value={lifetime}
+              onChange={setLifetime}
+              proxies={proxies.data?.proxies || []}
+            />
           )}
           {passwordWithoutUser ? (
             <p className='text-xs text-[color:var(--status-bad)]'>
-              只填密码不生效，SOCKS5 需要同时有用户名。
+              {translate('proxies:usernameRequired')}
             </p>
           ) : null}
           {boundCount && connectionChanged ? (
             <p className='text-xs text-[color:var(--status-caution)]'>
-              该代理已绑 {boundCount} 台槽位，保存后会重载它们的 worker。
+              {translate('proxies:boundReloadHint', { count: boundCount })}
             </p>
           ) : null}
         </div>
-        <DialogFooter>
+        <DialogFooter className='border-t px-6 py-4'>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
-            取消
+            {translate('proxies:cancel')}
           </Button>
           <Button
             onClick={() => save.mutate()}
@@ -242,12 +455,14 @@ export function ProxyEditDialog({
               save.isPending ||
               hostBad ||
               portBad ||
+              websocketBad ||
               nothingChanged ||
-              passwordWithoutUser
+              passwordWithoutUser ||
+              (lifetime.fallback_mode === 'proxy' && !lifetime.backup_proxy_id)
             }
             loading={save.isPending}
           >
-            保存
+            {translate('proxies:update')}
           </Button>
         </DialogFooter>
       </DialogContent>

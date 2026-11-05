@@ -36,6 +36,7 @@ import { modelsDevMeta } from './price-catalog.mjs'
 import { listOfficialModels, validateOfficialModel } from '../protocol/models.mjs'
 import {
   fetchChatgptModelCatalog,
+  parseCodexModelCatalog,
   refreshCodexAccessToken,
   resolveCodexCatalogVersion,
   CODEX_USER_AGENT,
@@ -164,12 +165,16 @@ export async function syncCodexCatalog({
   fetchImpl,
   rotate = true,
   catalogClientVersion = 'auto',
+  gatewayWorker = null,
 } = {}) {
   if (!projectRoot) {
     return { ok: false, error: 'invalid_request', message: 'projectRoot required', ids: [], synced: 0 }
   }
   const vm = vmId ? getVm(projectRoot, vmId) : null
   const targets = listCodexVmsForCatalog(projectRoot, vm && isCodexVm(vm) ? vm : null)
+  if (!targets.length && !vmId && gatewayWorker?.fetchModelCatalog) {
+    return syncCodexCatalogFromGateway({ projectRoot, gatewayWorker, catalogClientVersion })
+  }
   if (!targets.length) {
     return { ok: false, error: 'no_codex_slot', message: '没有可用的 GPT OAuth 槽', ids: [], synced: 0 }
   }
@@ -287,6 +292,40 @@ export async function syncCodexCatalog({
     added,
     synced: models.length,
     source: 'chatgpt',
+  }
+}
+
+// 只有 Gateway Worker 账号的部署：由 Worker 用其 OAuth 账号读取上游目录，同样写入 gpt_model_policy
+async function syncCodexCatalogFromGateway({ projectRoot, gatewayWorker, catalogClientVersion }) {
+  const catalogVersion = await resolveCodexCatalogVersion({
+    configuredVersion: catalogClientVersion,
+    cachePath: path.join(
+      String(process.env.KIN_DATA_DIR || '').trim() || path.join(projectRoot, 'data'),
+      'codex-catalog-client.json',
+    ),
+  })
+  if (!catalogVersion.ok)
+    return { ok: false, error: catalogVersion.error, message: '无法获取 Codex catalog client 版本', ids: [], synced: 0 }
+  const live = await gatewayWorker.fetchModelCatalog(catalogVersion.version)
+  const models = live.ok ? parseCodexModelCatalog(live.catalog) : []
+  if (!models.length)
+    return {
+      ok: false,
+      error: live.error || 'empty_catalog',
+      message: '通过 Gateway Worker 同步 GPT 目录失败',
+      catalog_version: catalogVersion.version,
+      ids: [],
+      synced: 0,
+    }
+  const { added } = syncGptIdsIntoPolicy(models, { displayNameOf: (id) => modelsDevMeta('openai', id)?.name })
+  return {
+    ok: true,
+    gateway_instance_id: live.instance_id,
+    catalog_version: catalogVersion.version,
+    ids: models.map((row) => row.id),
+    added,
+    synced: models.length,
+    source: 'gateway_worker',
   }
 }
 
@@ -676,7 +715,7 @@ function extractResponsesText(body) {
   return parts.join('')
 }
 
-async function consumeResponsesResponse(res) {
+export async function consumeResponsesResponse(res) {
   const status = res.status
   const headers = {}
   res.headers.forEach((v, k) => {
@@ -884,7 +923,7 @@ export async function runVmTestChat(opts = {}) {
   if (!apiKey) {
     return done({
       ok: false,
-      error: { code: 'missing_api_key', message: 'gateway master key missing' },
+      error: { code: 'missing_api_key', message: 'service master key missing' },
       log,
       duration_ms: 0,
     })

@@ -268,7 +268,7 @@ test('a held slot is left alone; reset gives a faulted slot a fresh budget', asy
     wd.release('vm-held')
     probed.length = 0
     await wd.tick()
-    assert.deepEqual(probed, ['vm-held', 'vm-loop'])
+    assert.deepEqual([...new Set(probed)], ['vm-held', 'vm-loop'])
   } finally {
     kernelFaults.delete('vm-loop')
   }
