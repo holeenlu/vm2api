@@ -99,7 +99,13 @@ async function fixture(t, { enabled = true, failSeed = false } = {}) {
     requestLog: { start: () => ({ request_id: `prune-${++sequence}` }), finish: (_ctx, row) => logged.push(row) },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {}, recordUsage() {} },
+    // tapmodels 商业 Key 预检（只读，不占并发），同 forced-tool-choice / between-tools-ingress 夹具
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      acquire: () => ({ ok: true }),
+      release() {},
+      recordUsage() {},
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },

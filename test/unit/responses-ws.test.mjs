@@ -5,10 +5,15 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
+import { Readable } from 'node:stream'
 import { WebSocket } from 'ws'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
+import { RelayBilling } from '../../src/lib/admin/relay-billing.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
-import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import {
   createResponsesWsHandler,
@@ -30,14 +35,16 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
 }
 
-async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
+async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes, gatewayWorker = null, keepaliveMs }) {
   const httpHits = []
   const handler = createResponsesWsHandler({
     handleProtocol,
     requireAuth,
     json,
     getRouting: () => routing,
+    getGatewayWorker: () => gatewayWorker,
     maxBodyBytes,
+    ...(keepaliveMs ? { keepaliveMs } : {}),
   })
   const server = http.createServer((req, res) => {
     if (req.method === 'POST' && (req.url === '/v1/responses' || req.url === '/responses')) {
@@ -47,6 +54,11 @@ async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
     }
     res.writeHead(404)
     res.end()
+  })
+  const sockets = new Set()
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
   })
   server.on('upgrade', (req, socket, head) => {
     if (!handler.handleUpgrade(req, socket, head)) socket.destroy()
@@ -59,7 +71,10 @@ async function listen({ routing, requireAuth, handleProtocol, maxBodyBytes }) {
     httpHits,
     url: `ws://127.0.0.1:${port}/v1/responses`,
     httpUrl: `http://127.0.0.1:${port}/v1/responses`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () => {
+      for (const socket of sockets) socket.destroy()
+      return new Promise((resolve) => server.close(resolve))
+    },
   }
 }
 
@@ -115,13 +130,6 @@ function allowAuth(req) {
   return true
 }
 
-function allowManagedOpenai(req) {
-  req.apiKeyKind = 'managed'
-  req.apiKeyRecord = { id: 'key-1', group_id: 1, group_type: 'all' }
-  req.presentedApiKey = 'sk-test'
-  return true
-}
-
 function denyAuth(_req, res) {
   json(res, 401, {
     error: { type: 'authentication_error', code: 'invalid_api_key', message: 'Invalid credentials' },
@@ -167,6 +175,7 @@ async function listenWithHandleProtocol(
     codexOps,
     requestLog,
     apiKeyStore,
+    gatewayWorker = null,
     routing = {
       websocket: { enabled: true },
       pool: { fallback_wait_timeout_ms: 3000 },
@@ -177,9 +186,31 @@ async function listenWithHandleProtocol(
         protocols: { 'openai.responses': { enabled: true, mode: 'native' } },
       },
     },
-    requireAuth = allowManagedOpenai,
   },
 ) {
+  const db = openDatabase({ dataDir: path.join(root, 'data') })
+  const users = new PanelUserStore({ db })
+  const user = users.create({ username: 'ws-customer', password: 'ws-test-pass' })
+  const groups = new GroupsRepo(db)
+  const group = groups.create({ name: 'WS group', platform: 'openai', rate_multiplier: 0 })
+  groups.setGrants(user.id, [group.id])
+  groups.assignResource('vm', 'vm-gpt-a', [group.id], 0)
+  const keys = new ApiKeyStore({ db })
+  const key = keys.create({ user_id: user.id, group_id: group.id })
+  new RelayBilling(db).adjust(user.id, { amount: 1, reason: 'test credit', idempotency_key: 'ws-test-credit' }, 'test')
+  const usageSpy = apiKeyStore?.recordUsage
+  const recordUsage = keys.recordUsage.bind(keys)
+  keys.recordUsage = (...args) => {
+    usageSpy?.(...args)
+    return recordUsage(...args)
+  }
+  apiKeyStore = keys
+  const requireAuth = (req) => {
+    req.apiKeyKind = 'managed'
+    req.apiKeyRecord = keys.getById(key.id)
+    req.presentedApiKey = key.key
+    return true
+  }
   const routingFile = path.join(root, 'routing.json')
   const codexRouting = {
     websocket: { enabled: true },
@@ -231,8 +262,21 @@ async function listenWithHandleProtocol(
       ensureCodexKernel: async () => ({ ok: true }),
       ...codexOps,
     },
+    gatewayWorker,
   })
-  return listen({ routing, requireAuth, handleProtocol })
+  const live = await listen({ routing, requireAuth, handleProtocol, gatewayWorker })
+  return {
+    ...live,
+    db,
+    keyId: key.id,
+    close: async () => {
+      try {
+        await live.close()
+      } finally {
+        closeDatabase()
+      }
+    },
+  }
 }
 
 beforeEach(() => resetOpenAIAccountRuntime())
@@ -802,7 +846,6 @@ test('real handleProtocol: one in-flight interrupt yields a single cancelled fin
       },
     },
     apiKeyStore: {
-      acquire: () => ({ ok: true }),
       recordUsage(_key, usage) {
         usageRecords.push(usage)
       },
@@ -836,7 +879,8 @@ test('real handleProtocol: one in-flight interrupt yields a single cancelled fin
     await nextFrame(opened.ws, (frame) => frame.type === 'response.interrupt.accepted')
     await new Promise((resolve) => setTimeout(resolve, 200))
     assert.equal(finishCalls.length, 1)
-    assert.equal(finishCalls[0].error_code, 'client_cancelled')
+    assert.equal(finishCalls[0].final_state, 'cancelled')
+    assert.equal(finishCalls[0].error_code, null)
     assert.equal(usageRecords.length, 0)
     opened.ws.close()
   } finally {
@@ -859,7 +903,6 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
       },
     },
     apiKeyStore: {
-      acquire: () => ({ ok: true }),
       recordUsage(_key, usageRow) {
         usageRecords.push(usageRow)
       },
@@ -900,8 +943,8 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
     assert.equal(finishCalls[0].input_tokens, 12)
     assert.equal(finishCalls[0].output_tokens, 4)
     assert.equal(usageRecords.length, 1)
-    assert.equal(usageRecords[0].input_tokens, 12)
-    assert.equal(usageRecords[0].output_tokens, 4)
+    assert.equal(live.db.prepare('SELECT requests FROM api_keys WHERE id = ?').get(live.keyId).requests, 1)
+    assert.equal(live.db.prepare('SELECT COUNT(*) AS n FROM billing_charges').get().n, 1)
     opened.ws.close()
   } finally {
     await live.close()
@@ -909,65 +952,80 @@ test('real handleProtocol: interrupt after hop finish bills once without duplica
   }
 })
 
-test('real handleProtocol: Codex spend fills the managed key USD quota and the next request is refused', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-responses-ws-key-quota-'))
+test('real handleProtocol: Gateway failures are unmetered while unproven successes wait for the Receipt', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-responses-ws-gateway-settle-'))
   writeGptVm(root, 'vm-gpt-a')
-  const keys = new ApiKeyStore({ dataDir: fs.mkdtempSync(path.join(root, 'keys-')) })
-  const key = keys.create({ name: 'gpt', quota: 0.000001 })
   const finishCalls = []
-  let hops = 0
-  const usage = { input_tokens: 100_000, output_tokens: 10_000, total_tokens: 110_000 }
-  const live = await listenWithHandleProtocol(root, {
-    requireAuth(req) {
-      req.apiKeyKind = 'managed'
-      req.apiKeyRecord = keys.getById(key.id)
-      req.presentedApiKey = 'sk-test'
-      return true
+  // 第一轮：提交后上游过载（流内 response.failed）；第二轮：成功但上游未给 usage
+  const streams = [
+    [
+      'data: {"type":"response.created","response":{"id":"resp_gw_fail","output":[]}}',
+      'data: {"type":"response.output_text.delta","delta":"partial"}',
+      'data: {"type":"response.failed","response":{"id":"resp_gw_fail","error":{"type":"server_error","code":"server_is_overloaded"}}}',
+      '',
+    ],
+    [
+      'data: {"type":"response.created","response":{"id":"resp_gw_ok","output":[]}}',
+      'data: {"type":"response.completed","response":{"id":"resp_gw_ok","status":"completed","output":[]}}',
+      '',
+    ],
+  ]
+  let dispatchNo = 0
+  const gatewayWorker = {
+    repo: { findAccountByRuntime: () => null },
+    shouldUse: () => true,
+    hasVmScope: () => false,
+    cancel: async () => {},
+    async execute() {
+      const lines = streams[dispatchNo++]
+      return {
+        ok: true,
+        status: 200,
+        stream: true,
+        headers: { 'x-kin-gateway-account': 'acct_1', 'content-type': 'text/event-stream' },
+        body: Readable.toWeb(Readable.from([Buffer.from(lines.join('\n\n'))])),
+        instance_id: 'gw_settle',
+        dispatch_id: `dispatch_settle_${dispatchNo}`,
+        release() {},
+      }
     },
+  }
+  let requestNo = 0
+  const live = await listenWithHandleProtocol(root, {
     requestLog: {
-      start: () => ({ request_id: `ws-key-quota-${finishCalls.length}`, t0: Date.now() }),
+      start: () => ({ request_id: `ws-gw-settle-${++requestNo}`, t0: Date.now() }),
       finish(_ctx, bag) {
         finishCalls.push(bag)
       },
     },
-    apiKeyStore: keys,
-    codexOps: {
-      streamCodexKernel: async ({ onEvent }) => {
-        hops += 1
-        await onEvent(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: { id: `resp_quota_${hops}`, status: 'completed', output: [], usage },
-          })}\n\n`,
-        )
-        return { ok: true, status: 200, terminalState: 'verified', usage }
-      },
-    },
+    gatewayWorker,
   })
-  const waitFinish = async (n) => {
-    const deadline = Date.now() + 5000
-    while (finishCalls.length < n) {
-      assert.ok(Date.now() < deadline, 'requestLog.finish timeout')
-      await new Promise((resolve) => setTimeout(resolve, 25))
-    }
-  }
-  let opened = null
   try {
-    opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
-    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'first' }))
-    await waitFinish(1)
-    const spent = keys.getById(key.id)
-    assert.equal(spent.requests, 1)
-    assert.equal(spent.tokens_in, 100_000)
-    assert.equal(spent.tokens_out, 10_000)
-    assert.ok(spent.quota_used > 0)
-    assert.equal(spent.status, 'quota_exhausted')
-    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'second' }))
-    await waitFinish(2)
-    assert.equal(finishCalls[1].error_code, 'api_key_quota_exhausted')
-    assert.equal(hops, 1)
+    const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'fail' }))
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.failed')
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'ok' }))
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.completed')
+    const deadline = Date.now() + 3000
+    while (finishCalls.length < 2) {
+      assert.ok(Date.now() < deadline, 'requestLog.finish timeout')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const [failed, verified] = finishCalls
+    assert.equal(failed.final_state, 'upstream_error')
+    assert.equal(failed.error_code, 'server_is_overloaded')
+    assert.equal(failed.billing_status, 'unmetered')
+    assert.equal(failed.attempt_count, 1)
+    assert.equal(verified.final_state, 'verified')
+    assert.equal(verified.billing_status, 'settlement_pending')
+    const jobs = live.db
+      .prepare('SELECT dispatch_id FROM gateway_worker_reconciliation_jobs ORDER BY dispatch_id')
+      .all()
+      .map((row) => row.dispatch_id)
+    assert.deepEqual(jobs, ['dispatch_settle_2'])
+    assert.equal(live.db.prepare('SELECT COUNT(*) AS n FROM billing_charges').get().n, 0)
+    opened.ws.close()
   } finally {
-    opened?.ws?.close()
     await live.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -985,7 +1043,7 @@ test('PUT /api/panel/routing rejects illegal websocket fields before persist', a
     },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -1017,6 +1075,236 @@ test('unexpected handler failures do not expose internal exception details', asy
     assert.equal(frame.status, 500)
     assert.equal(frame.error.code, 'api_error')
     assert.doesNotMatch(JSON.stringify(frame), /private|credentials|secret-fixture-token/)
+  } finally {
+    opened.ws.close()
+    await live.close()
+  }
+})
+
+for (const terminalOutput of [undefined, []]) {
+  test(`WebSocket continuation retains completed custom tools when terminal output is ${terminalOutput ? 'empty' : 'omitted'}`, async () => {
+    const hops = []
+    const tool = {
+      type: 'custom_tool_call',
+      id: 'ctc_probe',
+      call_id: 'call_probe',
+      name: 'diagnostic_echo',
+      input: 'probe',
+      status: 'completed',
+    }
+    const reasoning = { type: 'reasoning', id: 'rs_probe', encrypted_content: 'opaque-test-reasoning', summary: [] }
+    const result = { type: 'custom_tool_call_output', call_id: 'call_probe', output: 'probe' }
+    const live = await listen({
+      routing: ENABLED,
+      requireAuth: allowAuth,
+      async handleProtocol(req, res) {
+        const body = await readJson(req)
+        hops.push(body)
+        const id = `resp_lite_${hops.length}`
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        const send = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`)
+        send({ type: 'response.created', response: { id, output: [] } })
+        if (hops.length === 1) {
+          send({ type: 'response.output_item.done', output_index: 0, item: reasoning })
+          send({ type: 'response.output_item.done', output_index: 1, item: tool })
+        }
+        send({
+          type: 'response.completed',
+          response: { id, status: 'completed', ...(terminalOutput === undefined ? {} : { output: terminalOutput }) },
+        })
+        res.end()
+      },
+    })
+    let ws
+    try {
+      const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+      ws = opened.ws
+      ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-test', input: 'start' }))
+      await nextFrame(ws, (frame) => frame.type === 'response.completed')
+      ws.send(
+        JSON.stringify({
+          type: 'response.create',
+          model: 'gpt-test',
+          previous_response_id: 'resp_lite_1',
+          input: [result],
+        }),
+      )
+      await nextFrame(ws, (frame) => frame.type === 'response.completed' && frame.response.id === 'resp_lite_2')
+      assert.equal(hops.length, 2)
+      assert.equal(hops[1].previous_response_id, undefined)
+      assert.deepEqual(hops[1].input.slice(1), [reasoning, tool, result])
+    } finally {
+      if (ws) {
+        ws.close()
+        await once(ws, 'close')
+      }
+      await live.close()
+    }
+  })
+}
+
+test('completed output is authoritative without duplicating streamed items', () => {
+  const bridge = createSseJsonBridge()
+  const item = { type: 'function_call', id: 'fc', call_id: 'call', name: 'lookup', arguments: '{}' }
+  for (const event of [
+    { type: 'response.created', response: { id: 'resp', output: [] } },
+    { type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '' } },
+    { type: 'response.output_item.done', output_index: 0, item },
+    { type: 'response.completed', response: { id: 'resp', output: [{ ...item, status: 'completed' }] } },
+  ])
+    bridge.push(`data: ${JSON.stringify(event)}\n\n`)
+  bridge.finish()
+  assert.deepEqual(bridge.snapshot().output, [{ ...item, status: 'completed' }])
+})
+
+test('Gateway path: one connection key per socket, interrupts forwarded to the bound upstream WS, close releases it', async () => {
+  const seen = []
+  const frames = []
+  const closes = []
+  let release
+  const hold = new Promise((resolve) => {
+    release = resolve
+  })
+  const gatewayWorker = {
+    async wsFrame(instanceId, key, frame) {
+      frames.push([instanceId, key, frame.type])
+      return { ok: true }
+    },
+    async wsClose(instanceId, key) {
+      closes.push([instanceId, key])
+      return { ok: true }
+    },
+  }
+  const live = await listen({
+    routing: ENABLED,
+    requireAuth: allowAuth,
+    gatewayWorker,
+    async handleProtocol(req, res) {
+      seen.push({ key: req.gatewayWs.connectionKey, native: req.gatewayWs.nativeBody?.previous_response_id || null })
+      // handleCodexProtocol 在 Worker 返回后设置这两项
+      req.gatewayWs.instanceId = 'gw_1'
+      req.gatewayWs.activeGateway = true
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const id = `resp_${seen.length}`
+      res.write(`data: {"type":"response.created","response":{"id":"${id}"}}\n\n`)
+      if (seen.length === 1) await hold
+      res.write(`data: {"type":"response.completed","response":{"id":"${id}","output":[]}}\n\n`)
+      res.end()
+    },
+  })
+  try {
+    const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.5', input: 'one' }))
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.created')
+    const accepted = nextFrame(opened.ws, (frame) => frame.type === 'response.interrupt.accepted')
+    opened.ws.send(JSON.stringify({ type: 'response.interrupt', response_id: 'resp_1' }))
+    await accepted
+    release()
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.completed')
+    opened.ws.send(
+      JSON.stringify({ type: 'response.create', model: 'gpt-5.5', previous_response_id: 'resp_1', input: 'two' }),
+    )
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.completed' && frame.response.id === 'resp_2')
+    assert.equal(seen.length, 2)
+    assert.equal(seen[0].key, seen[1].key)
+    assert.match(seen[0].key, /^wsc_/)
+    assert.equal(seen[1].native, 'resp_1')
+    assert.deepEqual(frames, [['gw_1', seen[0].key, 'response.interrupt']])
+    opened.ws.close()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(closes, [['gw_1', seen[0].key]])
+  } finally {
+    await live.close()
+  }
+})
+
+test('Gateway path: an interrupt the Worker cannot forward returns response.interrupt.failed', async () => {
+  const gatewayWorker = {
+    wsFrame: async () => ({ ok: false, data: { error: { message: 'no channel' } } }),
+    wsClose: async () => ({ ok: true }),
+  }
+  let release
+  const hold = new Promise((resolve) => {
+    release = resolve
+  })
+  const live = await listen({
+    routing: ENABLED,
+    requireAuth: allowAuth,
+    gatewayWorker,
+    async handleProtocol(req, res) {
+      req.gatewayWs.instanceId = 'gw_1'
+      req.gatewayWs.activeGateway = true
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('data: {"type":"response.created","response":{"id":"resp_x"}}\n\n')
+      await hold
+      res.write('data: {"type":"response.completed","response":{"id":"resp_x","output":[]}}\n\n')
+      res.end()
+    },
+  })
+  try {
+    const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.5', input: 'one' }))
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.created')
+    const failed = nextFrame(opened.ws, (frame) => frame.type === 'response.interrupt.failed')
+    opened.ws.send(JSON.stringify({ type: 'response.interrupt', response_id: 'resp_x' }))
+    const frame = await failed
+    assert.equal(frame.response_id, 'resp_x')
+    // 当前响应继续交付真实终态
+    release()
+    await nextFrame(opened.ws, (frame) => frame.type === 'response.completed')
+    opened.ws.close()
+  } finally {
+    await live.close()
+  }
+})
+
+test('an overload delivered as a response.failed body keeps its reason and Retry-After on the WebSocket error frame', async () => {
+  const live = await listen({
+    routing: ENABLED,
+    requireAuth: allowAuth,
+    async handleProtocol(req, res) {
+      res.setHeader('retry-after', '3')
+      json(res, 503, {
+        type: 'response.failed',
+        response: { error: { code: 'server_is_overloaded', message: 'Our servers are currently overloaded.' } },
+      })
+    },
+  })
+  try {
+    const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.5', input: 'hi' }))
+    const frame = await nextFrame(opened.ws, (item) => item.type === 'error')
+    assert.equal(frame.status, 503)
+    assert.equal(frame.error.code, 'server_is_overloaded')
+    assert.equal(frame.error.type, 'server_error')
+    assert.equal(frame.error.message, 'Our servers are currently overloaded.')
+    assert.equal(frame.headers?.['retry-after'], '3')
+    opened.ws.close()
+  } finally {
+    await live.close()
+  }
+})
+
+test('a slow hop gets keepalive frames until the first event arrives', async () => {
+  const live = await listen({
+    routing: ENABLED,
+    requireAuth: allowAuth,
+    keepaliveMs: 60,
+    async handleProtocol(_req, res) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end('data: {"type":"response.completed","response":{"id":"resp_slow","status":"completed","output":[]}}\n\n')
+    },
+  })
+  const opened = await openWs(live.url, { authorization: 'Bearer sk-test' })
+  const seen = []
+  opened.ws.on('message', (data) => seen.push(JSON.parse(String(data)).type))
+  try {
+    const completed = nextFrame(opened.ws, (frame) => frame.type === 'response.completed')
+    opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'hi' }))
+    await completed
+    assert.ok(seen.filter((type) => type === 'keepalive').length >= 2, JSON.stringify(seen))
+    assert.equal(seen.at(-1), 'response.completed')
   } finally {
     opened.ws.close()
     await live.close()

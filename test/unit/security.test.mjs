@@ -19,6 +19,17 @@ test('panel admin has no hard-coded password fallback', async () => {
   }
 })
 
+test('redactSecretText masks whole sk-ant tokens, including underscores and corrupt tails', async () => {
+  const { redactSecretText, redactSecrets } = await import('../../src/lib/core/security.mjs')
+  const head = 'sk-ant-oat01-' + 'a'.repeat(60) + '_tail_part'
+  const corrupt = `Header '14' has invalid value: 'Bearer ${head} GX-yjZ-\u0445yy1\u00d7gAA'`
+  const masked = redactSecretText(corrupt)
+  assert.equal(masked, "Header '14' has invalid value: 'Bearer ***REDACTED***'")
+  assert.doesNotMatch(redactSecretText(`token=${head}`), /tail_part/)
+  assert.doesNotMatch(redactSecrets({ error: corrupt }), /GX-yjZ|tail_part/)
+  assert.equal(JSON.parse(redactSecrets({ error: corrupt })).error, masked)
+})
+
 test('panelCookieSecure follows PUBLIC_SCHEME then the request', async () => {
   const { panelCookieSecure, panelSessionCookie } = await import(`../../src/lib/core/security.mjs?cookie=${Date.now()}`)
   assert.equal(panelCookieSecure({}, { PUBLIC_SCHEME: 'http' }), false)
@@ -144,7 +155,7 @@ test('existing loose panel session file is tightened on load', async () => {
   const file = path.join(dir, 'panel-sessions.json')
   fs.writeFileSync(
     file,
-    JSON.stringify({ 'kin-panel-load': { user: 'admin', role: 'admin', exp: Date.now() + 60_000 } }),
+    JSON.stringify({ 'kin-panel-load': { user: 'admin', role: 'super_admin', exp: Date.now() + 60_000 } }),
   )
   fs.chmodSync(file, 0o644)
   try {

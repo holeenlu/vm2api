@@ -1,3 +1,6 @@
+import { i18n } from '@/i18n'
+import { fixedNumber } from '@/lib/locale-format'
+
 /**
  * 用量数字的统一格式化，口径移植自 claude-code-hub
  * （`token.ts` / `currency.ts` / `performance-formatter.ts`）。
@@ -13,56 +16,67 @@ const TOKEN_FORMAT: Intl.NumberFormatOptions = {
 export function formatTokenAmount(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '-'
   const abs = Math.abs(n)
-  if (abs < 1000) return n.toLocaleString(undefined, TOKEN_FORMAT)
+  if (abs < 1000) return n.toLocaleString(i18n.resolvedLanguage, TOKEN_FORMAT)
   if (abs < 1_000_000)
-    return `${(n / 1000).toLocaleString(undefined, TOKEN_FORMAT)}K`
-  return `${(n / 1_000_000).toLocaleString(undefined, TOKEN_FORMAT)}M`
+    return `${(n / 1000).toLocaleString(i18n.resolvedLanguage, TOKEN_FORMAT)}K`
+  return `${(n / 1_000_000).toLocaleString(i18n.resolvedLanguage, TOKEN_FORMAT)}M`
 }
 
-/** `$` + 固定小数位（en-US 千分位）；空值按 0 计，与 hub 一致。 */
+/** `$` + 固定小数位（当前语言的千分位）；空值按 0 计，与 hub 一致。 */
 export function formatCurrency(
   v: number | null | undefined,
   digits = 2
 ): string {
   const value = v != null && Number.isFinite(v) ? v : 0
-  return `$${value.toLocaleString('en-US', {
+  return `$${value.toLocaleString(i18n.resolvedLanguage, {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   })}`
 }
 
-/** ≥1000ms 显示 `1.23s`，否则 `850ms`；空值 / 非有限 / 负数为 `-`。 */
+/** ≥1000ms 显示 `1.23s`，否则 `850ms`；空值 `-`。 */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '-'
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
-  return `${Math.round(ms)}ms`
+  if (ms >= 1000) return `${fixedNumber(ms / 1000, 2)}s`
+  return `${fixedNumber(Math.round(ms), 0)}ms`
 }
 
 /**
- * 输出速率 tok/s = 实际输出 tokens / 上游输出窗口。
- * 窗口是实测 `generationMs`（首个协议事件 → 终止生成事件，含不可见推理），
- * 缺失、0、负、非有限都不估（不用总耗时减 TTFT / TTFB）。
+ * 输出速率 tok/s。生成窗口以首 token 为起点（tapmodels 没有独立的 TTFB，
+ * hub 用 firstByteMs 的位置这里用 TTFT）；任一输入缺失或窗口非正返回 null。
  */
 export function calculateOutputRate(
   outputTokens: number | null | undefined,
-  generationMs: number | null | undefined
+  durationMs: number | null | undefined,
+  ttftMs: number | null | undefined = undefined
 ): number | null {
   if (
     outputTokens == null ||
     !Number.isFinite(outputTokens) ||
     outputTokens <= 0
-  ) {
+  )
     return null
-  }
-  if (
-    generationMs == null ||
-    !Number.isFinite(generationMs) ||
-    generationMs <= 0
-  ) {
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs <= 0)
     return null
-  }
-  const rate = outputTokens / (generationMs / 1000)
-  return Number.isFinite(rate) && rate > 0 ? rate : null
+  const generationMs = ttftMs == null ? durationMs : durationMs - ttftMs
+  if (generationMs <= 0) return null
+  return outputTokens / (generationMs / 1000)
+}
+
+/**
+ * 被缓冲的流式请求：首 token 几乎贴着总耗时，算出来的速率是假的。
+ * 规则同 hub：生成窗口 < 总耗时 10% 且速率 > 5000 tok/s 时隐藏。
+ */
+export function shouldHideOutputRate(
+  rate: number | null,
+  durationMs: number | null | undefined,
+  ttftMs: number | null | undefined
+): boolean {
+  if (rate == null || !Number.isFinite(rate)) return false
+  if (durationMs == null || durationMs <= 0 || ttftMs == null) return false
+  const generationMs = durationMs - ttftMs
+  if (generationMs <= 0) return false
+  return generationMs / durationMs < 0.1 && rate > 5000
 }
 
 const NON_BILLING_ENDPOINTS: Record<string, true> = {

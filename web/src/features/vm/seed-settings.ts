@@ -10,8 +10,8 @@ import {
 } from '@/features/vm/telemetry-status'
 
 export const REJECT_FLAGS = [
-  ['reject_client_settings', '拒客户端 settings'],
-  ['reject_client_metadata_identity', '拒客户端身份'],
+  ['reject_client_settings', 'vm:seedSettings.rejectClientSettings'],
+  ['reject_client_metadata_identity', 'vm:seedSettings.rejectClientIdentity'],
 ] as const
 
 const TOP_KEYS = ['theme', 'autoUpdates', 'grove_enabled'] as const
@@ -266,6 +266,7 @@ export type TelemetryLive = {
   desired: boolean | null
   on: boolean | null
   confirmed: boolean
+  running: boolean | null
   label: string
   tone: 'on' | 'off' | 'unknown'
 }
@@ -283,6 +284,7 @@ export function telemetryLive(
     desired,
     on: observed?.enabled ?? null,
     confirmed,
+    running: observed?.running ?? null,
     label: telemetryStatusLabel(observed, desired),
     tone: confirmed ? (desired ? 'on' : 'off') : 'unknown',
   }

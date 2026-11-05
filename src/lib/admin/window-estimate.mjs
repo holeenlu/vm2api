@@ -1,10 +1,10 @@
 /**
- * Subscription window capacity estimate (magpie window_holds): the vendor
- * reports only used%, so the whole window ≈ official spend logged in it ÷ used%.
- * Every input must cover the same window, otherwise the ratio is meaningless
- * and the status says why instead of showing a number.
+ * Subscription window capacity estimate. The capacity comes from the codex-proxy-rs style
+ * sampling of the slot's used% history (`usage/vm-quota-forecast.mjs`, computed with the
+ * billing statistics); this shapes it for the panel next to the window's logged spend.
+ * Without paired history the sampling falls back to the whole cycle, i.e. spend ÷ used%.
  */
-import { parseResetMs, toPercentUsed } from '../pool/quota-window.mjs'
+import { toPercentUsed } from '../pool/quota-window.mjs'
 
 /** Below this the vendor's rounding dominates the ratio (magpie HoldsFloor). */
 export const ESTIMATE_MIN_USED_RATIO = 0.05
@@ -20,49 +20,32 @@ export function usedRatioOf(value) {
 }
 
 /**
- * @param {{ spentUsd?: number, tokens?: number, usedRatio?: number|null, reset?: string|number|null,
- *   windowStart?: string|null, coveredSince?: string|null, unpricedRequests?: number, now?: number }} input
- * `coveredSince`: earliest instant whose traffic is still fully logged.
+ * @param {{ forecast?: { status, capacity_usd, capacity_tokens, low_sample, incomplete_cost } | null,
+ *   spentUsd?: number, usedRatio?: number|null }} input
  */
-export function estimateWindow({
-  spentUsd = 0,
-  tokens = 0,
-  usedRatio = null,
-  reset = null,
-  windowStart = null,
-  coveredSince = null,
-  unpricedRequests = 0,
-  now = Date.now(),
-} = {}) {
+export function estimateFromForecast({ forecast = null, spentUsd = 0, usedRatio = null } = {}) {
   const spent = Number(spentUsd) || 0
+  const ratio =
+    usedRatio == null || !Number.isFinite(Number(usedRatio)) ? null : Math.min(1, Math.max(0, Number(usedRatio)))
   const base = {
+    status: forecast?.status || 'no_data',
     spent_usd: round(spent, 6),
     total_usd: null,
     remaining_usd: null,
     total_tokens: null,
-    used_ratio: null,
+    used_ratio: ratio == null ? null : round(ratio, 4),
+    low_sample: Boolean(forecast?.low_sample),
+    incomplete_cost: Boolean(forecast?.incomplete_cost),
   }
-  if (usedRatio == null || !Number.isFinite(Number(usedRatio))) return { status: 'no_data', ...base }
-  const ratio = Math.min(1, Math.max(0, Number(usedRatio)))
-  base.used_ratio = round(ratio, 4)
-  const resetMs = parseResetMs(reset)
-  if (!Number.isFinite(resetMs) || resetMs <= now) return { status: 'no_reset', ...base }
-  const startMs = Date.parse(windowStart || '')
-  const coveredMs = Date.parse(coveredSince || '')
-  if (!Number.isFinite(startMs) || !Number.isFinite(coveredMs) || coveredMs > startMs) {
-    return { status: 'log_gap', ...base }
-  }
-  if (ratio < ESTIMATE_MIN_USED_RATIO) return { status: 'low_usage', ...base }
-  if (Number(unpricedRequests) > 0) return { status: 'unpriced', ...base }
-  // Used% moved but nothing was billed here: the window was spent outside the gateway.
-  if (spent <= 0) return { status: 'log_gap', ...base }
-  const total = spent / ratio
+  if (base.status !== 'ok') return base
+  const total = Number(forecast.capacity_usd)
+  const tokens = Number(forecast.capacity_tokens)
   return {
-    status: 'ok',
     ...base,
-    total_usd: round(total, 6),
-    remaining_usd: round(Math.max(total - spent, 0), 6),
-    total_tokens: Math.round((Number(tokens) || 0) / ratio),
+    total_usd: forecast.capacity_usd != null && Number.isFinite(total) ? round(total, 6) : null,
+    remaining_usd:
+      forecast.capacity_usd != null && Number.isFinite(total) ? round(Math.max(total - spent, 0), 6) : null,
+    total_tokens: forecast.capacity_tokens != null && Number.isFinite(tokens) ? Math.round(tokens) : null,
   }
 }
 
