@@ -73,14 +73,14 @@ function proxyGeoFromRow(row) {
 }
 
 /** Geo already recorded for the proxy selected in the VM config. Never probes. */
-export function readVmProxyGeo(vm, lookup = null) {
+export async function readVmProxyGeo(vm, lookup = null) {
   const embedded = vm?.proxy?.geo
   if (embedded && typeof embedded === 'object' && !Array.isArray(embedded)) return embedded
   if (lookup) return lookup(vm)
   const id = String(vm?.proxy?.id || '').trim()
   if (!id || !isDbOpen()) return null
   try {
-    return proxyGeoFromRow(new ProxiesRepo().loadAll().find((row) => row.id === id))
+    return proxyGeoFromRow((await new ProxiesRepo().loadAll()).find((row) => row.id === id))
   } catch {
     return null
   }
@@ -146,7 +146,8 @@ function replaceOwnedJson(file, body, vm) {
 }
 
 /** Overwrite the guest egress snapshot from the VM's configured proxy geo. */
-export function writeVmProxyTelemetryEgress(projectRoot, vm, geo = readVmProxyGeo(vm), now = Date.now()) {
+export async function writeVmProxyTelemetryEgress(projectRoot, vm, geo = undefined, now = Date.now()) {
+  if (geo === undefined) geo = await readVmProxyGeo(vm)
   const snapshot = telemetryEgressSnapshot(vm, geo, now)
   if (!snapshot) return { wrote: false, overwritten: false, reason: 'proxy_geo_unavailable' }
   const file = path.join(projectRoot, 'vms', vm.id, 'cli-home', '.claude', 'telemetry', 'egress.json')

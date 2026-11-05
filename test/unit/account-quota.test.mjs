@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import { AccountQuota, extraHeadersFromLimitError } from '../../src/lib/pool/account-quota.mjs'
 import { parseResetMs } from '../../src/lib/pool/quota-window.mjs'
 
@@ -1247,4 +1248,75 @@ test('complete usage may replace a profile-sourced tier', async () => {
   assert.equal(quota.repo.get('acct-profile').unified.account_tier_source, 'usage')
   quota.setAccountTier('acct-profile', 'max', { source: 'profile' })
   assert.equal(quota.repo.get('acct-profile').unified.account_tier, 'max')
+})
+
+test('Fable reset-only headers advance that window without clearing utilization or refreshing other windows', (t) => {
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const q = new AccountQuota({ db, config: {} })
+  const firstReset = futureReset(3 * 86400_000)
+  q.ingestHeaders('fable-reset-only', {
+    'anthropic-ratelimit-unified-5h-utilization': '0.2',
+    'anthropic-ratelimit-unified-7d_oi-utilization': '0.87',
+    'anthropic-ratelimit-unified-7d_oi-status': 'allowed_warning',
+    'anthropic-ratelimit-unified-7d_oi-reset': firstReset,
+  })
+  const first = q.repo.get('fable-reset-only')
+  t.mock.timers.tick(1000)
+  const secondReset = futureReset(4 * 86400_000)
+  q.ingestHeaders('fable-reset-only', { 'anthropic-ratelimit-unified-7d_oi-reset': secondReset })
+  const next = q.repo.get('fable-reset-only')
+  assert.equal(next.unified['7d_oi'].reset, secondReset)
+  assert.equal(next.unified['7d_oi'].utilization, 0.87)
+  assert.equal(next.unified['7d_oi'].status, 'allowed_warning')
+  assert.ok(Date.parse(next.unified['7d_oi'].sampled_at) > Date.parse(first.unified['7d_oi'].sampled_at))
+  assert.equal(next.unified.headers['5h'].sampled_at, first.unified.headers['5h'].sampled_at)
+})
+
+test('older official cache cannot overwrite newer per-window response samples or clear a fresh hard rejection', (t) => {
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const q = new AccountQuota({ db, config: {} })
+  const stale = {
+    ok: true,
+    usage_status: 200,
+    source: 'official-cc-usage',
+    probed_at: new Date().toISOString(),
+    limits_present: true,
+    usage_has_fable: false,
+    five_hour: { utilization: 0.3, status: 'allowed', resets_at: futureReset(4 * 3600_000) },
+    seven_day: { utilization: 0.2, status: 'allowed', resets_at: futureReset(6 * 86400_000) },
+  }
+  q.ingestOAuthUsage('cache-order', stale)
+  t.mock.timers.tick(1000)
+  q.ingestHeaders('cache-order', {
+    'anthropic-ratelimit-unified-5h-utilization': '0.95',
+    'anthropic-ratelimit-unified-5h-status': 'rejected',
+    'anthropic-ratelimit-unified-7d-utilization': '0.62',
+    'anthropic-ratelimit-unified-7d_oi-utilization': '0.41',
+    'anthropic-ratelimit-unified-7d_oi-reset': futureReset(5 * 86400_000),
+  })
+  const observed = q.repo.get('cache-order').unified
+  t.mock.timers.tick(1000)
+  q.ingestOAuthUsage('cache-order', stale)
+  let current = q.repo.get('cache-order').unified
+  for (const key of ['5h', '7d', '7d_oi']) assert.deepEqual(current.headers[key], observed.headers[key])
+  assert.deepEqual(current['7d_oi'], observed['7d_oi'])
+  assert.equal(current.headers.exhausted_at, observed.headers.exhausted_at)
+  assert.equal(q.canAccept('cache-order').ok, false)
+
+  // A newer response with only 5h data must not relabel and recopy an old 7d sample.
+  q.ingestOAuthUsage('cache-order', {
+    ok: true,
+    probed_at: new Date().toISOString(),
+    five_hour: { utilization: 0, status: 'allowed' },
+  })
+  current = q.repo.get('cache-order').unified
+  assert.equal(current.headers['5h'].utilization, 0)
+  assert.equal(current.headers['5h'].status, 'allowed')
+  assert.deepEqual(current.headers['7d'], observed.headers['7d'])
+  assert.deepEqual(current['7d_oi'], observed['7d_oi'])
+  assert.equal(q.canAccept('cache-order').ok, true)
 })

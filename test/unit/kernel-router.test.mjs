@@ -662,7 +662,7 @@ test('writeKernelConfig projects thinking display and preserves it only without 
   }
 })
 
-test('model effort changes rewrite kernel.json without a routing save or restart', () => {
+test('model effort changes rewrite kernel.json without a routing save or restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-effort-'))
   const routing = { compatibility: { persona_preset: 'official' } }
   const vm = { id: 'vm-09' }
@@ -672,13 +672,13 @@ test('model effort changes rewrite kernel.json without a routing save or restart
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   fs.writeFileSync(path.join(root, 'vms', 'vm-09.json'), JSON.stringify({ id: 'vm-09', status: 'running' }))
   try {
-    saveModelPolicy({
+    await saveModelPolicy({
       models: { 'claude-haiku-5-5': { params: { default_effort: 'high' } } },
     })
     writeKernelConfig(root, vm, { token: 'tok', routing })
     assert.equal(read().model_effort['claude-haiku-5-5'], 'high')
     const before = fs.statSync(configPath).mtimeMs
-    saveModelPolicy({
+    await saveModelPolicy({
       models: { 'claude-haiku-5-5': { params: { default_effort: 'off' } } },
     })
     const synced = syncClaudeKernelConfigs(root, routing)
@@ -686,7 +686,7 @@ test('model effort changes rewrite kernel.json without a routing save or restart
     assert.equal(read().model_effort['claude-haiku-5-5'], 'off')
     assert.ok(fs.statSync(configPath).mtimeMs >= before)
   } finally {
-    resetModelPolicy()
+    await resetModelPolicy()
     closeDatabase()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -890,7 +890,7 @@ test('writeKernelConfig uses identity when official_full has no persona_inject',
   assert.equal(overridden.system_layout, 'zero')
 })
 
-test('kernel.json rename keeps the control-plane gid while adopting the slot uid', () => {
+test('kernel.json rename preserves the slot owner and the non-root control-plane group', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-owner-'))
   const vm = { id: 'vm-10', inference_engine: 'rust' }
   const owner = slotRuntimeOwner(vm)
@@ -913,10 +913,10 @@ test('kernel.json rename keeps the control-plane gid while adopting the slot uid
     const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
     assert.equal(changed.changed, true)
     const published = kernelOwned()
-    const controlGid = process.getgid()
+    const expectedGid = process.getuid() === 0 ? owner.gid : process.getgid()
     assert.ok(published.length >= 1)
     assert.ok(
-      published.every((call) => call.uid === owner.uid && call.gid === controlGid),
+      published.every((call) => call.uid === owner.uid && call.gid === expectedGid),
       JSON.stringify(published),
     )
     assert.ok(
@@ -929,7 +929,9 @@ test('kernel.json rename keeps the control-plane gid while adopting the slot uid
     assert.equal(again.changed, false)
     assert.equal(fs.readFileSync(again.configPath, 'utf8').includes('"persona_preset": "official_full'), true)
     assert.ok(
-      kernelOwned().some((call) => call.file === again.configPath && call.uid === owner.uid && call.gid === controlGid),
+      kernelOwned().some(
+        (call) => call.file === again.configPath && call.uid === owner.uid && call.gid === expectedGid,
+      ),
     )
   } finally {
     chown.mock.restore()

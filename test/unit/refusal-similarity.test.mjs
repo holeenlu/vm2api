@@ -153,7 +153,7 @@ test('different user text under the same system is not a near match', () => {
   }
 })
 
-test('panel policy defaults on at 90 and rejects an unknown threshold', () => {
+test('panel policy defaults on at 90 and rejects an unknown threshold', async () => {
   assert.deepEqual(refusalGuardPolicy(), {
     enabled: true,
     similarity_enabled: true,
@@ -165,8 +165,8 @@ test('panel policy defaults on at 90 and rejects an unknown threshold', () => {
     get: (key, fallback) => (settings.has(key) ? settings.get(key) : fallback),
     set: (key, value) => settings.set(key, value),
   }
-  assert.equal(applyRefusalGuardPatch(store, { similarity: 70 }).ok, false)
-  assert.equal(applyRefusalGuardPatch(store, { similarity: 85, similarity_enabled: false }).ok, true)
+  assert.equal((await applyRefusalGuardPatch(store, { similarity: 70 })).ok, false)
+  assert.equal((await applyRefusalGuardPatch(store, { similarity: 85, similarity_enabled: false })).ok, true)
   assert.equal(normalizeRefusalSimilarity(85), 85)
   assert.deepEqual(
     refusalGuardPolicy((key, fallback) => store.get(key, fallback)),

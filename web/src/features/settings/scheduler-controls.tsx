@@ -1,4 +1,5 @@
 import { Minus, Plus, RotateCcw, type LucideIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -56,6 +57,8 @@ function FieldHead({
   fallback?: string
   onReset?: () => void
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <div className='flex items-start justify-between gap-3'>
       <div className='min-w-0 space-y-0.5'>
@@ -72,10 +75,11 @@ function FieldHead({
             variant='ghost'
             className='h-6 cursor-pointer gap-1 px-1.5 text-[11px] text-muted-foreground'
             onClick={onReset}
-            title={`恢复默认 ${fallback}`}
+            title={t('restoreDefaultValue', { value1: fallback })}
           >
             <RotateCcw className='size-3' aria-hidden />
-            默认 {fallback}
+            {t('default')}
+            {fallback}
           </Button>
         ) : null}
         <span className='rounded-md bg-muted px-2 py-0.5 text-sm font-semibold tabular-nums'>
@@ -117,6 +121,8 @@ export function SliderSetting({
   /** 让滑块轨道与下方 0–100% 的可视化轴对齐（例如 min=30 时偏移 30%）。 */
   sliderClassName?: string
 }) {
+  const { t } = useTranslation('settings')
+
   return (
     <div className='space-y-2'>
       <FieldHead
@@ -143,7 +149,7 @@ export function SliderSetting({
       />
       {presets?.length ? (
         <ChipGroup
-          label={`${label}常用值`}
+          label={t('presetsFor', { value1: label })}
           value={value}
           options={presets.map((p) => [p, format(p)])}
           onChange={onChange}
@@ -223,6 +229,8 @@ export function StepperSetting({
   fallback?: number
   onChange: (value: number) => void
 }) {
+  const { t } = useTranslation('settings')
+
   const clamp = (n: number) => Math.min(max, Math.max(min, n))
   return (
     <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
@@ -240,7 +248,7 @@ export function StepperSetting({
             variant='ghost'
             className='h-7 cursor-pointer gap-1 px-1.5 text-[11px] text-muted-foreground'
             onClick={() => onChange(fallback)}
-            title={`恢复默认 ${fallback}`}
+            title={t('restoreDefaultValue', { value1: fallback })}
           >
             <RotateCcw className='size-3' aria-hidden />
             {fallback}
@@ -253,7 +261,7 @@ export function StepperSetting({
             variant='ghost'
             className='size-8 cursor-pointer rounded-r-none'
             disabled={value <= min}
-            aria-label={`${label}减少`}
+            aria-label={t('decreaseValue', { value1: label })}
             onClick={() => onChange(clamp(value - step))}
           >
             <Minus className='size-3.5' />
@@ -278,7 +286,7 @@ export function StepperSetting({
             variant='ghost'
             className='size-8 cursor-pointer rounded-l-none'
             disabled={value >= max}
-            aria-label={`${label}增加`}
+            aria-label={t('increaseValue', { value1: label })}
             onClick={() => onChange(clamp(value + step))}
           >
             <Plus className='size-3.5' />

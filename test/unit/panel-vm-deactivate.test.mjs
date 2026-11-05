@@ -16,7 +16,7 @@ let cfg
 let response
 let handle
 
-beforeEach(() => {
+beforeEach(async () => {
   project = fs.mkdtempSync(path.join(os.tmpdir(), 'vm-deactivate-'))
   fs.mkdirSync(path.join(project, 'vms'))
   for (const id of ['vm-01', 'vm-02']) {
@@ -32,7 +32,7 @@ beforeEach(() => {
     )
   }
   openDatabase({ dataDir: path.join(project, 'data') })
-  initVmDbSync(project, { watch: false })
+  await initVmDbSync(project, { watch: false })
   setActiveVm(project, 'vm-01')
   cfg = { paths: { project }, vm: { id: null } }
   reloadActiveVm(cfg)
@@ -75,7 +75,7 @@ for (const prefix of ['/api/panel', '/admin']) {
     assert.equal(cfg.vm.id, null)
     assert.equal(new VmsRepo().getActiveVmId(), null)
     assert.equal(fs.readFileSync(file, 'utf8'), before)
-    reconcileVms(project)
+    await reconcileVms(project)
     reloadActiveVm(cfg)
     assert.equal(getActiveVmId(project), null)
     assert.equal(cfg.vm.id, null)

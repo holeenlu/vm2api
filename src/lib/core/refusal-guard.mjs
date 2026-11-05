@@ -22,7 +22,7 @@ export const REFUSAL_DEVICE_BLOCK_SETTING = 'refusal_device_block_enabled'
 export const REFUSAL_SIMILARITY_CHOICES = Object.freeze([80, 85, 90, 95])
 
 export function isRefusalGuardEnabled(readSetting) {
-  const flag = process.env.VM2API_REFUSAL_GUARD || process.env.REFUSAL_GUARD || process.env.KIN_REFUSAL_GUARD
+  const flag = process.env.TAPMODELS_REFUSAL_GUARD || process.env.REFUSAL_GUARD || process.env.KIN_REFUSAL_GUARD
   if (flag === '0' || flag === 'false') return false
   if (typeof readSetting === 'function') {
     try {
@@ -205,7 +205,7 @@ export function normalizeRefusalSimilarity(value) {
 }
 
 /** Apply a panel PUT. Unknown similarity values are rejected, not coerced. */
-export function applyRefusalGuardPatch(settings, body = {}) {
+export async function applyRefusalGuardPatch(settings, body = {}) {
   const problems = []
   if (Object.hasOwn(body, 'enabled') && typeof body.enabled !== 'boolean') problems.push('enabled 必须是布尔')
   if (Object.hasOwn(body, 'similarity_enabled') && typeof body.similarity_enabled !== 'boolean') {
@@ -218,13 +218,14 @@ export function applyRefusalGuardPatch(settings, body = {}) {
     problems.push('similarity 只能是 80、85、90、95')
   }
   if (problems.length) return { ok: false, problems }
-  if (typeof body.enabled === 'boolean') settings.set(REFUSAL_GUARD_SETTING, body.enabled)
-  if (typeof body.similarity_enabled === 'boolean') settings.set(REFUSAL_SIMILARITY_SETTING, body.similarity_enabled)
+  if (typeof body.enabled === 'boolean') await settings.set(REFUSAL_GUARD_SETTING, body.enabled)
+  if (typeof body.similarity_enabled === 'boolean')
+    await settings.set(REFUSAL_SIMILARITY_SETTING, body.similarity_enabled)
   if (typeof body.device_block_enabled === 'boolean') {
-    settings.set(REFUSAL_DEVICE_BLOCK_SETTING, body.device_block_enabled)
+    await settings.set(REFUSAL_DEVICE_BLOCK_SETTING, body.device_block_enabled)
   }
   if (Object.hasOwn(body, 'similarity')) {
-    settings.set(REFUSAL_SIMILARITY_VALUE_SETTING, normalizeRefusalSimilarity(body.similarity))
+    await settings.set(REFUSAL_SIMILARITY_VALUE_SETTING, normalizeRefusalSimilarity(body.similarity))
   }
   return { ok: true }
 }

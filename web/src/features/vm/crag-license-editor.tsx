@@ -1,5 +1,7 @@
 import { useId } from 'react'
+import { t } from '@/i18n'
 import type { CragLicenseResponse, CragLicenseStatus } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { isApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -7,26 +9,28 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 
-const licenseMessages: Record<string, string> = {
-  license_required: '本槽尚未授权。请将机器码交给授权方，再粘贴签发的注册码。',
-  license_expired: '授权已到期。请向授权方申请续期，并在下方替换注册码。',
-  license_not_yet_valid:
-    '授权尚未生效。请核对服务器 UTC 时间和生效时间；如签发时间有误，请联系授权方重新签发。',
-  license_invalid:
-    '注册码无法通过校验，可能不完整、已被修改或签发密钥不匹配。请重新复制完整注册码，或联系授权方重新签发。',
-  license_binding_mismatch:
-    '注册码不属于本槽或当前机器。请使用下方机器码申请匹配的注册码。',
-  license_unconfigured:
-    '服务器尚未配置可信授权公钥或加密 CRAG 包。请联系管理员安装受信任的完整软件包后重试。',
-}
+const LICENSE_CODES = [
+  'license_required',
+  'license_expired',
+  'license_not_yet_valid',
+  'license_invalid',
+  'license_binding_mismatch',
+  'license_unconfigured',
+]
+const LICENSE_STATUSES: readonly CragLicenseStatus['status'][] = [
+  'unlicensed',
+  'valid',
+  'expired',
+  'not_yet_valid',
+  'invalid',
+  'unconfigured',
+]
+const LICENSE_TERMS = ['1m', '6m', '1y']
 
-const statusLabels: Record<CragLicenseStatus['status'], string> = {
-  unlicensed: '未授权',
-  valid: '授权有效',
-  expired: '已到期',
-  not_yet_valid: '尚未生效',
-  invalid: '授权无效',
-  unconfigured: '授权服务未配置',
+function licenseMessage(code?: string): string | undefined {
+  return code && LICENSE_CODES.includes(code)
+    ? t(`vm:cragLicense.messages.${code}`)
+    : undefined
 }
 
 const statusCodes: Record<CragLicenseStatus['status'], string> = {
@@ -40,11 +44,12 @@ const statusCodes: Record<CragLicenseStatus['status'], string> = {
 
 export function cragLicenseErrorMessage(error: unknown) {
   if (isApiError(error)) {
-    if (licenseMessages[error.code]) return licenseMessages[error.code]
-    if (error.status === 401) return '登录已过期，请重新登录后重试。'
-    if (error.status === 403) return '没有管理本槽授权的权限，请联系管理员。'
+    const message = licenseMessage(error.code)
+    if (message) return message
+    if (error.status === 401) return t('vm:cragLicense.sessionExpired')
+    if (error.status === 403) return t('vm:cragLicense.forbidden')
   }
-  return '无法完成授权请求。请检查连接和服务器配置后重试；仍然失败时请联系管理员。'
+  return t('vm:cragLicense.requestFailed')
 }
 
 function utcTimestamp(seconds?: number) {
@@ -59,29 +64,41 @@ export function CragLicenseSummary({
 }: {
   license: CragLicenseStatus
 }) {
-  const term = { '1m': '1 个月', '6m': '6 个月', '1y': '1 年' }
+  const { t: tVm } = useTranslation('vm')
   return (
     <dl className='grid min-w-0 gap-3 text-sm sm:grid-cols-2'>
       <div>
-        <dt className='text-xs text-muted-foreground'>CRAG 授权</dt>
+        <dt className='text-xs text-muted-foreground'>
+          {tVm('vm:cragLicense.summaryTitle')}
+        </dt>
         <dd className='mt-1 font-medium'>
-          {statusLabels[license.status] || '状态未知，请刷新授权状态'}
+          {LICENSE_STATUSES.includes(license.status)
+            ? tVm(`vm:cragLicense.status.${license.status}`)
+            : tVm('vm:cragLicense.unknownStatus')}
         </dd>
       </div>
       <div>
-        <dt className='text-xs text-muted-foreground'>签发期限</dt>
+        <dt className='text-xs text-muted-foreground'>
+          {tVm('vm:cragLicense.issuedTerm')}
+        </dt>
         <dd className='mt-1'>
-          {license.term ? term[license.term] || '—' : '—'}
+          {license.term && LICENSE_TERMS.includes(license.term)
+            ? tVm(`vm:cragLicense.term.${license.term}`)
+            : '—'}
         </dd>
       </div>
       <div>
-        <dt className='text-xs text-muted-foreground'>生效时间</dt>
+        <dt className='text-xs text-muted-foreground'>
+          {tVm('vm:cragLicense.notBefore')}
+        </dt>
         <dd className='mt-1 break-words tabular-nums'>
           {utcTimestamp(license.not_before)}
         </dd>
       </div>
       <div>
-        <dt className='text-xs text-muted-foreground'>到期时间</dt>
+        <dt className='text-xs text-muted-foreground'>
+          {tVm('vm:cragLicense.expiresAt')}
+        </dt>
         <dd className='mt-1 break-words tabular-nums'>
           {utcTimestamp(license.expires_at)}
         </dd>
@@ -113,24 +130,25 @@ export function CragLicenseEditor({
   onActivate: () => void
   onClose: () => void
 }) {
+  const { t: tVm } = useTranslation('vm')
   const formId = useId()
   const license = data?.license
   const statusMessage =
     license && !license.valid
-      ? licenseMessages[license.code || ''] ||
-        licenseMessages[statusCodes[license.status]] ||
-        '授权状态未知。请刷新状态，并联系管理员检查授权配置。'
+      ? licenseMessage(license.code) ||
+        licenseMessage(statusCodes[license.status]) ||
+        tVm('vm:cragLicense.statusUnknownHelp')
       : null
   const busy = loading || activating
 
   return (
     <section
       className='min-w-0 space-y-4 border-t pt-4'
-      aria-label='CRAG 授权管理'
+      aria-label={tVm('vm:cragLicense.manageAria')}
       aria-busy={busy}
     >
       <div className='flex flex-wrap items-center justify-between gap-2'>
-        <h4 className='text-sm font-medium'>本槽 CRAG 授权</h4>
+        <h4 className='text-sm font-medium'>{tVm('vm:cragLicense.heading')}</h4>
         <div className='flex gap-2'>
           <Button
             type='button'
@@ -138,7 +156,9 @@ export function CragLicenseEditor({
             disabled={busy}
             onClick={onRefresh}
           >
-            {loading ? '读取中…' : '刷新状态'}
+            {loading
+              ? tVm('vm:cragLicense.loading')
+              : tVm('vm:cragLicense.refresh')}
           </Button>
           <Button
             type='button'
@@ -146,14 +166,14 @@ export function CragLicenseEditor({
             disabled={busy}
             onClick={onClose}
           >
-            收起
+            {tVm('vm:cragLicense.collapse')}
           </Button>
         </div>
       </div>
       {loading && !data ? (
         <div role='status' className='space-y-2'>
           <span className='text-sm text-muted-foreground'>
-            正在读取本槽授权与机器码…
+            {tVm('vm:cragLicense.loadingDetails')}
           </span>
           <Skeleton className='h-16 w-full' />
         </div>
@@ -161,7 +181,7 @@ export function CragLicenseEditor({
       {loadError ? (
         <p role='alert' className='text-sm text-destructive'>
           {cragLicenseErrorMessage(loadError)}
-          {data ? ' 下方为上次读取的状态，请刷新后再操作。' : ''}
+          {data ? ` ${tVm('vm:cragLicense.staleData')}` : ''}
         </p>
       ) : null}
       {license ? <CragLicenseSummary license={license} /> : null}
@@ -176,7 +196,9 @@ export function CragLicenseEditor({
       {data?.machine_code ? (
         <div className='space-y-2'>
           <div className='flex flex-wrap items-center justify-between gap-2'>
-            <Label htmlFor={`${formId}-machine`}>本槽机器码</Label>
+            <Label htmlFor={`${formId}-machine`}>
+              {tVm('vm:cragLicense.machineCode')}
+            </Label>
             <Button
               type='button'
               variant='outline'
@@ -184,13 +206,13 @@ export function CragLicenseEditor({
               onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(data.machine_code)
-                  toast.success('机器码已复制')
+                  toast.success(tVm('vm:cragLicense.copied'))
                 } catch {
-                  toast.error('复制失败，请选中机器码后手动复制')
+                  toast.error(tVm('vm:cragLicense.copyFailed'))
                 }
               }}
             >
-              复制机器码
+              {tVm('vm:cragLicense.copy')}
             </Button>
           </div>
           <Textarea
@@ -207,7 +229,7 @@ export function CragLicenseEditor({
             id={`${formId}-machine-help`}
             className='text-xs leading-relaxed text-muted-foreground'
           >
-            将机器码交给授权方。注册码仅适用于本槽；期限与到期时间由签名确定，不能在此修改。
+            {tVm('vm:cragLicense.machineHelp')}
           </p>
         </div>
       ) : null}
@@ -221,7 +243,9 @@ export function CragLicenseEditor({
       >
         <div className='space-y-2'>
           <Label htmlFor={`${formId}-registration`}>
-            {license?.valid ? '替换注册码 / 续期' : '注册码'}
+            {license?.valid
+              ? tVm('vm:cragLicense.replaceCode')
+              : tVm('vm:cragLicense.registrationCode')}
           </Label>
           <Textarea
             id={`${formId}-registration`}
@@ -240,7 +264,7 @@ export function CragLicenseEditor({
             id={`${formId}-registration-help`}
             className='text-xs leading-relaxed text-muted-foreground'
           >
-            粘贴授权方签发的完整注册码。校验通过后才替换现有授权；失败不会改动原授权或内核。
+            {tVm('vm:cragLicense.registrationHelp')}
           </p>
         </div>
         {activationError ? (
@@ -257,10 +281,10 @@ export function CragLicenseEditor({
           disabled={busy || !registrationCode.trim() || !data || !!loadError}
         >
           {activating
-            ? '正在校验并激活…'
+            ? tVm('vm:cragLicense.activating')
             : license?.valid
-              ? '校验并替换授权'
-              : '校验并激活'}
+              ? tVm('vm:cragLicense.replace')
+              : tVm('vm:cragLicense.activate')}
         </Button>
       </form>
     </section>

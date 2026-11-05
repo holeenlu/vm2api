@@ -532,7 +532,7 @@ for (const recoveredOk of [true, false]) {
       },
       requireAuth(req) {
         req.panelUser = 'fixture'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, body) {
