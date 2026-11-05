@@ -17,14 +17,22 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { redactSecrets } from '../core/security.mjs'
+import { redactSecretText, redactSecrets } from '../core/security.mjs'
 import { resolveStoreDb } from '../db/database.mjs'
 import { enqueueWrite, writeBehindArmed } from '../db/write-behind.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
+import { findSupplierRuntimeVm } from '../vendor/repos/resources-repo.mjs'
+import { UsageStatsWorker } from './usage-stats-worker.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
 import { disjointOpenaiUsage } from '../protocol/openai-usage.mjs'
-import { REASONING_EFFORTS, sessionIdForLog } from '../protocol/log-fields.mjs'
+import {
+  REASONING_EFFORTS,
+  sessionIdForLog,
+  responseModelForLog,
+  transportForLog,
+  upstreamPathForLog,
+} from '../protocol/log-fields.mjs'
 
 /** Persist the token a client actually sent — only for failed ingress auth. */
 export function presentedApiKeyForLog(token) {
@@ -371,9 +379,19 @@ export function resolveLogMode(envMode, req) {
 }
 
 export function newRequestId(req) {
-  const incoming = String(req?.headers?.['x-request-id'] || '').trim()
-  if (incoming && incoming.length <= 128) return incoming
+  // Server-owned identity prevents caller collisions across accounting and diagnostics.
   return crypto.randomUUID()
+}
+
+const UPSTREAM_ERROR_FIELDS = ['code', 'type', 'message', 'param', 'close_reason', 'last_event_type']
+
+/** 上游错误对象的受控投影：只保留声明的字符串字段（各 1KiB），都缺失时为 null。 */
+function diagnosticJson(value) {
+  if (!value || typeof value !== 'object') return null
+  const out = {}
+  for (const key of UPSTREAM_ERROR_FIELDS)
+    if (typeof value[key] === 'string' && value[key].trim()) out[key] = value[key].trim().slice(0, 1024)
+  return Object.keys(out).length ? JSON.stringify(out) : null
 }
 
 export class RequestLogStore {
@@ -390,6 +408,8 @@ export class RequestLogStore {
     this.dataDir = dataDir || path.join(process.cwd(), 'data')
     this.db = resolveStoreDb({ db, dataDir: this.dataDir })
     this.repo = new UsageLogsRepo(this.db)
+    this._statistics = null
+    this._statisticsPaused = false
     this.root = path.join(this.dataDir, 'request-logs')
     this.mode = MODES.has(String(mode).toLowerCase()) ? String(mode).toLowerCase() : 'normal'
     this.maxDebugBodyChars = Number.isFinite(maxDebugBodyChars) ? maxDebugBodyChars : 200000
@@ -436,6 +456,8 @@ export class RequestLogStore {
 
   /** Re-bind to a fresh DB connection (after backup restore). */
   rebind(db) {
+    void this._statistics?.close()
+    this._statistics = null
     this.db = db
     this.repo = new UsageLogsRepo(db)
     this._mem = []
@@ -456,6 +478,8 @@ export class RequestLogStore {
       method: req.method || 'POST',
       ip: safeIp(req),
       user_agent: String(req.headers?.['user-agent'] || '').slice(0, 512),
+      // Responses WebSocket 把每个 response.create 改写成 POST 交给协议层，这里保留原入站方式
+      inbound_transport: req.inboundTransport === 'websocket' ? 'websocket' : 'http',
       headers: mode === 'debug' ? redactHeaders(req.headers) : null,
       // Outbound bodies carry the gateway's rewrite (persona / overlay) and are
       // readable by the owning tenant; only the operator's configured mode may
@@ -515,7 +539,12 @@ export class RequestLogStore {
    * Write debug full record when mode===debug.
    */
   finish(ctx, extra = {}) {
-    if (!ctx || ctx.mode === 'off') return null
+    if (!ctx) return null
+    if (ctx.mode === 'off') {
+      const supplier = extra.vm_id && findSupplierRuntimeVm(this.db, extra.vm_id)
+      if (!supplier) return null
+      ctx = { ...ctx, mode: 'normal', capture_outbound: false, headers: null }
+    }
     const duration_ms = Math.max(0, Date.now() - (ctx.t0 || Date.now()))
     const usage = normalizeUsage(disjointOpenaiUsage(extra.usage || {}) || {})
     const breakdown = cacheCreationBreakdown(usage)
@@ -541,6 +570,10 @@ export class RequestLogStore {
     const summary = {
       id: 'log_' + crypto.randomBytes(6).toString('hex'),
       request_id: ctx.request_id,
+      config_revision:
+        Number.isSafeInteger(Number(extra.config_revision)) && Number(extra.config_revision) > 0
+          ? Number(extra.config_revision)
+          : null,
       ts: new Date().toISOString(),
       log_mode: ctx.mode,
       method: ctx.method,
@@ -558,7 +591,7 @@ export class RequestLogStore {
       input_tokens: extra.input_tokens ?? usage.input_tokens ?? null,
       output_tokens: extra.output_tokens ?? usage.output_tokens ?? null,
       error_code: extra.error_code || null,
-      error_message: extra.error_message ? String(extra.error_message).slice(0, 300) : null,
+      error_message: extra.error_message ? redactSecretText(extra.error_message).slice(0, 300) : null,
       user_agent: ctx.user_agent,
       ip: ctx.ip,
       api_key_presented: extra.api_key_presented ? presentedApiKeyForLog(extra.api_key_presented) : null,
@@ -571,7 +604,8 @@ export class RequestLogStore {
       web_search_requests: webSearch,
       requested_model: extra.requested_model || extra.model || null,
       upstream_model: extra.upstream_model || null,
-      model_mismatch: modelMismatch(extra.requested_model || extra.model, extra.upstream_model),
+      response_model: responseModelForLog(extra),
+      model_mismatch: modelMismatch(extra.requested_model || extra.model, responseModelForLog(extra)),
       first_token_ms: extra.first_token_ms ?? null,
       first_byte_ms: extra.first_byte_ms ?? null,
       generation_ms: extra.generation_ms ?? null,
@@ -591,17 +625,48 @@ export class RequestLogStore {
       image_usage: extra.image_usage ? JSON.stringify(extra.image_usage) : null,
       image_input_tokens: imageTokenCount(extra.image_usage?.input_tokens),
       image_output_tokens: imageTokenCount(extra.image_usage?.output_tokens),
+      execution_kind: extra.execution_kind || null,
+      account_resource_id: extra.account_resource_id || null,
+      gateway_instance_id: extra.gateway_instance_id || null,
+      dispatch_id: extra.dispatch_id || null,
+      receipt_id: extra.receipt_id || null,
+      usage_confidence: extra.usage_confidence || null,
       // sub2api ownership + billing columns
       user_id: extra.user_id ?? null,
+      billing_status: extra.billing_status || 'unmetered',
+      billing_group_id: extra.billing_group_id ?? extra.group_id ?? null,
+      subscription_id: extra.subscription_id || null,
+      api_key_name: extra.api_key_name || null,
+      source: extra.api_key_kind === 'master' ? 'platform' : 'protocol',
       vm_owner_user_id: null,
       group_id: extra.group_id ?? 1,
       rate_multiplier: Number.isFinite(Number(extra.rate_multiplier)) ? Number(extra.rate_multiplier) : 1,
       ...costColumnsForLog(billedUsage, extra.upstream_model || extra.model || extra.requested_model, extra),
       upstream_service_tier: extra.upstream_service_tier || null,
+      // Gateway 请求诊断（092）：只存上游声明与网关已知事实，超长文本截断
+      error_kind: extra.error_kind ? String(extra.error_kind).slice(0, 64) : null,
+      // Gateway 请求的授权方式（094）：native / bps，其余路径为空
+      authorization_mode: ['native', 'bps'].includes(extra.authorization_mode) ? extra.authorization_mode : null,
+      // 端点与传输方式（099）：上游路径由执行路径在发出请求时写入，未发往上游为空
+      inbound_transport: transportForLog(ctx.inbound_transport),
+      upstream_path: upstreamPathForLog(extra.upstream_path),
+      upstream_transport: transportForLog(extra.upstream_transport),
+      upstream_error_json: diagnosticJson(extra.upstream_error),
+      websocket_close_code: Number.isInteger(extra.websocket_close_code) ? extra.websocket_close_code : null,
+      continuation_unavailable_reason: extra.continuation_unavailable_reason
+        ? String(extra.continuation_unavailable_reason).slice(0, 64)
+        : null,
+      upstream_connection_exit_reason: extra.upstream_connection_exit_reason
+        ? String(extra.upstream_connection_exit_reason).slice(0, 64)
+        : null,
+      retry_after_ms:
+        Number.isFinite(extra.retry_after_ms) && extra.retry_after_ms >= 0 ? Math.round(extra.retry_after_ms) : null,
     }
     // sub2api actual_cost: official cost × group rate multiplier (0 is a valid rate)
     if (summary.total_cost != null) {
-      summary.actual_cost = extra.actual_cost ?? summary.total_cost * summary.rate_multiplier
+      summary.actual_cost = Object.hasOwn(extra, 'actual_cost')
+        ? extra.actual_cost
+        : summary.total_cost * summary.rate_multiplier
     }
     const classified = classifyRequestError(summary)
     if (classified?.error_class) summary.error_class = classified.error_class
@@ -713,8 +778,21 @@ export class RequestLogStore {
     return this.repo.hasSuccessfulRequest(opts)
   }
 
-  billingStats(opts = {}) {
-    return this.repo.billingStats(opts)
+  async billingStats(opts = {}) {
+    if (this._statisticsPaused) throw new Error('billing statistics are paused')
+    this._statistics ??= new UsageStatsWorker(this.db)
+    return this._statistics.billingStats(opts)
+  }
+
+  async pauseStatistics() {
+    this._statisticsPaused = true
+    const statistics = this._statistics
+    this._statistics = null
+    await statistics?.close()
+  }
+
+  resumeStatistics() {
+    this._statisticsPaused = false
   }
 
   ownerBilling(opts = {}) {

@@ -56,6 +56,14 @@ test('classifyRequestError maps known codes and statuses', () => {
   assert.equal(classifyRequestError({ status: 529 }).error_class, 'overloaded')
   assert.equal(classifyRequestError({ status: 503, error_code: 'kernel_unavailable' }).error_class, 'other')
   assert.equal(classifyRequestError({ status: 529, error_code: 'pool_overload_cooldown' }).error_class, 'overloaded')
+  assert.equal(
+    classifyRequestError({
+      status: 503,
+      error_code: 'codex_session_overloaded',
+      error_message: '当前 Codex 会话上下文持续过载，已停止重复切换账号；请稍后重试或新建会话。',
+    }).error_class,
+    'overloaded',
+  )
   assert.equal(classifyRequestError({ status: 429, error_code: 'pool_rate_limited' }).error_class, 'rate_limit')
   assert.equal(classifyRequestError({ status: 403, error_message: 'Just a moment Cloudflare' }).error_class, 'proxy')
   assert.equal(

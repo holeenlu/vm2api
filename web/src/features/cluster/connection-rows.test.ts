@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { ClusterApiNode, ClusterLocalStatus } from '@/types/panel-cluster'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   internalAddresses,
   localDetailRows,
@@ -67,6 +68,11 @@ const status = {
   },
   kvm: { ok: true, accel: 'kvm', error: null },
 } as ClusterLocalStatus
+
+// 断言的是简体中文文案；语言由 i18n 决定，这里固定为 zh-CN。
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('local connection details', () => {
   it('says the closed panel port plainly and finds the internal address', () => {

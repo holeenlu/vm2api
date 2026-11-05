@@ -1,41 +1,35 @@
+import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { useLayout } from '@/context/layout-provider'
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarHeader,
   SidebarRail,
 } from '@/components/ui/sidebar'
 import { AppTitle } from './app-title'
-import { navGroupsFor, sidebarData } from './data/sidebar-data'
+import { navGroupsFor } from './data/sidebar-data'
 import { NavGroup } from './nav-group'
-import { NavUser } from './nav-user'
 
-export function AppSidebar() {
+export function AppSidebar({ versionControl }: { versionControl?: ReactNode }) {
   const { collapsible, variant } = useLayout()
+  useTranslation('common')
   const me = useAuthStore((s) => s.me)
-  const userName = useAuthStore((s) => s.user) || me?.user || 'admin'
-  const groups = navGroupsFor(me?.views)
+  const groups = navGroupsFor(me?.views ?? [], me?.role)
   return (
     <Sidebar collapsible={collapsible} variant={variant}>
       <SidebarHeader>
-        <AppTitle version={me?.version} />
+        <AppTitle
+          showDetails={me?.role === 'super_admin'}
+          versionControl={versionControl}
+        />
       </SidebarHeader>
       <SidebarContent>
         {groups.map((group) => (
           <NavGroup key={group.title} {...group} />
         ))}
       </SidebarContent>
-      <SidebarFooter>
-        <NavUser
-          user={{
-            name: userName,
-            email: me?.role || sidebarData.user.email,
-            avatar: '',
-          }}
-        />
-      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
   )

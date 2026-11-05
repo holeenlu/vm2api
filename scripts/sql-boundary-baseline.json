@@ -1,0 +1,25 @@
+{
+  "note": "仓储以外的 SQL 调用点基线，只减不增；只允许有依据的豁免（kind=exempt），其余 SQL 必须写在仓储里。见 scripts/sql-boundary.mjs。",
+  "files": {
+    "src/lib/admin/relay-migration.mjs": {
+      "count": 11,
+      "kind": "exempt",
+      "reason": "启动时执行一次的数据转换（commercial-scopes-v1），属于迁移代码，不是运行期数据访问"
+    },
+    "src/lib/admin/usage-stats-thread.mjs": {
+      "count": 5,
+      "kind": "exempt",
+      "reason": "统计线程的连接基础设施：PRAGMA 设置与只读事务边界，业务查询走 UsageLogsRepo"
+    },
+    "src/lib/admin/usage-stats-worker.mjs": {
+      "count": 3,
+      "kind": "exempt",
+      "reason": "统计线程的连接基础设施：PRAGMA database_list / data_version 与 total_changes() 变更检测"
+    },
+    "src/lib/pool/thinking-owner.mjs": {
+      "count": 6,
+      "kind": "exempt",
+      "reason": "上游原有代码（4 处 prepare、2 处建表 exec），按上游优先不改"
+    }
+  }
+}

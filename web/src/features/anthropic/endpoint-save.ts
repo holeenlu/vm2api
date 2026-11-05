@@ -1,5 +1,15 @@
+import { PROXY_DIRECT, PROXY_SAVED } from '@/features/proxies/proxy-picker'
+
 export const DEFAULT_URL = 'https://api.anthropic.com'
-export const DIRECT = '__direct__'
+export const DIRECT = PROXY_DIRECT
+
+/**
+ * 请求里的代理字段。已存的手填代理地址（PROXY_SAVED）不发 proxy_id，
+ * 让服务端沿用 key 上保存的 proxy_url。
+ */
+export function proxyIdField(proxyId: string): { proxy_id?: string } {
+  return proxyId === PROXY_SAVED ? {} : { proxy_id: proxyId }
+}
 
 export type AuthScheme = 'x_api_key' | 'authorization_bearer'
 
@@ -25,7 +35,7 @@ type StoredItem = {
   id: string
   base_url?: string
   auth_scheme?: string
-  api_key_entries?: { id?: string; proxy_id?: string }[]
+  api_key_entries?: { id?: string; proxy_id?: string; has_proxy?: boolean }[]
 }
 
 export function draftFromStored(item: StoredItem): EndpointDraft {
@@ -36,7 +46,7 @@ export function draftFromStored(item: StoredItem): EndpointDraft {
       item.auth_scheme === 'authorization_bearer'
         ? 'authorization_bearer'
         : 'x_api_key',
-    proxyId: key?.proxy_id || DIRECT,
+    proxyId: key?.proxy_id || (key?.has_proxy ? PROXY_SAVED : DIRECT),
   }
   return {
     id: item.id,
@@ -62,7 +72,6 @@ export function endpointSaveRequest(
 ): { method: 'POST' | 'PATCH'; path: string; body: Record<string, unknown> } {
   const baseUrl = item.baseUrl.trim() || DEFAULT_URL
   const apiKey = item.apiKey.trim()
-  const proxyId = item.proxyId === DIRECT ? '' : item.proxyId
   if (!item.storedId) {
     const name = model.trim() || 'claude-sonnet-4-5'
     return {
@@ -74,7 +83,7 @@ export function endpointSaveRequest(
         name: baseUrl,
         base_url: baseUrl,
         auth_scheme: item.authScheme,
-        proxy_id: proxyId,
+        ...proxyIdField(item.proxyId),
         key_id: item.keyId || '',
         api_key: apiKey,
         models: [{ name, alias: name }],
@@ -85,7 +94,8 @@ export function endpointSaveRequest(
   const was = item.stored
   const body: Record<string, unknown> = { key_id: item.keyId || '' }
   if (apiKey) body.api_key = apiKey
-  if (!was || item.proxyId !== was.proxyId) body.proxy_id = proxyId
+  if (!was || item.proxyId !== was.proxyId)
+    Object.assign(body, proxyIdField(item.proxyId))
   if (!was || item.authScheme !== was.authScheme)
     body.auth_scheme = item.authScheme
   if (was && baseUrl !== was.baseUrl) {

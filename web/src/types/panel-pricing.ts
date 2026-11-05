@@ -91,10 +91,15 @@ export type RepriceResult = {
 }
 
 export type WindowEstimate = {
-  status: 'ok' | 'no_data' | 'no_reset' | 'log_gap' | 'low_usage' | 'unpriced'
+  status: 'ok' | 'no_data' | 'no_reset' | 'log_gap' | 'low_usage' | 'resampling'
   spent_usd: number
+  /** Window capacity sampled from the used% history (codex-proxy-rs forecast). */
   total_usd: number | null
   remaining_usd: number | null
   total_tokens: number | null
   used_ratio: number | null
+  /** Fewer than 10pp sampled or under 2 recent blocks. */
+  low_sample?: boolean
+  /** Some requests in the sample are unpriced, so the dollar figure understates. */
+  incomplete_cost?: boolean
 }

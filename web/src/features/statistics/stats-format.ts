@@ -1,3 +1,4 @@
+import { t, i18n } from '@/i18n'
 import type { StatsRange, StatsResolution } from '@/types/panel-statistics'
 
 /** 与 hub bento 图表同一套 10 色，序号 = 序列在 `series` 中的位置（与筛选无关，颜色稳定）。 */
@@ -20,20 +21,31 @@ export function seriesColor(index: number): string {
 }
 
 export const STATS_RANGES: { id: StatsRange; label: string }[] = [
-  { id: 'today', label: '今天' },
-  { id: '7days', label: '过去 7 天' },
-  { id: '30days', label: '过去 30 天' },
-  { id: 'thisMonth', label: '本月' },
+  {
+    id: 'today',
+    get label() {
+      return t('statistics:rangeToday')
+    },
+  },
+  {
+    id: '7days',
+    get label() {
+      return t('statistics:rangeWeek')
+    },
+  },
+  {
+    id: '30days',
+    get label() {
+      return t('statistics:rangeMonth')
+    },
+  },
+  {
+    id: 'thisMonth',
+    get label() {
+      return t('statistics:thisMonth')
+    },
+  },
 ]
-
-/** 浏览器 IANA 时区；取不到时退回 UTC，与后端默认一致。 */
-export function browserTimeZone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-  } catch {
-    return 'UTC'
-  }
-}
 
 const formatters = new Map<string, Intl.DateTimeFormat>()
 
@@ -64,22 +76,6 @@ function zonedParts(iso: string, timeZone: string) {
   }
 }
 
-// date-fns zh-CN 的 `MMMM`（一月…十二月），hub tooltip 表头沿用这个口径。
-const ZH_MONTHS = [
-  '一月',
-  '二月',
-  '三月',
-  '四月',
-  '五月',
-  '六月',
-  '七月',
-  '八月',
-  '九月',
-  '十月',
-  '十一月',
-  '十二月',
-]
-
 /** 横轴刻度：小时桶 `HH:mm`，天桶 `M/d`，均按 `timeZone` 解释桶起点。 */
 export function formatBucketTick(
   iso: string,
@@ -91,18 +87,29 @@ export function formatBucketTick(
   return resolution === 'hour' ? p.time : `${p.month}/${p.day}`
 }
 
-/** Tooltip 表头：小时桶 `MMMM d HH:mm`，天桶 `yyyy MMMM d`（zh-CN 月名）。 */
+/** Tooltip 表头：小时桶 `MMMM d HH:mm`，天桶 `yyyy MMMM d`（当前界面语言）。 */
 export function formatBucketTitle(
   iso: string,
   resolution: StatsResolution,
   timeZone: string
 ): string {
   if (!iso || Number.isNaN(Date.parse(iso))) return ''
-  const p = zonedParts(iso, timeZone)
-  const month = ZH_MONTHS[p.month - 1]
-  return resolution === 'hour'
-    ? `${month} ${p.day} ${p.time}`
-    : `${p.year} ${month} ${p.day}`
+  return new Intl.DateTimeFormat(
+    i18n.resolvedLanguage || i18n.language || 'zh-CN',
+    {
+      timeZone,
+      ...(resolution === 'day' ? { year: 'numeric' as const } : {}),
+      month: 'long',
+      day: 'numeric',
+      ...(resolution === 'hour'
+        ? {
+            hour: '2-digit' as const,
+            minute: '2-digit' as const,
+            hourCycle: 'h23' as const,
+          }
+        : {}),
+    }
+  ).format(new Date(iso))
 }
 
 /**
@@ -121,6 +128,7 @@ export function percentChange(
 
 export type SessionDisplay = {
   label: 'FAIL' | 'LIVE' | 'IDLE'
+  text: string
   tooltip: string
   color: string
   pulse: boolean
@@ -129,7 +137,7 @@ export type SessionDisplay = {
 const LIVE_WINDOW_MS = 60_000
 
 /**
- * hub `getSessionDisplayStatus` 的 vm2api 版。vm2api 只在请求完成时落库，没有「进行中 / 初始化」，
+ * hub `getSessionDisplayStatus` 的 tapmodels 版。tapmodels 只在请求完成时落库，没有「进行中 / 初始化」，
  * 所以按最后一次请求区分：失败 → FAIL；1 分钟内刚完成 → LIVE；其余 IDLE。
  */
 export function sessionDisplay(
@@ -139,7 +147,8 @@ export function sessionDisplay(
   if (session.lastStatus != null && session.lastStatus >= 400) {
     return {
       label: 'FAIL',
-      tooltip: `最近一次请求失败（HTTP ${session.lastStatus}）`,
+      text: t('statistics:sessionFailLabel'),
+      tooltip: t('statistics:sessionFailed', { status: session.lastStatus }),
       color: 'text-rose-500 dark:text-rose-400',
       pulse: true,
     }
@@ -148,14 +157,16 @@ export function sessionDisplay(
   if (Number.isFinite(last) && now - last <= LIVE_WINDOW_MS) {
     return {
       label: 'LIVE',
-      tooltip: '最近 1 分钟内有请求完成',
+      text: t('statistics:sessionLiveLabel'),
+      tooltip: t('statistics:sessionRecent'),
       color: 'text-emerald-500 dark:text-emerald-400',
       pulse: true,
     }
   }
   return {
     label: 'IDLE',
-    tooltip: '会话空闲，无活跃请求',
+    text: t('statistics:sessionIdleLabel'),
+    tooltip: t('statistics:sessionIdle'),
     color: 'text-muted-foreground/50',
     pulse: false,
   }

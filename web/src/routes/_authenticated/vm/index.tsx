@@ -1,6 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { VmListPage } from '@/features/vm/list-page'
+import { ResourceWorkbench } from '@/features/resources/resource-workbench'
 
 export const Route = createFileRoute('/_authenticated/vm/')({
-  component: VmListPage,
+  component: function VmRoute() {
+    return <ResourceWorkbench preset='vm' />
+  },
 })

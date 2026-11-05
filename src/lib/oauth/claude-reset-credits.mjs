@@ -13,6 +13,8 @@ import { credentialModeOfVm, isApiKeyMode } from './credential-mode.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { getVm } from '../vm/vm-registry.mjs'
 import { atomicWriteJson, withVmLock } from '../vm/vm-file.mjs'
+import { parseOAuthUsage, isCompleteOAuthUsage } from './crs-usage-probe.mjs'
+import { getUsageCache } from './usage-cache.mjs'
 
 export const CLAUDE_RESET_USAGE_PATH = '/api/oauth/usage?cedar_ember=1&skip_spend=1'
 export const CLAUDE_RESET_REDEEM_PATH = '/api/organizations/%s/reset_rate_limits'
@@ -337,7 +339,35 @@ async function fetchBlock(transport, exec) {
   if (res.status !== 200) return fail('CLAUDE_RESET_QUERY_FAILED', `限额重置状态上游 HTTP ${res.status}`, 502)
   const parsed = parseClaudeResetStatus(res.body)
   if (parsed.error) return fail('CLAUDE_RESET_STATUS_INVALID', '限额重置状态无效', 502)
-  return { ok: true, block: parsed.block }
+  return { ok: true, block: parsed.block, usage: res.body }
+}
+
+// Use the just-fetched usage when present; otherwise query through the same slot.
+// A quota operation must finish its durable write before the panel refetches.
+async function refreshUsage({ accountQuota, transport, exec, raw, now }) {
+  if (!accountQuota) return null
+  const accountId = exec.vm.claude?.account_uuid || exec.vmId
+  const cache = getUsageCache()
+  cache.clear(accountId)
+  let usage = raw ? parseOAuthUsage(raw) : null
+  if (!usage?.five_hour && !usage?.seven_day && !usage?.seven_day_oi) {
+    const res = await callWorker(transport, exec, 'usage')
+    if (res?.status !== 200 || !res?.body) return false
+    raw = res.body
+    usage = parseOAuthUsage(raw)
+  }
+  if (!usage.five_hour && !usage.seven_day && !usage.seven_day_oi) return false
+  accountQuota.ensure({ account_id: accountId, vm_id: exec.vmId, email: exec.vm.claude?.email })
+  accountQuota.ingestOAuthUsage(accountId, {
+    ...usage,
+    ok: true,
+    source: 'official-cc-usage',
+    usage_status: 200,
+    limits_present: isCompleteOAuthUsage(raw, usage),
+    probed_at: iso(now()),
+  })
+  cache.clear(accountId)
+  return true
 }
 
 function canonicalUuid(value) {
@@ -368,6 +398,7 @@ function publicOutcome(outcome) {
   if (Array.isArray(outcome.cleared) && outcome.cleared.length) out.cleared = outcome.cleared
   if (outcome.cooldown_until) out.cooldown_until = outcome.cooldown_until
   if (outcome.credits) out.claude_reset_credits = outcome.credits
+  if (outcome.usage_refreshed != null) out.usage_refreshed = outcome.usage_refreshed
   return out
 }
 
@@ -469,6 +500,7 @@ function persistedCredits(view) {
 export async function queryClaudeResetCredits({
   projectRoot,
   vmId,
+  accountQuota,
   transport = defaultTransport,
   now = () => Date.now(),
 } = {}) {
@@ -478,12 +510,14 @@ export async function queryClaudeResetCredits({
   if (!fetched.ok) return fetched
   const credits = projectClaudeResetCredits(fetched.block, now())
   await persistCredits(projectRoot, vmId, credits)
-  return { ok: true, claude_reset_credits: credits }
+  const refreshed = await refreshUsage({ accountQuota, transport, exec: account.exec, raw: fetched.usage, now })
+  return { ok: true, claude_reset_credits: credits, ...(refreshed != null ? { usage_refreshed: refreshed } : {}) }
 }
 
 export async function redeemClaudeResetCredit({
   projectRoot,
   vmId,
+  accountQuota,
   idempotencyKey,
   transport = defaultTransport,
   now = () => Date.now(),
@@ -506,6 +540,7 @@ export async function redeemClaudeResetCredit({
       exec: account.exec,
       transport,
       now,
+      accountQuota,
     })
     if (!outcome.ok) return outcome
     const saved = await mutateState(projectRoot, async (state) => {
@@ -523,7 +558,7 @@ export async function redeemClaudeResetCredit({
   })
 }
 
-async function redeemOnce({ projectRoot, vmId, operation, exec, transport, now }) {
+async function redeemOnce({ projectRoot, vmId, operation, exec, transport, now, accountQuota }) {
   const orgResult = await fetchOrg(transport, exec)
   if (!orgResult.ok) return orgResult
   const orgKey = claudeResetOrgId(orgResult.org)
@@ -562,6 +597,12 @@ async function redeemOnce({ projectRoot, vmId, operation, exec, transport, now }
     })
     if (marked?.ok === false) return marked
     const claimed = await claim(transport, exec, orgResult.org, grant.id, operation)
+    if (claimed.outcome === 'reset' && accountQuota) {
+      const accountId = exec.vm.claude?.account_uuid || vmId
+      accountQuota.ensure({ account_id: accountId, vm_id: vmId })
+      accountQuota.clearUsageWindows(accountId, claimed.cleared, iso(now()))
+      getUsageCache().clear(accountId)
+    }
     const settled = await writeFence(projectRoot, orgKey, {
       operation,
       outcome: claimed.outcome,
@@ -576,6 +617,7 @@ async function redeemOnce({ projectRoot, vmId, operation, exec, transport, now }
         claimed.credits = projectClaudeResetCredits(fresh.block, now())
         await persistCredits(projectRoot, vmId, claimed.credits)
       }
+      claimed.usage_refreshed = await refreshUsage({ accountQuota, transport, exec, raw: fresh.usage, now })
     }
     return { ok: true, ...publicOutcome(claimed) }
   } finally {
