@@ -469,6 +469,32 @@ export class SeatPlanner {
     return true
   }
 
+  /**
+   * Tickets served before `self` on these VMs, in grant order: seated requests
+   * (`conc`) go first on their VM, then seat waits, then global tickets by
+   * arrival. A `conc` ticket only waits behind earlier `conc` tickets.
+   */
+  queuedAhead(vmIds, self = null) {
+    const ids = new Set([...(vmIds || [])].map(String))
+    const kind = self?.kind || 'global'
+    const before = self?.enqueuedAt ?? Number.POSITIVE_INFINITY
+    const earlier = (ticket) => ticket.enqueuedAt < before
+    let count = 0
+    for (const id of ids) {
+      for (const ticket of this.vmQueues.get(id) || []) {
+        if (ticket === self || !ticket.queued) continue
+        if (ticket.kind === 'conc') count += kind !== 'conc' || earlier(ticket) ? 1 : 0
+        else if (kind !== 'conc') count += kind === 'global' || earlier(ticket) ? 1 : 0
+      }
+    }
+    if (kind === 'conc') return count
+    for (const ticket of this.globalQueue) {
+      if (ticket === self || !ticket.queued || !earlier(ticket)) continue
+      if ((ticket.vmIds?.() || []).some((id) => ids.has(String(id)))) count += 1
+    }
+    return count
+  }
+
   pending() {
     let total = this.globalQueue.length
     for (const queue of this.vmQueues.values()) total += queue.length

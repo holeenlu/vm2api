@@ -1,0 +1,309 @@
+{
+  "version": 2,
+  "scope": "codex",
+  "i18n_namespace": "settings",
+  "groups": [
+    { "id": "routing", "label": "executorSettings.routing.title", "help": "executorSettings.routing.help" },
+    { "id": "scheduling", "label": "codexScheduling.title", "help": "codexScheduling.help" },
+    { "id": "warmup", "label": "codexWarmup.title", "help": "codexWarmup.help" },
+    { "id": "reset_credit", "label": "codexResetCredit.title", "help": "codexResetCredit.help" },
+    { "id": "credit_overage", "label": "codexCreditOverage.title", "help": "codexCreditOverage.help" },
+    { "id": "bps", "label": "codexBps.title", "help": "codexBps.help" },
+    {
+      "id": "bps_defaults",
+      "label": "codexBps.defaults.title",
+      "help": "codexBps.defaults.help",
+      "visible_when": { "key": "bps_enabled", "equals": true }
+    },
+    { "id": "bps_images", "label": "codexBps.images.title", "visible_when": { "key": "bps_enabled", "equals": true } }
+  ],
+  "fields": [
+    {
+      "key": "gateway_worker.preference",
+      "group": "routing",
+      "type": "enum",
+      "values": ["auto", "vm", "gateway_worker"],
+      "default": "auto",
+      "label": "executorSettings.routing.preference",
+      "help": "executorSettings.routing.preferenceHelp",
+      "option_label": "executorSettings.routing.{value}"
+    },
+    {
+      "key": "scheduling.strategy",
+      "group": "scheduling",
+      "type": "enum",
+      "values": ["smart", "quota_reset_priority", "round_robin", "sticky"],
+      "default": "smart",
+      "label": "codexScheduling.strategy",
+      "option_label": "codexScheduling.{value}"
+    },
+    {
+      "key": "scheduling.affinity",
+      "group": "scheduling",
+      "type": "enum",
+      "values": ["strict", "preferred", "relaxed"],
+      "default": "preferred",
+      "label": "codexScheduling.affinity",
+      "help": "codexScheduling.affinityHelp",
+      "option_label": "codexScheduling.{value}"
+    },
+    {
+      "key": "scheduling.smart_weights.load",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 1,
+      "label": "codexScheduling.load",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.quota",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 0.8,
+      "label": "codexScheduling.quota",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.health",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 1,
+      "label": "codexScheduling.health",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.latency",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 0.5,
+      "label": "codexScheduling.latency",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.reset",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 0,
+      "label": "codexScheduling.reset",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    { "key": "warmup.enabled", "group": "warmup", "type": "boolean", "default": false, "label": "codexWarmup.enabled" },
+    {
+      "key": "warmup.times",
+      "required_when": { "key": "warmup.enabled", "equals": true },
+      "group": "warmup",
+      "type": "string_list",
+      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+      "max_items": 24,
+      "default": [],
+      "label": "codexWarmup.times",
+      "help": "codexWarmup.timesHelp",
+      "invalid": "codexWarmup.invalidTimes",
+      "visible_when": { "key": "warmup.enabled", "equals": true }
+    },
+    {
+      "key": "warmup.model",
+      "required_when": { "key": "warmup.enabled", "equals": true },
+      "placeholder": "executorSettings.warmupModelPlaceholder",
+      "group": "warmup",
+      "type": "string",
+      "max_length": 128,
+      "default": "",
+      "label": "codexWarmup.model",
+      "visible_when": { "key": "warmup.enabled", "equals": true }
+    },
+    {
+      "key": "reset_credit.lead_minutes",
+      "group": "reset_credit",
+      "type": "integer",
+      "min": 1,
+      "max": 1440,
+      "default": 10,
+      "label": "codexResetCredit.lead",
+      "help": "codexResetCredit.leadHelp"
+    },
+    {
+      "key": "reset_credit.max_weekly_remaining_percent",
+      "group": "reset_credit",
+      "type": "integer",
+      "min": 0,
+      "max": 100,
+      "nullable": true,
+      "default": null,
+      "label": "codexResetCredit.weeklyCap",
+      "help": "codexResetCredit.weeklyCapHelp",
+      "placeholder": "codexResetCredit.weeklyCapNone"
+    },
+    {
+      "key": "credit_overage",
+      "group": "credit_overage",
+      "type": "boolean",
+      "default": false,
+      "label": "codexCreditOverage.toggle",
+      "help": "codexCreditOverage.toggleHelp"
+    },
+    {
+      "key": "bps_enabled",
+      "group": "bps",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBps.toggle",
+      "help": "codexBps.toggleHelp"
+    },
+    {
+      "key": "bps_defaults.enabled",
+      "group": "bps_defaults",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBps.defaults.enabled"
+    },
+    {
+      "key": "bps_defaults.models",
+      "group": "bps_defaults",
+      "type": "string_list",
+      "max_items": 100,
+      "max_length": 256,
+      "no_wildcard": true,
+      "unique": true,
+      "default": [],
+      "label": "codexBps.defaults.models",
+      "placeholder": "codexBps.defaults.modelsPlaceholder"
+    },
+    {
+      "key": "bps_defaults.omit_unsupported_tools",
+      "group": "bps_defaults",
+      "type": "boolean",
+      "default": false,
+      "label": "codexBps.defaults.omit_unsupported_tools"
+    },
+    {
+      "key": "bps_defaults.ignore_encrypted_content",
+      "group": "bps_defaults",
+      "type": "boolean",
+      "default": false,
+      "label": "codexBps.defaults.ignore_encrypted_content"
+    },
+    {
+      "key": "bps_defaults.auto_disable_on_403",
+      "group": "bps_defaults",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBps.defaults.auto_disable_on_403"
+    },
+    {
+      "key": "bps_defaults.auto_recover_on_403",
+      "group": "bps_defaults",
+      "type": "boolean",
+      "default": true,
+      "requires": "bps_defaults.auto_disable_on_403",
+      "label": "codexBps.defaults.auto_recover_on_403",
+      "visible_when": { "key": "bps_defaults.auto_disable_on_403", "equals": true }
+    },
+    {
+      "key": "bps_defaults.recovery_interval_minutes",
+      "group": "bps_defaults",
+      "type": "integer",
+      "min": 1,
+      "max": 10080,
+      "default": 1,
+      "label": "codexBps.defaults.recovery_interval_minutes",
+      "visible_when": { "key": "bps_defaults.auto_recover_on_403", "equals": true }
+    },
+    {
+      "key": "bps_defaults.rate_limit_cooldown_seconds",
+      "group": "bps_defaults",
+      "type": "integer",
+      "min": 1,
+      "max": 600,
+      "default": 5,
+      "label": "codexBps.defaults.rate_limit_cooldown_seconds"
+    },
+    {
+      "key": "bps_defaults.cache_creation_as_input",
+      "group": "bps_defaults",
+      "type": "boolean",
+      "default": true,
+      "label": "codexBps.defaults.cache_creation_as_input"
+    },
+    {
+      "key": "bps_images.policy",
+      "group": "bps_images",
+      "type": "enum",
+      "values": ["auto_compact", "warn", "off"],
+      "default": "auto_compact",
+      "label": "codexBps.images.policy",
+      "option_label": "codexBps.images.policies.{value}",
+      "help_by_value": "codexBps.images.policyHelp.{value}"
+    },
+    {
+      "key": "bps_images.max_images",
+      "group": "bps_images",
+      "type": "integer",
+      "min": 1,
+      "max": 200,
+      "default": 20,
+      "label": "codexBps.images.max_images",
+      "help": "codexBps.images.max_imagesHelp",
+      "visible_when": { "key": "bps_images.policy", "not_equals": "off" }
+    },
+    {
+      "key": "bps_images.max_image_mib",
+      "group": "bps_images",
+      "type": "integer",
+      "min": 1,
+      "max": 32,
+      "default": 32,
+      "label": "codexBps.images.max_image_mib",
+      "help": "codexBps.images.max_image_mibHelp"
+    },
+    {
+      "key": "bps_images.max_total_mib",
+      "group": "bps_images",
+      "type": "integer",
+      "min": 1,
+      "max": 64,
+      "default": 64,
+      "label": "codexBps.images.max_total_mib",
+      "help": "codexBps.images.max_total_mibHelp"
+    },
+    {
+      "key": "bps_images.warning_remaining",
+      "group": "bps_images",
+      "type": "integer",
+      "min": 0,
+      "max": 199,
+      "less_than": "bps_images.max_images",
+      "default": 8,
+      "label": "codexBps.images.warning_remaining",
+      "help": "codexBps.images.warning_remainingHelp",
+      "visible_when": { "key": "bps_images.policy", "equals": "warn" }
+    },
+    {
+      "key": "bps_images.compact_reserve",
+      "group": "bps_images",
+      "type": "integer",
+      "min": 0,
+      "max": 199,
+      "less_than": "bps_images.max_images",
+      "default": 3,
+      "label": "codexBps.images.compact_reserve",
+      "help": "codexBps.images.compact_reserveHelp",
+      "visible_when": { "key": "bps_images.policy", "equals": "warn" }
+    }
+  ]
+}

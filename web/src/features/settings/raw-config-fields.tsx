@@ -1,11 +1,15 @@
+import { useTranslation } from 'react-i18next'
+
 export function RawConfigFields({
   value,
 }: {
   value: Record<string, unknown> | undefined
 }) {
+  const { t } = useTranslation('settings')
+
   const entries = value ? Object.entries(value) : []
   if (!entries.length) {
-    return <p className='text-sm text-muted-foreground'>暂无配置数据。</p>
+    return <p className='text-sm text-muted-foreground'>{t('noConfig')}</p>
   }
   return (
     <div className='divide-y rounded-md border'>

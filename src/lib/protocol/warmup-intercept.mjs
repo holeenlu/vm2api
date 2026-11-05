@@ -65,7 +65,7 @@ export function detectWarmupIntercept(body = {}, { userAgent = '' } = {}) {
   if (isOfficialClaudeUa(userAgent) && Number(body.max_tokens) === 1 && model.toLowerCase().includes('haiku')) {
     return 'haiku_ping'
   }
-  // vm2api guard beyond sub2api: warmup / title / suggestion side calls never
+  // tapmodels guard beyond sub2api: warmup / title / suggestion side calls never
   // carry tools, while a real turn that quotes these texts always does.
   if (Array.isArray(body.tools) ? body.tools.length : body.tools) return null
   const raw = JSON.stringify(body)

@@ -1,15 +1,18 @@
+import { i18n } from '@/i18n'
 import type { ProviderChainItem } from '@/types/panel-usage-logs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import {
-  queueWaitMs,
+  attemptRouteLabel,
   cacheCostSplit,
   cacheWriteSplit,
   chainItemStatus,
   finalChainItem,
   formatShortDistance,
   latencySegments,
+  requestTypeOf,
   resolveModelAuditDisplay,
   segmentWidth,
+  selectionReasonLabel,
   statusBadgeClass,
   statusBadgeTooltip,
   thinkingEffortBadgeClass,
@@ -39,8 +42,6 @@ function attempt(over: Partial<ProviderChainItem>): ProviderChainItem {
     action: null,
     downstreamCommitted: false,
     waitMs: null,
-    queueWaitMs: null,
-    schedulingMs: null,
     ttftMs: null,
     latencyMs: null,
     startedAt: null,
@@ -87,89 +88,23 @@ describe('cache TTL split', () => {
 })
 
 describe('latency segments', () => {
-  it('splits queue / prefill / visible-wait / output / finalization', () => {
+  it('splits wait / ttft / generation and keeps a minimum width', () => {
     const segments = latencySegments({
       waitMs: 10,
-      firstByteMs: 200,
-      ttftMs: 15565,
-      generationMs: 15488,
-      durationMs: 15688,
-    })
-    expect(segments?.map((s) => [s.key, s.ms])).toEqual([
-      ['scheduling', 0],
-      ['wait', 10],
-      ['prefill', 190],
-      ['tokenWait', 15365],
-      ['generation', 123],
-      ['finalization', 0],
-    ])
-    expect(
-      segmentWidth(segments!.find((segment) => segment.key === 'wait')!)
-    ).toBe(3)
-  })
-
-  it('keeps trailing time as finalization instead of generation', () => {
-    const segments = latencySegments({
-      waitMs: 0,
-      firstByteMs: 200,
-      ttftMs: 500,
-      generationMs: 1000,
-      durationMs: 1500,
-    })
-    expect(segments?.map((s) => [s.key, s.ms])).toEqual([
-      ['scheduling', 0],
-      ['wait', 0],
-      ['prefill', 200],
-      ['tokenWait', 300],
-      ['generation', 700],
-      ['finalization', 300],
-    ])
-  })
-
-  it('does not estimate generation from duration minus TTFT', () => {
-    const segments = latencySegments({
-      waitMs: 10,
-      firstByteMs: null,
       ttftMs: 1000,
-      generationMs: null,
       durationMs: 5000,
     })
-    expect(segments?.find((s) => s.key === 'generation')?.ms).toBe(0)
-    expect(segments?.find((s) => s.key === 'tokenWait')?.ms).toBe(990)
-    expect(segments?.find((s) => s.key === 'finalization')?.ms).toBe(0)
+    expect(segments?.map((s) => s.ms)).toEqual([10, 990, 4000])
+    expect(segmentWidth(segments![0])).toBe(3)
   })
 
   it('drops an out-of-range wait and rejects impossible ttft', () => {
     expect(
-      latencySegments({
-        waitMs: 2000,
-        firstByteMs: 200,
-        ttftMs: 1000,
-        generationMs: 800,
-        durationMs: 5000,
-      })?.[0].ms
+      latencySegments({ waitMs: 2000, ttftMs: 1000, durationMs: 5000 })?.[0].ms
     ).toBe(0)
     expect(
-      latencySegments({
-        waitMs: 0,
-        firstByteMs: null,
-        ttftMs: 6000,
-        generationMs: null,
-        durationMs: 5000,
-      })
+      latencySegments({ waitMs: 0, ttftMs: 6000, durationMs: 5000 })
     ).toBeNull()
-  })
-
-  it('ignores a zero generation window', () => {
-    const segments = latencySegments({
-      waitMs: 0,
-      firstByteMs: 200,
-      ttftMs: 500,
-      generationMs: 0,
-      durationMs: 1000,
-    })
-    expect(segments?.find((s) => s.key === 'generation')?.ms).toBe(0)
-    expect(segments?.find((s) => s.key === 'finalization')?.ms).toBe(0)
   })
 })
 
@@ -185,6 +120,21 @@ describe('provider chain', () => {
     expect(chainItemStatus(attempt({}))).toBe('pending')
   })
 
+  it('labels BPS attempts with their stage', () => {
+    expect(attemptRouteLabel(attempt({}))).toBeNull()
+    expect(attemptRouteLabel(attempt({ route: 'native' }))).toBeNull()
+    expect(attemptRouteLabel(attempt({ route: 'bps' }))).toBe('BPS')
+    expect(
+      attemptRouteLabel(attempt({ route: 'bps', stage: 'attachments' }))
+    ).toContain('attachments')
+    for (const reason of [
+      'gateway_worker',
+      'gateway_worker_retry',
+      'gateway_worker_observed',
+    ])
+      expect(selectionReasonLabel(reason)).not.toBe(reason)
+  })
+
   it('picks the committed attempt as the final provider', () => {
     const chain = [
       attempt({ attemptNumber: 1, vmName: 'a', upstreamStatus: 529 }),
@@ -193,6 +143,10 @@ describe('provider chain', () => {
     ]
     expect(finalChainItem(chain)?.vmName).toBe('b')
     expect(finalChainItem([])).toBeNull()
+  })
+
+  it('treats a missing provider chain as an empty chain', () => {
+    expect(finalChainItem(undefined)).toBeNull()
   })
 })
 
@@ -239,9 +193,33 @@ describe('display helpers', () => {
     expect(audit.hasRedirect).toBe(true)
     expect(audit.secondaryActualModel).toBe('claude-z')
   })
+
+  it('compares the client request model instead of the billing model', () => {
+    const audit = resolveModelAuditDisplay({
+      originalModel: 'gpt-6-astra',
+      model: 'gpt-5.6-terra',
+      actualResponseModel: 'gpt-5.6-terra',
+      modelMismatch: 1,
+    })
+    expect(audit.primaryBillingModel).toBe('gpt-5.6-terra')
+    expect(audit.effectiveRequestModel).toBe('gpt-5.6-terra')
+    expect(audit.hasRedirect).toBe(true)
+    expect(audit.hasActualMismatch).toBe(true)
+    expect(audit.secondaryActualModel).toBe('gpt-5.6-terra')
+  })
 })
 
 describe('logs search', () => {
+  it('retains personal scope when applying filters', () => {
+    const filters = searchToFilters(
+      validateLogsSearch({ scope: 'mine', model: 'test' })
+    )
+    expect(filtersToSearch(filters).scope).toBe('mine')
+    expect(usageLogFiltersQuery(filtersToApi(filters, [])).get('scope')).toBe(
+      'mine'
+    )
+  })
+
   it('keeps legacy kind=error / error_class deep links working', () => {
     const search = validateLogsSearch({ kind: 'error', error_class: 'auth' })
     const filters = searchToFilters(search)
@@ -259,12 +237,17 @@ describe('logs search', () => {
 
   it('maps filters onto the backend query string', () => {
     const api = filtersToApi(
-      { minRetry: 1, excludeStatus200: true, startTime: 0, debugOnly: true },
+      {
+        minRetry: 1,
+        excludeStatus200: true,
+        startTime: 0,
+        platform: 'anthropic',
+      },
       ['auth']
     )
     expect(api.minAttemptCount).toBe(2)
     expect(usageLogFiltersQuery(api).toString()).toBe(
-      'exclude_status_200=1&min_attempt_count=2&exclude_error_class=auth&log_mode=debug&start_time=1970-01-01T00%3A00%3A00.000Z'
+      'platform=anthropic&exclude_status_200=1&min_attempt_count=2&exclude_error_class=auth&start_time=1970-01-01T00%3A00%3A00.000Z'
     )
     expect(
       filtersToApi({ errorClass: 'quota' }, ['auth']).excludeErrorClass
@@ -276,40 +259,25 @@ describe('logs search', () => {
   })
 })
 
-describe('scheduler versus capacity queue timings', () => {
-  it('does not relabel historical selection elapsed time as actual queue residence', () => {
-    expect(queueWaitMs([attempt({ waitMs: 5500 })])).toBeNull()
-    expect(
-      queueWaitMs([attempt({ waitMs: 250, queueWaitMs: 0, schedulingMs: 250 })])
-    ).toBe(0)
-    const parts = latencySegments({
-      waitMs: 5500,
-      firstByteMs: 6000,
-      ttftMs: 6200,
-      generationMs: 2000,
-      durationMs: 8500,
-    })
-    expect(parts?.find((part) => part.key === 'wait')?.label).toBe(
-      '调度与排队（未拆分）'
+const initialLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(initialLanguage)
+})
+
+describe('request type column', () => {
+  it('prefers inbound WebSocket, then the stream flag', () => {
+    expect(requestTypeOf({ inboundTransport: 'websocket', stream: true })).toBe(
+      'ws'
     )
-  })
-  it('shows measured scheduling and queue time as separate non-overlapping segments', () => {
-    const parts = latencySegments({
-      waitMs: 500,
-      queueWaitMs: 300,
-      schedulingMs: 200,
-      firstByteMs: 1000,
-      ttftMs: 1100,
-      generationMs: 500,
-      durationMs: 1600,
-    })
-    expect(parts?.map((part) => [part.key, part.ms])).toEqual([
-      ['scheduling', 200],
-      ['wait', 300],
-      ['prefill', 500],
-      ['tokenWait', 100],
-      ['generation', 400],
-      ['finalization', 100],
-    ])
+    expect(requestTypeOf({ inboundTransport: 'http', stream: true })).toBe(
+      'stream'
+    )
+    expect(requestTypeOf({ inboundTransport: null, stream: false })).toBe(
+      'sync'
+    )
+    expect(requestTypeOf({ stream: null })).toBe('sync')
   })
 })

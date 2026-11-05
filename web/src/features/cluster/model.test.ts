@@ -1,3 +1,4 @@
+import { i18n } from '@/i18n'
 import type {
   ClusterApiNode,
   ClusterDirectLink,
@@ -5,7 +6,7 @@ import type {
   NodeHostStats,
 } from '@/types/panel-cluster'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   buildLocalMachine,
   buildMachines,
@@ -106,6 +107,11 @@ function vm(partial: Partial<Vm> & Pick<Vm, 'id'>): Vm {
     ...partial,
   } as Vm
 }
+
+// 断言的是简体中文文案；语言由 i18n 决定，这里固定为 zh-CN。
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('remoteLink', () => {
   it('does not flag a far node for one slow-ish round trip', () => {
