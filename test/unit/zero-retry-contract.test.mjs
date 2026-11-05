@@ -131,7 +131,7 @@ async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCached
       collectPoolKeys: () => [],
     },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },

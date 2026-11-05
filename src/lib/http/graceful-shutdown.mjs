@@ -83,8 +83,9 @@ export function createGracefulShutdown({
         logger.log(`[shutdown] waiting up to ${drainTimeoutMs}ms for ${activeRequests.size} request(s) to drain...`)
         let timer
         const timeoutPromise = new Promise((resolve) => {
+          // 不 unref：排空期间若没有其它活动句柄，unref 的计时器会让进程在超时前自然退出，
+          // 跳过 afterDrain（关闭数据库）。流程末尾显式 exit，所以计时器最多保留到 drainTimeoutMs。
           timer = setTimeout(resolve, drainTimeoutMs)
-          timer.unref?.()
         })
         const drainPromise = new Promise((resolve) => {
           drainResolve = resolve

@@ -4,6 +4,7 @@
  */
 import { decodeSignature, REFUSAL_SIMILARITY, signatureSimilarity } from '../../core/refusal-similarity.mjs'
 import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
 
 function rowToRec(row) {
   if (!row) return null
@@ -20,9 +21,18 @@ function rowToRec(row) {
   }
 }
 
+// 管理面读写（list/count/remove/clear）经 DbClient 异步执行（R6 B6b）；推理热路径的 get/remember/hit/nearest 仍同步（B7）
+const LIST_SQL = `SELECT fingerprint, model, first_seen_at, last_seen_at, hit_count,
+              source_request_id, error_message, preview, expires_at
+       FROM refusal_guards ORDER BY last_seen_at DESC, fingerprint LIMIT ?`
+const COUNT_SQL = 'SELECT COUNT(*) AS n FROM refusal_guards'
+const REMOVE_SQL = 'DELETE FROM refusal_guards WHERE fingerprint = ?'
+const CLEAR_SQL = 'DELETE FROM refusal_guards'
+
 export class RefusalGuardsRepo {
   constructor(db = getDb()) {
     this.db = db
+    this.client = dbClient(db)
     this._get = db.prepare('SELECT * FROM refusal_guards WHERE fingerprint = ?')
     this._insert = db.prepare(`
       INSERT INTO refusal_guards (
@@ -44,25 +54,17 @@ export class RefusalGuardsRepo {
       UPDATE refusal_guards SET hit_count = hit_count + 1, last_seen_at = ?
       WHERE fingerprint = ?
     `)
-    this._list = db.prepare(
-      `SELECT fingerprint, model, first_seen_at, last_seen_at, hit_count,
-              source_request_id, error_message, preview, expires_at
-       FROM refusal_guards ORDER BY last_seen_at DESC, fingerprint LIMIT ?`,
-    )
     this._signatures = db.prepare(
       `SELECT fingerprint, signature FROM refusal_guards
        WHERE signature IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)`,
     )
-    this._count = db.prepare('SELECT COUNT(*) AS n FROM refusal_guards')
-    this._remove = db.prepare('DELETE FROM refusal_guards WHERE fingerprint = ?')
-    this._clear = db.prepare('DELETE FROM refusal_guards')
   }
 
   get(fingerprint) {
     const rec = rowToRec(this._get.get(String(fingerprint || '')))
     if (!rec?.expires_at) return rec
     if (Date.parse(rec.expires_at) > Date.now()) return rec
-    this.remove(rec.fingerprint)
+    this.removeSync(rec.fingerprint)
     return null
   }
 
@@ -114,26 +116,32 @@ export class RefusalGuardsRepo {
     return { ...rec, score: best.score }
   }
 
-  list(limit = 200) {
+  async list(limit = 200) {
     const n = Math.min(500, Math.max(1, Number(limit) || 200))
     const now = Date.now()
-    return this._list
-      .all(n)
+    return (await this.client.many(LIST_SQL, n))
       .map(rowToRec)
       .filter((rec) => !rec.expires_at || Date.parse(rec.expires_at) > now)
   }
 
-  count() {
-    return Number(this._count.get()?.n) || 0
+  async count() {
+    return Number((await this.client.one(COUNT_SQL))?.n) || 0
   }
 
-  remove(fingerprint) {
+  async remove(fingerprint) {
     const fp = String(fingerprint || '').trim()
     if (!fp) return false
-    return this._remove.run(fp).changes > 0
+    return (await this.client.run(REMOVE_SQL, fp)).changes > 0
   }
 
-  clear() {
-    return this._clear.run().changes
+  /** R6 临时同步出口（B7 删除）：推理热路径 get / nearest 读到过期指纹时同步删除。 */
+  removeSync(fingerprint) {
+    const fp = String(fingerprint || '').trim()
+    if (!fp) return false
+    return this.client.runSync(REMOVE_SQL, fp).changes > 0
+  }
+
+  async clear() {
+    return (await this.client.run(CLEAR_SQL)).changes
   }
 }

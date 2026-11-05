@@ -181,7 +181,7 @@ test('remember then lookup hits the same prompt', () => {
   }
 })
 
-test('timed refusal expires and no longer blocks', () => {
+test('timed refusal expires and no longer blocks', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-refusal-'))
   const db = createDatabase({ dataDir: dir })
   try {
@@ -197,7 +197,7 @@ test('timed refusal expires and no longer blocks', () => {
       expiresAt: new Date(Date.now() - 1000).toISOString(),
     })
     assert.equal(repo.get(fp), null)
-    assert.equal(repo.list().length, 0)
+    assert.equal((await repo.list()).length, 0)
   } finally {
     db.close()
   }
@@ -236,7 +236,7 @@ test('guard error is a non-retryable HTTP 400 request rejection, not a login err
   })
 })
 
-test('list remove and clear', () => {
+test('list remove and clear', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-refusal-'))
   const db = createDatabase({ dataDir: dir })
   try {
@@ -245,27 +245,27 @@ test('list remove and clear', () => {
     const b = refusalFingerprint(body('B'))
     repo.remember({ fingerprint: a, model: 'claude-opus-5', preview: 'A' })
     repo.remember({ fingerprint: b, model: 'claude-opus-5', preview: 'B' })
-    assert.equal(repo.count(), 2)
-    assert.equal(repo.list().length, 2)
-    assert.equal(repo.remove(a), true)
-    assert.equal(repo.count(), 1)
-    assert.equal(repo.clear(), 1)
-    assert.equal(repo.count(), 0)
+    assert.equal(await repo.count(), 2)
+    assert.equal((await repo.list()).length, 2)
+    assert.equal(await repo.remove(a), true)
+    assert.equal(await repo.count(), 1)
+    assert.equal(await repo.clear(), 1)
+    assert.equal(await repo.count(), 0)
   } finally {
     db.close()
   }
 })
 
-test('panel setting and env can disable the guard', () => {
+test('panel setting and env can disable the guard', async () => {
   const settings = new Map([[REFUSAL_GUARD_SETTING, true]])
   const read = (key, fb) => (settings.has(key) ? settings.get(key) : fb)
   assert.equal(isRefusalGuardEnabled(read), true)
-  settings.set(REFUSAL_GUARD_SETTING, false)
+  await settings.set(REFUSAL_GUARD_SETTING, false)
   assert.equal(isRefusalGuardEnabled(read), false)
   const prev = process.env.KIN_REFUSAL_GUARD
   process.env.KIN_REFUSAL_GUARD = '0'
   try {
-    settings.set(REFUSAL_GUARD_SETTING, true)
+    await settings.set(REFUSAL_GUARD_SETTING, true)
     assert.equal(isRefusalGuardEnabled(read), false)
   } finally {
     if (prev == null) delete process.env.KIN_REFUSAL_GUARD

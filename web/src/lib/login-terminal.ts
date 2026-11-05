@@ -1,8 +1,11 @@
-const AUTH_URL = /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s\u0007]+/
+const AUTH_URL = /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s]+/
 
 /** The manual authorize URL Claude prints or copies. */
 export function loginAuthUrl(raw = ''): string {
-  const match = String(raw || '').match(AUTH_URL)
+  const match = String(raw || '')
+    .split('\u0007')
+    .join(' ')
+    .match(AUTH_URL)
   return match ? match[0].replace(/[)\]}>.,]+$/, '') : ''
 }
 

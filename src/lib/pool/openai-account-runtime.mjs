@@ -13,6 +13,8 @@ export const OPENAI_MAX_WAITERS = 100
 
 const slots = new Map()
 const waiters = []
+const grantedTurns = new Set()
+let nextTicket = 0
 const feedback = new Map()
 // Upstream failures park a GPT account for a short, process-local window.
 // This is deliberately not the operator switch, which must not be flipped by
@@ -104,7 +106,10 @@ export function bumpOpenAICursor() {
  * the same tick, so two admissions can never both see the last free seat.
  * Returns a lease whose release() is idempotent, or null when full.
  */
-export function tryAcquireOpenAISlot(id, { concurrency = 1, maxRpm = 0, now = Date.now(), quotaPolicy = null } = {}) {
+export function tryAcquireOpenAISlot(
+  id,
+  { concurrency = 1, maxRpm = 0, now = Date.now(), quotaPolicy = null, ticket = null } = {},
+) {
   // Candidate selection resolves pins against the same live policy snapshot.
   // Never replace a resolved legacy/pinned candidate cap with the global cap
   // here: doing so can sell more seats than the candidate was selected for.
@@ -113,6 +118,10 @@ export function tryAcquireOpenAISlot(id, { concurrency = 1, maxRpm = 0, now = Da
     : Number(quotaPolicy?.max_concurrency)
   const effectiveRpm = Number.isFinite(Number(maxRpm)) ? Number(maxRpm) : Number(quotaPolicy?.max_rpm)
   const cap = Number(effectiveConcurrency) > 0 ? Number(effectiveConcurrency) : 1
+  const ahead = [...waiters, ...grantedTurns]
+    .filter((entry) => !entry.accounts || entry.accounts.has(String(id)))
+    .sort((a, b) => a.order - b.order)[0]
+  if (ahead && ahead !== ticket) return null
   const slot = slotOf(id)
   if (slot.inFlight >= cap) return null
   const rpm = Number(effectiveRpm) || 0
@@ -121,6 +130,8 @@ export function tryAcquireOpenAISlot(id, { concurrency = 1, maxRpm = 0, now = Da
   slot.inFlight += 1
   slot.lastStartedAt = now
   slot.starts.push(now)
+  ticket?.releaseTurn?.(false)
+  if (slot.inFlight < cap) wakeOpenAIWaiter(id)
   let released = false
   return {
     id: String(id || ''),
@@ -131,6 +142,16 @@ export function tryAcquireOpenAISlot(id, { concurrency = 1, maxRpm = 0, now = Da
       wakeOpenAIWaiter(id)
     },
   }
+}
+
+/** Retries keep their concurrency lease but still spend physical request RPM. */
+export function tryConsumeOpenAIRpm(id, maxRpm = 0, now = Date.now()) {
+  const slot = slotOf(id)
+  if (maxRpm > 0 && recentStarts(slot, now) >= maxRpm) return false
+  recentStarts(slot, now)
+  slot.starts.push(now)
+  slot.lastStartedAt = now
+  return true
 }
 
 export function openAIWaiterCount() {
@@ -158,29 +179,45 @@ export function wakeOpenAIWaiter(accountId = null) {
  * Resolves `{ woken, accountId }`; throws `pool_wait_queue_full` past OPENAI_MAX_WAITERS.
  */
 export function waitForOpenAICapacity({ deadline, signal = null, accounts = null, front = false } = {}) {
-  if (!front && waiters.length >= OPENAI_MAX_WAITERS) {
+  if (!front && waiters.length + grantedTurns.size >= OPENAI_MAX_WAITERS) {
     return Promise.reject(Object.assign(new Error('OpenAI pool wait queue is full'), { code: 'pool_wait_queue_full' }))
   }
   return new Promise((resolve) => {
-    const entry = { accounts: accounts ? new Set(Array.from(accounts, String)) : null }
+    const entry = {
+      accounts: accounts ? new Set(Array.from(accounts, String)) : null,
+      active: true,
+      order: front && waiters.length ? waiters[0].order - 1 : ++nextTicket,
+    }
+    let timer
     const cleanup = () => {
+      if (!entry.active) return false
+      entry.active = false
       clearTimeout(timer)
       signal?.removeEventListener?.('abort', onAbort)
       const at = waiters.indexOf(entry)
       if (at >= 0) waiters.splice(at, 1)
+      grantedTurns.delete(entry)
+      return true
+    }
+    entry.releaseTurn = (notify = true) => {
+      if (cleanup() && notify) for (const account of entry.accounts || [null]) wakeOpenAIWaiter(account)
     }
     const onAbort = () => {
       cleanup()
       resolve({ woken: false, aborted: true })
+      for (const account of entry.accounts || [null]) wakeOpenAIWaiter(account)
     }
     entry.wake = (accountId = null) => {
-      cleanup()
-      resolve({ woken: true, accountId })
+      // Keep the turn until synchronous acquisition, cancellation or deadline.
+      // A later caller cannot steal the slot between resolve and continuation.
+      grantedTurns.add(entry)
+      resolve({ woken: true, accountId, ticket: entry })
     }
-    const timer = setTimeout(
+    timer = setTimeout(
       () => {
         cleanup()
         resolve({ woken: false })
+        for (const account of entry.accounts || [null]) wakeOpenAIWaiter(account)
       },
       Math.max(1, Number(deadline) - Date.now()),
     )
@@ -209,10 +246,56 @@ export function reportOpenAIAttempt(id, kind, firstOutputMs = null, now = Date.n
   feedback.set(key, entry)
 }
 
+// Pool-relative overload signals. Production (2026-11-03) showed peak-hour
+// `server_is_overloaded` on every account at once (40–76% of attempts), while
+// a single bad account sat at 85–91% for hours. Only the relative view tells
+// the two apart: parking on every overload would empty the pool at peak.
+const POOL_SIGNAL_WINDOW_MS = FAILURE_HALF_LIFE_MS
+const POOL_MIN_ACCOUNTS = 3
+export const OPENAI_POOL_OVERLOAD_BPS = 3000
+export const OPENAI_OUTLIER_MIN_BPS = 7000
+export const OPENAI_OUTLIER_GAP_BPS = 2500
+export const OPENAI_OUTLIER_HOLD_MS = 60_000
+
+/** Median decayed failure (bps) of accounts with feedback in the last window; null below 3 accounts. */
+export function openAIPoolFailureBps({ exclude = null, now = Date.now() } = {}) {
+  const skip = exclude == null ? null : String(exclude)
+  const values = []
+  for (const [id, entry] of feedback) {
+    if (id === skip || !entry?.updatedAt || now - entry.updatedAt > POOL_SIGNAL_WINDOW_MS) continue
+    values.push(Math.min(1, Math.max(0, decayedFailure(entry, now))))
+  }
+  if (values.length < POOL_MIN_ACCOUNTS) return null
+  values.sort((a, b) => a - b)
+  const mid = values.length >> 1
+  const median = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2
+  return Math.round(median * 10_000)
+}
+
+/** Most recently active accounts are failing together: upstream is shedding load, not one account. */
+export function openAIPoolOverloaded(now = Date.now()) {
+  const median = openAIPoolFailureBps({ now })
+  return median != null && median >= OPENAI_POOL_OVERLOAD_BPS
+}
+
+/** Hold for an account failing far more often than its peers, or null. */
+export function openAIOverloadOutlierHold(id, now = Date.now()) {
+  const own = openAIRuntimeSignals(id, now).failureRateBps
+  if (own < OPENAI_OUTLIER_MIN_BPS) return null
+  const peers = openAIPoolFailureBps({ exclude: id, now })
+  if (peers == null || own - peers < OPENAI_OUTLIER_GAP_BPS) return null
+  return { until: now + OPENAI_OUTLIER_HOLD_MS, reason: 'overload_outlier' }
+}
+
 export function resetOpenAIAccountRuntime() {
   slots.clear()
   feedback.clear()
   holds.clear()
-  for (const entry of waiters.splice(0)) entry.wake()
+  for (const entry of waiters.splice(0)) {
+    entry.wake()
+    entry.releaseTurn()
+  }
+  for (const entry of [...grantedTurns]) entry.releaseTurn()
+  nextTicket = 0
   roundRobinCursor = 0
 }

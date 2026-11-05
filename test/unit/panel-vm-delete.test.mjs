@@ -26,7 +26,7 @@ function handler(project) {
     cfg,
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -97,41 +97,15 @@ test('startup reconcile does not resurrect a deleted sole active VM', async () =
   try {
     openDatabase({ dataDir: path.join(root, 'data') })
     seed(root, 'vm-01', { active: true })
-    initVmDbSync(root, { watch: false })
+    await initVmDbSync(root, { watch: false })
     const { handlePanel, response } = handler(root)
     await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-01'))
     assert.equal(response.status, 200, JSON.stringify(response.body))
-    const again = reconcileVms(root)
+    const again = await reconcileVms(root)
     assert.equal(again.rebuilt, 0)
     assert.equal(again.active, null)
     assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-01.json')), false)
     assert.equal(fs.existsSync(path.join(root, 'vms', 'active.json')), false)
-  } finally {
-    stopVmWatch()
-    setVmWriteHook(null)
-    closeDatabase()
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('deleting a slot removes its account-pool membership', async () => {
-  const { openDatabase, closeDatabase, getDb } = await import('../../src/lib/db/database.mjs')
-  const { initVmDbSync, stopVmWatch } = await import('../../src/lib/vm/vm-db-sync.mjs')
-  const { setVmWriteHook } = await import('../../src/lib/vm/vm-file.mjs')
-  const { VmPoolsRepo } = await import('../../src/lib/db/repos/vm-pools-repo.mjs')
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-pool-'))
-  try {
-    openDatabase({ dataDir: path.join(root, 'data') })
-    seed(root, 'vm-01')
-    seed(root, 'vm-02')
-    initVmDbSync(root, { watch: false })
-    const pools = new VmPoolsRepo(getDb())
-    const pool = pools.insert({ name: 'shared' })
-    pools.setMembers(pool.id, ['vm-01', 'vm-02'])
-    const { handlePanel, response } = handler(root)
-    await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-01'))
-    assert.equal(response.status, 200, JSON.stringify(response.body))
-    assert.deepEqual(pools.get(pool.id).vm_ids, ['vm-02'])
   } finally {
     stopVmWatch()
     setVmWriteHook(null)
@@ -158,6 +132,137 @@ test('deleting a slot drops cached record and credential entries', async () => {
     assert.equal(getVm(root, 'vm-02'), null)
     assert.deepEqual(readCodexAccounts(root, 'vm-02'), [])
   } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('deletion clears every group without an API-key store and rejects stale group saves', async () => {
+  const { openDatabase, closeDatabase } = await import('../../src/lib/db/database.mjs')
+  const { GroupsRepo } = await import('../../src/lib/db/repos/groups-repo.mjs')
+  const { VmsRepo } = await import('../../src/lib/db/repos/vms-repo.mjs')
+  const { initVmDbSync } = await import('../../src/lib/vm/vm-db-sync.mjs')
+  const { setVmWriteHook } = await import('../../src/lib/vm/vm-file.mjs')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-groups-'))
+  try {
+    const db = openDatabase({ dataDir: path.join(root, 'data') })
+    seed(root, 'vm-02')
+    seed(root, 'vm-03')
+    await initVmDbSync(root, { watch: false })
+    const groups = new GroupsRepo(db)
+    const first = await groups.create({ name: 'first' })
+    const second = await groups.create({ name: 'second' })
+    await groups.assignResource('vm', 'vm-02', [first.id, second.id], 0)
+    await groups.assignResource('vm', 'vm-03', [first.id], 0)
+    const before = await groups.getById(first.id)
+    const { handlePanel, response } = handler(root)
+    await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-02'))
+    assert.equal(response.status, 200, JSON.stringify(response.body))
+    assert.deepEqual(await groups.forResource('vm', 'vm-02'), [])
+    assert.deepEqual(await groups.resources(second.id), [])
+    assert.deepEqual(
+      (await groups.resources(first.id)).map((r) => r.resource_id),
+      ['vm-03'],
+    )
+    assert.equal((await groups.getById(first.id)).version, before.version + 1)
+    assert.equal(await groups.resourceVersion('vm', 'vm-02'), 2)
+    assert.equal(await new VmsRepo(db).get('vm-02'), null)
+    await assert.rejects(() => groups.update(first.id, { expected_version: before.version, name: 'stale' }), /刷新/)
+    seed(root, 'vm-02')
+    await initVmDbSync(root, { watch: false })
+    assert.deepEqual(await groups.forResource('vm', 'vm-02'), [])
+    await assert.rejects(() => groups.assignResource('vm', 'vm-02', [second.id], 1), /刷新/)
+  } finally {
+    setVmWriteHook(null)
+    closeDatabase()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('failed membership cleanup rolls back DB deletion and does not report success', async () => {
+  const { openDatabase, closeDatabase } = await import('../../src/lib/db/database.mjs')
+  const { GroupsRepo } = await import('../../src/lib/db/repos/groups-repo.mjs')
+  const { VmsRepo } = await import('../../src/lib/db/repos/vms-repo.mjs')
+  const { initVmDbSync } = await import('../../src/lib/vm/vm-db-sync.mjs')
+  const { setVmWriteHook } = await import('../../src/lib/vm/vm-file.mjs')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-failure-'))
+  try {
+    const db = openDatabase({ dataDir: path.join(root, 'data') })
+    seed(root, 'vm-02')
+    await initVmDbSync(root, { watch: false })
+    const groups = new GroupsRepo(db)
+    const group = await groups.create({ name: 'service' })
+    await groups.assignResource('vm', 'vm-02', [group.id], 0)
+    db.exec(
+      "CREATE TRIGGER fail_cleanup BEFORE DELETE ON group_resources BEGIN SELECT RAISE(ABORT, 'test failure'); END",
+    )
+    const { handlePanel, response } = handler(root)
+    await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-02'))
+    assert.equal(response.status, 500)
+    assert.equal(response.body.error.code, 'vm_delete_failed')
+    assert.ok(await new VmsRepo(db).get('vm-02'))
+    assert.ok(getVm(root, 'vm-02'))
+    assert.equal((await groups.resources(group.id)).length, 1)
+    assert.equal(await groups.resourceVersion('vm', 'vm-02'), 1)
+    db.exec('DROP TRIGGER fail_cleanup')
+    await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-02'))
+    assert.equal(response.status, 200)
+    assert.deepEqual(await groups.resources(group.id), [])
+  } finally {
+    setVmWriteHook(null)
+    closeDatabase()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('group reads and copies exclude historical deleted slots while preserving live empty slots', async () => {
+  const { openDatabase, closeDatabase } = await import('../../src/lib/db/database.mjs')
+  const { GroupsRepo } = await import('../../src/lib/db/repos/groups-repo.mjs')
+  const { createRelayHandler } = await import('../../src/lib/admin/relay-routes.mjs')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-stale-'))
+  try {
+    const db = openDatabase({ dataDir: path.join(root, 'data') })
+    seed(root, 'vm-live')
+    const groups = new GroupsRepo(db)
+    const group = await groups.create({ name: 'service' })
+    await groups.assignResource('vm', 'vm-gone', [group.id], 0)
+    await groups.assignResource('vm', 'vm-live', [group.id], 0)
+    let response, input
+    const handle = createRelayHandler({
+      cfg: { paths: { project: root } },
+      apiKeyStore: { db },
+      json(_res, status, body) {
+        response = { status, body }
+      },
+      readBody: async () => input,
+    })
+    const call = async (method, suffix = '', body) => {
+      input = body
+      await handle(
+        { method, apiKeyKind: 'master', panelRole: 'super_admin' },
+        {},
+        new URL('http://localhost/api/panel/groups/' + group.id + suffix),
+      )
+      assert.equal(response.status, method === 'POST' ? 201 : 200, JSON.stringify(response.body))
+      return response.body.data.item
+    }
+    const view = await call('GET')
+    assert.deepEqual(
+      view.resources.map((r) => r.resource_id),
+      ['vm-live'],
+    )
+    assert.equal(view.capacity.resources, 1)
+    const copy = await call('POST', '/duplicate', { name: 'copy', copy_resources: true })
+    assert.deepEqual(
+      (await groups.resources(copy.id)).map((r) => r.resource_id),
+      ['vm-live'],
+    )
+    // Reading leaves old data untouched; the existing explicit save replaces membership.
+    assert.equal((await groups.resources(group.id)).length, 2)
+    const saved = await call('PUT', '/resources', { expected_version: view.version, resources: view.resources })
+    assert.equal(saved.resources.length, 1)
+    assert.deepEqual(await groups.forResource('vm', 'vm-gone'), [])
+  } finally {
+    closeDatabase()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })

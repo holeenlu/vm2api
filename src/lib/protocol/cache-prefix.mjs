@@ -22,6 +22,15 @@ const IMAGE_WINDOW = 24
 /** Cache entries written by recent turns, per session; anchors only read these. */
 const WRITE_LIMIT = 64
 const IMAGE_TYPES = new Set(['image', 'input_image', 'image_url'])
+/**
+ * Field stamps are kept only for the last STAMPED_TAIL messages. A stamp tree
+ * per block of every message, held for SESSION_IDLE_MS, was over half of the
+ * retained heap in production (2026-11-03) and ran the gateway out of memory
+ * every ~43 minutes. Older messages keep their per-block kind and digest, so a
+ * break there is still located and classified exactly; only its field-level
+ * detail falls back to `digest`.
+ */
+const STAMPED_TAIL = 24
 /** Anthropic accepts at most four cache breakpoints per request. */
 const MAX_CACHE_MARKERS = 4
 
@@ -200,21 +209,36 @@ function stampDelta(prev, next) {
   return { change: 'value' }
 }
 
-function partRecord(block) {
+function partRecord(block, stamped = true) {
   const classified = partKind(block)
-  const clean = typeof block === 'string' ? block : withoutCacheControl(block)
-  return {
+  const record = {
     kind: classified.kind,
     digest: classified.digest,
     type: typeof block === 'string' ? 'string' : block?.type || null,
-    stamp: valueStamp(clean),
   }
+  if (stamped) record.stamp = valueStamp(typeof block === 'string' ? block : withoutCacheControl(block))
+  return record
 }
 
-function contentParts(content) {
-  if (typeof content === 'string') return [partRecord(content)]
-  if (!Array.isArray(content)) return [partRecord(content)]
-  return content.map(partRecord)
+function contentParts(content, stamped = true) {
+  if (typeof content === 'string') return [partRecord(content, stamped)]
+  if (!Array.isArray(content)) return [partRecord(content, stamped)]
+  return content.map((block) => partRecord(block, stamped))
+}
+
+function hasStamps(record) {
+  return record.parts.every((part) => part.stamp)
+}
+
+function withoutStamps(record) {
+  if (!record.parts.some((part) => part.stamp)) return record
+  return { ...record, parts: record.parts.map(({ stamp: _stamp, ...part }) => part) }
+}
+
+/** A record with field stamps, rebuilt from its message when it was stored without. */
+function stampedRecord(record, message) {
+  if (!record || !message || hasStamps(record)) return record
+  return { ...record, parts: contentParts(message.content) }
 }
 
 function isImagePart(block) {
@@ -304,15 +328,34 @@ function messageIdentity(message) {
   return identityOf(withoutCacheControl(message))
 }
 
-function messageRecord(message) {
+/**
+ * `cached` is the record this index held in the previous turn's snapshot.
+ *
+ * A conversation is append-only below the first change, so most messages are
+ * byte-identical turn after turn and `parts` — a stamp tree with its own clone
+ * and digests per block, by far the most expensive half of this record — is
+ * only ever read at the one index that diverges. Reusing the stored record
+ * turns a long history into one hash per message instead of a full rebuild.
+ *
+ * `hash` is the digest of the whole cache_control-free message, and every other
+ * field is a pure function of that same value (`parts` reads content, `id`
+ * strips images from it, `images` counts them, `keys` lists its keys, and
+ * cache_control reaches none of them). So an equal hash means an equal record;
+ * there is nothing left to compare.
+ */
+function messageRecord(message, cached = null, stamped = true) {
   const clean = withoutCacheControl(message)
-  const images = messageImageCount(message)
   const hash = digest(clean)
+  if (cached && cached.hash === hash) {
+    if (!stamped) return withoutStamps(cached)
+    if (hasStamps(cached)) return cached
+  }
+  const images = messageImageCount(message)
   const record = {
     hash,
     role: message?.role || null,
     keys: clean && typeof clean === 'object' && !Array.isArray(clean) ? Object.keys(clean) : [],
-    parts: contentParts(message?.content),
+    parts: contentParts(message?.content, stamped),
     id: identityOf(clean, hash),
   }
   return images ? { ...record, images } : record
@@ -337,8 +380,8 @@ function messageDiff(previous, current) {
   if (!previous || !current) {
     return {
       reason: 'missing',
-      prev_n: previous?.parts.length ?? 0,
-      next_n: current?.parts.length ?? 0,
+      prev_n: previous?.parts?.length ?? 0,
+      next_n: current?.parts?.length ?? 0,
       prev_types: (previous?.parts || []).map((part) => part.type || part.kind),
       next_types: (current?.parts || []).map((part) => part.type || part.kind),
     }
@@ -364,22 +407,69 @@ function messageDiff(previous, current) {
         reason: 'part',
         part: i,
         type: left.type || left.kind,
-        fields: stampDelta(left.stamp, right.stamp) || { change: 'digest' },
+        fields: (left.stamp && right.stamp && stampDelta(left.stamp, right.stamp)) || { change: 'digest' },
       }
     }
   }
   return keyDelta(previous.keys, current.keys) || { reason: 'digest' }
 }
 
-function snapshotBody(body) {
+/** `previous` is the stored snapshot of the same session; see messageRecord. */
+function snapshotBody(body, previous = null) {
   const messages = Array.isArray(body?.messages) ? body.messages : []
   const tools = Array.isArray(body?.tools) ? body.tools : []
+  const prior = previous?.messages
+  const stampedFrom = messages.length - STAMPED_TAIL
   return {
     tools: digest(withoutCacheControl(body?.tools)),
     tool_names: tools.map((tool) => tool?.name || null),
     system: digest(withoutCacheControl(body?.system)),
-    messages: messages.map(messageRecord),
+    messages: messages.map((message, index) => messageRecord(message, prior?.[index] || null, index >= stampedFrom)),
   }
+}
+
+/**
+ * snapshotBody with only the `hash` of each message record. `known` maps message
+ * (and tools / system) objects to hashes already taken: a hash is a pure function
+ * of its value, and the map lives no longer than one request.
+ */
+function hashSnapshot(body, known = null) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const tools = Array.isArray(body?.tools) ? body.tools : []
+  const cleanDigest = (value) => {
+    if (!known || !value || typeof value !== 'object') return digest(withoutCacheControl(value))
+    let hash = known.get(value)
+    if (hash === undefined) {
+      hash = digest(withoutCacheControl(value))
+      known.set(value, hash)
+    }
+    return hash
+  }
+  return {
+    tools: cleanDigest(body?.tools),
+    tool_names: tools.map((tool) => tool?.name || null),
+    system: cleanDigest(body?.system),
+    messages: messages.map((message) => ({ hash: cleanDigest(message) })),
+  }
+}
+
+/**
+ * snapshotBody for a read-only comparison: every message is hashed once, and the
+ * full record (parts and field stamps) is built only at the first index that
+ * differs from `previous` — the only one comparePrefix describes.
+ */
+function compareSnapshot(body, previous, known = null) {
+  const current = hashSnapshot(body, known)
+  const prior = previous?.messages
+  if (!prior) return current
+  const index = firstDivergence(
+    prior.map((record) => record.hash),
+    current.messages.map((record) => record.hash),
+  )
+  if (index >= 0 && index < current.messages.length) {
+    current.messages[index] = messageRecord(body.messages[index], prior[index] || null)
+  }
+  return current
 }
 
 function toolsDiff(previous, current) {
@@ -396,34 +486,37 @@ function toolsDiff(previous, current) {
   }
 }
 
-function messageBreak(previous, current) {
+/** Bodies, when the caller has them, restore field stamps at the diverging index. */
+function messageBreak(previous, current, { previousMessages = null, currentMessages = null } = {}) {
   const prevHashes = previous.messages.map((message) => message.hash)
   const currHashes = current.messages.map((message) => message.hash)
   const index = firstDivergence(prevHashes, currHashes)
   if (index < 0) return null
+  const left = stampedRecord(previous.messages[index], previousMessages?.[index])
+  const right = stampedRecord(current.messages[index], currentMessages?.[index])
   return {
     section: 'messages',
     index,
-    kind: classifyParts(previous.messages[index], current.messages[index]),
-    diff: messageDiff(previous.messages[index], current.messages[index]),
+    kind: classifyParts(left, right),
+    diff: messageDiff(left, right),
   }
 }
 
-function sectionDiffs(previous, current) {
+function sectionDiffs(previous, current, bodies = {}) {
   const sections = []
   if (previous.tools !== current.tools) {
     sections.push({ section: 'tools', index: null, kind: 'structure', diff: toolsDiff(previous, current) })
   }
   if (previous.system !== current.system) sections.push({ section: 'system', index: null, kind: 'text' })
-  const messages = messageBreak(previous, current)
+  const messages = messageBreak(previous, current, bodies)
   if (messages) sections.push(messages)
   return sections
 }
 
-function comparePrefix(previous, current) {
+function comparePrefix(previous, current, currentMessages = null) {
   if (!previous) return { turn: 1, break: null }
   const turn = (previous.turn || 0) + 1
-  const sections = sectionDiffs(previous, current)
+  const sections = sectionDiffs(previous, current, { currentMessages })
   if (!sections.length) return { turn, break: null }
   return { turn, break: sections.length > 1 ? { ...sections[0], sections } : sections[0] }
 }
@@ -451,7 +544,29 @@ export function firstHistoryDiff(inbound, outbound) {
   if (!inbound || !outbound || typeof inbound !== 'object' || typeof outbound !== 'object') {
     return { section: null, index: null, kind: null, sections: [] }
   }
-  const sections = sectionDiffs(snapshotBody(inbound), snapshotBody(outbound))
+  // Runs on every attempt with both bodies at hand, and only the first diverging
+  // message is described: hash each message once, then build the full record
+  // (parts and field stamps) at that one index instead of for the whole history.
+  const before = hashSnapshot(inbound)
+  const known = new Map()
+  if (Array.isArray(inbound.messages)) {
+    inbound.messages.forEach((message, index) => {
+      if (message && typeof message === 'object') known.set(message, before.messages[index].hash)
+    })
+  }
+  const after = hashSnapshot(outbound, known)
+  const index = firstDivergence(
+    before.messages.map((record) => record.hash),
+    after.messages.map((record) => record.hash),
+  )
+  if (index >= 0) {
+    if (index < before.messages.length) before.messages[index] = messageRecord(inbound.messages[index])
+    if (index < after.messages.length) after.messages[index] = messageRecord(outbound.messages[index])
+  }
+  const sections = sectionDiffs(before, after, {
+    previousMessages: inbound.messages,
+    currentMessages: outbound.messages,
+  })
   if (!sections.length) return { section: null, index: null, kind: null, sections: [] }
   return { ...sections[0], sections }
 }
@@ -510,17 +625,24 @@ export function describeCacheContinuity({
 /**
  * Compare `body` with the stored turn of `sessionKey` without recording.
  * `confirmed` is true only after a successful hop called confirmCachePrefix.
+ * `known` (a Map scoped to one request) shares message hashes across the
+ * per-account peeks of the same body during scheduling.
  */
-export function peekCachePrefix(sessionKey, body, now = Date.now(), { preserveMessageCache = null } = {}) {
+export function peekCachePrefix(
+  sessionKey,
+  body,
+  now = Date.now(),
+  { preserveMessageCache = null, known = null } = {},
+) {
   const key = String(sessionKey || '').trim()
   if (!key || !body || typeof body !== 'object') return null
   const previous = liveSession(key, now)
   // Compare what prepareCachePrefix would send, not the client's raw images.
   const images = liveImageState(previous?.image_key || key, now)
   const preserve = preserveMessageCache ?? previous?.preserve_message_cache ?? false
-  const current = snapshotBody(preserve ? body : retainImages(images, body).body)
-  const compared = comparePrefix(previous, current)
-  return { ...compared, confirmed: !!previous?.confirmed }
+  const compared = preserve ? body : retainImages(images, body).body
+  const result = comparePrefix(previous, compareSnapshot(compared, previous, known), compared.messages)
+  return { ...result, confirmed: !!previous?.confirmed }
 }
 
 function liveSession(key, now) {
@@ -761,8 +883,8 @@ export function prepareCachePrefix(
   const retained = preserveMessageCache
     ? { body, floor: 0, active: false, moved: false }
     : retainImages(liveImageState(imagesAt, now), body)
-  const current = snapshotBody(retained.body)
-  const compared = comparePrefix(previous, current)
+  const current = snapshotBody(retained.body, previous)
+  const compared = comparePrefix(previous, current, retained.body.messages)
   const br = compared.break
   const writes = liveWrites(previous, br, now)
   const previousTail = previous?.tail ?? -1
@@ -823,4 +945,9 @@ export function clearCachePrefixSessions() {
 
 export function cachePrefixSessionCountsForTest() {
   return { sessions: sessions.size, images: imageSessions.size }
+}
+
+/** Stored messages that still carry field stamps, per STAMPED_TAIL. */
+export function cachePrefixStampedMessagesForTest(sessionKey) {
+  return (sessions.get(sessionKey)?.messages || []).filter((record) => record.parts.some((part) => part.stamp)).length
 }

@@ -55,3 +55,17 @@ test('malformed public counters and free text error data are not leaked as nativ
   assert.equal(result.telemetry.last_error, null)
   assert.ok(!JSON.stringify(result).includes('private-host'))
 })
+
+test('legacy retirement uses the slot UID when container capabilities are dropped', async () => {
+  let command
+  const result = await retireLegacyTelemetry({
+    vm: { id: 'vm-03', status: 'running' },
+    inspect: async () => ({ State: { Running: true } }),
+    run: async (argv) => {
+      command = argv
+      return { code: 0 }
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(command[command.indexOf('-u') + 1], '10003:987')
+})

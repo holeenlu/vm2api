@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { ApiKeyItem } from '@/types/panel-keys'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   keyIsDead,
   keyQuotaLabel,
@@ -66,4 +67,8 @@ describe('API key status and quota', () => {
       '启用'
     )
   })
+})
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
 })

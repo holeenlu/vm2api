@@ -14,12 +14,17 @@ export function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(ba, bb)
 }
 
-export function redactSecrets(obj) {
-  const s = JSON.stringify(obj)
-  return s
-    .replace(/sk-ant-[a-z0-9-]{8,}/gi, (m) => m.slice(0, 14) + '***REDACTED***')
+/** Mask credential-shaped text. A Bearer sk-ant value runs to the quote/line end: corrupt tokens may hold spaces. */
+export function redactSecretText(text) {
+  return String(text)
+    .replace(/Bearer\s+sk-ant-[^'"\\\r\n]*/gi, 'Bearer ***REDACTED***')
+    .replace(/sk-ant-[\w-]{8,}/gi, (m) => m.slice(0, 14) + '***REDACTED***')
     .replace(/sk-(?:kin|vm)-[a-f0-9]{8,}/gi, (m) => m.slice(0, 10) + '***REDACTED***')
     .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer ***REDACTED***')
+}
+
+export function redactSecrets(obj) {
+  return redactSecretText(JSON.stringify(obj))
 }
 
 export function extractApiKey(req) {
@@ -69,8 +74,8 @@ export const HOP_BY_HOP = new Set([
 /** Panel admin credentials (env override) */
 export function getPanelAdmin() {
   return {
-    username: process.env.VM2API_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
-    password: process.env.VM2API_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
+    username: process.env.TAPMODELS_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
+    password: process.env.TAPMODELS_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
   }
 }
 
@@ -148,7 +153,7 @@ export function createPanelSession(username, ttlMs = SESSION_TTL_MS, extra = {})
     ttlMs = extra.ttlMs || SESSION_TTL_MS
   }
   const token = 'kin-panel-' + crypto.randomBytes(24).toString('hex')
-  const role = extra.role || (_lookupRole && _lookupRole(username)) || 'admin'
+  const role = extra.role || (_lookupRole && _lookupRole(username)) || 'super_admin'
   panelSessions.set(panelSessionKey(token), {
     user: username,
     role,
@@ -173,12 +178,18 @@ export function verifyPanelSession(token) {
     saveSessions()
     return null
   }
-  if (!s.role && _lookupRole) {
-    s.role = _lookupRole(s.user) || null
+  if (_lookupRole) {
+    const role = _lookupRole(s.user)
+    if (!role) {
+      panelSessions.delete(key)
+      saveSessions()
+      return null
+    }
+    s.role = role
   }
   if (!s.role) {
     const admin = getPanelAdmin()
-    s.role = admin.username && s.user === admin.username ? 'admin' : 'user'
+    s.role = admin.username && s.user === admin.username ? 'super_admin' : 'user'
   }
   const now = Date.now()
   const remaining = s.exp - now
@@ -213,18 +224,20 @@ export function revokePanelSessionsForUser(username, { exceptToken } = {}) {
 /**
  * @returns {{ username: string, role: string, id?: string } | null}
  */
-export function verifyPanelLogin(username, password) {
+export async function verifyPanelLogin(username, password) {
   if (_authenticateUser) {
-    const rec = _authenticateUser(username, password)
+    // 数据库用户校验是 async（R6 B6b：PanelUserStore.authenticate 经 DbClient 读写）
+    const rec = await _authenticateUser(username, password)
     if (rec) return { username: rec.username, role: rec.role || 'user', id: rec.id }
-    // Existing DB user (including disabled) must not fall through to env password.
-    if (_lookupRole && _lookupRole(username)) return null
+    // Once database authentication is attached, environment credentials cannot
+    // resurrect a disabled or deleted account (or bypass a changed password).
+    return null
   }
   const admin = getPanelAdmin()
   if (!admin.password) return null
   if (!timingSafeEqualStr(String(username || ''), admin.username)) return null
   if (!timingSafeEqualStr(String(password || ''), admin.password)) return null
-  return { username: admin.username, role: 'admin', id: null, source: 'env' }
+  return { username: admin.username, role: 'super_admin', id: null, source: 'env' }
 }
 
 function parseCookie(header) {

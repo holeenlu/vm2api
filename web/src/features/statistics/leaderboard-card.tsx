@@ -1,9 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import type {
   LeaderboardEntry,
   LeaderboardScope,
 } from '@/types/panel-statistics'
 import { Award, ChevronRight, Medal, Trophy } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { useAuthStore } from '@/stores/auth-store'
 import { formatCurrency, formatTokenAmount } from '@/lib/usage-format'
 import { cn } from '@/lib/utils'
 import { ModelVendorIcon } from '@/components/model-vendor-icon'
@@ -40,6 +43,8 @@ const RANKS = [
 const MAX_ITEMS = 3
 
 function RankBadge({ rank }: { rank: number }) {
+  useTranslation('statistics')
+
   const config = RANKS[rank - 1]
   if (!config) {
     return (
@@ -70,6 +75,8 @@ export function EntryName({
   scope: LeaderboardScope
   className?: string
 }) {
+  useTranslation('statistics')
+
   const label = entry.name || entry.id
   return (
     <span className={cn('flex min-w-0 items-center gap-1.5', className)}>
@@ -96,9 +103,15 @@ export function LeaderboardCard({
   onViewAll?: () => void
   className?: string
 }) {
+  const { t } = useTranslation('statistics')
+
+  const canSeeMoney = useAuthStore((s) => Boolean(s.me?.role))
   const board = useQuery(leaderboardQueryOptions('today', scope, MAX_ITEMS, tz))
   const entries = board.data?.entries ?? []
-  const maxCost = Math.max(0, ...entries.map((e) => e.totalCost))
+  const maxCost = Math.max(
+    0,
+    ...entries.map((e) => (canSeeMoney ? e.totalCost : e.totalRequests))
+  )
 
   return (
     <BentoCard className={cn('min-h-[280px]', className)}>
@@ -110,7 +123,7 @@ export function LeaderboardCard({
             onClick={onViewAll}
             className='flex cursor-pointer items-center gap-0.5 text-xs font-medium text-primary transition-colors hover:text-primary/80'
           >
-            <span>查看全部</span>
+            <span>{t('statistics:viewAll')}</span>
             <ChevronRight className='h-3 w-3' />
           </button>
         ) : null}
@@ -129,15 +142,20 @@ export function LeaderboardCard({
           ))
         ) : board.error && !board.data ? (
           <div className='flex flex-1 items-center justify-center text-sm text-destructive'>
-            获取排行榜数据失败
+            {t('statistics:rankingError')}
           </div>
         ) : entries.length === 0 ? (
           <div className='flex flex-1 items-center justify-center text-sm text-muted-foreground'>
-            今日暂无数据
+            {t('statistics:noTodayData')}
           </div>
         ) : (
           entries.slice(0, MAX_ITEMS).map((entry, idx) => {
-            const pct = maxCost > 0 ? (entry.totalCost / maxCost) * 100 : 0
+            const pct =
+              maxCost > 0
+                ? ((canSeeMoney ? entry.totalCost : entry.totalRequests) /
+                    maxCost) *
+                  100
+                : 0
             return (
               <div
                 key={entry.id}
@@ -152,7 +170,11 @@ export function LeaderboardCard({
                       className='text-sm font-medium'
                     />
                     <span className='ml-2 text-sm font-semibold tabular-nums'>
-                      {formatCurrency(entry.totalCost)}
+                      {canSeeMoney
+                        ? formatCurrency(entry.totalCost)
+                        : t('statistics:requestTotal', {
+                            count: entry.totalRequests,
+                          })}
                     </span>
                   </div>
                   <div className='h-1.5 w-full overflow-hidden rounded-full bg-muted/40 dark:bg-white/10'>
@@ -166,10 +188,12 @@ export function LeaderboardCard({
                   </div>
                   <div className='mt-1 flex items-center justify-between'>
                     <span className='text-[10px] text-muted-foreground'>
-                      {entry.totalRequests.toLocaleString()} 请求
+                      {entry.totalRequests.toLocaleString(i18n.language)}{' '}
+                      {t('statistics:requests')}
                     </span>
                     <span className='text-[10px] text-muted-foreground'>
-                      {formatTokenAmount(entry.totalTokens)} Token
+                      {formatTokenAmount(entry.totalTokens)}{' '}
+                      {t('statistics:tokenCount')}
                     </span>
                   </div>
                 </div>

@@ -10,6 +10,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { resolveVendorAccountNameSync } from '../vendor/vendor-account-name.mjs'
 import { atomicWriteJson } from '../vm/vm-file.mjs'
 import { applyClearUnschedulable, applyUnschedulable, migrateScheduleRecord } from '../pool/schedule-state.mjs'
 import {
@@ -20,7 +21,7 @@ import {
   isSetupTokenMode,
 } from './credential-mode.mjs'
 import { resolveAuthScheme } from './auth-scheme.mjs'
-import { flattenOauthIdentity, normalizeSubscriptionType } from './oauth-identity.mjs'
+import { flattenOauthIdentity, normalizeSubscriptionType, SUBSCRIPTION_METADATA_KEYS } from './oauth-identity.mjs'
 
 export const REFRESH_SKEW_MS = 5 * 60 * 1000
 
@@ -606,12 +607,22 @@ export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operat
     !!(n._token_version && prev._token_version && Number(n._token_version) > Number(prev._token_version))
   const mode = credentialModeFromOauth({ ...cred, mode: cred?.mode || cred?.type || prev.mode })
   vm.claude = stripCredentialSecrets({ ...prev })
+  if (operatorImport) for (const key of ['email', 'account_uuid', 'org_uuid', 'scope']) delete vm.claude[key]
   if (n.access_token || cred.has_access || cred.has_api_key || cred.api_key) vm.claude.has_access = true
   if (n.refresh_token || cred.has_refresh) vm.claude.has_refresh = true
   if (n.expires_at) vm.claude.expires_at = n.expires_at
   if (n.email) vm.claude.email = n.email
   if (n.account_uuid) vm.claude.account_uuid = n.account_uuid
   if (n.org_uuid) vm.claude.org_uuid = n.org_uuid
+  // Display metadata follows the observed identity; never keep another account's plan.
+  const identityChanged = ['account_uuid', 'org_uuid'].some((key) => n[key] && prev[key] && n[key] !== prev[key])
+  const keepProfileSnapshot =
+    cred.source === 'go-slot-worker' && prev.subscription_updated_at && !operatorImport && !identityChanged
+  for (const key of SUBSCRIPTION_METADATA_KEYS) {
+    if (keepProfileSnapshot && mode !== 'apikey') continue
+    if (mode === 'apikey' || operatorImport || identityChanged || Object.hasOwn(cred, key)) delete vm.claude[key]
+    if (mode !== 'apikey' && typeof cred[key] === 'string' && cred[key].trim()) vm.claude[key] = cred[key].trim()
+  }
   if (isOfficialSetupTokenMode(mode)) {
     vm.claude.scope = 'user:inference'
   } else if (n.scope) {
@@ -653,6 +664,7 @@ export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operat
   restoreScheduleAfterLiveCredential(vm, { operatorImport })
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(vmPath, vm, { mode: 0o600 })
+  resolveVendorAccountNameSync(vm, vm.claude.email)
   return vm
 }
 
@@ -671,13 +683,23 @@ function clearClaudeAuthCooldown(claude = {}) {
 export function markVmRestriction(vmPath, { until, reason } = {}) {
   if (!vmPath || !fs.existsSync(vmPath)) return null
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-  vm.claude = { ...(vm.claude || {}) }
   const untilMs = Number(until) || 0
-  if (untilMs > Date.now()) {
+  const why = reason || 'restricted'
+  // Codex admission re-asserts every restricted slot on each request. Rewriting
+  // an unchanged file (only updated_at moves) cost a write, rename, fs.watch DB
+  // sync and JSON cache miss per slot per request in production (2026-11-03).
+  const hasUntil = untilMs > Date.now()
+  if (
+    vm.claude?.temp_unschedulable_reason === why &&
+    vm.temp_unschedulable_reason === why &&
+    (!hasUntil || (vm.claude?.temp_unschedulable_until === untilMs && vm.temp_unschedulable_until === untilMs))
+  )
+    return vm
+  vm.claude = { ...(vm.claude || {}) }
+  if (hasUntil) {
     vm.claude.temp_unschedulable_until = untilMs
     vm.temp_unschedulable_until = untilMs
   }
-  const why = reason || 'restricted'
   vm.claude.temp_unschedulable_reason = why
   vm.temp_unschedulable_reason = why
   vm.updated_at = new Date().toISOString()

@@ -103,6 +103,7 @@ test('a handler records the served signature and the next account replays it as 
       seen.length
         ? {
             model: 'claude-haiku-4-5',
+            max_tokens: 64,
             messages: [
               { role: 'user', content: 'before' },
               {
@@ -115,7 +116,7 @@ test('a handler records the served signature and the next account replays it as 
               { role: 'user', content: 'after' },
             ],
           }
-        : { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] },
+        : { model: 'claude-haiku-4-5', max_tokens: 64, messages: [{ role: 'user', content: 'hello' }] },
     requireAuth: () => true,
     cfg: {
       rewrite: { enabled: false },
@@ -127,7 +128,7 @@ test('a handler records the served signature and the next account replays it as 
     requestLog: { start: () => ({ request_id: 'thinking-owner', mode: 'normal' }), finish() {} },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },

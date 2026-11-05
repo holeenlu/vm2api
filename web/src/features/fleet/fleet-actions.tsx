@@ -5,6 +5,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { wrapSyncKernelFails } from '@/lib/wrap-health'
@@ -80,16 +81,18 @@ async function invalidateFleet(qc: QueryClient) {
 }
 
 export function FleetActions() {
+  const { t } = useTranslation('fleet')
+
   const qc = useQueryClient()
   const me = useQuery(meQueryOptions())
   // 额度探测、全槽更新、重装内核都是管理员接口，其它角色点了只会 403。
-  const canManage = me.data?.role === 'admin'
+  const canManage = me.data?.role === 'super_admin'
   const [fleetOpen, setFleetOpen] = useState(false)
   const [kernelOpen, setKernelOpen] = useState(false)
   const [kernelMode, setKernelMode] = useState<'keep' | 'traits'>('keep')
   const refresh = useMutation({
     mutationFn: () => invalidateFleet(qc),
-    onSuccess: () => toast.success('已刷新'),
+    onSuccess: () => toast.success(t('fleet:refreshed')),
   })
   const probe = useMutation({
     mutationFn: () =>
@@ -105,14 +108,20 @@ export function FleetActions() {
         const reasons = failed
           .slice(0, 2)
           .map(
-            (x) => `${x.vm_id || x.id || '?'} ${errorText(x.error) || '失败'}`
+            (x) =>
+              `${x.vm_id || x.id || '?'} ${errorText(x.error) || t('fleet:failed')}`
           )
-          .join('；')
+          .join('; ')
         toast.error(
-          `探测 ${ok}/${items.length} · 失败 ${failed.length}${reasons ? ` · ${reasons}` : ''}`
+          t('fleet:probeFailure', {
+            ok,
+            total: items.length,
+            count: failed.length,
+            reasons,
+          })
         )
       } else {
-        toast.success(`探测完成 ${ok}/${items.length}`)
+        toast.success(t('fleet:probeSuccess', { ok: ok, total: items.length }))
       }
       await invalidateFleet(qc)
     },
@@ -129,11 +138,21 @@ export function FleetActions() {
       const total = report.total ?? items.length
       const ok = report.ok_count ?? items.filter((x) => x?.ok).length
       const failed = items.filter((x) => x && !x.ok).map((x) => x.id || '?')
-      const label = report.action === 'collect' ? '仅采集' : '重载并采集'
+      const label =
+        report.action === 'collect'
+          ? t('fleet:collectOnly')
+          : t('fleet:reloadCollect')
       if (failed.length) {
-        toast.error(`${label} ${ok}/${total} · 失败 ${failed.join('、')}`)
+        toast.error(
+          t('fleet:actionFailed', {
+            action: label,
+            ok: ok,
+            total: total,
+            failures: failed.join(', '),
+          })
+        )
       } else {
-        toast.success(`${label} ${ok}/${total}`)
+        toast.success(t('fleet:actionSuccess', { action: label, ok, total }))
       }
       setFleetOpen(false)
       await invalidateFleet(qc)
@@ -151,11 +170,19 @@ export function FleetActions() {
       const ok = report.ok_count ?? 0
       const kernelFail = wrapSyncKernelFails(report.items)
       if ((report.failed_count || 0) > 0) {
-        toast.error(`kernel 重装 ${syncReportSummary(report)}`)
+        toast.error(
+          t('fleet:kernelSummary', { summary: syncReportSummary(report) })
+        )
       } else if (kernelFail > 0) {
-        toast.error(`kernel 文件 ${ok}/${total}，进程未起来 ${kernelFail}`)
+        toast.error(
+          t('fleet:kernelProcessFailure', {
+            ok: ok,
+            total: total,
+            count: kernelFail,
+          })
+        )
       } else {
-        toast.success(`kernel 重装 ${ok}/${total}`)
+        toast.success(t('fleet:kernelSuccess', { ok, total }))
       }
       setKernelOpen(false)
     },
@@ -163,7 +190,9 @@ export function FleetActions() {
       // 部分槽失败时网关回 400，正文仍是逐槽报告。
       const report = syncReportFromError(error)
       toast.error(
-        report ? `kernel 重装 ${syncReportSummary(report)}` : error.message
+        report
+          ? t('fleet:kernelSummary', { summary: syncReportSummary(report) })
+          : error.message
       )
     },
     onSettled: () => invalidateFleet(qc),
@@ -178,7 +207,7 @@ export function FleetActions() {
         disabled={refresh.isPending}
         loading={refresh.isPending}
       >
-        刷新
+        {t('fleet:refresh')}
       </Button>
       {canManage ? (
         <>
@@ -189,7 +218,7 @@ export function FleetActions() {
             disabled={probe.isPending}
             loading={probe.isPending}
           >
-            额度探测
+            {t('fleet:probeQuota')}
           </Button>
           <Button
             variant='outline'
@@ -198,7 +227,7 @@ export function FleetActions() {
             disabled={fleet.isPending}
             loading={fleet.isPending}
           >
-            全槽更新
+            {t('fleet:updateAll')}
           </Button>
           <Button
             variant='outline'
@@ -207,7 +236,7 @@ export function FleetActions() {
             disabled={wrapSync.isPending}
             loading={wrapSync.isPending}
           >
-            重装当前内核
+            {t('fleet:reinstallKernel')}
           </Button>
         </>
       ) : null}
@@ -215,16 +244,13 @@ export function FleetActions() {
       <Dialog open={fleetOpen} onOpenChange={setFleetOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>全槽更新</DialogTitle>
+            <DialogTitle>{t('fleet:updateAll')}</DialogTitle>
           </DialogHeader>
           <p className='text-sm text-muted-foreground'>
-            重装当前内核：本地槽换挂载的 kernel / cli-node
-            并重启进程；集群槽用同一份 kernel、cli-node 和 Go
-            遥测重建镜像，再换容器。凭证和指纹保留。
+            {t('fleet:reinstallHelp')}
           </p>
           <p className='text-sm text-muted-foreground'>
-            全槽更新只重载已在跑的 runtime 并采集特征，不换二进制。KVM
-            槽在适配器未接线时会失败并跳过。
+            {t('fleet:updateHelp')}
           </p>
           <DialogFooter>
             <Button
@@ -232,7 +258,7 @@ export function FleetActions() {
               onClick={() => setFleetOpen(false)}
               disabled={fleet.isPending}
             >
-              取消
+              {t('fleet:cancel')}
             </Button>
             <Button
               variant='outline'
@@ -240,14 +266,14 @@ export function FleetActions() {
               loading={fleet.isPending}
               onClick={() => fleet.mutate('collect')}
             >
-              只采集
+              {t('fleet:collect')}
             </Button>
             <Button
               disabled={fleet.isPending}
               loading={fleet.isPending}
               onClick={() => fleet.mutate('roll')}
             >
-              重载并采集
+              {t('fleet:reloadCollect')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -255,26 +281,25 @@ export function FleetActions() {
       <Dialog open={kernelOpen} onOpenChange={setKernelOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>重装当前内核</DialogTitle>
+            <DialogTitle>{t('fleet:reinstallKernel')}</DialogTitle>
           </DialogHeader>
           <p className='text-sm text-muted-foreground'>
-            本地槽和集群槽都换成当前 kernel、cli-node 与 Go 遥测。Codex
-            槽不参与。
+            {t('fleet:kernelScope')}
           </p>
           <ChoiceTiles
-            label='更新方式'
+            label={t('fleet:updateMode')}
             value={kernelMode}
             onChange={setKernelMode}
             choices={[
               {
                 value: 'keep',
-                title: '保留原数据重建',
-                detail: '留下凭证、指纹和统计，只换服务并重启运行中的槽。',
+                title: t('fleet:preserveData'),
+                detail: t('fleet:preserveHelp'),
               },
               {
                 value: 'traits',
-                title: '重建新特征',
-                detail: '本机槽清家目录并重抽计算机身份；集群槽仍只换镜像。',
+                title: t('fleet:newFingerprint'),
+                detail: t('fleet:newFingerprintHelp'),
               },
             ]}
           />
@@ -284,7 +309,7 @@ export function FleetActions() {
               onClick={() => setKernelOpen(false)}
               disabled={wrapSync.isPending}
             >
-              取消
+              {t('fleet:cancel')}
             </Button>
             <Button
               disabled={wrapSync.isPending}
@@ -292,7 +317,9 @@ export function FleetActions() {
               variant={kernelMode === 'traits' ? 'destructive' : 'default'}
               onClick={() => wrapSync.mutate(kernelMode)}
             >
-              {kernelMode === 'keep' ? '保留原数据重建' : '重建新特征'}
+              {kernelMode === 'keep'
+                ? t('fleet:preserveData')
+                : t('fleet:newFingerprint')}
             </Button>
           </DialogFooter>
         </DialogContent>
