@@ -44,37 +44,37 @@ def env_has(path: Path, key: str) -> bool:
 
 # Bare `docker compose` (including the panel's one-click upgrade helper) reads
 # COMPOSE_FILE from .env; without it the base service would start on ./vms and
-# ./data instead of .local/arm64. The helper mounts VM2API_HOST_ROOT.
+# ./data instead of .local/arm64. The helper mounts TAPMODELS_HOST_ROOT.
 COMPOSE_FILE = "docker-compose.yml:docker-compose.arm64.yml"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=valid_port, default=8787)
-    parser.add_argument("--container-name", type=valid_container_name, default="vm2api")
+    parser.add_argument("--container-name", type=valid_container_name, default="tapmodels")
     parser.add_argument("--bind-host", type=valid_bind_host, default="127.0.0.1")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
     env_path = root / ".env"
     values = {
-        "VM2API_ADMIN_USER": "admin",
-        "VM2API_ADMIN_PASSWORD": secrets.token_urlsafe(24),
-        "VM2API_API_KEY": secrets.token_hex(32),
-        "VM2API_DB_SECRET": secrets.token_hex(32),
-        "VM2API_CONTAINER_NAME": args.container_name,
-        "VM2API_BIND_HOST": args.bind_host,
+        "TAPMODELS_ADMIN_USER": "admin",
+        "TAPMODELS_ADMIN_PASSWORD": secrets.token_urlsafe(24),
+        "TAPMODELS_API_KEY": secrets.token_hex(32),
+        "TAPMODELS_DB_SECRET": secrets.token_hex(32),
+        "TAPMODELS_CONTAINER_NAME": args.container_name,
+        "TAPMODELS_BIND_HOST": args.bind_host,
         "PORT": str(args.port),
         "COMPOSE_FILE": COMPOSE_FILE,
-        "VM2API_HOST_ROOT": str(root),
+        "TAPMODELS_HOST_ROOT": str(root),
     }
     try:
         fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         print("Existing .env preserved. Review it locally before starting this deployment.")
-        missing = [key for key in ("COMPOSE_FILE", "VM2API_HOST_ROOT") if not env_has(env_path, key)]
+        missing = [key for key in ("COMPOSE_FILE", "TAPMODELS_HOST_ROOT") if not env_has(env_path, key)]
         if missing:
-            print(f"Add to .env: COMPOSE_FILE={COMPOSE_FILE} and VM2API_HOST_ROOT={root} "
+            print(f"Add to .env: COMPOSE_FILE={COMPOSE_FILE} and TAPMODELS_HOST_ROOT={root} "
                   f"(missing: {', '.join(missing)}).")
         return 0
     except OSError as exc:

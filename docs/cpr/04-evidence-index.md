@@ -1,0 +1,144 @@
+# CPR 研究证据索引
+
+## 基线
+
+本轮核对命令使用本机工作树：
+
+```text
+CPR root:     /Users/luhonglin/Git/codex-proxy-rs
+CPR commit:   958e13c3 (main, v3.35.0)
+tapmodels:    /Users/luhonglin/Git/vm2api
+tapmodels:    51955eb3 (main)
+date:         2026-10-29
+```
+
+两边工作区在研究开始时均无未提交差异。本轮只读研究，没有修改 CPR。
+
+## Gateway Worker 对齐基线
+
+Gateway Worker（Go `kin-codex-gateway` + Node 控制面）按 CPR 行为用 Go 重写，没有共同 git 历史，只能逐提交盘点后移植。本节是增量盘点的唯一起点记录，规则、结论分类、验证与交付要求见[交付规范](../CHANGE_DELIVERY.md)第 4 节“CPR（Gateway Worker）同步”。取得待盘点提交：在 CPR 检出执行 `git fetch origin main && git log --first-parent <已对齐到>..origin/main`，聚焦 `backend/crates/providers/openai`、`gateway-core` 重试与路由、互联（peer link）被接入方、代理探测，再逐个提交读取实际 diff，判定已移植 / 已具备 / 部分采用 / 不适用 / 待决定并更新本节。
+
+```text
+已对齐到:    2dc6bf01 (main, v3.41.0+5, 2026-11-05)
+盘点起点:    e0b7a841 (Gateway Worker 开工时本机 CPR 检出)
+```
+
+| CPR 提交 | 内容 | 结论 |
+| --- | --- | --- |
+| `79083a56` | WS 连接首包未声明托管搜索时，后续声明需新连接 | 已移植：识别补上 Lite `input` 中的 `additional_tools` / `tool_search_output` 声明（`ws.go`、`compat.go`） |
+| `2016bda0` | 透传 trace 与 `x-openai-fedramp`；按账号发送 `x-codex-installation-id` | 已移植（`correlation.go`、`server.go`、`profile.go`、`gateway-execution.mjs`） |
+| `e7c24781` | 账号路由覆盖头只取部署配置 | 已具备（`profile.go` 只从画像写入，调用方值丢弃） |
+| `790f3147` | 归属不明的全量请求凭证明回传已验证 turn state | 已被 `1daa0623` 取代：证明缓存（原 `turn_state.go`）已删除，见下 |
+| `0ff1a729` | Retry-After 等待上限，超限不截短 | 行为已具备；对齐显式 0 不接受正数等待（`attempt.go`、`config.go`），配置为环境变量/配置文件而非面板设置 |
+| `7b05b14a` | 模型拒绝冷却只认 `model_not_found` + 400/403/404，`unsupported_value` 为请求错误 | 已具备（`classify.go`） |
+| `6f71b27c` | 互联池摘要计入只由额度提供的套餐 | 已具备（`cpr-peer-link.mjs` 回落到额度 `plan_type`） |
+| `a92b95c4` | 代理延迟按选中的地址族计 | 不适用：延迟只由 IPv4 一次查询计时，无双栈并发拉长问题 |
+| `5100f633` | 请求记录补错误分类、WS 关闭码、续接不可用与连接退出原因、`recovered`，详情投影结构化上游错误 | 已移植（迁移 092、Worker 诊断头与 trailer、日志详情“网关诊断”）；`recovered` 无数据来源未做 |
+| `1915806b` | 主题预览加载顺序 | 与网关无关 |
+| `187af363`、`be35f8a6`、`d22ec298` | 接入方同步、上游池展示、请求记录 CPR 标记 | 不适用：只实现被接入方 `/v1/cpr/link` |
+| `26de6712` | PostgreSQL 配置快照 revision 竞争 | 不适用：无该快照发布机制 |
+| `68595209` | Chat Completions 兼容大幅放宽：`file` 块接受 `file_id` / `file_data` / `file_url`；`input_audio`；custom 工具与结果；推理摘要投影 `reasoning_content`；`message.images` 图片扩展；`logprobs`；流式 `delta.annotations`；保留 `max_output_tokens`；入口失败诊断 `api/http_ingress` | 部分采用：`file` 块放宽已移植（`codex-convert.mjs` 的 `chatFilePart`，替代上一轮只放行内联 PDF 的 `inlinePdfPart`）；其他角色的 `name` 本地本就忽略。待决定：音频、推理摘要投影、图片扩展、logprobs、流式引用、`max_output_tokens`——都会改变发往官方 Codex 后端的报文或新增 Chat 扩展字段，需真实账号验证；入口失败诊断为 CPR 自身观测表，本地失败请求已记入请求日志 |
+| `a9a77f5f` | 账号模型成功率按请求结果计算 | 已具备：`vendor-account-usage.mjs` 的 `success_rate` 按成功数 / 请求数计算 |
+| `6f7d9259`、`9039cef3`、`b9bcb4e0`、`272534a3`、`37749001`、`f7f64ead`、`2dc6bf01` | CPR 前端表单校验时机、发版、CI、启动与重启延迟、依赖升级 | 与网关无关 |
+| `1daa0623` | 撤销 `790f3147` 的进程内 turn-state 证明缓存：归属不明的全量请求原样回传客户端 turn-state；只在明确换号时清理（头、正文、`client_metadata`、turn metadata），Live 请求按换号清理 | 已移植（删除 `turn_state.go` 与 `rememberTurnState`；`account_scope.go`、`attempt.go`、`server.go`、`live.go`）：`resetKeys` 不再含 turn-state 字段，turn-state 只在 `scopeDifferent` 时删除；归属不明与同账号取客户端 token（请求头优先，否则 `client_metadata`）；`previous_response_id` 等账号绑定状态在归属不明时照常清理 |
+| `46b4665c` | Client Key 可设置固定 `installationId`（带连字符 UUID），换账号仍沿用；通用设置不接受该字段 | 不采用（用户 2026-11-05 决定暂不做）：同一 Key 跨账号共用一个安装身份会让多个账号呈现为同一设备，涉及风控取舍。本地已有按 Key 的 `codex_client_profile`，以后有明确需求时可在其上增加，并只允许运营方配置；之后的增量盘点不再把它列为待决定 |
+| `21d84af2`、`d604adfb`、`311e4d22` | CPR 自身提示文案、登录页移动端布局、贡献指南 | 与网关无关（Worker 的错误文案为本项目自有） |
+| `19ef4849` | 互联协议升到 schema 3（接入端只接受 3），新增能力 `key_limits`：当前密钥公开的并发上限与 RPM，0 表示不限 | 已移植（`cpr-peer-link.mjs`、`api-keys.mjs` 的 `effectiveLimits`、`server.mjs`）：被接入方 `/v1/cpr/link` 改返回 schema 3 并带 `key_limits`；值取 Key 实际生效的上限——并发取 Key 与所属用户上限中较小的正数（超级管理员不受用户上限约束），RPM 取 Key、用户、分组（含用户覆盖）中较小的正数，与准入检查 `check()` 同源。接入方的调度改动不适用（只实现被接入方） |
+| `6b362a50` | 冻结恢复探测不能回写 Cookie 或刷新凭据，解冻只由恢复任务按上游结果决定 | 已移植（`cookies.go`、`protection.go`）：`probeAccount` 的请求（含取探测模型目录）带恢复探测标记，`accountCookieTransport` 只回放已存 Cookie、不回写 Set-Cookie；探测本就不刷新凭据、不计入保护证据 |
+| `bdfc2017` | 上游明确关闭共享（`403 peer_sharing_disabled`）或不支持协议时，接入方清除互联身份 | 已具备：被接入方在 Key 未开启共享时已返回 `403 peer_sharing_disabled`；接入方逻辑不适用 |
+| `10e25ce2` | Chat Completions 兼容扩展：tool 消息 `name`、PDF `file` 内容块、`web_search_options`、URL 引用投影，以及 Responses 编码保留 `max_output_tokens` | 部分采用（`codex-convert.mjs`、`handle-codex.mjs`、`handle-codex-gateway.mjs`；Gateway Worker 与虚拟机 Codex 槽位共用）：已移植 tool 消息 `name` → `function_call_output.name`、user 内联 PDF → `input_file`、`web_search_options` → 强制 `web_search` 工具（与函数工具或非 `auto` 的 `tool_choice` 同用时返回 400 `unsupported_parameter`）、非流式 Chat 的 `url_citation` → `message.annotations`。不采用：保留 `max_output_tokens`（会改变发往官方 Codex 后端的报文，真实账号验证前继续剥离）；CPR 对其他非法形状的严格拒绝（本地转换保持宽松，`file_id`、非 PDF 文件不映射）。流式引用与 CPR 一致只保留正文行内链接 |
+| `f5c5a6e5` | 账号出口测试、按代理批量分配账号、服务器直连出口探测 | 部分已具备：Codex 账号详情「代理」页签已能测通与测地理；按代理批量分配账号属于平台代理池的产品功能，待决定 |
+| `13374e2a`、`789609dd`、`860fb396` | 部署就绪检查 `/readyz`（PostgreSQL、Redis、运行时快照）、发版、前端格式 | 不适用：Worker 没有这些依赖，健康检查由控制面托管；其余与网关无关 |
+| `242ffb23` | 账号模型白名单增加独立“清理未列出模型”按钮：列出当前目录未返回的已选 ID，默认不选，确认后只改表单、保存账号生效；目录未就绪/失败/为空时不能清理，也不能清空白名单 | 已移植（`web/src/features/gateway-worker/model-access-field.tsx`、`accounts-model.ts` 的 `missingAllowlistModels` / `removeAllowlistModels`、四语 `codexModelAccessCleanup*`）；目录来源为面板 `test-models?platform=openai`，不是 CPR 的按账号上游目录，所以只作为清理候选，不据此判定模型失效 |
+| `239def9a`、`53a09bbf` | PostgreSQL 客户端 Key 账本在删 Key 后保留；CPR 自身 PR 标题规则 | 不适用：本项目没有 CPR 的 Key 预算账本存储，计费在 Node 控制面；技能文档与网关无关 |
+| `5eaca14a` | Responses 明确换号时清理 `traceparent`、`tracestate`、`sentry-trace`、`baggage`、`x-openai-fedramp`，含正文、`client_metadata`、turn metadata 与 `ws_request_header_*` 副本；同账号及归属未知时保留 | 已移植（`account_scope.go`、`guardian.go`）：HTTP 头、WS 握手头与三处正文字段统一按 `scopeDifferent` 清理；`client_metadata` 内再嵌套 `client_metadata` 的递归未做，没有已知来源 |
+| `49cee239` | 完整新链按线程在 15.5 MiB 转 HTTP、低于 13.5 MiB 才回 WS；预热/增量成功不清大小偏好；大包 HTTP 后下游 WS 空闲时正常关闭，让客户端重连发全量 | 部分采用：阈值与回差、成功不清偏好已移植（`ws.go`、`ws_budget.go`，原固定 15 MiB 且对所有请求生效）；带 `previous_response_id` 的请求只看 15.5 MiB，不更新线程偏好。下游关闭重连不采用：下游 WS 在 Node `responses-ws.mjs`，自行展开 `previous_response_id` 重放，没有该协议提示。入站 WS 的 `wsRequired` 请求不做大小回退，沿用既有差异 |
+| `0663df14` | 大包回退后的下游重连不再限定 Codex CLI 客户端 | 不适用：依赖 `49cee239` 的下游关闭机制，本项目没有按客户端类型限定的同类逻辑 |
+| 其余 6 个（`78e943f4`、`39aa20a1`、`621b1fac`、`28eb4708`、`aa003f7d`、`4c57a040`） | 插件用量数据、插件账号级画像、PostgreSQL 16 兼容、在线更新解压、迁移换行、xAI 额度快照 | 与网关无关 / 本项目无对应机制 |
+| 其余 15 个 | 依赖升级、Windows 构建与在线更新、插件、部署文档、发版、前端徽标与 OAuth 通知、PostgreSQL 代理删除锁 | 与网关无关 |
+
+### 2026-11-04 功能级对照
+
+增量提交盘点之外，按传输与身份、凭据与额度、执行与调度、数据面接口四个方向逐项比对了 CPR 源码与 Worker（CPR `1915806b`）。本轮已修复：WS 空闲池按会话锚点与握手画像分键、复用连接不重放握手 turn-state、提交后流不受总时长截断（上游正文 300s 空闲）、额度访问结论与按证据解除、额度/目录接口只认 402、凭据 2 小时恢复窗口与无请求内刷新、`cyber_policy` 会话排除、严格亲和的后代线程跟随与续接迁移、preferred 主账号越过权重层、会话绑定按调用方隔离、重置卡账号锁与自动使用。同日第二档继续对齐：上游 WS 连接管理（读循环与空闲 Ping、800ms 快路径、按出口的半开熔断、建连名额、语义边界前恢复、终态回池、必须走 WS 的请求、`stream:true`、握手 turn-state、`codex.rate_limits` 过滤与 metadata turn-state、发布核验调度）、请求头黑名单透传与身份头推导、API Key 画像头与按账号出口隔离的客户端、OAuth 授权 URL/回调校验/刷新报文/刷新失败诊断/恢复日志、客户端重试抑制、Cloudflare 挑战与 Retry-After: 0、排队关闭 503、健康分闭集、建连退避、具名额度桶、额度拒绝回读、目录 ETag、套餐归一、人工恢复、头像来源与请求诊断字段。仍保留的差异见 [Gateway Worker 实施状态](../supplier-platform/18-gateway-worker-node-go-implementation.md) 的“已知差异”。
+
+## CPR 架构与 API
+
+| 主题 | 文件 | 重点 |
+| --- | --- | --- |
+| 系统定位与运行拓扑 | `codex-proxy-rs/docs/architecture.md:14-96` | Core/Admin/API/Store/Host/Provider/Plugin 边界；PostgreSQL、Redis、S3/R2 的状态分工 |
+| 插件职责与发布 | `codex-proxy-rs/docs/architecture.md:98-171` | SDK、Runtime、manifest、快照、实例隔离、故障处理和业务事实所有权 |
+| 请求生命周期 | `codex-proxy-rs/docs/architecture.md:394-482` | snapshot、attempt、send state、delivery commit、retry/fallback 安全边界 |
+| Provider 边界 | `codex-proxy-rs/docs/architecture.md:483-697` | OAuth、目录、额度、出站代理、导入和协议差异的 owner |
+| 路由、continuation、排队 | `codex-proxy-rs/docs/architecture.md:698-880` | 智能调度、native continuation、会话亲和、队列、Key 预算和费用 |
+| 控制面 revision | `codex-proxy-rs/docs/architecture.md:881-942` | 事务、审计、快照发布、Redis 通知和配置冲突 |
+| 观测、预测和请求记录 | `codex-proxy-rs/docs/architecture.md:988-1085` | 有界观测、统计投影、quota forecast、attempt 完整性、费用来源 |
+| Worker、错误保护和恢复 | `codex-proxy-rs/docs/architecture.md:1086-1196` | Worker 所有权、账号冻结、日志脱敏、在线更新、备份恢复 |
+| 数据面协议 | `codex-proxy-rs/docs/api.md:15-80`, `208-380` | Client Key、版本门禁、Responses、Chat、Images、Search、模型目录 |
+| Key/组/运行设置 | `codex-proxy-rs/docs/api.md:1473-1627`, `1757-1842` | 账号组、Client Key、并发、智能调度、亲和和限额 |
+| 备份、更新、插件 | `codex-proxy-rs/docs/api.md:2068-2148`, `2423-2795` | 业务备份、系统更新、插件管理、实例和兼容性 |
+| 部署与恢复 | `codex-proxy-rs/deploy/README.md:495-840` | 持久化、日志、在线更新、插件兼容、人工恢复 |
+
+## CPR 关键源码
+
+| 主题 | 文件 | 关键事实 |
+| --- | --- | --- |
+| Core 端口 | `backend/crates/gateway-core/src/lib.rs` | CoreStorePorts、ExecutionService、ProviderRegistry、SnapshotControl 和启动恢复 |
+| Operation/能力 | `backend/crates/gateway-core/src/operation.rs` | Provider 无关 operation、Feature、opaque payload 和 continuation state |
+| 客户准入 | `backend/crates/gateway-core/src/engine/admission.rs` | admission、lease maintain、abandon、release、启动恢复 |
+| continuation | `backend/crates/gateway-core/src/engine/continuation.rs` | Client Key/Provider/账号 pin、opaque response ID、ownership mismatch |
+| snapshot | `backend/crates/gateway-core/src/routing/snapshot.rs` | 配置事实、Key/组/账号、目录代次、模型能力和计划编译 |
+| snapshot publisher | `backend/crates/gateway-core/src/runtime/publisher.rs` | committed refresh、后台刷新抢占、失败暂停和 revision 通知 |
+| observation | `backend/crates/gateway-core/src/engine/observation.rs` | RequestObservation、WS observation、outcome、usage、cost、timing |
+| diagnostics | `backend/crates/gateway-core/src/diagnostics/capture.rs`、`trace.rs` | 有界摘要、fingerprint、脱敏、evidence 预算和 trace 丢失计数 |
+| error protection | `backend/crates/gateway-core/src/account/error_protection.rs` | 规则 DSL、校验、编译、fingerprint 和匹配 |
+| metering | `backend/crates/gateway-core/src/metering/mod.rs`、`pricing.rs` | Decimal、Money、Usage、CostSource、价格覆盖和倍率 |
+| Provider | `backend/crates/providers/openai/src`、`xai/src` | 凭据、目录、额度、transport、错误和上游适配 |
+| plugin SDK | `backend/crates/gateway-plugin/sdk/docs/capabilities.md`、`upstream-adapters.md` | 中间件、目录、调度、重试、观测、服务和受管出站 |
+
+## CPR 近期演进证据
+
+| 提交 | 主题 | 说明 |
+| --- | --- | --- |
+| `736eca65` | configurable account error protection | 从容量冻结升级为规则、策略 revision、Redis generation 和恢复探测 |
+| `005466bc` | Chat Completions through Responses | 协议投影复用 Responses 执行链，新增大量 request/response contract tests |
+| `3f95f8b0` | diagnostic evidence and ZIP bundles | 保留 evidence、导出 ZIP、统一可用性和缺口语义 |
+| `2f3c1787` | WebSocket lifecycle | 心跳、连接归属、续接和回收边界持续修正 |
+| `60e6bc01` | remove model catalog v1 | 插件目录合同主动收敛，旧版本不永久兼容 |
+| `af9790ac` | managed HTTP replay safety | 只对证明安全的受管 HTTP 429 允许有限重放 |
+
+## tapmodels 对照证据
+
+| 主题 | 文件 | 当前能力 |
+| --- | --- | --- |
+| 产品与隔离目标 | `README.md:69-168` | VM/KVM、真实客户端、独立出口、风险审计、集群、Key/额度 |
+| 运营模型 | `docs/RELAY_OPERATIONS.md:7-140` | VM/API 供给、商业分组、用户、Key、钱包、套餐、结算和权限设计 |
+| 请求恢复 | `src/lib/pool/failover-runner.mjs` | 账号切换、重试 deadline、session queue、容量/限流错误和恢复动作 |
+| kernel 错误恢复 | `src/lib/transport/go-worker-client.mjs:367-436` | committed、incomplete、错误状态恢复和空响应处理 |
+| API 调度 | `src/lib/pool/api-scheduler.mjs` | endpoint/model/key 轮询和模型目录 |
+| 代理池 | `src/lib/vm/proxy-pool.mjs:1-63` | 多协议代理、容量、探测、失败禁用、绑定 VM 和出口时区 |
+| 请求日志与计费字段 | `src/lib/admin/request-log.mjs:1-220` | normal/debug、脱敏、usage、图片、搜索、价格来源和保留 |
+| 备份 | `src/lib/admin/backup-service.mjs:1-36` | 在线一致性快照、manifest、SHA、worker、restore 期间 503 |
+| 在线更新 | `src/lib/admin/release.mjs` | 版本解析、架构、下载、更新和发布信息 |
+| 供应商平台 | `docs/supplier-platform/02-permission-matrix.md`、`07-implementation-and-acceptance.md` | 角色、能力范围、资源、结算、验收和回退边界 |
+
+## 本轮核查命令
+
+以下命令用于生成研究范围和现状索引；它们不是业务验证：
+
+```text
+git -C /Users/luhonglin/Git/codex-proxy-rs status --short --branch
+git -C /Users/luhonglin/Git/codex-proxy-rs log -8 --date=short --pretty='%h %ad %s'
+git -C /Users/luhonglin/Git/vm2api status --short --branch
+git -C /Users/luhonglin/Git/vm2api log -8 --date=short --pretty='%h %ad %s'
+rg --files /Users/luhonglin/Git/codex-proxy-rs
+rg --files /Users/luhonglin/Git/vm2api
+rg -n '^#{1,4} ' codex-proxy-rs/docs codex-proxy-rs/deploy
+rg -n 'revision|snapshot|attempt|continuation|diagnostic|quota|backup|plugin' vm2api/src vm2api/docs
+```
+
+## 证据限制
+
+- 研究依据是本地源码和文档，没有把 CPR 的远程 CI、生产配置或线上预览当作行为证明
+- CPR 文档非常详细，但规划采用前仍需回到对应源码和测试确认边界
+- tapmodels 的一些功能分散在 Node、Go、Rust、VM 和控制台，名称相同不代表语义等效
+- 本目录没有执行真实供应商推理、生产数据库迁移、Docker 部署或远程节点操作

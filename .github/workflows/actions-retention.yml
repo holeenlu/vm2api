@@ -1,0 +1,33 @@
+name: Actions retention
+
+on:
+  workflow_run:
+    workflows: [ci, guest-images, pr-rerun, Versioned system release, Upstream sync preview]
+    types: [completed]
+  schedule:
+    - cron: '31 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: tapmodels-actions-retention
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    if: github.repository == 'holeenlu/vm2api' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Keep the latest ten runs across all workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/release/prune_action_runs.py --apply

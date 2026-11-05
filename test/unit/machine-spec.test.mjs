@@ -26,8 +26,8 @@ test('normalizeVmConfig fills defaults and replaces invalid fields', () => {
     allow_tcg: 'yes',
     smbios: { manufacturer: 'Bad,Inc', product: '' },
   })
-  assert.equal(out.memory, '512m')
-  assert.equal(out.vcpus, 2)
+  assert.equal(out.memory, '4g')
+  assert.equal(out.vcpus, 4)
   assert.equal(out.disk_gb, 20)
   assert.equal(out.cpu_model, 'host')
   assert.equal(out.default_runtime, 'docker')
@@ -115,7 +115,7 @@ test('resolveMachineSpec override precedence and invalid_machine', () => {
 
   const base = resolveMachineSpec({ config: { memory: '2g' } })
   assert.equal(base.memory, '2g')
-  assert.equal(base.vcpus, 2)
+  assert.equal(base.vcpus, 4)
 
   assert.throws(
     () => resolveMachineSpec({ overrides: { memory: '3g' } }),
@@ -127,11 +127,11 @@ test('resolveMachineSpec override precedence and invalid_machine', () => {
   )
 })
 
-test('slotMemory prefers the slot then routing then 512m', () => {
+test('slotMemory prefers the slot then routing then 4g', () => {
   assert.equal(slotMemory({ machine: { memory: '4g' } }, { vm: { memory: '2g' } }), '4g')
   assert.equal(slotMemory({ machine: {} }, { vm: { memory: '2g' } }), '2g')
   assert.equal(slotMemory(null, { vm: { memory: '8g' } }), '8g')
-  assert.equal(slotMemory(null, null), '512m')
+  assert.equal(slotMemory(null, null), '4g')
   assert.equal(slotMemory({ machine: { memory: 'nope' } }, { vm: { memory: '2g' } }), '2g')
 })
 
@@ -180,4 +180,17 @@ test('create picks a random catalog portrait and an existing brand stays', () =>
   assert.equal(bare.machine.memory, '512m')
   assert.ok(SMBIOS_CATALOG.some((item) => item.product === bare.machine.smbios.product))
   assert.equal(ensureSlotSmbios(bare), false)
+})
+
+test('new Docker slots persist the configured CPU quota while KVM and explicit overrides stay distinct', () => {
+  const defaults = resolveMachineSpec({ runtime: 'docker' })
+  assert.equal(defaults.memory, '4g')
+  assert.equal(defaults.vcpus, 4)
+  assert.equal(defaults.docker_cpus, 4)
+  assert.equal(resolveMachineSpec({ config: { vcpus: 8 }, runtime: 'docker' }).docker_cpus, 8)
+  assert.equal(resolveMachineSpec({ config: { vcpus: 8 }, overrides: { vcpus: 2 }, runtime: 'docker' }).docker_cpus, 2)
+  assert.equal(resolveMachineSpec({ overrides: { docker_cpus: 0 }, runtime: 'docker' }).docker_cpus, 0)
+  assert.equal(resolveMachineSpec({ overrides: { docker_cpus: 0.5 }, runtime: 'docker' }).docker_cpus, 0.5)
+  assert.equal(Object.hasOwn(resolveMachineSpec({ runtime: 'kvm' }), 'docker_cpus'), false)
+  assert.equal(Object.hasOwn(resolveMachineSpec({ config: { default_runtime: 'kvm' } }), 'docker_cpus'), false)
 })

@@ -1,10 +1,12 @@
 import * as React from 'react'
+import { enUS, zhCN, zhTW, ja } from 'date-fns/locale'
 import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
 } from 'lucide-react'
 import { DayButton, DayPicker, getDefaultClassNames } from 'react-day-picker'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Button, buttonVariants } from '@/components/ui/button'
 
@@ -15,15 +17,48 @@ function Calendar({
   captionLayout = 'label',
   buttonVariant = 'ghost',
   formatters,
+  labels,
   components,
   ...props
 }: React.ComponentProps<typeof DayPicker> & {
   buttonVariant?: React.ComponentProps<typeof Button>['variant']
 }) {
+  const { i18n, t } = useTranslation('common')
+  const locale =
+    { 'en-US': enUS, 'zh-CN': zhCN, 'zh-TW': zhTW, 'ja-JP': ja }[
+      i18n.resolvedLanguage ?? 'zh-CN'
+    ] ?? zhCN
   const defaultClassNames = getDefaultClassNames()
 
   return (
     <DayPicker
+      locale={locale}
+      labels={{
+        labelNext: () => t('calendarNextMonth'),
+        labelPrevious: () => t('calendarPreviousMonth'),
+        labelMonthDropdown: () => t('calendarMonth'),
+        labelYearDropdown: () => t('calendarYear'),
+        labelNav: () => t('calendarNavigation'),
+        labelWeekNumber: (week) => t('calendarWeek', { week }),
+        labelWeekNumberHeader: () => t('calendarWeekHeader'),
+        labelDayButton: (date, modifiers) =>
+          t(
+            modifiers.today
+              ? modifiers.selected
+                ? 'calendarSelectedToday'
+                : 'calendarToday'
+              : modifiers.selected
+                ? 'calendarSelected'
+                : 'calendarDate',
+            {
+              date: new Intl.DateTimeFormat(i18n.resolvedLanguage, {
+                dateStyle: 'full',
+                timeZone: props.timeZone,
+              }).format(date),
+            }
+          ),
+        ...labels,
+      }}
       showOutsideDays={showOutsideDays}
       className={cn(
         'group/calendar bg-background p-3 [--cell-size:--spacing(8)] in-data-[slot=card-content]:bg-transparent in-data-[slot=popover-content]:bg-transparent',
@@ -34,7 +69,7 @@ function Calendar({
       captionLayout={captionLayout}
       formatters={{
         formatMonthDropdown: (date) =>
-          date.toLocaleString('default', { month: 'short' }),
+          date.toLocaleString(i18n.resolvedLanguage, { month: 'short' }),
         ...formatters,
       }}
       classNames={{
