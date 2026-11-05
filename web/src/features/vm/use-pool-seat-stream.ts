@@ -8,6 +8,7 @@ import type {
   VmDetailPayload,
 } from '@/types/panel-vm'
 import { panelFetch } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 import { hasSession } from '@/lib/session'
 import { vmsListQueryOptions } from '@/features/vm/queries'
 
@@ -142,9 +143,10 @@ type Dashboard = { vms?: Vm[] }
  * 总览和详情缓存。EventSource 不能带 Bearer，所以用 fetch 读流；断线期间
  * 各页照常靠轮询刷新。
  */
-export function usePoolSeatStream() {
+export function usePoolSeatStream(enabled = true) {
   const qc = useQueryClient()
   useEffect(() => {
+    if (!enabled) return
     const listKey = vmsListQueryOptions().queryKey
     const ctrl = new AbortController()
     let retry: number | undefined
@@ -162,13 +164,13 @@ export function usePoolSeatStream() {
           : prev
       )
       qc.setQueriesData<Dashboard>(
-        { queryKey: ['panel', 'dashboard'] },
+        { queryKey: panelQueryKeys.dashboard() },
         (prev) => (prev?.vms ? { ...prev, vms: prev.vms.map(patch) } : prev)
       )
       // 详情页 `['panel','vm',id]`；子查询（seed / credential …）键更长，跳过。
       qc.setQueriesData<VmDetailPayload>(
         {
-          queryKey: ['panel', 'vm'],
+          queryKey: panelQueryKeys.vm(),
           predicate: (query) => query.queryKey.length === 3,
         },
         (prev) => {
@@ -233,5 +235,5 @@ export function usePoolSeatStream() {
       ctrl.abort()
       clearTimeout(retry)
     }
-  }, [qc])
+  }, [qc, enabled])
 }

@@ -79,8 +79,14 @@ export async function syncClaudeCatalog({ projectRoot, runOauth = runSlotOauth }
 }
 
 /** Live ChatGPT Codex catalog → gpt_model_policy. Timers never rotate OAuth; the panel button may. */
-export async function syncGptCatalog({ projectRoot, vmId = '', catalogClientVersion = 'auto', rotate = false } = {}) {
-  const result = await syncCodexCatalog({ projectRoot, vmId, rotate, catalogClientVersion })
+export async function syncGptCatalog({
+  projectRoot,
+  vmId = '',
+  catalogClientVersion = 'auto',
+  rotate = false,
+  gatewayWorker = null,
+} = {}) {
+  const result = await syncCodexCatalog({ projectRoot, vmId, rotate, catalogClientVersion, gatewayWorker })
   if (!result.ok) {
     const skipped = result.error === 'no_codex_slot' || result.error === 'proxy_required'
     writeCatalogSync('codex', syncStatus(skipped ? 'skipped' : 'error', { error: result.error }))
@@ -93,7 +99,12 @@ export async function syncGptCatalog({ projectRoot, vmId = '', catalogClientVers
 /**
  * @param {{ projectRoot: string, codexCatalogVersion?: () => string, log?: (event: object) => void }} opts
  */
-export function createCatalogMonitor({ projectRoot, codexCatalogVersion = () => 'auto', log = () => {} } = {}) {
+export function createCatalogMonitor({
+  projectRoot,
+  codexCatalogVersion = () => 'auto',
+  getGatewayWorker = () => null,
+  log = () => {},
+} = {}) {
   const timers = []
   let running = false
   const guard = (name, fn) => async () => {
@@ -107,7 +118,11 @@ export function createCatalogMonitor({ projectRoot, codexCatalogVersion = () => 
   const modelsDev = guard('models.dev', () => syncModelsDev())
   const upstream = guard('upstream', async () => {
     const claude = await syncClaudeCatalog({ projectRoot })
-    await syncGptCatalog({ projectRoot, catalogClientVersion: codexCatalogVersion() })
+    await syncGptCatalog({
+      projectRoot,
+      catalogClientVersion: codexCatalogVersion(),
+      gatewayWorker: getGatewayWorker(),
+    })
     return claude
   })
 

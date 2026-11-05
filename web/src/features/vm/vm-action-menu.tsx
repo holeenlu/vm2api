@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { t as tr } from '@/i18n'
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import {
   BarChart3,
@@ -7,14 +9,15 @@ import {
   LifeBuoy,
   Link2,
   MoreHorizontal,
+  Pencil,
   Play,
   RefreshCw,
   RotateCcw,
   Star,
   Trash2,
-  Undo2,
   UserRoundPlus,
 } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { canRefreshCredential, credTypeOf } from '@/lib/cred-type'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -29,16 +32,15 @@ import { meQueryOptions } from '@/features/auth/queries'
 import { isActiveVmPointer } from '@/features/vm/active-vm'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { useVmActions } from '@/features/vm/vm-actions-context'
-import { canReclaimVm } from '@/features/vm/vm-owner'
 import { VmPackageDialog } from '@/features/vm/vm-package-dialog'
-import { useVmPerms } from '@/features/vm/vm-perms'
+import { useVmPerms, vmPermsFor } from '@/features/vm/vm-perms'
 
 /** 无法刷新时给出原因，与详情页 refreshBlocked 文案一致。 */
 export function refreshBlockedReason(vm: Vm): string {
   if (canRefreshCredential(vm)) return ''
   return credTypeOf(vm) === 'apikey'
-    ? 'Console API Key 不能刷新'
-    : '没有 refresh 令牌，无法刷新'
+    ? tVm('vm:detailPage.consoleAPIKeysCannotBeRefreshed')
+    : tVm('vm:vmActionMenu.noRefreshTokenCannotRefresh')
 }
 
 /**
@@ -52,12 +54,14 @@ export function VmActionMenu({
   vm: Vm
   className?: string
 }) {
-  const actions = useVmActions()
+  const { t: tVm } = useTranslation('vm')
+
+  const actions = useVmActions(vm)
   const me = useQuery(meQueryOptions())
   const [packOpen, setPackOpen] = useState(false)
   const blocked = refreshBlockedReason(vm)
   const restricted = restrictionTitle(vm)
-  const admin = me.data?.role === 'admin'
+  const admin = vmPermsFor(me.data).manage
   const perms = useVmPerms()
   return (
     <>
@@ -67,7 +71,7 @@ export function VmActionMenu({
             size='icon'
             variant='ghost'
             className={cn('size-7 text-muted-foreground', className)}
-            aria-label={`更多操作 ${vm.id}`}
+            aria-label={tVm('vm:vmActionMenu.moreActionsFor', { id: vm.id })}
             onClick={(e) => e.stopPropagation()}
           >
             <MoreHorizontal className='size-4' />
@@ -78,57 +82,81 @@ export function VmActionMenu({
           className='w-44'
           onClick={(e) => e.stopPropagation()}
         >
-          {perms.test ? (
+          {actions.openEdit ? (
+            <DropdownMenuItem onSelect={() => actions.openEdit?.(vm)}>
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.editAccount'
+                components={{ part0: <Pencil /> }}
+              />
+            </DropdownMenuItem>
+          ) : null}
+          {perms.edit ? (
             <DropdownMenuItem onSelect={() => actions.openTest(vm)}>
-              <Play className='text-[color:var(--status-ok)]' />
-              测试链接
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.testConnection'
+                components={{
+                  part0: <Play className='text-[color:var(--status-ok)]' />,
+                }}
+              />
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem onSelect={() => actions.openStats(vm)}>
-            <BarChart3 className='text-[color:var(--tier-pro-solid)]' />
-            查看统计
+            <Trans
+              ns='vm'
+              i18nKey='vmActionMenu.viewStatistics'
+              components={{
+                part0: (
+                  <BarChart3 className='text-[color:var(--tier-pro-solid)]' />
+                ),
+              }}
+            />
           </DropdownMenuItem>
-          {perms.credential ? (
+          {perms.edit ? (
             <>
               <DropdownMenuItem onSelect={() => actions.openReauth(vm)}>
-                <Link2 />
-                重新授权
+                <Trans
+                  ns='vm'
+                  i18nKey='vmActionMenu.reauthorize'
+                  components={{ part0: <Link2 /> }}
+                />
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={Boolean(blocked) || actions.refreshingId === vm.id}
                 title={blocked || undefined}
                 onSelect={() => actions.refreshToken(vm)}
               >
-                <RefreshCw />
-                刷新令牌
+                <Trans
+                  ns='vm'
+                  i18nKey='vmActionMenu.refreshToken'
+                  components={{ part0: <RefreshCw /> }}
+                />
               </DropdownMenuItem>
             </>
           ) : null}
-          {admin ? (
+          {admin && actions.packageExport !== false ? (
             <DropdownMenuItem onSelect={() => setPackOpen(true)}>
-              <Download />
-              打包 JSON
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.exportJSONPackage'
+                components={{ part0: <Download /> }}
+              />
             </DropdownMenuItem>
           ) : null}
-          {admin && actions.openAssignOwner ? (
+          {actions.openAssignGroups ? (
             <DropdownMenuItem
-              disabled={actions.ownerBusyId === vm.id}
-              onSelect={() => actions.openAssignOwner?.(vm)}
+              disabled={actions.groupsBusyId === vm.id}
+              onSelect={() => actions.openAssignGroups?.(vm)}
             >
-              <UserRoundPlus />
-              分配给租户
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.assignGroups'
+                components={{ part0: <UserRoundPlus /> }}
+              />
             </DropdownMenuItem>
           ) : null}
-          {admin && actions.reclaimOwner && canReclaimVm(vm) ? (
-            <DropdownMenuItem
-              disabled={actions.ownerBusyId === vm.id}
-              onSelect={() => actions.reclaimOwner?.(vm)}
-            >
-              <Undo2 />
-              收回
-            </DropdownMenuItem>
-          ) : null}
-          {actions.activate ? (
+          {perms.edit && actions.activate ? (
             <DropdownMenuItem
               disabled={
                 actions.activatingId === vm.id ||
@@ -136,8 +164,8 @@ export function VmActionMenu({
               }
               title={
                 isActiveVmPointer(vm)
-                  ? '清空面板默认槽位，不影响调度'
-                  : '写入 vms/active.json，面板默认接口指向此槽'
+                  ? tr('vm:sync14008ClearActiveHelp')
+                  : tr('vm:sync14008SetActiveHelp')
               }
               onSelect={() =>
                 isActiveVmPointer(vm)
@@ -146,29 +174,44 @@ export function VmActionMenu({
               }
             >
               <Star />
-              {isActiveVmPointer(vm) ? '取消活跃' : '设为活跃'}
+              {isActiveVmPointer(vm)
+                ? tr('vm:detailOpsTab.clearActive')
+                : tr('vm:detailOpsTab.setActive')}
             </DropdownMenuItem>
           ) : null}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            disabled={!restricted || actions.recoveringId === vm.id}
-            title={restricted ?? '当前没有冷却或熔断'}
-            onSelect={() => actions.recover(vm)}
-          >
-            <RotateCcw />
-            恢复状态
-          </DropdownMenuItem>
-          {perms.power ? (
-            <DropdownMenuItem onSelect={() => actions.openRecovery(vm)}>
-              <LifeBuoy />
-              恢复服务
+          {perms.edit ? <DropdownMenuSeparator /> : null}
+          {perms.edit ? (
+            <DropdownMenuItem
+              disabled={!restricted || actions.recoveringId === vm.id}
+              title={
+                restricted ?? tVm('vm:vmActionMenu.noCooldownOrOpenCircuit')
+              }
+              onSelect={() => actions.recover(vm)}
+            >
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.restoreStatus'
+                components={{ part0: <RotateCcw /> }}
+              />
+            </DropdownMenuItem>
+          ) : null}
+          {perms.edit && actions.openRecovery ? (
+            <DropdownMenuItem onSelect={() => actions.openRecovery?.(vm)}>
+              <Trans
+                ns='vm'
+                i18nKey='testChatResultCard.recoverService'
+                components={{ part0: <LifeBuoy /> }}
+              />
             </DropdownMenuItem>
           ) : null}
           {actions.reset || actions.remove ? <DropdownMenuSeparator /> : null}
           {actions.reset ? (
             <DropdownMenuItem onSelect={() => actions.reset?.(vm)}>
-              <RotateCcw />
-              重置槽位
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.resetSlot'
+                components={{ part0: <RotateCcw /> }}
+              />
             </DropdownMenuItem>
           ) : null}
           {actions.remove ? (
@@ -176,13 +219,16 @@ export function VmActionMenu({
               variant='destructive'
               onSelect={() => actions.remove?.(vm)}
             >
-              <Trash2 />
-              删除
+              <Trans
+                ns='vm'
+                i18nKey='vmActionMenu.delete'
+                components={{ part0: <Trash2 /> }}
+              />
             </DropdownMenuItem>
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
-      {admin ? (
+      {admin && actions.packageExport !== false ? (
         <VmPackageDialog
           vmId={vm.id}
           open={packOpen}

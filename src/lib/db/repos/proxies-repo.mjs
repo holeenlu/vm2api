@@ -22,6 +22,9 @@ const COLUMNS = [
   'name',
   'label',
   'owner_user_id',
+  'vendor_id',
+  'vendor_resource_id',
+  'platforms_json',
   'bound_vm_id',
   'consecutive_failures',
   'latency_ms',
@@ -48,12 +51,34 @@ const COLUMNS = [
   'created_at',
   'updated_at',
   'domain_forward',
+  'quality_json',
+  'quality_version',
+  'expires_at',
+  'fallback_mode',
+  'backup_proxy_id',
+  'max_websocket_connections',
+  'request_location_mode',
+  'location_country',
+  'location_region',
+  'location_city',
+  'location_timezone',
 ]
 
 function rowToProxy(row) {
   if (!row) return null
   // ProxyPool still speaks `scheme`; the column is sub2api's `protocol`.
-  return { ...row, scheme: row.protocol, enabled: !!row.enabled, domain_forward: !!row.domain_forward }
+  let platforms = []
+  try {
+    const parsed = JSON.parse(row.platforms_json || '[]')
+    platforms = Array.isArray(parsed) ? parsed : []
+  } catch {}
+  return {
+    ...row,
+    scheme: row.protocol,
+    platforms,
+    enabled: !!row.enabled,
+    domain_forward: !!row.domain_forward,
+  }
 }
 
 export class ProxiesRepo {
@@ -80,7 +105,12 @@ export class ProxiesRepo {
           ...COLUMNS.map((c) => {
             if (c === 'enabled') return p.enabled === false ? 0 : 1
             if (c === 'domain_forward') return p.domain_forward ? 1 : 0
+            if (c === 'quality_version') return p.quality_version || 0
+            if (c === 'fallback_mode') return p.fallback_mode || 'none'
+            if (c === 'max_websocket_connections') return Math.max(0, Number(p.max_websocket_connections) || 0)
+            if (c === 'request_location_mode') return p.request_location_mode || 'inherit'
             if (c === 'protocol') return p.protocol ?? p.scheme ?? 'socks5'
+            if (c === 'platforms_json') return JSON.stringify(Array.isArray(p.platforms) ? p.platforms : [])
             if (c === 'name') return p.name ?? (p.host && p.port != null ? `${p.host}:${p.port}` : p.id)
             return p[c] ?? null
           }),
