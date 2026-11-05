@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createProxyAgent } from '../vm/proxy-agent.mjs'
 import { isSyncableGptCatalogId } from './gpt-ids.mjs'
+import { codexMetadata } from './codex-catalog.mjs'
 
 export { SKIP_GPT, GPT_ID_PREFIX, isGptSeriesId, isSyncableGptCatalogId } from './gpt-ids.mjs'
 
@@ -195,6 +196,7 @@ export function parseCodexModelCatalog(payload) {
     out.push({
       id,
       display_name: String(row.display_name || row.title || id).trim() || id,
+      codex_metadata: codexMetadata(row),
       catalog: sanitizeCodexCatalogMetadata(row),
     })
   }

@@ -1,9 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   modelsDevSyncOutcome,
   resetConfirmText,
   syncConfirmText,
 } from './page-messages'
+
+const originalLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(originalLanguage)
+})
 
 describe('models page confirmations', () => {
   it('asks before a sync would drop unsaved edits', () => {

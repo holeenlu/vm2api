@@ -120,6 +120,20 @@ export function nextNumericIndex(vms) {
   return n
 }
 
+/** Shared operator/supplier naming, including retained account history. */
+export function newVmNaming(existing, historic, requestedName, projectRoot = null) {
+  let reserved = []
+  if (projectRoot) {
+    try {
+      reserved = fs.readdirSync(path.join(projectRoot, 'vms')).map((name) => ({ id: name.replace(/\.json$/, '') }))
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+  const index = nextNumericIndex([...existing, ...historic, ...reserved])
+  return { index, id: 'vm-' + padVm(index), name: String(requestedName || '').trim() || 'vm-' + padVm(index) }
+}
+
 function sh(argv, opts = {}) {
   try {
     const out = execFileSync(argv[0], argv.slice(1), {

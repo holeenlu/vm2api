@@ -14,7 +14,7 @@
 - `queue_wait_ms`：实际等待容量/席位的队列驻留时间。
 - `scheduling_ms`：总调度时间减去实际排队时间。
 
-迁移 `046_request_attempt_scheduler_timing.sql` 为历史行保留 NULL。日志性能条、详情和供应商链分开显示新记录的调度与排队；历史记录显示“调度与排队（未拆分）”，不推算不存在的测量。
+迁移 `053_request_attempt_scheduler_timing.sql` 为历史行保留 NULL。日志性能条、详情和供应商链分开显示新记录的调度与排队；历史记录显示“调度与排队（未拆分）”，不推算不存在的测量。
 
 ## 上游 SQLite 验证
 

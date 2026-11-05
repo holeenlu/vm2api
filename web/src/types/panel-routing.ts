@@ -1,8 +1,7 @@
 import type { RuntimeType } from '@/types/panel-vm'
 
 /** `routing.compatibility.persona_preset`。PUT 严格匹配，不做别名归一化。 */
-export type PersonaPreset =
-  'official' | 'official_full' | 'zero' | 'custom' | 'official_303'
+export type PersonaPreset = 'official' | 'official_full' | 'zero' | 'custom'
 
 /** `routing.compatibility.overlay_preset`。`off` 没有模板体。 */
 export type OverlayPreset = 'off' | 'official' | 'minimal' | 'custom'
@@ -27,6 +26,7 @@ export type PersonaBlock = {
   type?: 'text' | 'wrapper' | 'body'
   text: string
   /** 任一块为 true → 对调用方遮罩这部分 usage。 */
+  role?: 'system'
   hide?: boolean
   /** 渲染后 text.trim() 为空则整块丢弃。 */
   drop_if_empty?: boolean
