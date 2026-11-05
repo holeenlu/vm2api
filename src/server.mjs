@@ -1,5 +1,7 @@
+import { RelayBilling } from './lib/admin/relay-billing.mjs'
+import { migrateRelayScopes } from './lib/admin/relay-migration.mjs'
 /**
- * vm2api — Node control plane.
+ * tapmodels — Node control plane.
  * Inference data plane: one long-lived Go slot worker per VM
  * (slot SOCKS5 + OAuth owner + SSE terminal validation).
  * The gateway converts protocols, schedules the account pool with bounded
@@ -10,6 +12,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import { runtimeMetrics } from './lib/core/runtime-metrics.mjs'
 import { loadConfig, reloadActiveVm, routingConfigFile } from './lib/core/config.mjs'
 import {
   extractApiKey,
@@ -22,6 +25,21 @@ import {
 } from './lib/core/security.mjs'
 import { loadModelPolicy } from './lib/protocol/model-policy.mjs'
 import { gatewayModelCatalog } from './lib/protocol/models.mjs'
+import { migrateRoutingFile, warmCodexSettings } from './lib/executor/settings-store.mjs'
+import { keyModelCatalog } from './lib/protocol/key-models.mjs'
+import { buildPeerLinkSnapshot } from './lib/protocol/cpr-peer-link.mjs'
+import {
+  LIVE_UNSUPPORTED_PATHS,
+  createLiveCallDirectory,
+  createLiveSidebandHandler,
+  isLiveCallPath,
+  liveHangupCallId,
+  liveSipPath,
+  realtimeUnsupportedBody,
+} from './lib/protocol/codex-live.mjs'
+import { normalizePeerSharing } from './lib/admin/peer-sharing.mjs'
+import { codexModelCatalog } from './lib/protocol/codex-catalog.mjs'
+import { handleResponsesCompact } from './lib/protocol/responses-compact.mjs'
 import {
   createCredentialRefreshMonitor,
   normalizeCredentialRefreshConfig,
@@ -29,6 +47,7 @@ import {
 import { createKernelWatchdog, normalizeKernelWatchdogConfig } from './lib/transport/kernel-watchdog.mjs'
 import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
+import { createVendorVmProvisioner } from './lib/vendor/vendor-vm-provisioner.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
 import { createUsageProbeMonitor, normalizeUsageProbeConfig } from './lib/oauth/usage-probe-monitor.mjs'
@@ -44,7 +63,8 @@ import { StickyRouter } from './lib/pool/sticky-router.mjs'
 import { AccountQuota } from './lib/pool/account-quota.mjs'
 import { normalizeTiers } from './lib/pool/quota-tiers.mjs'
 import { ApiKeyStore } from './lib/admin/api-keys.mjs'
-import { keyScopeFromRequest } from './lib/admin/key-scope.mjs'
+import { keyScopeFromRequest, keyScopeFromRecord, groupScopeDenial } from './lib/admin/key-scope.mjs'
+import { detectInboundPlatform } from './lib/protocol/platform-detect.mjs'
 import { GroupsRepo } from './lib/db/repos/groups-repo.mjs'
 import { SettingsRepo } from './lib/db/repos/settings-repo.mjs'
 import { ApiEndpointStore } from './lib/admin/api-endpoints.mjs'
@@ -55,19 +75,22 @@ import { PanelUserStore } from './lib/admin/panel-users.mjs'
 import { RequestLogStore } from './lib/admin/request-log.mjs'
 import {
   bindVmProxy,
+  vmHasSchedulableCredential,
   listVms,
   getVm,
   getActiveVmId,
   setScheduleHold,
   clearScheduleHold,
+  clearLegacyProxyScheduleOff,
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
-import { HOLD_PROXY } from './lib/pool/schedule-state.mjs'
+import { HOLD_MAINTENANCE, HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
+import { ensureSlotInferenceRuntime, reloadSlotReady } from './lib/vm/slot-runtime.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
@@ -101,11 +124,20 @@ import { corsHeadersForRequest } from './lib/http/cors.mjs'
 import { isConsoleEntry, tryServeWebDist } from './lib/http/web-dist.mjs'
 import { createGracefulShutdown } from './lib/http/graceful-shutdown.mjs'
 import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
+import { createRuntimeSnapshot } from './lib/core/runtime-snapshot.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
-import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
+import { handleUserUsage } from './lib/protocol/user-usage.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
+import { tryServeSiteIcon } from './lib/admin/site-branding.mjs'
+import {
+  createGatewayInternalReceiptRoute,
+  createGatewayInternalRegistrationRoute,
+} from './lib/gateway-worker/gateway-routes.mjs'
+import { createWorkerSupervisor } from './lib/gateway-worker/worker-supervisor.mjs'
+import { GatewayWorkerService } from './lib/gateway-worker/gateway-execution.mjs'
+import { createGatewayWorkerReconciler } from './lib/gateway-worker/receipt-reconciler.mjs'
 
 const FEATURES = [
   'passthrough',
@@ -126,15 +158,15 @@ const LIMITATIONS = {
   claude_session: 'sticky commits only after a terminally verified response',
   kernel: 'one Docker container and one long-lived Go worker per slot; not a KVM guest',
   workspace: 'client only; VM/Claude-CLI inference has been removed',
-  forward: 'Rust kernel uses slot egress (SOCKS5 or local) with no Go hop',
-  oauth: 'the Go slot worker Refresher.Ensure is the sole refresh manager and uses the same slot SOCKS5',
+  forward: 'Rust kernel uses slot egress (configured proxy or local) with no Go hop',
+  oauth: 'the Go slot worker Refresher.Ensure is the sole refresh manager and uses the same slot proxy',
   realtime_stream:
     'account failover stops after the first downstream business event; verified mode buffers to message_stop',
 }
 
 const cfg = loadConfig()
 if (!getPanelAdmin().password) {
-  throw new Error('VM2API_ADMIN_PASSWORD must be set; insecure default panel credentials are disabled')
+  throw new Error('TAPMODELS_ADMIN_PASSWORD must be set; insecure default panel credentials are disabled')
 }
 fs.mkdirSync(cfg.paths.captures, { recursive: true })
 
@@ -145,6 +177,7 @@ const allowRate = createRateLimiter({
 
 // --- Persistent store (SQLite, sub2api-inspired) ---
 const dataDir = cfg.paths.data || path.join(cfg.paths.root, 'data')
+let gatewayWorker = null
 openDatabase({ dataDir, pooled: true })
 armWriteBehind(getDb())
 const jevUsageRepo = new JevUsageRepo()
@@ -167,10 +200,6 @@ if (vmSync.upserted || vmSync.rebuilt) {
 if (vmSync.proxy_cli_repaired) {
   console.log(`[vm] repaired proxy_cli_enabled on ${vmSync.proxy_cli_repaired} slot(s)`)
 }
-if (vmSync.reclaimed_vm_ids.length) {
-  console.log(`[vm] reclaimed ${vmSync.reclaimed_vm_ids.length} slot(s) assigned to deleted users`)
-}
-
 // --- P3 sticky + quota ---
 
 const routingConfigPath = routingConfigFile(cfg.paths.project)
@@ -183,6 +212,7 @@ let catalogMonitor = null
 let notifyMonitor = null
 
 let routingConfig = {}
+let runtimeSnapshot = null
 
 let stickyRouter
 let accountQuota
@@ -205,6 +235,12 @@ const routingRt = createRoutingRuntime({
   setRoutingConfig: (v) => {
     routingConfig = v
   },
+  get runtimeSnapshot() {
+    return runtimeSnapshot
+  },
+  getConfigRevision: () => new SettingsRepo().getConfigRevision(),
+  advanceConfigRevision: (expectedRevision) => new SettingsRepo().advanceConfigRevision(expectedRevision),
+  publishRuntimeSnapshot: (nextRouting, revision) => runtimeSnapshot?.publish(nextRouting, revision),
   cfg,
   routingConfigPath,
   get requestLog() {
@@ -281,8 +317,11 @@ const {
   inheritVmScheduling,
   applyVmQuotaOverride,
   migrateLegacyOpenAIPolicies,
+  reloadAccountErrorProtection,
 } = routingRt
 
+await migrateRoutingFile(getDb(), routingConfigPath)
+await warmCodexSettings(getDb())
 routingConfig = loadRoutingConfig()
 migrateLegacyOpenAIPolicies(routingConfig)
 if (routingConfig.official_cc) {
@@ -293,6 +332,10 @@ routingConfig.usage_probe = normalizeUsageProbeConfig(routingConfig.usage_probe)
 routingConfig.notify = normalizeNotifyConfig(routingConfig.notify)
 routingConfig.tiers = normalizeTiers(routingConfig.tiers, routingConfig.quota, routingConfig.concurrency)
 syncTierDefaultsIntoRouting()
+runtimeSnapshot = createRuntimeSnapshot({
+  routingConfig,
+  configRevision: new SettingsRepo().getConfigRevision(),
+})
 stickyRouter = new StickyRouter({ dataDir, config: routingConfig })
 accountQuota = new AccountQuota({
   dataDir,
@@ -319,9 +362,13 @@ try {
 } catch (e) {
   console.warn('[panel-users] bootstrap failed', e?.message || e)
 }
+migrateRelayScopes(apiKeyStore.db, listVms(cfg.paths.project), apiEndpointStore.listRaw())
 attachPanelAuth({
   authenticate: (username, password) => panelUsers.authenticate(username, password),
-  lookupRole: (username) => panelUsers.getByUsername(username)?.role || null,
+  lookupRole: (username) => {
+    const user = panelUsers.getByUsername(username)
+    return user?.enabled ? user.role : null
+  },
 })
 requestLog = new RequestLogStore({
   dataDir: cfg.paths.data,
@@ -368,11 +415,27 @@ proxyPool = new ProxyPool({
   onDisconnectVm: (vmId, reason, proxyId) => {
     setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
   },
+  onRebindVm: async (vmId, proxy) => {
+    const vm = getVm(cfg.paths.project, vmId)
+    if (!vm || !proxy) throw new Error('proxy_expiry_vm_missing')
+    const hold = 'proxy_expiry_rebind'
+    setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: hold })
+    bindVmProxy(cfg.paths.project, vmId, proxy)
+    if (process.env.KIN_CRS_MOCK !== '1' && ['running', 'paused'].includes(vm.status)) {
+      const reloaded = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
+        routing: routingConfig,
+      })
+      if (!reloaded.ok) throw new Error('proxy_expiry_reload_failed')
+    }
+    clearScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: hold })
+  },
   // Lifts only the hold this proxy put on the slot (受限); 调度关 / 不可调度 stay.
   onEnableVm: (vmId, _reason, proxyId) => {
     const hold = getVm(cfg.paths.project, vmId)?.schedule_hold
-    if (hold?.reason !== HOLD_PROXY) return
-    clearScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: hold.detail?.tag == null ? null : proxyId })
+    if (hold?.reason === HOLD_PROXY) {
+      clearScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: hold.detail?.tag == null ? null : proxyId })
+    }
+    clearLegacyProxyScheduleOff(cfg.paths.project, vmId)
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
@@ -535,11 +598,13 @@ usageProbeMonitor = createUsageProbeMonitor({
       poolScheduler.syncQuotaSchedule(vm, account)
     } catch {}
   },
-  probeOne: (vm) => panel.buildProbeOne({ cfg, accountQuota, id: vm.id, routingConfig }),
+  probeOne: (vm, { readOnly = false } = {}) =>
+    panel.buildProbeOne({ cfg, accountQuota, id: vm.id, routingConfig, probeEntitlement: !readOnly }),
 })
 catalogMonitor = createCatalogMonitor({
   projectRoot: cfg.paths.project,
   codexCatalogVersion: () => routingConfig.codex?.catalog_client_version || 'auto',
+  getGatewayWorker: () => gatewayWorker,
   log: (event) => console.log(JSON.stringify(event)),
 })
 notifyMonitor = createNotifyMonitor({
@@ -563,7 +628,11 @@ const backupService = new BackupService({
   projectRoot: cfg.paths.project,
   configDir: path.dirname(routingConfigPath),
 })
-backupService.onRestored((db) => {
+backupService.onBeforeRestore(async () => {
+  await requestLog.pauseStatistics()
+  return () => requestLog.resumeStatistics()
+})
+backupService.onRestored(async (db) => {
   // A restore swaps the DatabaseSync instance and routing files. Rebuild every
   // holder before reporting success; otherwise requests keep stale snapshots
   // or silently write through statements owned by the closed connection.
@@ -571,8 +640,11 @@ backupService.onRestored((db) => {
     store.rebind(db)
   }
   groupsRepo = new GroupsRepo(db)
+  migrateRelayScopes(db, listVms(cfg.paths.project), apiEndpointStore.listRaw())
   apiScheduler.reload(apiEndpointStore.listRaw())
 
+  await migrateRoutingFile(getDb(), routingConfigPath)
+  await warmCodexSettings(getDb())
   routingConfig = loadRoutingConfig()
   migrateLegacyOpenAIPolicies(routingConfig)
   if (routingConfig.official_cc) {
@@ -583,6 +655,7 @@ backupService.onRestored((db) => {
   routingConfig.notify = normalizeNotifyConfig(routingConfig.notify)
   routingConfig.tiers = normalizeTiers(routingConfig.tiers, routingConfig.quota, routingConfig.concurrency)
   syncTierDefaultsIntoRouting()
+  runtimeSnapshot?.publish(routingConfig, new SettingsRepo().getConfigRevision())
 
   stickyRouter.reloadConfig(routingConfig)
   accountQuota.reloadConfig(routingConfig)
@@ -687,6 +760,24 @@ async function refreshWorkerCredentialForVm({ vmId, vmPath, homeDir, vm, force =
 const { json, writeSSEHeaders, readBody, readRawBody } = createRespond(cfg, {
   tcpNodelay: () => routingConfig?.inference?.tcp_nodelay !== false,
 })
+let handleGatewayInternalReceipt = null
+handleGatewayInternalReceipt = createGatewayInternalReceiptRoute({ json, readBody, readRawBody })
+let handleGatewayInternalRegistration = null
+handleGatewayInternalRegistration = createGatewayInternalRegistrationRoute({
+  json,
+  readBody,
+  readRawBody,
+})
+gatewayWorker = new GatewayWorkerService()
+gatewayWorker.startSubscriptionRefresh()
+const gatewayWorkerReconciler = createGatewayWorkerReconciler({ db: getDb(), apiKeyStore })
+gatewayWorkerReconciler.start()
+// 同机 Gateway Worker 由控制面托管：随控制面启停，控制面升级时一并换成新二进制
+const gatewayWorkerSupervisor = createWorkerSupervisor({
+  root: cfg.paths.root,
+  dataDir: cfg.paths.data,
+})
+gatewayWorkerSupervisor.start()
 
 function rejectAuth(req, res, error) {
   req.authError = {
@@ -700,7 +791,9 @@ function rejectAuth(req, res, error) {
 
 function requireAuth(req, res) {
   req.presentedApiKey = extractApiKey(req)
-  const token = extractPanelToken(req) || req.presentedApiKey
+  const token = /^\/(api\/panel|admin)(\/|$)/.test(String(req.url || ''))
+    ? extractPanelToken(req) || req.presentedApiKey
+    : req.presentedApiKey || extractPanelToken(req)
   if (!token) {
     return rejectAuth(
       req,
@@ -716,6 +809,17 @@ function requireAuth(req, res) {
   // Panel session
   const session = verifyPanelSession(token)
   if (session) {
+    if (!/^\/(api\/panel|api\/vendor|api\/admin\/vendors|admin)(\/|$)/.test(String(req.url || '')))
+      return rejectAuth(
+        req,
+        res,
+        makeError({
+          type: ErrorType.PERMISSION,
+          code: 'api_key_required',
+          message: '推理接口必须使用 API Key，控制台会话不能调用',
+          status: 403,
+        }),
+      )
     if (!allowRate('panel:' + session.user)) {
       return rejectAuth(
         req,
@@ -723,16 +827,16 @@ function requireAuth(req, res) {
         makeError({
           type: ErrorType.RATE_LIMIT,
           code: ErrorCode.GATEWAY_RATE_LIMIT,
-          message: 'Gateway rate limit exceeded. Retry later.',
+          message: 'Request rate limit exceeded. Retry later.',
           status: 429,
         }),
       )
     }
     req.panelUser = session.user
-    req.panelRole = session.role || panelUsers.getByUsername(session.user)?.role || 'user'
     const rec = panelUsers.getByUsername(session.user)
+    req.panelRole = rec?.role || 'user'
     req.panelUserId = rec?.id || null
-    req.panelVmCreateQuota = rec?.vm_create_quota ?? 0
+    req.panelResourcePermissions = rec?.resource_permissions || []
     return true
   }
   // Master env API key — unlimited admin
@@ -744,13 +848,13 @@ function requireAuth(req, res) {
         makeError({
           type: ErrorType.RATE_LIMIT,
           code: ErrorCode.GATEWAY_RATE_LIMIT,
-          message: 'Gateway rate limit exceeded. Retry later.',
+          message: 'Request rate limit exceeded. Retry later.',
           status: 429,
         }),
       )
     }
     req.apiKeyKind = 'master'
-    req.panelRole = 'admin'
+    req.panelRole = 'super_admin'
     req.panelUser = 'master'
     return true
   }
@@ -769,7 +873,9 @@ function requireAuth(req, res) {
       }),
     )
   }
-  const gate = apiKeyStore.canAccept(managed.record)
+  const gate = apiKeyStore.permitsIp(managed.record, req.socket?.remoteAddress)
+    ? apiKeyStore.canAccept(managed.record)
+    : { ok: false, code: 'ip_not_allowed', message: '来源 IP 不在允许范围', status: 403 }
   if (!gate.ok) {
     const type =
       gate.status === 429
@@ -796,7 +902,7 @@ function requireAuth(req, res) {
       makeError({
         type: ErrorType.RATE_LIMIT,
         code: ErrorCode.GATEWAY_RATE_LIMIT,
-        message: 'Gateway rate limit exceeded. Retry later.',
+        message: 'Request rate limit exceeded. Retry later.',
         status: 429,
       }),
     )
@@ -804,6 +910,39 @@ function requireAuth(req, res) {
   req.apiKeyKind = 'managed'
   req.apiKeyRecord = managed.record
   return true
+}
+
+// CPR 互联只读快照：只接受推理 Key（不接受控制台会话或主密钥），不做预算放行、RPM 计数或最近使用更新，
+// 预算耗尽后仍可查询；Key 必须开启 peer_sharing.enabled 且绑定分组。
+function handleCprPeerLink(req, res) {
+  res.setHeader('Cache-Control', 'no-store')
+  const token = extractApiKey(req)
+  const managed = token ? apiKeyStore.authenticate(token) : { ok: false }
+  const record = managed.ok ? apiKeyStore.getById(managed.record.id) || managed.record : null
+  if (!record || !apiKeyStore.permitsIp(record, req.socket?.remoteAddress)) {
+    return json(res, 401, {
+      error: { type: 'authentication_error', code: 'invalid_api_key', message: 'Invalid credentials' },
+    })
+  }
+  if (!normalizePeerSharing(record.peer_sharing).enabled || !record.group_id || record.status === 'disabled') {
+    return json(res, 403, {
+      error: { type: 'permission_error', code: 'peer_sharing_disabled', message: '该 Key 未开启互联共享' },
+    })
+  }
+  let models = []
+  try {
+    const scope = keyScopeFromRecord({ ...record, status: 'active' }, apiKeyStore.db)
+    if (!scope.error) {
+      models = keyModelCatalog({ scope, api: false, apiScheduler, projectRoot: cfg.paths.project })
+        .data.map((model) => model.id)
+        .filter((id) => detectInboundPlatform(id).platform === 'openai')
+    }
+  } catch {}
+  return json(
+    res,
+    200,
+    buildPeerLinkSnapshot({ db: apiKeyStore.db, record, models, keyLimits: apiKeyStore.effectiveLimits(record) }),
+  )
 }
 
 function fetchWorkerModels(opts = {}) {
@@ -832,7 +971,10 @@ const importCommit = createImportCommit({
 
 const { commitImportedOauth, requireSlotProxy, officialCcStatsHandler } = importCommit
 
-const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
+// Codex Live：call → Worker 实例登记由通话引导与 sideband 共用
+const liveCalls = createLiveCallDirectory()
+const { handleProtocol, handleSearch, handleImages, handleLive, handleLiveHangup } = createHandleProtocol({
+  liveCalls,
   json,
   writeSSEHeaders,
   readBody,
@@ -841,12 +983,14 @@ const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
   requestLog,
   stickyRouter,
   accountQuota,
+  refreshQuotaAfterRequest: (vmId, headers) => usageProbeMonitor?.refreshAfterRequest(vmId, headers),
   apiKeyStore,
   apiScheduler,
   apiEndpointStore,
   stats,
   routingConfigPath,
   getRoutingConfig: () => routingConfig,
+  getRuntimeSnapshot: () => runtimeSnapshot,
   get routingConfig() {
     return routingConfig
   },
@@ -865,6 +1009,7 @@ const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
   get groupsRepo() {
     return groupsRepo
   },
+  gatewayWorker,
 })
 
 const responsesWs = createResponsesWsHandler({
@@ -872,6 +1017,7 @@ const responsesWs = createResponsesWsHandler({
   requireAuth,
   json,
   getRouting: () => routingConfig,
+  getGatewayWorker: () => gatewayWorker,
   maxBodyBytes: cfg.limits.max_body_bytes,
 })
 
@@ -945,12 +1091,19 @@ cliNodeGuard = createCliNodeGuard({
 })
 
 const handlePanel = createPanelHandler({
+  gatewayWorkerSupervisor,
   json,
   writeSSEHeaders,
   readBody,
   readRawBody,
   requireAuth,
   cfg,
+  vendorVmProvisioner: createVendorVmProvisioner({
+    cfg,
+    get routingConfig() {
+      return routingConfig
+    },
+  }),
   routingConfigPath,
   get routingConfig() {
     return routingConfig
@@ -958,6 +1111,11 @@ const handlePanel = createPanelHandler({
   set routingConfig(v) {
     routingConfig = v
   },
+  get runtimeSnapshot() {
+    return runtimeSnapshot
+  },
+  getConfigRevision: () => new SettingsRepo().getConfigRevision(),
+  publishRuntimeSnapshot: (nextRouting, revision) => runtimeSnapshot?.publish(nextRouting, revision),
   stickyRouter,
   accountQuota,
   get poolScheduler() {
@@ -1003,6 +1161,7 @@ const handlePanel = createPanelHandler({
   applyVmMaxSessions,
   inheritVmScheduling,
   applyVmQuotaOverride,
+  reloadAccountErrorProtection,
   initPoolRuntime,
   poolSchedulerConfig,
   commitImportedOauth,
@@ -1010,6 +1169,7 @@ const handlePanel = createPanelHandler({
   officialCcStatsHandler,
   refreshWorkerCredentialForVm,
   fetchWorkerModels,
+  gatewayWorker,
   clusterRoutes,
   clusterManager,
   slotShell,
@@ -1017,7 +1177,14 @@ const handlePanel = createPanelHandler({
 
 const gracefulShutdown = createGracefulShutdown({
   beforeDrain: async () => {
+    runtimeMetrics.stop()
     installJevUsageRecorder(null)
+    try {
+      gatewayWorkerReconciler.stop()
+    } catch {}
+    try {
+      gatewayWorker.stopSubscriptionRefresh()
+    } catch {}
     try {
       vmTestSchedule.stop()
     } catch {}
@@ -1050,6 +1217,10 @@ const gracefulShutdown = createGracefulShutdown({
     } catch {}
   },
   afterDrain: async () => {
+    // Gateway Worker 子进程在排空期间仍要服务在途请求，排空后再停
+    try {
+      gatewayWorkerSupervisor.stop()
+    } catch {}
     try {
       stopVmWatch()
     } catch {}
@@ -1058,6 +1229,10 @@ const gracefulShutdown = createGracefulShutdown({
     } catch {}
     try {
       await clusterManager.stop()
+    } catch {}
+    try {
+      requestLog.stopCleanupScheduler()
+      await requestLog.pauseStatistics()
     } catch {}
     try {
       closeDatabase()
@@ -1093,6 +1268,15 @@ const server = http.createServer(async (req, res) => {
     }
     gracefulShutdown.trackRequest(req, res)
 
+    if (p === '/internal/v1/gateway/receipts') {
+      const handled = await handleGatewayInternalReceipt(req, res, url)
+      if (handled !== false) return
+    }
+    if (p.startsWith('/internal/v1/gateway/workers/')) {
+      const handled = await handleGatewayInternalRegistration(req, res, url)
+      if (handled !== false) return
+    }
+
     if (isTelemetryPath(p)) {
       return json(res, 200, telemetryInterceptResponse(p))
     }
@@ -1107,20 +1291,38 @@ const server = http.createServer(async (req, res) => {
         makeError({
           type: ErrorType.OVERLOADED,
           code: 'restore_in_progress',
-          message: 'Gateway is restoring from backup; retry shortly',
+          message: 'The service is restoring data; retry shortly',
           status: 503,
         }).body,
       )
     }
 
-    if (p.startsWith('/admin') || p.startsWith('/api/panel')) {
+    if (
+      p.startsWith('/admin') ||
+      p.startsWith('/api/panel') ||
+      p.startsWith('/api/vendor') ||
+      p.startsWith('/api/admin/vendors')
+    ) {
       const handled = await handlePanel(req, res, url)
       if (handled !== false) return
     }
 
-    if (req.method === 'GET' && tryServeWebDist(res, cfg.paths.project, p)) return
-    if (req.method === 'GET' && isConsoleEntry(p)) {
-      return json(res, 404, { error: { message: 'console not found; run pnpm -C web build' } })
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/') {
+      res.writeHead(307, { location: '/console/', 'cache-control': 'no-store' })
+      return res.end()
+    }
+
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      // Browser login links must enter the console's hash router.
+      if (/^\/(?:console\/|cc\/)?login\/?$/.test(p)) {
+        res.writeHead(307, { location: `/console/#/login${url.search}`, 'cache-control': 'no-store' })
+        return res.end()
+      }
+      if (tryServeSiteIcon(res, p)) return
+      if (tryServeWebDist(res, cfg.paths.project, p)) return
+      if (isConsoleEntry(p)) {
+        return json(res, 404, { error: { message: 'console not found; run pnpm -C web build' } })
+      }
     }
 
     // CLIProxyAPI-style liveness: no auth, no inference.
@@ -1132,10 +1334,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { status: 'ok' })
     }
 
-    if (req.method === 'GET' && (p === '/' || p === '/health')) {
+    if (req.method === 'GET' && p === '/health') {
       return json(res, 200, {
         status: 'ok',
-        service: 'vm2api',
+        service: 'tapmodels',
         base_url: cfg.base_url,
         rewrite: cfg.rewrite.enabled ? 'on' : 'off',
         intercept_rules: cfg.intercept.rules.length,
@@ -1173,18 +1375,70 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/v1/models') {
       if (!requireAuth(req, res)) return
-      if (resolveInferenceBackend(req) === 'api') {
-        return json(res, 200, apiScheduler.catalog())
-      }
-      const result = await fetchWorkerModels({ groupType: keyScopeFromRequest(req).group_type })
+      const scope = keyScopeFromRequest(req)
+      const denial = groupScopeDenial(scope)
+      if (denial) return json(res, 403, { error: denial })
+      const result = keyModelCatalog({
+        scope,
+        api: resolveInferenceBackend(req) === 'api',
+        apiScheduler,
+        projectRoot: cfg.paths.project,
+      })
+      res.setHeader('Cache-Control', 'private, no-store')
+      if (url.searchParams.get('client_version'))
+        return json(res, 200, codexModelCatalog(result, { bpsModels: gatewayWorker?.bpsModels(req, routingConfig) }))
       return json(res, 200, result)
+    }
+    // 单个模型详情（对齐 codex-proxy-rs /v1/models/{model_id}）：只返回本 Key 可用目录中的模型
+    if (req.method === 'GET' && p.startsWith('/v1/models/') && p.length > '/v1/models/'.length) {
+      if (!requireAuth(req, res)) return
+      const scope = keyScopeFromRequest(req)
+      const denial = groupScopeDenial(scope)
+      if (denial) return json(res, 403, { error: denial })
+      let modelId = ''
+      try {
+        modelId = decodeURIComponent(p.slice('/v1/models/'.length))
+      } catch {}
+      const result = keyModelCatalog({
+        scope,
+        api: resolveInferenceBackend(req) === 'api',
+        apiScheduler,
+        projectRoot: cfg.paths.project,
+      })
+      const model = modelId ? (result.data || []).find((item) => item.id === modelId) : null
+      res.setHeader('Cache-Control', 'private, no-store')
+      if (!model)
+        return json(res, 404, {
+          error: {
+            message: 'The requested model does not exist or is not available.',
+            type: 'invalid_request_error',
+            param: null,
+            code: 'model_not_found',
+          },
+        })
+      return json(res, 200, model)
     }
     if (req.method === 'POST' && p === '/admin/models/refresh') {
       if (!requireAuth(req, res)) return
       const result = await fetchWorkerModels()
       return json(res, 200, result)
     }
+    if (req.method === 'GET' && (p === '/v1/cpr/link' || p === '/cpr/link')) {
+      return handleCprPeerLink(req, res)
+    }
     if (req.method === 'GET' && p === '/v1/usage') {
+      if (!requireAuth(req, res)) return
+      if (req.apiKeyRecord?.group_id) {
+        const key = req.apiKeyRecord
+        const billing = new RelayBilling(apiKeyStore.db)
+        return json(res, 200, {
+          unit: 'USD',
+          ...billing.balance(key.user_id),
+          group_id: key.group_id,
+          key: { id: key.id, spent: key.quota_used, requests: key.quota_requests_used },
+          subscriptions: billing.subscriptions(key.user_id),
+        })
+      }
       return await handleUserUsage(req, res, {
         json,
         requireAuth,
@@ -1208,6 +1462,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && (p === '/v1/responses' || p === '/responses')) {
       return await handleProtocol(req, res, 'openai.responses', p)
     }
+    if (req.method === 'POST' && (p === '/v1/responses/compact' || p === '/responses/compact')) {
+      return await handleResponsesCompact(req, res, { handleProtocol, readBody, json })
+    }
     if (req.method === 'GET' && (p === '/v1/responses' || p === '/responses')) {
       return json(res, 426, {
         error: {
@@ -1222,6 +1479,15 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && (p === '/v1/alpha/search' || p === '/alpha/search')) {
       return await handleSearch(req, res, p)
+    }
+    if (req.method === 'POST' && isLiveCallPath(p)) {
+      return await handleLive(req, res, p)
+    }
+    if (req.method === 'POST' && liveHangupCallId(p)) {
+      return await handleLiveHangup(req, res, decodeURIComponent(liveHangupCallId(p)))
+    }
+    if (LIVE_UNSUPPORTED_PATHS.has(p) || (req.method === 'POST' && liveSipPath(p))) {
+      return json(res, 501, realtimeUnsupportedBody(LIVE_UNSUPPORTED_PATHS.get(p) || 'Realtime SIP control'))
     }
     if (req.method === 'POST' && (p === '/v1/images/generations' || p === '/images/generations')) {
       return await handleImages(req, res, p, 'generations')
@@ -1243,12 +1509,15 @@ const server = http.createServer(async (req, res) => {
     }
   }
 })
+
+const liveSideband = createLiveSidebandHandler({ requireAuth, getGateway: () => gatewayWorker, directory: liveCalls })
 server.on('upgrade', (req, socket, head) => {
   if (gracefulShutdown.isShuttingDown()) {
     socket.destroy()
     return
   }
   if (responsesWs.handleUpgrade(req, socket, head)) return
+  if (liveSideband.handleUpgrade(req, socket, head)) return
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
   if (!slotShell.handleUpgrade(req, socket, head)) socket.destroy()
 })
@@ -1314,6 +1583,7 @@ server.headersTimeout = 125_000
 server.timeout = 0
 
 server.listen(cfg.port, cfg.host, () => {
+  runtimeMetrics.start()
   try {
     vmTestSchedule.start()
   } catch (e) {
@@ -1335,10 +1605,15 @@ server.listen(cfg.port, cfg.host, () => {
     console.warn('[kernel-watchdog] start failed', e?.message || e)
   }
   // Proxy slots do not auto-start with Docker: boot restores egress before starting recorded-running slots.
+  // Also restore host-side Codex kernels lost with the old control plane.
   if (process.env.KIN_CRS_MOCK !== '1' && normalizeKernelWatchdogConfig(routingConfig.kernel_watchdog).enabled) {
-    reviveDownSlots({ vms: listVms(cfg.paths.project), powerOn: bootSlot, watchdog: kernelWatchdog }).catch((e) =>
-      console.warn('[slot-revive] boot pass failed', e?.message || e),
-    )
+    reviveDownSlots({
+      vms: listVms(cfg.paths.project),
+      powerOn: bootSlot,
+      restoreRuntime: (id) =>
+        ensureSlotInferenceRuntime(getVm(cfg.paths.project, id), cfg.paths.project, { routing: routingConfig }),
+      watchdog: kernelWatchdog,
+    }).catch((e) => console.warn('[slot-revive] boot pass failed', e?.message || e))
   }
   try {
     cliNodeGuard?.start?.({ immediate: true })
@@ -1380,7 +1655,7 @@ server.listen(cfg.port, cfg.host, () => {
   }
   console.log(
     JSON.stringify({
-      event: 'vm2api-started',
+      event: 'tapmodels-started',
       port: boundPort,
       base_url: cfg.base_url,
       active_vm: getActiveVmId(cfg.paths.project),

@@ -13,6 +13,7 @@ import {
 } from './quota-window.mjs'
 import { GATE_DRAINING, GATE_GATED, gateZone, quotaGateOf } from './quota-gate.mjs'
 import { DEFAULT_TIER_POLICIES } from './quota-tiers.mjs'
+import { projectQuotaWindow } from '../usage/quota-window-projection.mjs'
 import { resolveSlotState } from './schedule-state.mjs'
 import { isOfficialUsageRateLimited } from '../oauth/crs-usage-probe.mjs'
 import { expiresAtToMs } from '../oauth/oauth-credentials.mjs'
@@ -130,6 +131,8 @@ function quotaWindows(quota = {}, account = {}) {
   const u = account.unified || {}
   const w5 = headerWindowOrEmpty(u, '5h')
   const w7 = headerWindowOrEmpty(u, '7d')
+  const project = (window, key) =>
+    projectQuotaWindow({ key, used: window.utilization, limit: 1, reset_at: window.reset })
   if (
     quota &&
     (quota.utilization_5h != null || quota.status_5h || quota.status_7d || quota.reset_5h || quota.reset_7d)
@@ -140,8 +143,8 @@ function quotaWindows(quota = {}, account = {}) {
       utilization_7d: quota.utilization_7d ?? w7.utilization,
       status_5h: quota.status_5h || w5.status,
       status_7d: quota.status_7d || w7.status,
-      reset_5h: quota.reset_5h || w5.reset || null,
-      reset_7d: quota.reset_7d || w7.reset || null,
+      reset_5h: project({ ...w5, reset: quota.reset_5h || w5.reset || null }, '5h').reset_at,
+      reset_7d: project({ ...w7, reset: quota.reset_7d || w7.reset || null }, '7d').reset_at,
       last_used_at: quota.last_used_at || account.last_used_at || null,
     }
   }
@@ -150,9 +153,8 @@ function quotaWindows(quota = {}, account = {}) {
     utilization_7d: w7.utilization,
     status_5h: w5.status,
     status_7d: w7.status,
-    weekly_split: quota.weekly_split || account.weekly_split || u.weekly_split,
-    reset_5h: w5.reset,
-    reset_7d: w7.reset,
+    reset_5h: project(w5, '5h').reset_at,
+    reset_7d: project(w7, '7d').reset_at,
     last_used_at: account.last_used_at || quota.last_used_at || null,
   }
 }
@@ -337,12 +339,14 @@ export function evaluateAccount({
   // sub2api IsSchedulable: live rate_limit_reset_at / overload_until win over passive Extra.
   if (hardBlock?.until > now) {
     const overloaded = hardBlock.reason === 'overloaded'
+    const window = /^quota_(5h|7d)/.exec(hardBlock.reason || '')?.[1] || null
     return finish(base, {
       key: overloaded ? 'cool' : 'quota',
-      text: overloaded ? '过载冷却' : '限流中',
+      text: overloaded ? '过载冷却' : window ? `${window} 限制` : '限流中',
       accept: false,
       usable: true,
       reason: hardBlock.reason,
+      ...(window ? { window } : {}),
       until: hardBlock.until,
     })
   }
@@ -420,17 +424,6 @@ export function evaluateAccount({
     })
   }
 
-  const split = q.weekly_split
-  if (split?.enabled && split.mode === 'fable_only') {
-    return finish(base, {
-      key: 'quota',
-      text: '普通限制',
-      accept: true,
-      usable: true,
-      reason: 'weekly_split_regular',
-    })
-  }
-
   const tempUntil = Number(claude.temp_unschedulable_until || vm.temp_unschedulable_until || 0)
   const coolUntil = Math.max(
     Number(cooldownUntil || account.cooldown_until || vm.cooldown_until || 0),
@@ -503,6 +496,26 @@ export function isQuotaWindowReason(reason) {
 /** Account-scope quota / 429 parks stored on temp_unschedulable_* + runtime cooldown. */
 export function isAccountRestrictionReason(reason) {
   return isQuotaWindowReason(reason) || /^(account_quota_exhausted|rate_limited)$/i.test(String(reason || ''))
+}
+
+function quotaWindowRejected(quota = {}, key, now) {
+  const status = String(quota?.[`status_${key}`] || '').toLowerCase()
+  if (status !== 'rejected' && status !== 'rate_limited') return false
+  const reset = parseResetMs(quota?.[`reset_${key}`])
+  return !Number.isFinite(reset) || reset > now
+}
+
+/**
+ * An account 429 whose headers name the exhausted window reads as that window
+ * (7d before 5h, as anthropic429Reset picks the reset), so one spent window
+ * shows one label whether it was caught passively or by a 429.
+ */
+export function accountLimitReason(reason, { unified = {}, quota = {} } = {}, now = Date.now()) {
+  if (!/^(rate_limited|account_quota_exhausted)$/.test(String(reason || ''))) return reason
+  for (const key of ['7d', '5h']) {
+    if (headerHardBlocked(unified || {}, key, now) || quotaWindowRejected(quota, key, now)) return `quota_${key}_header`
+  }
+  return reason
 }
 
 /** Old Extra auto-off that is not an operator lock. */

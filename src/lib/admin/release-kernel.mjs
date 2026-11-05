@@ -61,13 +61,13 @@ export function isAllowedKernelUrl(raw, { redirect = false } = {}) {
   }
   if (url.protocol !== 'https:' || url.username || url.password) return false
   if (url.hostname === 'api.github.com') {
-    return new RegExp(`^/repos/${GITHUB_REPO}/releases/(?:latest|tags/v\\d+\\.\\d+\\.\\d+|assets/\\d+)$`).test(
-      url.pathname,
-    )
+    return new RegExp(
+      `^/repos/${GITHUB_REPO}/releases/(?:latest|tags/v\\d+\\.\\d+\\.\\d+(?:\\.(?:0|[1-9]\\d*))?|assets/\\d+)$`,
+    ).test(url.pathname)
   }
   if (url.hostname === 'github.com') {
     return new RegExp(
-      `^/${GITHUB_REPO}/releases/download/v\\d+\\.\\d+\\.\\d+/(?:${KERNEL_RELEASE_ASSET}|${CLI_NODE_RELEASE_ASSET}|${CC_NODE_RELEASE_ASSET}|${KERNEL_CRAG_RELEASE_ASSET}|crag-v2-licensed-amd64\\.tar\\.gz)$`,
+      `^/${GITHUB_REPO}/releases/download/v\\d+\\.\\d+\\.\\d+(?:\\.(?:0|[1-9]\\d*))?/(?:${KERNEL_RELEASE_ASSET}|${CLI_NODE_RELEASE_ASSET}|${CC_NODE_RELEASE_ASSET}|${KERNEL_CRAG_RELEASE_ASSET}|crag-v2-licensed-amd64\\.tar\\.gz)$`,
     ).test(url.pathname)
   }
   return (
@@ -201,7 +201,7 @@ export async function openKernelReleaseAsset(startUrl, fetchImpl = globalThis.fe
       current = new URL(loc, current).href
       headers = {
         Accept: 'application/octet-stream',
-        'User-Agent': 'vm2api-release-check',
+        'User-Agent': 'tapmodels-release-check',
       }
       continue
     }
@@ -257,7 +257,7 @@ export async function downloadReleaseKernel({ tag = '', fetchImpl = globalThis.f
   if (trimmed) {
     const normalized = normalizeTag(trimmed)
     if (!normalized || !isReleaseTag(normalized)) {
-      return { ok: false, code: 'kernel_tag_invalid', error: 'Release tag 必须是 vX.Y.Z' }
+      return { ok: false, code: 'kernel_tag_invalid', error: 'Release tag 必须是 vX.Y.Z.N（历史三段版本也支持）' }
     }
     metaUrl = `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${normalized}`
   }

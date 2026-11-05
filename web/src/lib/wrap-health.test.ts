@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest'
+import { i18n } from '@/i18n'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   kernelHopReady,
   kernelProcessUp,
   wrapHealthLabel,
   wrapSyncKernelFails,
 } from './wrap-health'
+
+// Keep the existing Chinese UI assertions independent of the host locale.
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('wrapHealthLabel', () => {
   it('shows cli-hop ready slots from worker_version not version', () => {

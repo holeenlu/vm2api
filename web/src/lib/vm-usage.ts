@@ -1,8 +1,11 @@
+import { t } from '@/i18n'
 import type { BillingAccountRow } from '@/types/panel-overview'
 import type { WindowEstimate } from '@/types/panel-pricing'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm, VmClosedWindow } from '@/types/panel-vm'
 import { fmtNum, fmtUsd } from '@/lib/format'
+import { fixedNumber } from '@/lib/locale-format'
+import { systemDate, systemDateTime } from '@/lib/system-time'
 
 function num(v: unknown): number {
   const n = Number(v)
@@ -169,7 +172,7 @@ export function vmCacheHitPct(
 
 export function fmtHitPct(p: number | null): string {
   if (p == null || !Number.isFinite(p)) return '—'
-  return `${p.toFixed(p >= 10 ? 1 : 2)}%`
+  return `${fixedNumber(p, p >= 10 ? 1 : 2)}%`
 }
 
 export function vmTodayStats(vm: Vm, accounts?: UsageAccountRow[]) {
@@ -272,47 +275,115 @@ export type VmLedgerRow = {
   label: string
   cost: number
   tokens: number
+  /** 统计范围说明（悬停提示）；明细已按保留期清理时说明从哪天起算。 */
+  hint?: string
 }
 
-/** 一台槽位的费用与 token 只走这一份：5H / 7D 窗口 + 账号总计。 */
+/**
+ * 费用来自使用记录明细（含小时汇总），二者随保留期一起清理：
+ * 「总计」只能是保留期内的合计，7D 在覆盖起点晚于窗口起点时也不完整。
+ * `coverageStart` 为后端 `billing.log_coverage_start`，缺失时按原样显示。
+ */
+export function ledgerCoverage(
+  coverageStart: string | null | undefined,
+  now: number = Date.now()
+): { since: string; partial7d: boolean } | null {
+  const at = Date.parse(coverageStart || '')
+  if (!Number.isFinite(at)) return null
+  return {
+    since: systemDate(at).slice(5),
+    partial7d: at > now - 7 * 24 * 3600 * 1000,
+  }
+}
+
+/** 一台槽位的费用与 token 只走这一份：5H / 7D 窗口 + 保留期内合计。 */
 export function vmCostLedger(
   vm: Vm,
-  accounts?: UsageAccountRow[]
+  accounts?: UsageAccountRow[],
+  coverageStart?: string | null,
+  now: number = Date.now()
 ): VmLedgerRow[] {
   const cost = vmWindowCosts(vm, accounts)
   const tok = vmWindowTokens(vm, accounts)
+  const coverage = ledgerCoverage(coverageStart, now)
+  const sinceHint = coverage
+    ? t('lib:usage.coverageHint', { since: coverage.since })
+    : undefined
   return [
     { key: '5h', label: '5H', cost: cost.h5, tokens: tok.h5 },
-    { key: '7d', label: '7D', cost: cost.d7, tokens: tok.d7 },
+    {
+      key: '7d',
+      label: coverage?.partial7d ? '7D*' : '7D',
+      cost: cost.d7,
+      tokens: tok.d7,
+      hint: coverage?.partial7d ? sinceHint : undefined,
+    },
     {
       key: 'total',
-      label: '总计',
+      label: coverage
+        ? t('lib:usage.totalSince', { since: coverage.since })
+        : t('lib:usage.total'),
       cost: vmTotalCost(vm, accounts),
       tokens: vmTotalTokens(vm, accounts),
+      hint: sinceHint,
     },
   ]
 }
 
-export const ESTIMATE_STATUS_ZH: Record<WindowEstimate['status'], string> = {
-  ok: '估算有效',
-  no_data: '无用量读数',
-  no_reset: '无重置时间',
-  log_gap: '日志未覆盖窗口',
-  low_usage: '用量<5%',
-  unpriced: '窗口内有未定价请求',
-}
-
-const ESTIMATE_CAVEAT = '按官方价估算；账号在网关外使用会偏低'
+export const ESTIMATE_STATUS_LABELS: Record<WindowEstimate['status'], string> =
+  {
+    get ok() {
+      return t('lib:usage.estimateValid')
+    },
+    get no_data() {
+      return t('lib:usage.noReadings')
+    },
+    get no_reset() {
+      return t('lib:usage.noReset')
+    },
+    get log_gap() {
+      return t('lib:usage.logGap')
+    },
+    get low_usage() {
+      return t('lib:usage.lowUsage')
+    },
+    get resampling() {
+      return t('lib:usage.resampling')
+    },
+  }
 
 export function estimateTooltip(
   est: WindowEstimate | null | undefined
 ): string {
-  const bits = [est ? ESTIMATE_STATUS_ZH[est.status] : '暂无估算']
+  const bits = [
+    est ? ESTIMATE_STATUS_LABELS[est.status] : t('lib:usage.noEstimate'),
+  ]
   if (est?.total_tokens != null && Number.isFinite(est.total_tokens)) {
-    bits.push(`约 ${fmtNum(est.total_tokens)} tok`)
+    bits.push(
+      t('lib:usage.estimatedTokens', { tokens: fmtNum(est.total_tokens) })
+    )
   }
-  bits.push(ESTIMATE_CAVEAT)
+  if (est?.status === 'ok' && est.low_sample)
+    bits.push(t('lib:usage.lowSample'))
+  if (est?.status === 'ok' && est.incomplete_cost)
+    bits.push(t('lib:usage.unpriced'))
+  bits.push(t('lib:usage.estimateCaveat'))
   return bits.join('\n')
+}
+
+/** 7D 窗口容量预测（成本列第四行）：只在估算有效时给出金额与 token。 */
+export function vmForecastRow(vm: Pick<Vm, 'estimate_7d'>): {
+  cost: number | null
+  tokens: number | null
+  tooltip: string
+} {
+  const est = vm.estimate_7d
+  const ok = est?.status === 'ok'
+  return {
+    cost: ok && est.total_usd != null ? est.total_usd : null,
+    tokens: ok && est.total_tokens != null ? est.total_tokens : null,
+    tooltip: [t('lib:usage.forecastHint'), estimateTooltip(est)].join('\n'),
+  }
 }
 
 export function formatWindowSpend(
@@ -342,7 +413,7 @@ export function formatWindowSpend(
   const remain =
     est.remaining_usd == null || !Number.isFinite(est.remaining_usd)
       ? '—'
-      : `余 ${fmtUsd(est.remaining_usd, 2)}`
+      : t('lib:usage.remaining', { amount: fmtUsd(est.remaining_usd, 2) })
   return {
     costText: `${spentUsd} / ≈${total}`,
     remainText: remain,
@@ -350,14 +421,13 @@ export function formatWindowSpend(
   }
 }
 
-/** 窗口起止 `MM-DD HH:mm – HH:mm`；跨天时结束端也带日期。本地时区，与重置时刻同口径。 */
+/** 窗口起止 `MM-DD HH:mm – HH:mm`；跨天时结束端也带日期。UTC+8，与重置时刻同口径。 */
 export function fmtWindowSpan(start: string, end: string): string {
   const a = new Date(start)
   const b = new Date(end)
   if (!Number.isFinite(a.getTime()) || !Number.isFinite(b.getTime())) return '—'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const day = (d: Date) => `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  const clock = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const day = (d: Date) => systemDateTime(d).slice(5, 10)
+  const clock = (d: Date) => systemDateTime(d).slice(11, 16)
   const tail = day(a) === day(b) ? clock(b) : `${day(b)} ${clock(b)}`
   return `${day(a)} ${clock(a)} – ${tail}`
 }

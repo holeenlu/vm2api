@@ -252,9 +252,10 @@ test('serializes jobs and persists interrupted holds across restart without expo
 
 test('migration API is administrator-only, including job history', () => {
   for (const method of ['GET', 'POST']) {
-    for (const role of ['user', 'super'])
+    // tapmodels 的运维角色是 super_admin（上游为 admin）；admin 与 user 均拒绝
+    for (const role of ['user', 'admin'])
       assert.equal(authorizePanelRoute(method, '/api/panel/vms/vm-move/migration', role).ok, false)
-    assert.equal(authorizePanelRoute(method, '/api/panel/vms/vm-move/migration', 'admin').ok, true)
+    assert.equal(authorizePanelRoute(method, '/api/panel/vms/vm-move/migration', 'super_admin').ok, true)
   }
 })
 

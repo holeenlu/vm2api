@@ -1,0 +1,35 @@
+/**
+ * 后台用户管理的定制查询：用户列表的供应商身份、管理员域、资料邮箱查重。
+ * db 由调用方注入，返回原始行或语句结果；上游 UsersRepo 不变。
+ */
+
+/** 有效供应商成员（含是否可开下级），按主身份优先排序。 */
+export function listActiveVendorMemberships(db) {
+  return db
+    .prepare(
+      `
+            SELECT vm.user_id, v.id AS vendor_id, v.name AS vendor_name, v.tier AS vendor_tier,
+              v.child_limit AS vendor_child_limit,
+              EXISTS(SELECT 1 FROM vendor_capabilities vc
+                WHERE vc.vendor_id = v.id AND vc.capability = 'vendor.create_child' AND vc.enabled = 1
+              ) AS vendor_create_child
+            FROM vendor_members vm
+            JOIN vendors v ON v.id = vm.vendor_id
+            WHERE vm.status = 'active' AND v.status = 'active' AND v.deleted_at IS NULL
+            ORDER BY vm.is_primary DESC, vm.created_at ASC, vm.id ASC
+          `,
+    )
+    .all()
+}
+
+export function insertAdminDomain(db, domainId, createdByUserId) {
+  return db
+    .prepare('INSERT OR IGNORE INTO admin_domains(id,created_by_user_id) VALUES(?,?)')
+    .run(domainId, createdByUserId)
+}
+
+export function findOtherUserByEmail(db, email, userId) {
+  return db
+    .prepare('SELECT id FROM users WHERE email=? COLLATE NOCASE AND id<>? AND deleted_at IS NULL')
+    .get(email, userId)
+}

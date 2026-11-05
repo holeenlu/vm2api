@@ -1,3 +1,6 @@
+import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -7,15 +10,16 @@ import path from 'node:path'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
-import { CRS_OFFICIAL_AGENT_PROMPT, CRS_OFFICIAL_CLI_SYSTEM } from '../../src/lib/identity/crs-persona.mjs'
 import { OFFICIAL_303_HARNESS } from '../../src/lib/identity/official-profiles.mjs'
 import { sessionIdFromOutboundBody } from '../../src/lib/identity/identity-rewrite.mjs'
 import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
 import {
+  apiBilledConsoleKey,
   isOpenAIResponsesCommitEvent,
   resolveInferenceBackend,
   messagesUrl,
   runApiInference,
+  withoutClaudeCodeAttribution,
 } from '../../src/lib/pool/api-protocol.mjs'
 import { createClaudeMessageAssembler, applyClaudeSSELineToMessage } from '../../src/lib/protocol/convert.mjs'
 
@@ -50,7 +54,13 @@ test('only a managed key explicitly marked api uses the Anthropic address path',
   assert.equal(resolveInferenceBackend({ headers: { 'x-kin-backend': 'api' } }), 'oauth')
 })
 
-test('tenant api-category keys cannot reach platform API endpoints', async () => {
+test('customer keys without a commercial group cannot reach platform API endpoints', async (t) => {
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  const users = new PanelUserStore({ db })
+  const user = users.create({ username: 'api-customer', password: 'test-password' })
+  const keys = new ApiKeyStore({ db })
+  const key = keys.create({ user_id: user.id, category: 'api' })
   const response = fakeResponse()
   let picked = 0
   const handler = createHandleProtocol({
@@ -72,7 +82,7 @@ test('tenant api-category keys cannot reach platform API endpoints', async () =>
     requestLog: { start: () => ({ request_id: 'api-tenant-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {}, users: { getById: () => ({ role: 'user' }) } },
+    apiKeyStore: keys,
     apiScheduler: {
       pick: () => {
         picked += 1
@@ -89,13 +99,13 @@ test('tenant api-category keys cannot reach platform API endpoints', async () =>
     url: '/v1/messages',
     headers: { authorization: 'Bearer sk-vm-tenant', 'user-agent': 'test-client' },
     apiKeyKind: 'managed',
-    apiKeyRecord: { category: 'api', user_id: 'u1' },
+    apiKeyRecord: key,
     once() {},
     off() {},
   }
   await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
   assert.equal(response.status, 403)
-  assert.equal(response.body.error.code, 'api_backend_forbidden')
+  assert.equal(response.body.error.code, 'group_required')
   assert.equal(picked, 0)
 })
 
@@ -126,14 +136,24 @@ test('API backend applies the global official_full persona setting', async () =>
     req.on('end', () => {
       received = JSON.parse(Buffer.concat(chunks).toString('utf8'))
       res.writeHead(200, { 'content-type': 'text/event-stream' })
-      res.end(completeAnthropicSse())
+      const tool = { type: 'tool_use', id: 'tool_1', name: 'mcp__lookup', input: {} }
+      res.end(
+        completeAnthropicSse(
+          `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: tool })}\n\n`,
+        ),
+      )
     })
   })
   await new Promise((resolve, reject) => {
     kernel.once('error', reject)
     kernel.listen(socketPath, resolve)
   })
+  let stream = false
+  let wire = ''
   const response = fakeResponse()
+  response.write = (chunk) => {
+    wire += chunk
+  }
   const stats = { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 }
   const handler = createHandleProtocol({
     json: (_res, status, body) => {
@@ -141,8 +161,15 @@ test('API backend applies the global official_full persona setting', async () =>
       response.body = body
       return body
     },
-    writeSSEHeaders() {},
-    readBody: async () => ({ model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] }),
+    writeSSEHeaders(res) {
+      res.headersSent = true
+    },
+    readBody: async () => ({
+      model: 'claude-haiku-4-5',
+      stream,
+      tools: [{ name: 'lookup', input_schema: { type: 'object', properties: {} } }],
+      messages: [{ role: 'user', content: 'hello' }],
+    }),
     requireAuth: () => true,
     cfg: {
       rewrite: { enabled: false },
@@ -154,7 +181,7 @@ test('API backend applies the global official_full persona setting', async () =>
     requestLog: { start: () => ({ request_id: 'api-persona-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {
       pick: () => ({
         ok: true,
@@ -190,43 +217,28 @@ test('API backend applies the global official_full persona setting', async () =>
     assert.equal(response.status, 200)
     assert.ok(received)
     const outbound = JSON.parse(received.body)
-    const texts = outbound.system.map((block) => String(block.text || ''))
-    const shape = JSON.stringify({
-      system: texts.map((t) => t.slice(0, 60)),
-      roles: outbound.messages.map((m) => m.role),
-    })
-    assert.match(texts[0], /^x-anthropic-billing-header: /, shape)
-    assert.equal(texts[1], CRS_OFFICIAL_CLI_SYSTEM, shape)
-    assert.ok(texts[2].startsWith(`${DEFAULT_AGENT_STANDING}\n${OFFICIAL_303_HARNESS}`), shape)
-    assert.equal(
-      texts.some((text) => text.includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 80))),
-      false,
-      shape,
-    )
-    // claude-haiku-4-5 rejects mid-conversation role=system: the Environment must not reach the wire as a message.
-    assert.equal(
-      outbound.messages.some((message) => message.role === 'system'),
-      false,
-      shape,
-    )
-    assert.ok(
-      texts.some((text) => text.includes('# Environment')),
-      shape,
-    )
+    assert.equal(outbound.tools[0].name, 'mcp__lookup')
+    assert.equal(response.body.content[0].name, 'lookup')
+    assert.ok(outbound.system.length >= 4)
+    assert.equal(outbound.system[2].text, `${DEFAULT_AGENT_STANDING}\n${OFFICIAL_303_HARNESS}`)
+    assert.ok(outbound.system.some((block) => block.text.includes('# Environment')))
+    stream = true
+    await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
+    assert.match(wire, /"name":"lookup"/)
+    assert.doesNotMatch(wire, /mcp__lookup/)
   } finally {
     await new Promise((resolve) => kernel.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('OAuth cli-hop applies the resolved Protocol custom persona template', async () => {
+test('OAuth cli-hop retains custom persona with upstream official layout, billing and caller TTL', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-persona-'))
   const routingFile = path.join(root, 'routing.json')
   const compatibility = {
     persona_preset: 'custom',
+    cache_ttl: '1h',
     persona_inject: 'rewrite',
-    // e358143c: {{timezone}} renders only when the per-preset timezone switch is on.
-    persona_timezone_presets: { custom: true },
     persona_templates: {
       custom: [{ id: 'custom', type: 'text', text: 'CUSTOM_PERSONA {{timezone}}' }],
     },
@@ -268,7 +280,10 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     requestLog: { start: () => ({ request_id: 'slot-persona-test' }), finish() {} },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats,
@@ -290,7 +305,7 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
   const req = {
     method: 'POST',
     url: '/v1/messages',
-    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0' },
+    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0', 'x-kin-cache-ttl': '5m' },
     apiKeyKind: 'master',
     once() {},
     off() {},
@@ -303,7 +318,8 @@ test('OAuth cli-hop applies the resolved Protocol custom persona template', asyn
     // The rendered custom prompt plus billing survives without a second
     // official-system rebuild inserting an extra identity block.
     assert.equal(prepared.body.system.length, 2)
-    assert.ok(prepared.body.system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA UTC')))
+    assert.ok(prepared.body.system.some((block) => String(block.text || '').match(/^x-anthropic-billing-header:/)))
+    assert.ok(prepared.body.system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA')))
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -350,7 +366,10 @@ test('logs the session id actually sent upstream, not the caller one', async () 
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -457,7 +476,10 @@ for (const previousVm of [null, 'vm-01']) {
       },
       stickyRouter: sticky,
       accountQuota: {},
-      apiKeyStore: {},
+      apiKeyStore: {
+        canAccept: (record) => ({ ok: true, record }),
+        db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+      },
       apiScheduler: {},
       apiEndpointStore: {},
       stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -562,6 +584,8 @@ async function runManagedKeyHop(root, result) {
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
     apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
       acquire: () => ({ ok: true }),
       release() {},
       recordUsage: (key, usage, opts) => charges.push({ key, usage, opts }),
@@ -584,7 +608,7 @@ async function runManagedKeyHop(root, result) {
     url: '/v1/messages',
     headers: { authorization: 'Bearer sk-vm-x', 'user-agent': 'claude-cli/2.1.241 (external, cli)' },
     apiKeyKind: 'managed',
-    apiKeyRecord: { id: 'key-1', group_id: 1 },
+    apiKeyRecord: { id: 'key-1', group_id: null },
     once() {},
     off() {},
   }
@@ -602,10 +626,11 @@ test('a managed key is charged exactly once for a hop billed inline', async () =
       status: 503,
       accountId: 'account-1',
       usage,
+      usageComplete: true,
       body: { error: { type: 'server_error', code: 'x', message: 'stop' } },
     })
     assert.equal(charges.length, 1)
-    assert.equal(charges[0].opts.rateMultiplier, 2)
+    assert.equal(charges[0].opts.rateMultiplier, 1)
     assert.equal(charges[0].opts.officialCost, logged[0].total_cost)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -626,6 +651,7 @@ test('native mixed TTL usage is billed from upstream buckets rather than the pan
       status: 503,
       accountId: 'account-1',
       usage,
+      usageComplete: true,
       body: { error: { type: 'server_error', code: 'x', message: 'stop' } },
     })
     assert.deepEqual(logged[0].usage.cache_creation, usage.cache_creation)
@@ -668,7 +694,10 @@ test('OpenAI chat carrying claude-opus-4-8 uses the Claude pool', async () => {
     requestLog: { start: () => ({ request_id: 'opus-platform-test' }), finish() {} },
     stickyRouter: { extractPoolKey: () => 'opus-session', collectPoolKeys: () => ['opus-session'] },
     accountQuota: {},
-    apiKeyStore: {},
+    apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -759,6 +788,8 @@ function protocolHarness({ body, stickyRouter, failoverRunner, apiKeyRecord = nu
     stickyRouter,
     accountQuota: {},
     apiKeyStore: {
+      canAccept: (record) => ({ ok: true, record }),
+      db: createDatabase({ dbPath: path.join(root, 'protocol.db') }),
       acquire: () => {
         apiKeyCalls.acquire += 1
         return { ok: true }
@@ -780,7 +811,7 @@ function protocolHarness({ body, stickyRouter, failoverRunner, apiKeyRecord = nu
     url: '/v1/messages',
     headers: { authorization: 'Bearer test', 'user-agent': 'Go-http-client/2.0', ...headers },
     apiKeyKind: apiKeyRecord ? 'managed' : 'master',
-    apiKeyRecord,
+    apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     once() {},
     off() {},
   }
@@ -880,7 +911,7 @@ async function captureRunOpts({ body, stickyRouter, apiKeyRecord, headers }) {
   const harness = protocolHarness({
     body,
     stickyRouter,
-    apiKeyRecord,
+    apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     headers,
     failoverRunner: {
       async run(opts) {
@@ -975,12 +1006,12 @@ test('shared API key keeps different devices apart at the protocol entry', async
     const a = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-one', session_id: 'sess-one' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     const b = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-two', session_id: 'sess-two' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     assert.notEqual(a.stickyKey, b.stickyKey)
     assert.notEqual(a.deviceKey, b.deviceKey)
@@ -1015,7 +1046,7 @@ test('legacy API-key-scoped session row migrates lazily at the protocol entry', 
     const opts = await captureRunOpts({
       body: sessionBody({ device_id: 'dev-legacy', session_id: 'sess-legacy' }),
       stickyRouter: router,
-      apiKeyRecord,
+      apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
     })
     assert.equal(opts.stickyKey, 'sess:sess-legacy')
     assert.deepEqual(opts.stickyKeys, ['sess:sess-legacy', legacyKey])
@@ -1075,7 +1106,7 @@ test('Claude Code sub-agent hops run as child sessions of the main session', asy
       captureRunOpts({
         body,
         stickyRouter: router,
-        apiKeyRecord,
+        apiKeyRecord: apiKeyRecord ? { ...apiKeyRecord, group_id: null } : null,
         headers: {
           'x-claude-code-session-id': 'main-sess',
           'x-claude-code-agent-id': agentId,
@@ -1192,15 +1223,19 @@ test('Responses API backend keeps parallel done-only tools in one stream state',
       wire += chunk
     },
   }
+  const relayReq = { headers: {}, relayLog: {} }
   try {
     const result = await runApiInference({
       cfg: { paths: { data: root } },
+      req: relayReq,
       res,
       protocol: 'openai.chat',
       clientStream: true,
       deliveryMode: 'verified',
       convertedBody: { model: 'claude-opus-5-5', messages: [{ role: 'user', content: 'edit' }] },
       inbound: {},
+      // Chat 经 OpenAI 端点按原始请求转换，工具名不改写，也不需要还原
+      toolNames: {},
       converters: {
         writeSSEHeaders: () => {
           res.headersSent = true
@@ -1216,6 +1251,9 @@ test('Responses API backend keeps parallel done-only tools in one stream state',
       },
     })
     assert.equal(result.ok, true)
+    // 使用记录的上游端点取实际请求的 URL 路径
+    assert.equal(relayReq.relayLog.upstream_path, '/v1/responses')
+    assert.equal(relayReq.relayLog.upstream_transport, 'http')
     const chunks = wire
       .split('\n\n')
       .filter((line) => line.startsWith('data: {'))
@@ -1224,6 +1262,7 @@ test('Responses API backend keeps parallel done-only tools in one stream state',
     for (let index = 0; index < items.length; index++) {
       const tool = calls.filter((call) => call.index === index)
       assert.equal(tool.find((call) => call.id)?.id, items[index].call_id)
+      assert.equal(tool.find((call) => call.function?.name)?.function.name, 'edit')
       assert.deepEqual(JSON.parse(tool.map((call) => call.function?.arguments || '').join('')), {
         path: `${index}.txt`,
       })
@@ -1377,6 +1416,165 @@ test('API Anthropic non-stream accepts message_stop as terminal', async () => {
   }
 })
 
+test('API Anthropic hop drops Claude Code cache_control.scope before the API-key upstream', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-api-cache-scope-'))
+  const socket = path.join(root, 'run', 'api-kernel.sock')
+  fs.mkdirSync(path.dirname(socket), { recursive: true })
+  let sent = null
+  const kernel = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      sent = JSON.parse(JSON.parse(raw).body)
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(completeAnthropicSse())
+    })
+  })
+  await new Promise((resolve) => kernel.listen(socket, resolve))
+  try {
+    const result = await runApiInference({
+      cfg: { paths: { data: root } },
+      req: { headers: { 'anthropic-beta': 'prompt-caching-scope-2026-01-05' } },
+      res: { headersSent: false, write: () => {} },
+      protocol: 'anthropic.messages',
+      clientStream: false,
+      deliveryMode: 'verified',
+      convertedBody: {
+        model: 'claude-opus-5-5',
+        system: [
+          { type: 'text', text: 'billing' },
+          { type: 'text', text: 'identity' },
+          { type: 'text', text: 'harness', cache_control: { type: 'ephemeral', scope: 'global', ttl: '1h' } },
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral', scope: 'global' } }],
+          },
+        ],
+      },
+      inbound: {},
+      converters: { createClaudeMessageAssembler, applyClaudeSSELineToMessage },
+      scheduler: {
+        pick: () => ({
+          ok: true,
+          endpoint: { id: 'ep', kind: 'claude', protocol: 'anthropic', base_url: 'https://fixture.invalid' },
+          key: { id: 'key', api_key: 'fixture' },
+          upstream_model: 'claude-opus-5-5',
+        }),
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(sent.system[2].cache_control, { type: 'ephemeral', ttl: '1h' })
+    assert.deepEqual(sent.messages[0].content[0].cache_control, { type: 'ephemeral' })
+  } finally {
+    kernel.closeAllConnections()
+    await new Promise((resolve) => kernel.close(resolve))
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('API Anthropic hop strips Claude Code billing markers only for Console sk-ant-usr / sk-ant-svc keys', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-api-cc-beta-'))
+  const socket = path.join(root, 'run', 'api-kernel.sock')
+  fs.mkdirSync(path.dirname(socket), { recursive: true })
+  const sent = []
+  const kernel = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const parsed = JSON.parse(raw)
+      sent.push({ headers: parsed.headers, body: JSON.parse(parsed.body) })
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(completeAnthropicSse())
+    })
+  })
+  await new Promise((resolve) => kernel.listen(socket, resolve))
+  const desktopUa = 'claude-cli/2.1.317 (external, claude-desktop-3p, agent-sdk/0.3.317)'
+  const identity = "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
+  const system = [
+    {
+      type: 'text',
+      text: 'x-anthropic-billing-header: cc_version=2.1.317.abc; cc_entrypoint=claude-desktop-3p; cch=00000;',
+    },
+    { type: 'text', text: identity },
+    { type: 'text', text: 'Main prompt', cache_control: { type: 'ephemeral' } },
+  ]
+  const run = (apiKey) =>
+    runApiInference({
+      cfg: { paths: { data: root } },
+      req: {
+        headers: {
+          'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
+          'user-agent': desktopUa,
+          'x-app': 'cli',
+        },
+      },
+      res: { headersSent: false, write: () => {} },
+      protocol: 'anthropic.messages',
+      clientStream: false,
+      deliveryMode: 'verified',
+      passthrough: true,
+      convertedBody: { model: 'claude-haiku-4-5', system, messages: [{ role: 'user', content: 'hi' }] },
+      inbound: {},
+      converters: { createClaudeMessageAssembler, applyClaudeSSELineToMessage },
+      scheduler: {
+        pick: () => ({
+          ok: true,
+          endpoint: { id: 'ep', kind: 'claude', protocol: 'anthropic', base_url: 'https://fixture.invalid' },
+          key: { id: 'key', api_key: apiKey },
+          upstream_model: 'claude-haiku-4-5',
+        }),
+      },
+    })
+  try {
+    assert.equal((await run('sk-ant-usr-fixture')).ok, true)
+    assert.equal((await run('sk-ant-svc-fixture')).ok, true)
+    assert.equal((await run('sk-ant-api03-fixture')).ok, true)
+    for (const console of sent.slice(0, 2)) {
+      assert.equal(console.headers['anthropic-beta'], 'interleaved-thinking-2025-05-14')
+      assert.match(console.headers['user-agent'], /\(external, sdk-cli\)$/)
+      assert.equal(console.headers['x-app'], 'cli')
+      assert.deepEqual(console.body.system, [
+        { type: 'text', text: `${identity}\n\nMain prompt`, cache_control: { type: 'ephemeral' } },
+      ])
+    }
+    const classic = sent[2]
+    assert.equal(classic.headers['anthropic-beta'], 'claude-code-20250219,interleaved-thinking-2025-05-14')
+    assert.equal(classic.headers['user-agent'], desktopUa)
+    assert.deepEqual(classic.body.system, system)
+  } finally {
+    kernel.closeAllConnections()
+    await new Promise((resolve) => kernel.close(resolve))
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Claude Code attribution cleaner keeps the text the model reads', () => {
+  const identity = "You are Claude Code, Anthropic's official CLI for Claude."
+  const unchanged = { model: 'm', system: [{ type: 'text', text: `${identity}\nMore context` }] }
+  assert.equal(withoutClaudeCodeAttribution(unchanged), unchanged)
+  assert.equal(withoutClaudeCodeAttribution({ model: 'm', system: identity }).system, undefined)
+  assert.equal(
+    withoutClaudeCodeAttribution({ model: 'm', system: [{ type: 'text', text: identity }] }).system,
+    undefined,
+  )
+  assert.deepEqual(
+    withoutClaudeCodeAttribution({
+      model: 'm',
+      system: [
+        { type: 'text', text: identity, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'Rest' },
+      ],
+    }).system,
+    [{ type: 'text', text: `${identity}\n\nRest`, cache_control: { type: 'ephemeral' } }],
+  )
+  assert.equal(apiBilledConsoleKey('sk-ant-usr-x'), true)
+  assert.equal(apiBilledConsoleKey('sk-ant-svc-x'), true)
+  assert.equal(apiBilledConsoleKey('sk-ant-api03-x'), false)
+  assert.equal(apiBilledConsoleKey('sk-ant-oat01-x'), false)
+})
+
 test('API backend non-stream maps incomplete assistant hops to incomplete_response', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-api-incomplete-http-'))
   const routingFile = path.join(root, 'routing.json')
@@ -1416,7 +1614,7 @@ test('API backend non-stream maps incomplete assistant hops to incomplete_respon
     requestLog: { start: () => ({ request_id: 'api-incomplete-test' }), finish() {} },
     stickyRouter: {},
     accountQuota: {},
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {
       pick: () => ({
         ok: true,
@@ -1519,13 +1717,19 @@ test('OpenAI Responses lifecycle metadata does not commit downstream output', ()
   assert.equal(isOpenAIResponsesCommitEvent({ type: 'response.output_text.delta', delta: 'hello' }), true)
 })
 
-async function runOpenAIResponsesFixture(events) {
+async function runOpenAIResponsesFixture(events, { clientStream = true, nativeBody = null, toolNames } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-metadata-'))
   const socket = path.join(root, 'run', 'api-kernel.sock')
   fs.mkdirSync(path.dirname(socket), { recursive: true })
+  let upstream = null
   const kernel = http.createServer((req, response) => {
-    req.resume()
+    let raw = ''
+    req.on('data', (chunk) => {
+      raw += chunk
+    })
     req.on('end', () => {
+      const envelope = JSON.parse(raw)
+      upstream = { url: envelope.url, body: JSON.parse(envelope.body) }
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       response.end(events.map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join('') + 'data: [DONE]\n\n')
     })
@@ -1543,10 +1747,11 @@ async function runOpenAIResponsesFixture(events) {
       cfg: { paths: { data: root } },
       res,
       protocol: 'openai.responses',
-      clientStream: true,
+      clientStream,
       deliveryMode: 'verified',
       convertedBody: { model: 'gpt-5.4', messages: [{ role: 'user', content: 'hello' }] },
-      inbound: {},
+      inbound: nativeBody || { model: 'gpt-5.4', input: 'hello' },
+      toolNames,
       converters: {
         writeSSEHeaders: () => {
           res.headersSent = true
@@ -1561,7 +1766,7 @@ async function runOpenAIResponsesFixture(events) {
         }),
       },
     })
-    return { result, wire, headersSent: res.headersSent }
+    return { result, wire, headersSent: res.headersSent, upstream }
   } finally {
     kernel.closeAllConnections()
     await new Promise((resolve) => kernel.close(resolve))
@@ -1600,5 +1805,62 @@ unixTest('API OpenAI flushes buffered metadata with the first real output', asyn
   assert.match(run.wire, /response\.created/)
   assert.match(run.wire, /response\.queued/)
   assert.match(run.wire, /response\.output_text\.delta/)
+  assert.match(run.wire, /response\.completed/)
+})
+
+for (const clientStream of [true, false]) {
+  unixTest(`API Responses failover retains complete terminal usage (stream=${clientStream})`, async () => {
+    const usage = { input_tokens: 7, output_tokens: 2 }
+    const run = await runOpenAIResponsesFixture(
+      [
+        { type: 'response.created', response: { id: 'billable-failure' } },
+        {
+          type: 'response.failed',
+          response: {
+            error: { type: 'server_error', status: 503, message: 'busy' },
+            usage,
+          },
+        },
+      ],
+      { clientStream },
+    )
+    assert.equal(run.result.ok, false)
+    assert.equal(run.result.committed, false)
+    assert.equal(run.headersSent, false)
+    assert.deepEqual(run.result.usage, usage)
+    assert.equal(run.result.usageComplete, true)
+  })
+}
+
+unixTest('Codex Responses reaches an OpenAI endpoint with its native tool history intact', async () => {
+  const input = [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'list files' }] },
+    { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc' },
+    { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'exec_command', arguments: '{"cmd":"ls"}' },
+    { type: 'function_call_output', call_id: 'call_1', output: 'a.txt' },
+  ]
+  const nativeBody = {
+    model: 'gpt-5.4',
+    instructions: 'You are Codex.',
+    input,
+    tools: [{ type: 'function', name: 'exec_command', parameters: { type: 'object', properties: {} } }],
+    reasoning: { effort: 'high', summary: 'auto' },
+    include: ['reasoning.encrypted_content'],
+    prompt_cache_key: 'session-1',
+    store: false,
+    stream: true,
+    client_metadata: { installation_id: 'device' },
+  }
+  const run = await runOpenAIResponsesFixture(
+    [
+      { type: 'response.output_text.delta', delta: 'a.txt' },
+      { type: 'response.completed', response: { id: 'resp_native', output: [] } },
+    ],
+    { nativeBody, toolNames: { exec_command: 'renamed' } },
+  )
+  assert.equal(run.result.ok, true)
+  assert.equal(run.upstream.url, 'https://api.openai.com/v1/responses')
+  const { client_metadata: _identity, ...expected } = nativeBody
+  assert.deepEqual(run.upstream.body, expected)
   assert.match(run.wire, /response\.completed/)
 })

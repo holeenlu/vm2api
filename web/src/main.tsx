@@ -10,20 +10,27 @@ import {
   createHashHistory,
   createRouter,
 } from '@tanstack/react-router'
+import { t } from '@/i18n'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
 import { ApiError } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
-import { onPanelSessionExpired } from '@/lib/session'
+import { hasSession, onPanelSessionExpired } from '@/lib/session'
+import { installStaleAssetReload } from '@/lib/stale-asset-reload'
+import { meQueryOptions } from '@/features/auth/queries'
+import { BrandingProvider } from './context/branding-provider'
 import { DirectionProvider } from './context/direction-provider'
 import { FontProvider } from './context/font-provider'
+import { LocaleProvider } from './context/locale-provider'
 import { ThemeProvider } from './context/theme-provider'
 import { routeTree } from './routeTree.gen'
 import './styles/index.css'
 
+installStaleAssetReload()
+
 onPanelSessionExpired(() => {
   useAuthStore.setState({ token: '', user: '', me: null })
-  toast.error('登录已过期')
+  toast.error(t('common:sessionExpired'))
   if (!window.location.hash.startsWith('#/login')) {
     window.location.hash = '/login'
   }
@@ -50,6 +57,20 @@ const queryClient = new QueryClient({
   }),
 })
 
+// 有会话时启动即请求 /me，与路由代码下载并行；布局挂载时直接命中缓存。
+if (hasSession()) void queryClient.prefetchQuery(meQueryOptions())
+
+useAuthStore.subscribe((current, previous) => {
+  if (
+    current.token !== previous.token ||
+    current.user !== previous.user ||
+    (current.me && previous.me && current.me.role !== previous.me.role)
+  ) {
+    void queryClient.cancelQueries()
+    queryClient.clear()
+  }
+})
+
 const router = createRouter({
   routeTree,
   history: createHashHistory(),
@@ -70,13 +91,17 @@ if (!rootElement.innerHTML) {
   root.render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <ThemeProvider defaultTheme='dark'>
-          <FontProvider>
-            <DirectionProvider>
-              <RouterProvider router={router} />
-            </DirectionProvider>
-          </FontProvider>
-        </ThemeProvider>
+        <BrandingProvider>
+          <LocaleProvider>
+            <ThemeProvider defaultTheme='system'>
+              <FontProvider>
+                <DirectionProvider>
+                  <RouterProvider router={router} />
+                </DirectionProvider>
+              </FontProvider>
+            </ThemeProvider>
+          </LocaleProvider>
+        </BrandingProvider>
       </QueryClientProvider>
     </StrictMode>
   )
