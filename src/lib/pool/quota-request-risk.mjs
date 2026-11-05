@@ -112,6 +112,16 @@ function cachedPromptParts(body, quotaRequest = null) {
   return parts
 }
 
+// 同一请求调度时按候选账号逐个比较缓存前缀：消息哈希只算一次，挂在本请求的 quotaRequest 上（与 _promptParts 同一生命周期）
+function messageHashMemo(body, quotaRequest) {
+  if (!quotaRequest || typeof quotaRequest !== 'object') return null
+  if (quotaRequest._messageHashBody !== body) {
+    quotaRequest._messageHashBody = body
+    quotaRequest._messageHashes = new Map()
+  }
+  return quotaRequest._messageHashes
+}
+
 export function estimatePromptTokens(body, quotaRequest = null) {
   return cachedPromptParts(body, quotaRequest).prompt
 }
@@ -126,11 +136,12 @@ export function cacheColdForAccount({
   body = null,
   now = Date.now(),
   preserveMessageCache = null,
+  known = null,
 } = {}) {
   const account = String(accountId || '').trim()
   const session = String(sessionId || '').trim()
   if (!account || !session || !body) return { cold: true, reason: 'unknown', prefix: null }
-  const prefix = peekCachePrefix(`${account}:${session}`, body, now, { preserveMessageCache })
+  const prefix = peekCachePrefix(`${account}:${session}`, body, now, { preserveMessageCache, known })
   if (!prefix) return { cold: true, reason: 'unknown', prefix: null }
   if (prefix.turn <= 1) return { cold: true, reason: 'first_turn', prefix }
   if (!prefix.confirmed) return { cold: true, reason: 'unconfirmed', prefix }
@@ -155,6 +166,7 @@ export function estimateRequestRisk(
     body,
     now,
     preserveMessageCache: quotaRequest?.preserveMessageCache,
+    known: messageHashMemo(body, quotaRequest),
   })
   const uncached = cache.cold ? parts.prompt : parts.lastUser
   return {

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { JevInterceptConfig, JevScopeOption } from '@/types/panel-routing'
 import { ChevronDown } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -66,6 +67,8 @@ function Chip({
   active: boolean
   onToggle: () => void
 }) {
+  useTranslation('risk')
+
   return (
     <button
       type='button'
@@ -89,6 +92,8 @@ function Chip({
  * 全空 = 所有账号都进关卡。指定账号和勾选是并集。
  */
 export function AccountScopeSettings() {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const q = useQuery(jevInterceptQueryOptions())
   const [draft, setDraft] = useServerDraft(q.data, draftOf, scopeDiffers)
@@ -100,7 +105,7 @@ export function AccountScopeSettings() {
 
   const save = useMutation({
     mutationFn: () => {
-      if (!draft) throw new Error('没有可保存的配置')
+      if (!draft) throw new Error(translate('risk:noConfigToSave'))
       return api<JevInterceptConfig>('/api/panel/jev-intercept', {
         method: 'PUT',
         body: JSON.stringify({
@@ -112,7 +117,7 @@ export function AccountScopeSettings() {
       })
     },
     onSuccess: (data) => {
-      toast.success('已保存账号范围')
+      toast.success(translate('risk:scopeSaved'))
       setDraft(draftOf(data))
       qc.setQueryData(jevInterceptQueryOptions().queryKey, data)
     },
@@ -145,13 +150,16 @@ export function AccountScopeSettings() {
   const named = linesOf(draft.account_ids).length
   const summary = configured
     ? [
-        selectedLabels.join('、') || (named ? '指定账号' : '未选'),
-        named ? `另指定 ${named}` : '',
-        `命中 ${matched.length}/${total}`,
+        selectedLabels.join('、') ||
+          (named
+            ? translate('risk:specificAccounts')
+            : translate('risk:noneSelected')),
+        named ? translate('risk:additionalAccounts', { p0: named }) : '',
+        translate('risk:scopeMatches', { p0: matched.length, p1: total }),
       ]
         .filter(Boolean)
         .join(' · ')
-    : `全部账号 · ${total}`
+    : translate('risk:allAccountCount', { p0: total })
   const shown = open || dirty
 
   const toggle = (id: string) =>
@@ -172,7 +180,9 @@ export function AccountScopeSettings() {
       className='rounded-xl border bg-card'
     >
       <CollapsibleTrigger className='flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 text-left transition-colors duration-200 hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'>
-        <span className='shrink-0 text-sm font-semibold'>账号范围</span>
+        <span className='shrink-0 text-sm font-semibold'>
+          {translate('risk:accountScope')}
+        </span>
         <span className='flex min-w-0 items-center gap-2 text-xs text-muted-foreground'>
           <span className='truncate'>{summary}</span>
           <ChevronDown
@@ -186,15 +196,12 @@ export function AccountScopeSettings() {
       </CollapsibleTrigger>
       <CollapsibleContent className='space-y-6 border-t px-4 py-4'>
         <p className='text-xs leading-5 text-muted-foreground'>
-          按平台和套餐决定哪些槽位进四道关。都不选 =
-          全部账号。指定账号和勾选取并集。只选 GPT 套餐时 Claude
-          照旧全进关卡；选了 Claude 套餐或指定了账号，才按槽位收窄 Claude。GPT
-          没设范围时仍看「OpenAI 平台」。
+          {translate('risk:scopeDescription')}
         </p>
 
         <Group
-          title='平台 · 套餐'
-          hint='数字是当前槽位数。同一套餐的不同写法合成一档，例如 Team 和 Business Premium 都是 Business。'
+          title={translate('risk:platformAndPlan')}
+          hint={translate('risk:planGroupingHint')}
           action={
             draft.account_platform_plans.length ? (
               <Button
@@ -206,7 +213,7 @@ export function AccountScopeSettings() {
                   setDraft({ ...draft, account_platform_plans: [] })
                 }
               >
-                清空
+                {translate('risk:clear')}
               </Button>
             ) : undefined
           }
@@ -223,16 +230,18 @@ export function AccountScopeSettings() {
               ))}
             </div>
           ) : (
-            <p className='text-xs text-muted-foreground'>还没有槽位。</p>
+            <p className='text-xs text-muted-foreground'>
+              {translate('risk:noSlots')}
+            </p>
           )}
         </Group>
 
         <Group
-          title='指定账号'
-          hint='一行一个：槽位 id、邮箱或名称。留空即不按账号限制。'
+          title={translate('risk:specificAccounts')}
+          hint={translate('risk:accountInputHint')}
         >
           <Textarea
-            aria-label='指定账号'
+            aria-label={translate('risk:specificAccounts')}
             rows={3}
             className='font-mono text-xs'
             placeholder={'vm-02\naldanacharles9564@aol.com'}
@@ -246,12 +255,15 @@ export function AccountScopeSettings() {
         <div className='space-y-1 text-xs leading-5'>
           <p className='font-medium'>
             {configured
-              ? `当前范围命中 ${matched.length} / ${total} 个槽位`
-              : `当前范围：全部账号（${total} 个槽位）`}
+              ? translate('risk:scopeSlotMatches', {
+                  p0: matched.length,
+                  p1: total,
+                })
+              : translate('risk:allSlotsInScope', { count: total })}
           </p>
           {configured && !matched.length ? (
             <p className='text-[var(--status-caution)]'>
-              没有槽位命中，等于所有请求都不检查。请重选。
+              {translate('risk:noScopeMatches')}
             </p>
           ) : null}
         </div>

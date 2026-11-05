@@ -57,7 +57,7 @@ async function run(
   const res = { headersSent: false, statusCode: 0, body: null, write() {}, end() {} }
   const logBag = {}
   await handleCodexProtocol({
-    req: { headers: {}, apiKeyKind: 'user' },
+    req: { headers: {}, apiKeyKind: 'master' },
     res,
     protocol: 'openai.responses',
     ctx: { body, path: '/v1/responses' },

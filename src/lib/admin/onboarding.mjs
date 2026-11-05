@@ -7,13 +7,13 @@ import { verifyPassword } from './panel-users.mjs'
 
 export const ONBOARDING_STATE_KEY = 'onboarding_state'
 export const MASTER_ONBOARDING_USER = '__master__'
-/** docker-entrypoint writes this when VM2API_ADMIN_PASSWORD is empty. */
+/** Reject this known weak password in existing/configured accounts; new installs use random secrets. */
 export const DEFAULT_ADMIN_PASSWORD = '123456'
 
 export const STEPS_BY_ROLE = Object.freeze({
-  admin: Object.freeze(['admin_password', 'egress', 'slot_account', 'schedulable', 'api_key', 'first_request']),
-  user: Object.freeze(['egress', 'slot_account', 'schedulable', 'api_key', 'first_request']),
-  super: Object.freeze(['schedulable', 'first_request']),
+  super_admin: Object.freeze(['admin_password', 'egress', 'slot_account', 'schedulable', 'api_key', 'first_request']),
+  user: Object.freeze(['service_group', 'api_key', 'first_request']),
+  admin: Object.freeze(['first_request']),
 })
 
 export function stepsForRole(role) {
@@ -29,7 +29,7 @@ export function onboardingUserOf(req) {
 }
 
 export function onboardingRoleOf(req) {
-  if (req?.apiKeyKind === 'master') return 'admin'
+  if (req?.apiKeyKind === 'master') return 'super_admin'
   return normalizePanelRole(req?.panelRole)
 }
 
@@ -67,6 +67,8 @@ export function isStepDone(id, facts = {}) {
       return Number(facts.vmWithTokenCount) >= 1
     case 'schedulable':
       return Number(facts.schedulableCount) >= 1
+    case 'service_group':
+      return Number(facts.groupCount) > 0
     case 'api_key':
       return Number(facts.activeKeyCount) >= 1
     case 'first_request':

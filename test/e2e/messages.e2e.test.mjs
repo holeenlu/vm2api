@@ -111,14 +111,14 @@ test('legacy x-kin-forward: cli cannot re-enable CLI execution', async () => {
   }
 })
 
-test('HTTP worker preserves thinking, sampling and max_tokens', async () => {
+test('Haiku cli-hop disables unsupported thinking, drops sampling and keeps max_tokens', async () => {
   const gw = await startGateway({ scenario: 'thinking' })
   try {
     const r = await api(gw, 'POST', '/v1/messages', {
       headers: { 'x-kin-forward': 'cli' },
       body: {
         model: MODEL,
-        max_tokens: 99,
+        max_tokens: 2048,
         temperature: 0.2,
         thinking: { type: 'enabled', budget_tokens: 1234 },
         messages: [{ role: 'user', content: 'think' }],
@@ -126,9 +126,9 @@ test('HTTP worker preserves thinking, sampling and max_tokens', async () => {
     })
     assert.equal(r.status, 200, r.text)
     const tr = readTrace(gw)
-    assert.deepEqual(tr.body.thinking, { type: 'enabled', budget_tokens: 1234, display: 'omitted' })
-    assert.equal(tr.body.max_tokens, 99)
-    assert.equal(tr.body.temperature, 1)
+    assert.deepEqual(tr.body.thinking, { type: 'disabled' })
+    assert.equal(tr.body.max_tokens, 2048)
+    assert.equal(tr.body.temperature, undefined)
   } finally {
     await gw.stop()
   }
@@ -186,7 +186,7 @@ test('image block reaches Go relay envelope as Anthropic image', async () => {
   }
 })
 
-test('HTTP path preserves long system without CLI argv truncation', async () => {
+test('cli-hop official template preserves the complete long caller system', async () => {
   const gw = await startGateway({ scenario: 'text' })
   try {
     const sys = 'S'.repeat(30000)
@@ -200,14 +200,17 @@ test('HTTP path preserves long system without CLI argv truncation', async () => 
       },
     })
     const tr = readTrace(gw)
-    // Haiku cannot park leftover as messages[].role=system. official_full then
-    // keeps billing + identity + agent + env + caller_system (5 blocks).
-    assert.equal(tr.body.system.length, 5)
+    // CLI output has the official identity followed by the full caller body.
+    assert.equal(tr.body.system.length, 2)
+    assert.equal(tr.body.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.")
     assert.equal(tr.body.messages[0].role, 'user')
     assert.equal(tr.body.messages.length, 1)
-    assert.ok(!String(tr.body.system[2].text || '').includes(sys))
-    assert.ok(!String(tr.body.system[3].text || '').includes(sys))
-    assert.equal(tr.body.system.at(-1).text, sys)
+    assert.ok(tr.body.system[1].text.endsWith(sys))
+    assert.equal(tr.body.system[1].text.split(sys).length, 2)
+    assert.deepEqual(
+      tr.body.system.map((block) => block.cache_control),
+      [{ type: 'ephemeral' }, { type: 'ephemeral' }],
+    )
     assert.ok(msgText(tr.body.messages[0]).endsWith('x'))
     assert.equal(tr.argv, undefined)
   } finally {
