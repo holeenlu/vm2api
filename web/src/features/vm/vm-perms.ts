@@ -1,79 +1,52 @@
 import { useQuery } from '@tanstack/react-query'
-import type { PanelRole } from '@/types/panel-auth'
+import type { MeResponse } from '@/types/panel-auth'
 import { meQueryOptions } from '@/features/auth/queries'
+import { resourcePermsOf } from '@/features/auth/resource-permissions'
 
-/** VM 页面按角色能做的事，对齐后端 src/lib/admin/panel-acl.mjs。 */
+/**
+ * VM 与 Codex 账号页面的显示裁剪，来自服务端下发的账号资源能力
+ * （src/lib/admin/resource-permissions.mjs）。前端隐藏不是安全边界。
+ */
 export type VmPerms = {
-  /** me 已返回、角色已知。 */
+  /** me 已返回。未返回时一律不放行，避免先发一批 403。 */
   known: boolean
-  admin: boolean
-  /** GET /api/panel/dashboard（admin、super）。 */
+  /** 查看：列表、详情、用量金额、分组与代理信息、测试模型列表。 */
+  read: boolean
+  /** 创建：新建 VM、导入凭证、新建或导入 Codex 账号。 */
+  create: boolean
+  /** 编辑：开关机与探测、测试、凭证授权与刷新、额度、代理、调度与各项配置。 */
+  edit: boolean
+  /** 管理：重建、删除、终端、内核与种子、打包导出、凭证明文。 */
+  manage: boolean
+  /** GET /api/panel/dashboard 属于平台总览，仍只给 super_admin。 */
   dashboard: boolean
-  /** 开机 / 关机 / 探测。 */
-  power: boolean
-  /** test-chat、定时测试。 */
-  test: boolean
-  /** GET /api/panel/test-models（后端目前只放行 admin）。 */
-  testModels: boolean
-  /** oauth/*、导入凭证、额度刷新、重置券、诊断与恢复服务。 */
-  credential: boolean
-  /** DELETE /vms/:id（仅管理员）。 */
-  remove: boolean
 }
 
-const NONE: VmPerms = {
-  known: false,
-  admin: false,
-  dashboard: false,
-  power: false,
-  test: false,
-  testModels: false,
-  credential: false,
-  remove: false,
-}
-
-/** 角色未知（me 还没回来）时一律不放行，避免先发一批 403。 */
-export function vmPermsFor(
-  role: PanelRole | string | null | undefined
-): VmPerms {
-  if (role === 'admin') {
-    return {
-      known: true,
-      admin: true,
-      dashboard: true,
-      power: true,
-      test: true,
-      testModels: true,
-      credential: true,
-      remove: true,
-    }
+export function vmPermsFor(me: MeResponse | undefined | null): VmPerms {
+  const perms = resourcePermsOf(me)
+  return {
+    known: perms.known,
+    read: perms.read,
+    create: perms.create,
+    edit: perms.edit,
+    manage: perms.manage,
+    dashboard: me?.role === 'super_admin',
   }
-  if (role === 'user') {
-    return {
-      ...NONE,
-      known: true,
-      power: true,
-      test: true,
-      credential: true,
-      remove: false,
-    }
-  }
-  if (role === 'super') return { ...NONE, known: true, dashboard: true }
-  return NONE
 }
 
 export function useVmPerms(): VmPerms {
   const me = useQuery(meQueryOptions())
-  return vmPermsFor(me.data?.role)
+  return vmPermsFor(me.data)
 }
 
 export type VmDetailTab =
   'overview' | 'account' | 'proxy' | 'test' | 'ops' | 'seed'
 
 export function vmDetailTabs(perms: VmPerms): VmDetailTab[] {
+  if (!perms.read) return []
   const tabs: VmDetailTab[] = ['overview', 'account', 'proxy']
-  if (perms.test) tabs.push('test')
-  if (perms.admin) tabs.push('ops', 'seed')
+  if (perms.edit) tabs.push('test')
+  if (perms.manage) tabs.push('ops', 'seed')
   return tabs
 }
 

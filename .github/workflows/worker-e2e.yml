@@ -1,0 +1,67 @@
+# 真实 Gateway Worker 端到端演练（统一控制面重构，最终审计 U10）：编译 Go Worker，跑事件三种模式、双 Worker 刷新与
+# 数据目录重建、凭据库重建投影、Redis 共享与降级。ACCEPTANCE 第 5 条“降级”的演练证据依赖这些用例。
+# KIN_E2E_REQUIRE_GO=1 时缺 Go 直接失败；每一步用带 pipefail 的 bash 运行，并检查 TAP 汇总没有失败、跳过或超时取消的用例。
+# 共享 Redis 一步设置 KIN_E2E_REQUIRE_REDIS=1：双 Worker 用例断言两个实例都报告 Redis 可用，Worker 退回本地状态时失败。
+name: worker-e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  worker-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      KIN_E2E_REQUIRE_GO: '1'
+    # 显式 bash 才带 pipefail：node 失败不会被 tee 吞掉（复核 Q1）
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: worker/go.sum
+      - run: npm ci
+      - name: Real Worker, two Workers and Redis fallback
+        run: |
+          node --test --test-reporter=tap \
+            test/e2e/gateway-worker-real.e2e.test.mjs \
+            test/e2e/gateway-worker-multi.e2e.test.mjs \
+            test/e2e/gateway-worker-redis.e2e.test.mjs | tee "$RUNNER_TEMP/worker-e2e.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/worker-e2e.tap"
+          grep -qx '# fail 0' "$RUNNER_TEMP/worker-e2e.tap"
+          grep -qx '# cancelled 0' "$RUNNER_TEMP/worker-e2e.tap"
+      - name: Real Worker and two Workers with shared Redis state
+        run: |
+          (cd worker && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/kin-test-redis" ./internal/testutil/miniredis-server)
+          "$RUNNER_TEMP/kin-test-redis" -addr 127.0.0.1:16399 &
+          redis_pid=$!
+          trap 'kill $redis_pid' EXIT
+          ready=0
+          for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/16399) 2>/dev/null && ready=1 && break; sleep 0.1; done
+          [ "$ready" = 1 ] && kill -0 "$redis_pid" || { echo 'miniredis did not start'; exit 1; }
+          KIN_REDIS_URL=redis://127.0.0.1:16399/0 KIN_E2E_REQUIRE_REDIS=1 node --test --test-reporter=tap \
+            test/e2e/gateway-worker-real.e2e.test.mjs \
+            test/e2e/gateway-worker-multi.e2e.test.mjs | tee "$RUNNER_TEMP/worker-e2e-redis.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/worker-e2e-redis.tap"
+          grep -qx '# fail 0' "$RUNNER_TEMP/worker-e2e-redis.tap"
+          grep -qx '# cancelled 0' "$RUNNER_TEMP/worker-e2e-redis.tap"

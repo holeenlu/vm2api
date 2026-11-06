@@ -24,6 +24,7 @@ import { credentialModeFromOauth, canOfficialCc } from './credential-mode.mjs'
 import { resolveAuthScheme } from './auth-scheme.mjs'
 import { flattenOauthIdentity, normalizeSubscriptionType } from './oauth-identity.mjs'
 import { persistOauthToVm } from './oauth-credentials.mjs'
+import { refreshAccountProfile } from './account-profile.mjs'
 import {
   officialCcUidGid,
   scheduleOfficialCcBootstrap,
@@ -44,8 +45,8 @@ export function createImportCommit(ctx) {
     ctx.accountQuota.rebindToVm(uuid, vm.id, { email: vm.claude?.email || null })
   }
 
-  function requireSlotProxy(existing, body = {}) {
-    const resolved = resolveImportProxy({
+  async function requireSlotProxy(existing, body = {}) {
+    const resolved = await resolveImportProxy({
       vm: existing,
       proxyPool: ctx.proxyPool,
       overrideUrl: body.proxy_url || null,
@@ -97,12 +98,14 @@ export function createImportCommit(ctx) {
         oauth.expires_at ||
         oauth.expiresAt ||
         (oauth.expires_in ? Math.floor(Date.now() / 1000) + Number(oauth.expires_in) : null),
-      email: identity.email || existing.claude?.email || null,
-      account_uuid: identity.account_uuid || existing.claude?.account_uuid || null,
-      org_uuid: identity.org_uuid || existing.claude?.org_uuid || null,
-      subscription_type:
-        identity.subscription_type || normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
-      account_tier: normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
+      email: identity.email,
+      account_uuid: identity.account_uuid,
+      org_uuid: identity.org_uuid,
+      subscription_type: identity.subscription_type,
+      ...(identity.rate_limit_tier ? { rate_limit_tier: identity.rate_limit_tier } : {}),
+      ...(identity.billing_type ? { billing_type: identity.billing_type } : {}),
+      ...(oauth.subscription_updated_at ? { subscription_updated_at: oauth.subscription_updated_at } : {}),
+      account_tier: identity.subscription_type || normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
       scopes: Array.isArray(oauth.scopes)
         ? oauth.scopes
         : String(oauth.scope || '')
@@ -152,7 +155,7 @@ export function createImportCommit(ctx) {
       vm: existing,
       homeDir: path.join(ctx.cfg.paths.project, 'vms', vmId, 'cli-home'),
     }
-    const bound = ctx.proxyPool?.getProxyForVm?.(vmId)
+    const bound = await ctx.proxyPool?.getProxyForVm?.(vmId)
     if (bound) {
       // Re-bind even when the id already matches: a prior stale write may have
       // left proxy_cli_enabled=false on a bound slot (#332).
@@ -236,6 +239,8 @@ export function createImportCommit(ctx) {
         Object.assign(existing, refreshed)
       }
     })
+    const profile = await (ctx.refreshAccountProfile || refreshAccountProfile)(ctx.cfg.paths.project, vmId)
+    if (profile.ok && profile.vm) Object.assign(existing, profile.vm)
     try {
       const ids = officialCcUidGid(vmId)
       materializeOfficialClaudeCredentials(workerExec.homeDir, ids)
@@ -269,7 +274,12 @@ export function createImportCommit(ctx) {
             email: importedCredential.email,
           },
         })
-    return { ok: true, existing, official_cc_bootstrap: officialCc }
+    return {
+      ok: true,
+      existing,
+      official_cc_bootstrap: officialCc,
+      subscription_profile: { ok: profile.ok, reason: profile.reason },
+    }
   }
   async function commitImportedOauth(options) {
     let result

@@ -200,7 +200,7 @@ test('package import with a proxy keeps proxy_cli_enabled even if the spec says 
   const root = tmpRoot()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const db = createDatabase({ dbPath: ':memory:' })
-  const pool = new ProxyPool({ db })
+  const pool = await ProxyPool.create({ db })
   t.after(() => {
     pool.stopScheduler()
     db.close()
@@ -231,7 +231,7 @@ test('package import with a proxy keeps proxy_cli_enabled even if the spec says 
     parsed,
     mode: 'create',
     proxyPool: pool,
-    owner: { role: 'admin', userId: null },
+    owner: { role: 'super_admin', userId: null },
   })
   assert.equal(result.ok, true, result.error?.message)
   const saved = getVm(root, 'vm-pkg')

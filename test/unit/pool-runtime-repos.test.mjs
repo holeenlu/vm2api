@@ -94,6 +94,65 @@ test('updateWindow persists session window without touching cooldowns', () => {
   }
 })
 
+test('account error protection state round trips through CAS revisions', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-runtime-protection-'))
+  const db = createDatabase({ dataDir: dir })
+  try {
+    const columns = new Set(
+      db
+        .prepare('PRAGMA table_info(account_runtime)')
+        .all()
+        .map((row) => row.name),
+    )
+    assert.equal(columns.has('protection_state_json'), true)
+    assert.equal(columns.has('protection_generation'), true)
+
+    const repo = new AccountRuntimeRepo(db)
+    repo.upsert({ account_id: 'protected-1', vm_id: 'vm-protected', status: 'ready' })
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: null, generation: 0 })
+
+    const frozen = {
+      policyFingerprint: 'policy-a',
+      credentialGeneration: 2,
+      windowStartedAt: 10,
+      count: 12,
+      frozenUntil: 20,
+      matchedRules: [{ id: 'auth-expired', name: '凭据失效' }],
+      generation: 1,
+      probePending: true,
+      lastProbeAt: 0,
+    }
+    assert.equal(repo.compareAndSwapProtectionState('protected-1', { expectedGeneration: 0, state: frozen }), 1)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: frozen, generation: 1 })
+    assert.deepEqual(repo.get('protected-1').protection_state, frozen)
+    assert.equal(repo.get('protected-1').protection_generation, 1)
+
+    // A stale scheduler write must not revert a newer CAS state merely
+    // because it also writes the shared runtime row.
+    repo.upsert({
+      ...repo.get('protected-1'),
+      protection_state: { count: 1 },
+      protection_generation: 0,
+    })
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: frozen, generation: 1 })
+
+    assert.equal(repo.compareAndSwapProtectionState('protected-1', { expectedGeneration: 0, state: {} }), null)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: frozen, generation: 1 })
+
+    const cleared = { ...frozen, count: 0, frozenUntil: 0, probePending: false, generation: 2 }
+    assert.equal(repo.clearProtectionState('protected-1', { expectedGeneration: 1, state: cleared }), 2)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: cleared, generation: 2 })
+    assert.equal(repo.clearProtectionState('protected-1', { expectedGeneration: 1 }), null)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: cleared, generation: 2 })
+
+    assert.equal(repo.clearProtectionState('protected-1', { expectedGeneration: 2 }), 3)
+    assert.deepEqual(repo.getProtectionState('protected-1'), { state: null, generation: 3 })
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('clearAuthCooldown drops 401 leftover and keeps quota cools', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-runtime-auth-'))
   const db = createDatabase({ dataDir: dir })

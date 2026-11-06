@@ -74,6 +74,7 @@ export class BackupService {
     this._timer = null
     this._bootTimer = null
     this._rebindStores = null // set via onRestored()
+    this._prepareRestore = null
   }
 
   _repo() {
@@ -98,6 +99,11 @@ export class BackupService {
     this._rebindStores = typeof fn === 'function' ? fn : null
   }
 
+  /** Stop auxiliary DB readers/writers before swapping the database files. */
+  onBeforeRestore(fn) {
+    this._prepareRestore = typeof fn === 'function' ? fn : null
+  }
+
   // ---------- schedule config ----------
 
   getSchedule() {
@@ -114,7 +120,7 @@ export class BackupService {
     return cfg
   }
 
-  updateSchedule(patch = {}) {
+  async updateSchedule(patch = {}) {
     const cur = { ...DEFAULT_SCHEDULE, ...(this._settings().get(SCHEDULE_KEY, {}) || {}) }
     if (patch.enabled != null) cur.enabled = !!patch.enabled
     if (patch.interval_hours != null) {
@@ -131,14 +137,14 @@ export class BackupService {
       }
       cur.retention = n
     }
-    this._settings().set(SCHEDULE_KEY, cur)
+    await this._settings().set(SCHEDULE_KEY, cur)
     return this.getSchedule()
   }
 
-  nextAutoAt() {
+  async nextAutoAt() {
     const cfg = this.getSchedule()
     if (!cfg.enabled) return null
-    const last = this._repo().lastSuccessful({})
+    const last = await this._repo().lastSuccessful({})
     const base = last ? Date.parse(last.created_at) : 0
     return new Date(Math.max(Date.now(), base + cfg.interval_hours * 3600_000)).toISOString()
   }
@@ -171,8 +177,8 @@ export class BackupService {
       // The worker records its own failure; this covers the cases where it never
       // got that far (module error, OOM, kill) so the panel still shows the job.
       try {
-        if (!this._repo().get(id)) {
-          this._repo().insert({
+        if (!(await this._repo().get(id))) {
+          await this._repo().insert({
             id,
             created_at: createdAt,
             kind,
@@ -232,21 +238,19 @@ export class BackupService {
 
   // ---------- list / delete ----------
 
-  list({ limit = 100 } = {}) {
-    return this._repo()
-      .list({ limit })
-      .map((r) => ({
-        ...r,
-        file_exists: !!(r.file_path && fs.existsSync(r.file_path)),
-      }))
+  async list({ limit = 100 } = {}) {
+    return (await this._repo().list({ limit })).map((r) => ({
+      ...r,
+      file_exists: !!(r.file_path && fs.existsSync(r.file_path)),
+    }))
   }
 
-  get(id) {
+  async get(id) {
     return this._repo().get(id)
   }
 
-  remove(id) {
-    const rec = this._repo().get(id)
+  async remove(id) {
+    const rec = await this._repo().get(id)
     if (!rec) return false
     try {
       if (rec.file_path && fs.existsSync(rec.file_path)) fs.rmSync(rec.file_path, { force: true })
@@ -261,7 +265,7 @@ export class BackupService {
    * state first (kind=pre_restore). Re-binds stores via onRestored callback.
    */
   async restoreBackup(id) {
-    const rec = this._repo().get(id)
+    const rec = await this._repo().get(id)
     if (!rec) throw Object.assign(new Error('backup not found'), { code: 'backup_not_found' })
     if (rec.status !== 'ok')
       throw Object.assign(new Error('backup record is not restorable'), { code: 'backup_not_ok' })
@@ -278,6 +282,7 @@ export class BackupService {
 
     this.isRestoring = true
     let tmp = null
+    let resume = null
     try {
       // 0. safety net snapshot of the current state
       const pre = await this.createBackup({ kind: 'pre_restore', note: `before restore of ${rec.id}` })
@@ -305,6 +310,7 @@ export class BackupService {
       if (!fs.existsSync(dbFile)) throw new Error('no db snapshot inside backup')
 
       // 2. swap the live database
+      resume = await this._prepareRestore?.()
       const dbPath = getDbPath()
       closeDatabase()
       const keep = `${dbPath}.pre-restore`
@@ -359,7 +365,7 @@ export class BackupService {
       if (this.projectRoot) {
         invalidateReadCache()
         try {
-          reconcileVms(this.projectRoot)
+          await reconcileVms(this.projectRoot)
           try {
             repairVmProxyCliEnabled(this.projectRoot)
           } catch {}
@@ -376,17 +382,18 @@ export class BackupService {
       //    pre_restore snapshot (and any other on-disk archives) so the
       //    user can still see/undo from the panel.
       try {
-        this._registerOrphanArchives([pre, rec])
+        await this._registerOrphanArchives([pre, rec])
       } catch {}
 
       // 7. re-bind stores to the fresh connection. A failed rebind leaves the
       //    process partially attached to the closed database, so it must make
       //    the restore fail instead of reporting a false success.
-      if (this._rebindStores) this._rebindStores(db)
+      if (this._rebindStores) await this._rebindStores(db)
 
       return { ok: true, restored: rec.id, pre_restore: pre.id }
     } finally {
       this.isRestoring = false
+      resume?.()
       if (tmp) {
         try {
           fs.rmSync(tmp, { recursive: true, force: true })
@@ -400,13 +407,13 @@ export class BackupService {
    * record in the (freshly restored) DB. `known` records are inserted
    * verbatim; remaining orphans get kind='imported'.
    */
-  _registerOrphanArchives(known = []) {
+  async _registerOrphanArchives(known = []) {
     const repo = this._repo()
-    const existing = new Set(repo.list({ limit: 500 }).map((r) => r.file_name))
+    const existing = new Set((await repo.list({ limit: 500 })).map((r) => r.file_name))
     for (const rec of known) {
       if (rec?.file_name && !existing.has(rec.file_name) && rec.file_path && fs.existsSync(rec.file_path)) {
         try {
-          repo.insert(rec)
+          await repo.insert(rec)
           existing.add(rec.file_name)
         } catch {}
       }
@@ -417,7 +424,7 @@ export class BackupService {
       const fp = path.join(this.backupDir, f)
       try {
         const st = fs.statSync(fp)
-        repo.insert({
+        await repo.insert({
           id: 'bak_' + crypto.randomBytes(6).toString('hex'),
           created_at: st.mtime.toISOString(),
           kind: 'imported',
@@ -443,7 +450,7 @@ export class BackupService {
     this.stopScheduler()
     const check = async () => {
       try {
-        if (this.shouldRunScheduled()) {
+        if (await this.shouldRunScheduled()) {
           const rec = await this.createBackup({ kind: 'scheduled' })
           console.log(`[backup] scheduled backup completed (${Math.round((rec.size_bytes || 0) / 1048576)} MiB)`)
         }
@@ -458,10 +465,10 @@ export class BackupService {
     if (typeof this._bootTimer.unref === 'function') this._bootTimer.unref()
   }
 
-  shouldRunScheduled(now = Date.now()) {
+  async shouldRunScheduled(now = Date.now()) {
     const cfg = this.getSchedule()
     if (!cfg.enabled || this._running || this.isRestoring) return false
-    const last = this._repo().lastSuccessful({})
+    const last = await this._repo().lastSuccessful({})
     if (!last) return true
     return now - Date.parse(last.created_at) >= cfg.interval_hours * 3600_000
   }
