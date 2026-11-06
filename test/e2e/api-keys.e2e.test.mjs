@@ -4,47 +4,54 @@ import { startGateway, api } from '../harness.mjs'
 
 const MODEL = 'claude-haiku-4-5-20251001'
 
-test('real admin and user sessions cannot list or operate each other personal keys', async () => {
+// 上游 #862 的真实会话回归，按 tapmodels 契约改写：商业 Key 必须绑定授权分组；用户只能看到和操作自己的 Key，
+// 伪造的 user_id 查询不能扩大范围；超级管理员 / master 保留全量视图（管理员分支范围见 panel-api-key-routes 单测）。
+test('real user sessions cannot list or operate other users or platform keys', async () => {
   const gw = await startGateway()
   try {
+    const data = (r) => r.json?.data || r.json
     const login = async (username, password) => {
       const response = await api(gw, 'POST', '/api/panel/login', { body: { username, password } })
       assert.equal(response.status, 200, response.text)
       return response.headers.get('set-cookie')
     }
-    const adminCookie = await login('admin', 'testpass')
-    const user = await api(gw, 'POST', '/api/panel/users', {
-      body: { username: 'key-owner', password: 'fixture-key-owner-pass', role: 'user' },
-    })
-    assert.equal(user.status, 201, user.text)
-    const userId = (user.json.data?.item || user.json.item).id
-    const userCookie = await login('key-owner', 'fixture-key-owner-pass')
-    const personal = (cookie, method, path, body) =>
-      api(gw, method, path, {
-        headers: { authorization: '', cookie },
-        body,
+    const group = data(await api(gw, 'POST', '/api/panel/groups', { body: { name: 'Keys', platform: 'mixed' } })).item
+    const users = []
+    for (const username of ['key-owner', 'key-other']) {
+      const created = await api(gw, 'POST', '/api/panel/users', {
+        body: { username, password: `fixture-${username}-pass`, role: 'user' },
       })
+      assert.equal(created.status, 201, created.text)
+      const id = data(created).item.id
+      await api(gw, 'PUT', `/api/panel/users/${id}/groups`, { body: { groups: [{ group_id: group.id }] } })
+      users.push({ id, cookie: await login(username, `fixture-${username}-pass`) })
+    }
+    const personal = (cookie, method, path, body) =>
+      api(gw, method, path, { headers: { authorization: '', cookie }, body })
     const platform = await api(gw, 'POST', '/api/panel/api-keys', { body: { name: 'platform' } })
     assert.equal(platform.status, 201, platform.text)
-    const userKey = await personal(userCookie, 'POST', '/api/panel/api-keys', { name: 'user-key' })
-    assert.equal(userKey.status, 201, userKey.text)
-    assert.equal(userKey.json.item.user_id, userId)
-    const adminKey = await personal(adminCookie, 'POST', '/api/panel/api-keys', { name: 'admin-key', user_id: userId })
-    assert.equal(adminKey.status, 201, adminKey.text)
-    assert.ok(adminKey.json.item.user_id)
-    assert.notEqual(adminKey.json.item.user_id, userId)
-    for (const [cookie, own, foreign] of [
-      [adminCookie, adminKey.json.item.id, userKey.json.item.id],
-      [userCookie, userKey.json.item.id, adminKey.json.item.id],
-    ]) {
-      const list = await personal(cookie, 'GET', `/api/panel/api-keys?user_id=${userId}`)
+    const keys = []
+    for (const user of users) {
+      // 调用方伪造的 user_id 被忽略，属主取认证用户
+      const created = await personal(user.cookie, 'POST', '/api/panel/api-keys', {
+        name: 'mine',
+        group_id: group.id,
+        user_id: users.find((u) => u !== user).id,
+      })
+      assert.equal(created.status, 201, created.text)
+      keys.push(created.json.item)
+      assert.equal(keys.at(-1).user_id, user.id)
+    }
+    for (const [index, user] of users.entries()) {
+      const own = keys[index].id
+      const foreign = keys[1 - index].id
+      const list = await personal(user.cookie, 'GET', `/api/panel/api-keys?user_id=${users[1 - index].id}`)
       assert.equal(list.status, 200, list.text)
-      assert.equal(list.json.total, 1)
-      assert.equal(list.json.active, 1)
       assert.deepEqual(
         list.json.keys.map((key) => key.id),
         [own],
       )
+      assert.equal(list.json.total, 1)
       for (const [method, suffix] of [
         ['GET', '/stats'],
         ['POST', '/reveal'],
@@ -55,21 +62,21 @@ test('real admin and user sessions cannot list or operate each other personal ke
       ]) {
         for (const id of [foreign, platform.json.item.id, 'missing']) {
           const denied = await personal(
-            cookie,
+            user.cookie,
             method,
             `/api/panel/api-keys/${id}${suffix}`,
             method === 'PATCH' ? { name: 'hijacked' } : undefined,
           )
-          assert.equal(denied.status, 404, `${method} ${suffix}: ${denied.text}`)
+          assert.equal(denied.status, 404, `${method} ${suffix} ${id}: ${denied.text}`)
         }
       }
-      const reveal = await personal(cookie, 'POST', `/api/panel/api-keys/${own}/reveal`)
+      const reveal = await personal(user.cookie, 'POST', `/api/panel/api-keys/${own}/reveal`)
       assert.equal(reveal.status, 200, reveal.text)
     }
     const masterList = await api(gw, 'GET', '/api/panel/api-keys')
     assert.deepEqual(
-      masterList.json.keys.map((key) => key.id),
-      [platform.json.item.id],
+      new Set(masterList.json.keys.map((key) => key.id)),
+      new Set([platform.json.item.id, ...keys.map((key) => key.id)]),
     )
   } finally {
     await gw.stop()
@@ -255,6 +262,46 @@ test('managed key cannot access panel admin APIs', async () => {
       headers: { authorization: `Bearer ${key}` },
     })
     assert.equal(keys.status, 403, keys.text)
+  } finally {
+    await gw.stop()
+  }
+})
+
+test('bulk key HTTP route saves selected fields atomically and rejects malformed patches', async () => {
+  const gw = await startGateway({ disableWatchdog: true })
+  try {
+    const keys = []
+    for (const name of ['bulk-one', 'bulk-two']) {
+      const r = await api(gw, 'POST', '/api/panel/api-keys', { body: { name, quota_usd: 9, rpm: 5 } })
+      assert.equal(r.status, 201, r.text)
+      keys.push(r.json.item)
+    }
+    const update = (ids, patch) => api(gw, 'PATCH', '/api/panel/api-keys/bulk', { body: { ids, patch } })
+    assert.equal((await update([keys[0].id, 'missing'], { rpm: 10 })).status, 404)
+    assert.equal(
+      (
+        await update(
+          keys.map((k) => k.id),
+          { quota_usd: null },
+        )
+      ).status,
+      400,
+    )
+    const saved = await update(
+      keys.map((k) => k.id),
+      { quota_usd: 12.5, rate_limit_5h: 1, rpm: 0 },
+    )
+    assert.equal(saved.status, 200, saved.text)
+    assert.deepEqual(saved.json, { ok: true, updated: 2 })
+    const listed = await api(gw, 'GET', '/api/panel/api-keys')
+    for (const key of keys) {
+      const row = listed.json.keys.find((k) => k.id === key.id)
+      assert.equal(row.quota_usd, 12.5)
+      assert.equal(row.rate_limit_5h, 1)
+      assert.equal(row.rpm, 0)
+      assert.equal(row.name, key.name)
+      assert.ok(row.key.includes('…'))
+    }
   } finally {
     await gw.stop()
   }

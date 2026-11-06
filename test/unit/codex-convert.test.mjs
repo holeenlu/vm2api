@@ -13,7 +13,9 @@ import {
   codexBodyToAnthropicMessage,
   stripCodexIdentity,
   toCodexResponses,
+  withChatUrlCitations,
 } from '../../src/lib/protocol/codex-convert.mjs'
+import { fromClaudeToOpenAIChat } from '../../src/lib/protocol/convert.mjs'
 
 test('strips client identity fields', () => {
   const out = stripCodexIdentity({
@@ -557,4 +559,150 @@ test('completed snapshots recover unregistered function and custom calls in ever
     assert.equal(frames.filter((frame) => frame.type === 'content_block_stop' && frame.index === index).length, 1)
   }
   assert.equal(frames.find((frame) => frame.type === 'message_delta').delta.stop_reason, 'tool_use')
+})
+
+// CPR 10e25ce2：Chat Completions 内容映射
+const PDF = 'data:application/pdf;base64,JVBERi0xLjQ='
+
+test('chat file blocks become input_file by id, inline data or URL; empty and non-user files are not mapped', () => {
+  const body = toCodexResponses('openai.chat', {
+    model: 'gpt-5.5',
+    messages: [
+      {
+        role: 'system',
+        content: [
+          { type: 'file', file: { filename: 'sys.pdf', file_data: PDF } },
+          { type: 'text', text: 'rules' },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'read' },
+          { type: 'file', file: { filename: 'a.pdf', file_data: PDF } },
+          { type: 'file', file: { file_id: 'file_1' } },
+          { type: 'file', file: { file_url: 'https://example.test/c.png', filename: 'c.png' } },
+          { type: 'file', file: { file_data: 'data:text/csv;base64,YSxi' } },
+          { type: 'file', file: { filename: 'nothing.pdf' } },
+          { type: 'file', file: 'not-an-object' },
+        ],
+      },
+    ],
+  }).body
+  assert.deepEqual(body.input[0].content, [{ type: 'input_text', text: 'rules' }])
+  assert.deepEqual(body.input[1].content, [
+    { type: 'input_text', text: 'read' },
+    { type: 'input_file', filename: 'a.pdf', file_data: PDF },
+    { type: 'input_file', file_id: 'file_1' },
+    { type: 'input_file', file_url: 'https://example.test/c.png', filename: 'c.png' },
+    { type: 'input_file', file_data: 'data:text/csv;base64,YSxi' },
+  ])
+})
+
+test('chat tool message name is carried onto function_call_output', () => {
+  const body = toCodexResponses('openai.chat', {
+    model: 'gpt-5.5',
+    messages: [
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', name: 'lookup', content: 'ok' },
+      { role: 'tool', tool_call_id: 'call_2', name: '', content: 'ok' },
+    ],
+  }).body
+  assert.deepEqual(body.input[1], { type: 'function_call_output', call_id: 'call_1', output: 'ok', name: 'lookup' })
+  assert.equal('name' in body.input[2], false)
+})
+
+test('chat web_search_options becomes a forced web_search tool and refuses function tools', () => {
+  const converted = toCodexResponses('openai.chat', {
+    model: 'gpt-5.5',
+    messages: [{ role: 'user', content: 'news' }],
+    tool_choice: 'auto',
+    web_search_options: {
+      search_context_size: 'low',
+      user_location: { type: 'approximate', approximate: { city: 'Taipei', country: 'TW' } },
+    },
+  })
+  assert.equal(converted.ok, true)
+  assert.deepEqual(converted.body.tools, [
+    {
+      type: 'web_search',
+      search_context_size: 'low',
+      user_location: { type: 'approximate', city: 'Taipei', country: 'TW' },
+    },
+  ])
+  assert.deepEqual(converted.body.tool_choice, { type: 'web_search' })
+  assert.deepEqual(
+    toCodexResponses('openai.chat', { model: 'gpt-5.5', messages: [], web_search_options: {} }).body.tools,
+    [{ type: 'web_search' }],
+  )
+  const fn = { type: 'function', function: { name: 'f', parameters: { type: 'object' } } }
+  for (const [extra, param] of [
+    [{ tools: [fn] }, 'tools'],
+    [{ tool_choice: 'required' }, 'tool_choice'],
+    [{ web_search_options: { user_location: { type: 'exact' } } }, 'web_search_options.user_location'],
+  ]) {
+    const rejected = toCodexResponses('openai.chat', {
+      model: 'gpt-5.5',
+      messages: [],
+      web_search_options: {},
+      ...extra,
+    })
+    assert.equal(rejected.ok, false)
+    assert.equal(rejected.code, 'unsupported_parameter')
+    assert.equal(rejected.param, param)
+  }
+})
+
+test('Chat stays on the Codex wire contract: max_tokens is still stripped', () => {
+  const body = toCodexResponses('openai.chat', { model: 'gpt-5.5', messages: [], max_tokens: 64 }).body
+  assert.equal(body.max_output_tokens, undefined)
+})
+
+test('non-stream chat projects url citations with offsets across merged messages', () => {
+  const assembled = {
+    id: 'resp_1',
+    output: [
+      { type: 'web_search_call', id: 'ws_1', status: 'completed' },
+      {
+        type: 'message',
+        content: [
+          {
+            type: 'output_text',
+            text: '你好 A',
+            annotations: [{ type: 'url_citation', url: 'https://a.test', title: 'A', start_index: 3, end_index: 4 }],
+          },
+        ],
+      },
+      {
+        type: 'message',
+        content: [
+          {
+            type: 'output_text',
+            text: 'B',
+            annotations: [
+              { type: 'url_citation', url: 'https://b.test', title: 'B', start_index: 0, end_index: 1 },
+              { type: 'url_citation', url: 'https://bad.test', title: 'bad', start_index: 2, end_index: 1 },
+              { type: 'file_citation', file_id: 'f', index: 0 },
+            ],
+          },
+        ],
+      },
+    ],
+    usage: { input_tokens: 1, output_tokens: 1 },
+  }
+  const chat = withChatUrlCitations(
+    fromClaudeToOpenAIChat(codexBodyToAnthropicMessage(assembled, 'gpt-5.5'), 'gpt-5.5'),
+    assembled,
+  )
+  assert.equal(chat.choices[0].message.content, '你好 AB')
+  assert.deepEqual(chat.choices[0].message.annotations, [
+    { type: 'url_citation', url_citation: { url: 'https://a.test', title: 'A', start_index: 3, end_index: 4 } },
+    { type: 'url_citation', url_citation: { url: 'https://b.test', title: 'B', start_index: 4, end_index: 5 } },
+  ])
+  const plain = withChatUrlCitations(fromClaudeToOpenAIChat(codexBodyToAnthropicMessage({ output: [] }, 'm'), 'm'), {})
+  assert.equal('annotations' in plain.choices[0].message, false)
 })

@@ -2,14 +2,21 @@
  * Per-account Claude usage quota tracker (SQLite-backed).
  *
  * Scheduling and list Extra come from Messages response headers.
- * Official GET /api/oauth/usage is a manual calibration hop that writes
+ * Official GET /api/oauth/usage is a cached calibration read that writes
  * Extra (÷100) after a cache hit/miss.
  *
  * Persistent state → `accounts` + `account_allocations` tables.
  * Transient state (inflight counters, RPM buckets) stays in memory.
+ *
+ * R6 B7b：读写经 DbClient 异步执行。读改写一个账号行（读、改、写回）在同一个 `db.tx` 里（`_mutate`），并发的同账号
+ * 写入排队，不互相覆盖。准入判定（`canAcceptAccount` / `tryAcquire` / `gateZoneOf` / Fable 与周拆分判定）是纯内存
+ * 计算：账号行由调用方先 await 读好传入，不传时用本进程最近读到的账号行（`AccountsRepo.cached`），不读库；
+ * `PoolScheduler.reserve()` 在同步段里调用 `tryAcquire`（竞态 R9、R10）。
+ * 构造函数不读库；带种子账号时用 `await AccountQuota.create({ …, accounts })`。
  */
 
 import { resolveStoreDb } from '../db/database.mjs'
+import { dbClient } from '../db/db-client.mjs'
 import { AccountsRepo } from '../db/repos/accounts-repo.mjs'
 import { computeWeeklySplit, weeklySplitConfig } from './weekly-split.mjs'
 import {
@@ -26,6 +33,7 @@ import {
   wipeElapsedHeaderWindows,
 } from './quota-window.mjs'
 import { rollWindowHistory } from './window-history.mjs'
+import { recordQuotaObservations } from '../usage/quota-observations.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from './quota-tiers.mjs'
 import { resolvePolicyModelId } from '../protocol/model-policy.mjs'
 import { SessionLimitRegistry } from './session-limit.mjs'
@@ -60,7 +68,9 @@ export { estimateRequestRisk }
 
 export class AccountQuota {
   constructor({ dataDir, db, config, accounts }) {
+    if (accounts?.length) throw new Error('AccountQuota seeds accounts asynchronously: use await AccountQuota.create()')
     this.db = resolveStoreDb({ db, dataDir })
+    this.client = dbClient(this.db)
     this.repo = new AccountsRepo(this.db)
     this.config = config?.quota || {
       safety_ratio: 0.85,
@@ -79,8 +89,18 @@ export class AccountQuota {
     this.sessions = config?.sessions instanceof SessionLimitRegistry ? config.sessions : new SessionLimitRegistry()
     // vm_id → normalized `vm.policy.quota`; vm.json is the source of truth, this is the hot-path copy.
     this.vmQuota = new Map()
-    // seed accounts
-    for (const a of accounts || []) this.ensure(a)
+  }
+
+  /** 构造并按种子账号 ensure（启动时 server.mjs 传入 VM 列表）。 */
+  static async create({ accounts = [], ...options } = {}) {
+    const quota = new AccountQuota(options)
+    for (const a of accounts || []) await quota.ensure(a)
+    return quota
+  }
+
+  /** 读改写一个账号行：读、改、写回在同一事务里（单连接上并发的同账号写入排队，不互相覆盖）。 */
+  _mutate(fn) {
+    return this.client.tx(() => fn())
   }
 
   /** Kept for API compat + post-restore hook (no in-memory cache to refresh). */
@@ -89,6 +109,7 @@ export class AccountQuota {
   /** Re-bind to a fresh DB connection (after backup restore). */
   rebind(db) {
     this.db = db
+    this.client = dbClient(db)
     this.repo = new AccountsRepo(db)
   }
 
@@ -100,14 +121,14 @@ export class AccountQuota {
     this.runtimeRepo = runtimeRepo || null
   }
 
-  _writeSessionWindow(acc) {
+  async _writeSessionWindow(acc) {
     if (!this.runtimeRepo?.updateWindow || !acc) return
     const extra = headerWindow(acc.unified, '5h')
     const w5 = extra.utilization != null || extra.status || extra.reset ? extra : officialWindow(acc.unified, '5h')
     const endIso = w5.reset || null
     const endMs = endIso ? Date.parse(endIso) : NaN
     try {
-      this.runtimeRepo.updateWindow(acc.account_id, {
+      await this.runtimeRepo.updateWindow(acc.account_id, {
         vmId: acc.vm_id || null,
         sessionWindowEnd: Number.isFinite(endMs)
           ? endMs
@@ -121,52 +142,73 @@ export class AccountQuota {
   }
 
   /** Archive the window that just rolled over; live headers win over the official probe, as in `_writeSessionWindow`. */
-  _rollWindowHistory(acc) {
+  async _rollWindowHistory(acc) {
     if (!acc?.unified) return
     const read = (key) => {
       const extra = headerWindow(acc.unified, key)
       return extra.utilization != null && extra.reset ? extra : officialWindow(acc.unified, key)
     }
     acc.window_history = rollWindowHistory(acc.window_history, { '5h': read('5h'), '7d': read('7d') })
+    if (acc.vm_id) {
+      const fable = headerWindow(acc.unified, '7d_oi')
+      await recordQuotaObservations(
+        acc.vm_id,
+        {
+          '5h': read('5h'),
+          '7d': read('7d'),
+          '7d_oi': fable.utilization != null && fable.reset ? fable : acc.unified['7d_oi'] || acc.unified.fable || null,
+        },
+        { db: this.repo.db },
+      )
+    }
   }
 
-  ensure(account) {
+  /** 新账号行的初始内容（ensure 插入的行；reserve 时账号行还没建好也按它判定）。 */
+  newAccountRecord(account) {
+    const id = account.account_id || account.account_uuid || account.id
+    return {
+      account_id: id,
+      vm_id: account.vm_id || null,
+      email: account.email || null,
+      type: account.type || 'oauth',
+      max_concurrency: account.max_concurrency ?? this.defaultMax(),
+      concurrency_override: account.concurrency_override ? 1 : 0,
+      max_rpm: account.max_rpm ?? this.defaultRpm(),
+      rpm_override: account.rpm_override ? 1 : 0,
+      requests: 0,
+      tokens_in: 0,
+      tokens_out: 0,
+      unified: {
+        '5h': { utilization: 0, reset: null, status: 'active' },
+        '7d': { utilization: 0, reset: null, status: 'active' },
+        representative_claim: null,
+        overage_status: null,
+        updated_at: null,
+        ...(process.env.KIN_CRS_MOCK === '1'
+          ? {
+              source: 'vm-oauth-usage',
+              last_probe: { ok: true, source: 'vm-oauth-usage', at: new Date().toISOString() },
+            }
+          : {}),
+      },
+      last_blocked: null,
+      last_error: null,
+    }
+  }
+
+  /**
+   * 竞态 R10：并发的首次 ensure 都读不到行时，插入用 ON CONFLICT DO NOTHING，之后读回库里的行（先插入的一方），
+   * 不撞主键；归属 VM / 类型变化只改这两列，不整行写回。
+   */
+  async ensure(account) {
     const id = account.account_id || account.account_uuid || account.id
     if (!id) return
-    let acc = this.repo.get(id)
+    let acc = await this.repo.get(id)
     if (!acc) {
-      acc = this.repo.insert({
-        account_id: id,
-        vm_id: account.vm_id || null,
-        email: account.email || null,
-        type: account.type || 'oauth',
-        max_concurrency: account.max_concurrency ?? this.defaultMax(),
-        concurrency_override: account.concurrency_override ? 1 : 0,
-        max_rpm: account.max_rpm ?? this.defaultRpm(),
-        rpm_override: account.rpm_override ? 1 : 0,
-        requests: 0,
-        tokens_in: 0,
-        tokens_out: 0,
-        unified: {
-          '5h': { utilization: 0, reset: null, status: 'active' },
-          '7d': { utilization: 0, reset: null, status: 'active' },
-          representative_claim: null,
-          overage_status: null,
-          updated_at: null,
-          ...(process.env.KIN_CRS_MOCK === '1'
-            ? {
-                source: 'vm-oauth-usage',
-                last_probe: { ok: true, source: 'vm-oauth-usage', at: new Date().toISOString() },
-              }
-            : {}),
-        },
-        last_blocked: null,
-        last_error: null,
-      })
-    } else if ((account.vm_id && acc.vm_id !== account.vm_id) || (account.type && acc.type !== account.type)) {
-      if (account.vm_id) acc.vm_id = account.vm_id
-      if (account.type) acc.type = account.type
-      acc = this.repo.save(acc)
+      acc = await this.repo.insertIfAbsent(this.newAccountRecord({ ...account, account_id: id }))
+    }
+    if ((account.vm_id && acc.vm_id !== account.vm_id) || (account.type && acc.type !== account.type)) {
+      acc = await this.repo.setVmAndType(id, { vmId: account.vm_id || null, type: account.type || null })
     }
     return acc
   }
@@ -175,349 +217,383 @@ export class AccountQuota {
    * Update from Anthropic response headers (unified OAuth stats).
    * headers: Headers | plain object (lower-cased keys preferred)
    */
-  ingestHeaders(accountId, headers, usageBody = null, extra = {}) {
-    const acc = this.ensure({ account_id: accountId })
-    const h = normalizeHeaders(headers)
-    acc.unified.headers = acc.unified.headers || {}
-    acc.unified.header_stall = 0
+  async ingestHeaders(accountId, headers, usageBody = null, extra = {}) {
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      const h = normalizeHeaders(headers)
+      acc.unified.headers = acc.unified.headers || {}
+      acc.unified.header_stall = 0
 
-    const countRequest = extra.countRequest !== false
-    const exhausted = extra.exhausted === true || isUnifiedRejected(h)
-    const writeExtra = countRequest || exhausted
-    const u5 = num(h['anthropic-ratelimit-unified-5h-utilization'])
-    const u7 = num(h['anthropic-ratelimit-unified-7d-utilization'])
-    let sampled = false
-    if (exhausted) {
-      dropElapsedReset(acc, '5h', h['anthropic-ratelimit-unified-5h-reset'])
-      dropElapsedReset(acc, '7d', h['anthropic-ratelimit-unified-7d-reset'])
-    }
-    if (
-      writeExtra &&
-      (u5 != null || h['anthropic-ratelimit-unified-5h-status'] || h['anthropic-ratelimit-unified-5h-reset'])
-    ) {
-      writeHeaderWindow(acc, '5h', {
-        utilization: u5,
-        reset: h['anthropic-ratelimit-unified-5h-reset'],
-        status: h['anthropic-ratelimit-unified-5h-status'] || (u5 != null ? statusFromUtil(u5) : null),
-      })
-      sampled = true
-    }
-    if (
-      writeExtra &&
-      (u7 != null || h['anthropic-ratelimit-unified-7d-status'] || h['anthropic-ratelimit-unified-7d-reset'])
-    ) {
-      writeHeaderWindow(acc, '7d', {
-        utilization: u7,
-        reset: h['anthropic-ratelimit-unified-7d-reset'],
-        status: h['anthropic-ratelimit-unified-7d-status'] || (u7 != null ? statusFromUtil(u7) : null),
-      })
-      sampled = true
-    }
-    const uOi = num(h['anthropic-ratelimit-unified-7d_oi-utilization'])
-    if (writeExtra && (uOi != null || h['anthropic-ratelimit-unified-7d_oi-status'])) {
-      acc.unified['7d_oi'] = {
-        utilization: uOi ?? acc.unified['7d_oi']?.utilization ?? null,
-        reset: h['anthropic-ratelimit-unified-7d_oi-reset'] || acc.unified['7d_oi']?.reset || null,
-        status: h['anthropic-ratelimit-unified-7d_oi-status'] || statusFromUtil(uOi ?? 0),
+      const countRequest = extra.countRequest !== false
+      const exhausted = extra.exhausted === true || isUnifiedRejected(h)
+      const writeExtra = countRequest || exhausted
+      const sampledAt = new Date().toISOString()
+      const u5 = num(h['anthropic-ratelimit-unified-5h-utilization'])
+      const u7 = num(h['anthropic-ratelimit-unified-7d-utilization'])
+      let sampled = false
+      if (exhausted) {
+        dropElapsedReset(acc, '5h', h['anthropic-ratelimit-unified-5h-reset'])
+        dropElapsedReset(acc, '7d', h['anthropic-ratelimit-unified-7d-reset'])
       }
-      sampled = true
-    }
-    if (
-      writeExtra &&
-      /seven_day_overage_included|7d_oi/i.test(String(h['anthropic-ratelimit-unified-representative-claim'] || ''))
-    ) {
-      acc.unified['7d_oi'] = {
-        ...(acc.unified['7d_oi'] || {}),
-        claim: h['anthropic-ratelimit-unified-representative-claim'],
+      if (
+        writeExtra &&
+        (u5 != null || h['anthropic-ratelimit-unified-5h-status'] || h['anthropic-ratelimit-unified-5h-reset'])
+      ) {
+        writeHeaderWindow(
+          acc,
+          '5h',
+          {
+            utilization: u5,
+            reset: h['anthropic-ratelimit-unified-5h-reset'],
+            status: h['anthropic-ratelimit-unified-5h-status'] || (u5 != null ? statusFromUtil(u5) : null),
+          },
+          sampledAt,
+        )
+        sampled = true
       }
-    }
-    if (writeExtra && h['anthropic-ratelimit-unified-representative-claim']) {
-      acc.unified.representative_claim = h['anthropic-ratelimit-unified-representative-claim']
-    }
-    if (writeExtra && h['anthropic-ratelimit-unified-overage-status']) {
-      acc.unified.overage_status = h['anthropic-ratelimit-unified-overage-status']
-    }
-    acc.unified.updated_at = new Date().toISOString()
-    if (sampled) acc.unified.headers.sampled_at = new Date().toISOString()
+      if (
+        writeExtra &&
+        (u7 != null || h['anthropic-ratelimit-unified-7d-status'] || h['anthropic-ratelimit-unified-7d-reset'])
+      ) {
+        writeHeaderWindow(
+          acc,
+          '7d',
+          {
+            utilization: u7,
+            reset: h['anthropic-ratelimit-unified-7d-reset'],
+            status: h['anthropic-ratelimit-unified-7d-status'] || (u7 != null ? statusFromUtil(u7) : null),
+          },
+          sampledAt,
+        )
+        sampled = true
+      }
+      const uOi = num(h['anthropic-ratelimit-unified-7d_oi-utilization'])
+      if (
+        writeExtra &&
+        (uOi != null || h['anthropic-ratelimit-unified-7d_oi-status'] || h['anthropic-ratelimit-unified-7d_oi-reset'])
+      ) {
+        acc.unified['7d_oi'] = {
+          utilization: uOi ?? acc.unified['7d_oi']?.utilization ?? null,
+          reset: h['anthropic-ratelimit-unified-7d_oi-reset'] || acc.unified['7d_oi']?.reset || null,
+          status:
+            h['anthropic-ratelimit-unified-7d_oi-status'] ||
+            (uOi != null ? statusFromUtil(uOi) : acc.unified['7d_oi']?.status || null),
+          sampled_at: sampledAt,
+        }
+        writeHeaderWindow(acc, '7d_oi', acc.unified['7d_oi'], sampledAt)
+        sampled = true
+      }
+      if (
+        writeExtra &&
+        /seven_day_overage_included|7d_oi/i.test(String(h['anthropic-ratelimit-unified-representative-claim'] || ''))
+      ) {
+        acc.unified['7d_oi'] = {
+          ...(acc.unified['7d_oi'] || {}),
+          claim: h['anthropic-ratelimit-unified-representative-claim'],
+        }
+      }
+      if (writeExtra && h['anthropic-ratelimit-unified-representative-claim']) {
+        acc.unified.representative_claim = h['anthropic-ratelimit-unified-representative-claim']
+      }
+      if (writeExtra && h['anthropic-ratelimit-unified-overage-status']) {
+        acc.unified.overage_status = h['anthropic-ratelimit-unified-overage-status']
+      }
+      acc.unified.updated_at = new Date().toISOString()
+      if (sampled) acc.unified.headers.sampled_at = sampledAt
 
-    const usage = normalizeUsage(disjointOpenaiUsage(usageBody || {}) || {})
-    if (
-      countRequest &&
-      (usage.input_tokens != null ||
-        usage.output_tokens != null ||
-        usage.cache_read_tokens != null ||
-        usage.cache_creation_tokens != null)
-    ) {
-      acc.tokens_in += Number(usage.input_tokens) || 0
-      acc.tokens_out += Number(usage.output_tokens) || 0
-      acc.cache_read_tokens = (acc.cache_read_tokens || 0) + (Number(usage.cache_read_tokens) || 0)
-      acc.cache_creation_tokens = (acc.cache_creation_tokens || 0) + (Number(usage.cache_creation_tokens) || 0)
-    }
-    if (countRequest) acc.requests += 1
+      const usage = normalizeUsage(disjointOpenaiUsage(usageBody || {}) || {})
+      if (
+        countRequest &&
+        (usage.input_tokens != null ||
+          usage.output_tokens != null ||
+          usage.cache_read_tokens != null ||
+          usage.cache_creation_tokens != null)
+      ) {
+        acc.tokens_in += Number(usage.input_tokens) || 0
+        acc.tokens_out += Number(usage.output_tokens) || 0
+        acc.cache_read_tokens = (acc.cache_read_tokens || 0) + (Number(usage.cache_read_tokens) || 0)
+        acc.cache_creation_tokens = (acc.cache_creation_tokens || 0) + (Number(usage.cache_creation_tokens) || 0)
+      }
+      if (countRequest) acc.requests += 1
 
-    if (exhausted) applyHeaderExhausted(acc, h)
+      if (exhausted) applyHeaderExhausted(acc, h, sampledAt)
 
-    if (countRequest) {
-      const view = headerWindowOrEmpty(acc.unified, '5h')
-      const view7 = headerWindowOrEmpty(acc.unified, '7d')
-      this.repo.addAllocation(accountId, {
-        at: new Date().toISOString(),
-        source: 'headers',
-        util_5h: view.utilization ?? officialWindow(acc.unified, '5h').utilization,
-        util_7d: view7.utilization ?? officialWindow(acc.unified, '7d').utilization,
-        status_5h: view.status || null,
-        status_7d: view7.status || null,
-        claim: acc.unified.representative_claim,
-        tokens_in: usageBody?.input_tokens ?? null,
-        tokens_out: usageBody?.output_tokens ?? null,
-      })
-    }
+      if (countRequest) {
+        const view = headerWindowOrEmpty(acc.unified, '5h')
+        const view7 = headerWindowOrEmpty(acc.unified, '7d')
+        await this.repo.addAllocation(accountId, {
+          at: new Date().toISOString(),
+          source: 'headers',
+          util_5h: view.utilization ?? officialWindow(acc.unified, '5h').utilization,
+          util_7d: view7.utilization ?? officialWindow(acc.unified, '7d').utilization,
+          status_5h: view.status || null,
+          status_7d: view7.status || null,
+          claim: acc.unified.representative_claim,
+          tokens_in: usageBody?.input_tokens ?? null,
+          tokens_out: usageBody?.output_tokens ?? null,
+        })
+      }
 
-    this._rollWindowHistory(acc)
-    const saved = this.repo.save(acc)
-    this._writeSessionWindow(saved)
-    if (sampled) {
-      const observed5 = headerWindowOrEmpty(saved.unified, '5h')
-      const observed7 = headerWindowOrEmpty(saved.unified, '7d')
-      this._observeUtil(accountId, {
-        u5: observed5.utilization,
-        u7: observed7.utilization,
-        source: 'headers',
-      })
-    }
-    return saved
+      await this._rollWindowHistory(acc)
+      const saved = await this.repo.save(acc)
+      await this._writeSessionWindow(saved)
+      if (sampled) {
+        const observed5 = headerWindowOrEmpty(saved.unified, '5h')
+        const observed7 = headerWindowOrEmpty(saved.unified, '7d')
+        this._observeUtil(accountId, {
+          u5: observed5.utilization,
+          u7: observed7.utilization,
+          source: 'headers',
+        })
+      }
+      return saved
+    })
   }
 
-  recordLastProbe(accountId, probe = {}) {
+  async recordLastProbe(accountId, probe = {}) {
     if (!accountId) return null
-    const acc = this.ensure({ account_id: accountId })
-    const prev = acc.last_probe || acc.unified?.last_probe || null
-    if (isTestProbeSource(probe) && prev?.ok === true && !isTestProbeSource(prev)) {
-      return acc
-    }
-    acc.last_probe = {
-      at: probe.at || new Date().toISOString(),
-      ok: !!probe.ok,
-      source: probe.source || 'test-chat',
-      error: probe.error || null,
-      transport: !!probe.transport,
-      status: probe.status || null,
-    }
-    acc.unified.last_probe = acc.last_probe
-    return this.repo.save(acc)
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      const prev = acc.last_probe || acc.unified?.last_probe || null
+      if (isTestProbeSource(probe) && prev?.ok === true && !isTestProbeSource(prev)) {
+        return acc
+      }
+      acc.last_probe = {
+        at: probe.at || new Date().toISOString(),
+        ok: !!probe.ok,
+        source: probe.source || 'test-chat',
+        error: probe.error || null,
+        transport: !!probe.transport,
+        status: probe.status || null,
+      }
+      acc.unified.last_probe = acc.last_probe
+      return this.repo.save(acc)
+    })
   }
 
   /**
    * CRS oauth/usage snapshot from the VM UID probe.
    * Fable weekly limit is stored separately and does not unschedulable the account.
    */
-  ingestOAuthUsage(accountId, probe = {}) {
-    const acc = this.ensure({ account_id: accountId })
-    const nowIso = probe.probed_at || new Date().toISOString()
-    if (isOfficialUsageRateLimited(probe)) {
-      const retryMs = Number(probe.retry_after_ms)
-      const backoff =
-        Number.isFinite(retryMs) && retryMs > 0 ? Math.min(Math.max(retryMs, 60_000), 30 * 60_000) : 15 * 60_000
-      acc.unified = acc.unified || {}
-      acc.unified.usage_rate_limited_until = new Date(Date.now() + backoff).toISOString()
-      acc.unified.usage_probe_attempted_at = nowIso
-      const prev = acc.last_probe || acc.unified.last_probe || {}
-      acc.last_probe = {
-        ...prev,
-        at: prev.ok === true ? prev.at || prev.probed_at || nowIso : prev.at || nowIso,
-        ok: prev.ok === true,
-        source: prev.source || probe.source || 'official-cc-usage',
-        error: prev.ok === true ? null : prev.error || null,
-        rate_limited: true,
-        attempted_at: nowIso,
+  async ingestOAuthUsage(accountId, probe = {}) {
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      const nowIso = probe.probed_at || new Date().toISOString()
+      if (isOfficialUsageRateLimited(probe)) {
+        const retryMs = Number(probe.retry_after_ms)
+        const backoff =
+          Number.isFinite(retryMs) && retryMs > 0 ? Math.min(Math.max(retryMs, 60_000), 30 * 60_000) : 15 * 60_000
+        acc.unified = acc.unified || {}
+        acc.unified.usage_rate_limited_until = new Date(Date.now() + backoff).toISOString()
+        acc.unified.usage_probe_attempted_at = nowIso
+        const prev = acc.last_probe || acc.unified.last_probe || {}
+        acc.last_probe = {
+          ...prev,
+          at: prev.ok === true ? prev.at || prev.probed_at || nowIso : prev.at || nowIso,
+          ok: prev.ok === true,
+          source: prev.source || probe.source || 'official-cc-usage',
+          error: prev.ok === true ? null : prev.error || null,
+          rate_limited: true,
+          attempted_at: nowIso,
+        }
+        acc.unified.last_probe = acc.last_probe
+        return this.repo.save(acc)
       }
-      acc.unified.last_probe = acc.last_probe
-      return this.repo.save(acc)
-    }
-    if (acc.unified) delete acc.unified.usage_rate_limited_until
-    const official = probe.interpretations?.official || {}
-    const w5 = official.five_hour || probe.five_hour || {}
-    const w7 = official.seven_day || probe.seven_day || {}
-    writeOfficialWindow(acc, '5h', w5)
-    writeOfficialWindow(acc, '7d', w7)
-    if (probe.seven_day_sonnet) {
-      acc.unified.seven_day_sonnet = {
-        utilization: probe.seven_day_sonnet.utilization ?? null,
-        reset: probe.seven_day_sonnet.resets_at || null,
-        status: probe.seven_day_sonnet.status || null,
+      if (acc.unified) delete acc.unified.usage_rate_limited_until
+      const official = probe.interpretations?.official || {}
+      const w5 = official.five_hour || probe.five_hour || {}
+      const w7 = official.seven_day || probe.seven_day || {}
+      writeOfficialWindow(acc, '5h', w5, nowIso)
+      writeOfficialWindow(acc, '7d', w7, nowIso)
+      if (probe.seven_day_sonnet) {
+        acc.unified.seven_day_sonnet = {
+          utilization: probe.seven_day_sonnet.utilization ?? null,
+          reset: probe.seven_day_sonnet.resets_at || null,
+          status: probe.seven_day_sonnet.status || null,
+        }
       }
-    }
-    if (probe.extra_usage) acc.unified.overage_status = probe.extra_usage.status || acc.unified.overage_status
-    acc.unified.extra_usage = probe.extra_usage || acc.unified.extra_usage || null
-    const fableTransport = isFableTransportFailure(probe)
-    if (probe.fable) acc.unified.fable_probe_attempted_at = nowIso
-    const oi = probe.seven_day_oi || probe.seven_day_overage_included || probe.fable?.seven_day_oi
-    const oiUtil =
-      oi?.utilization != null
-        ? Number(oi.utilization)
-        : probe.fable?.utilization != null
-          ? Number(probe.fable.utilization)
-          : null
-    const oiNorm = oiUtil != null && Number.isFinite(oiUtil) ? (oiUtil > 1.5 ? oiUtil / 100 : oiUtil) : null
-    const oiRejected =
-      ['rejected', 'rate_limited'].includes(String(oi?.status || '').toLowerCase()) || (oiNorm != null && oiNorm >= 1)
-    if (oiNorm != null || oi?.status || oi?.resets_at || oi?.reset || oiRejected) {
-      acc.unified['7d_oi'] = {
-        utilization: oiNorm ?? (oiRejected ? 1 : (acc.unified['7d_oi']?.utilization ?? null)),
-        reset: oi?.resets_at || oi?.reset || probe.fable?.reset_at || acc.unified['7d_oi']?.reset || null,
-        status: oiRejected
-          ? 'rejected'
-          : oi?.status || (oiNorm != null ? statusFromUtil(oiNorm) : acc.unified['7d_oi']?.status || null),
+      if (probe.extra_usage) acc.unified.overage_status = probe.extra_usage.status || acc.unified.overage_status
+      acc.unified.extra_usage = probe.extra_usage || acc.unified.extra_usage || null
+      const fableTransport = isFableTransportFailure(probe)
+      if (probe.fable) acc.unified.fable_probe_attempted_at = nowIso
+      const oi = probe.seven_day_oi || probe.seven_day_overage_included || probe.fable?.seven_day_oi
+      const oiUtil =
+        oi?.utilization != null
+          ? Number(oi.utilization)
+          : probe.fable?.utilization != null
+            ? Number(probe.fable.utilization)
+            : null
+      const oiNorm = oiUtil != null && Number.isFinite(oiUtil) ? (oiUtil > 1.5 ? oiUtil / 100 : oiUtil) : null
+      const oiRejected =
+        ['rejected', 'rate_limited'].includes(String(oi?.status || '').toLowerCase()) || (oiNorm != null && oiNorm >= 1)
+      const freshOi = !olderThanWindowSample(acc, '7d_oi', nowIso)
+      if (freshOi && (oiNorm != null || oi?.status || oi?.resets_at || oi?.reset || oiRejected)) {
+        acc.unified['7d_oi'] = {
+          utilization: oiNorm ?? (oiRejected ? 1 : (acc.unified['7d_oi']?.utilization ?? null)),
+          reset: oi?.resets_at || oi?.reset || probe.fable?.reset_at || acc.unified['7d_oi']?.reset || null,
+          status: oiRejected
+            ? 'rejected'
+            : oi?.status || (oiNorm != null ? statusFromUtil(oiNorm) : acc.unified['7d_oi']?.status || null),
+          sampled_at: nowIso,
+        }
       }
-    }
-    const usageOk = probe.ok === true || (probe.usage_status > 0 && probe.usage_status < 400)
-    const completeOfficialUsage = usageOk && probe.limits_present === true
-    const leftoverFable = acc.unified.fable || {}
-    const hasFableUsage =
-      probe.usage_has_fable === true ||
-      (!isInventedFableWindow(probe.fable || leftoverFable, {
-        utilization_7d_oi: oiNorm,
-        reset_7d_oi: oi?.resets_at || oi?.reset,
-        status_7d_oi: oi?.status,
-        '7d_oi': oi,
-      }) &&
-        (oiNorm != null || oi?.resets_at || oi?.reset || oi?.status))
-    if (completeOfficialUsage && (probe.usage_has_fable === true || hasFableUsage)) acc.unified.usage_has_fable = true
-    else if (completeOfficialUsage && probe.usage_has_fable === false) {
-      acc.unified.usage_has_fable = false
-      delete acc.unified['7d_oi']
-      if (acc.unified.headers) delete acc.unified.headers['7d_oi']
-      delete acc.unified.fable
-    }
-    if (completeOfficialUsage) {
-      if (probe.usage_has_fable === true || hasFableUsage) acc.unified.account_tier = 'max'
-      else if (probe.usage_has_fable === false) acc.unified.account_tier = 'pro'
-      if (acc.unified.account_tier === 'pro' || acc.unified.account_tier === 'max')
-        acc.unified.account_tier_source = 'usage'
-    }
-    if (probe.fable && !fableTransport) {
-      const planDenied = completeOfficialUsage && !hasFableUsage && isFablePlanDenied(probe.fable)
-      acc.unified.fable = {
-        limited: oiRejected,
-        banned: !!probe.fable.banned && !usageOk && (probe.usage_status === 401 || probe.usage_status === 403),
-        plan_denied: planDenied,
-        ok: completeOfficialUsage && hasFableUsage,
-        status: probe.fable.status || 0,
-        reset: probe.fable.reset_at || acc.unified['7d_oi']?.reset || null,
-        utilization: oiNorm ?? probe.fable.utilization ?? acc.unified['7d_oi']?.utilization ?? null,
-        model: probe.fable.model || 'claude-fable-5',
-        error: usageOk && Number(probe.fable.status) === 401 ? null : probe.fable.error || null,
-        probed_at: probe.probed_at || new Date().toISOString(),
+      const usageOk = probe.ok === true || (probe.usage_status > 0 && probe.usage_status < 400)
+      const completeOfficialUsage = usageOk && probe.limits_present === true && freshOi
+      const leftoverFable = acc.unified.fable || {}
+      const hasFableUsage =
+        probe.usage_has_fable === true ||
+        (!isInventedFableWindow(probe.fable || leftoverFable, {
+          utilization_7d_oi: oiNorm,
+          reset_7d_oi: oi?.resets_at || oi?.reset,
+          status_7d_oi: oi?.status,
+          '7d_oi': oi,
+        }) &&
+          (oiNorm != null || oi?.resets_at || oi?.reset || oi?.status))
+      if (completeOfficialUsage && (probe.usage_has_fable === true || hasFableUsage)) acc.unified.usage_has_fable = true
+      else if (completeOfficialUsage && probe.usage_has_fable === false) {
+        acc.unified.usage_has_fable = false
+        delete acc.unified['7d_oi']
+        if (acc.unified.headers) delete acc.unified.headers['7d_oi']
+        delete acc.unified.fable
       }
-      // Only a complete official /usage classifies the plan; Fable hop only fills metadata.
-      if (completeOfficialUsage && hasFableUsage) {
-        acc.unified.account_tier = 'max'
-        acc.unified.account_tier_source = 'usage'
+      if (completeOfficialUsage) {
+        if (probe.usage_has_fable === true || hasFableUsage) acc.unified.account_tier = 'max'
+        else if (probe.usage_has_fable === false) acc.unified.account_tier = 'pro'
+        if (acc.unified.account_tier === 'pro' || acc.unified.account_tier === 'max')
+          acc.unified.account_tier_source = 'usage'
       }
-    } else if (usageOk) {
-      const leftover = leftoverFable
-      if (completeOfficialUsage && hasFableUsage) {
-        acc.unified.account_tier = 'max'
-        acc.unified.account_tier_source = 'usage'
-        if (leftover.plan_denied || leftover.ok === false) {
-          acc.unified.fable = {
-            ...leftover,
-            plan_denied: false,
-            ok: true,
-            error: null,
-            probed_at: probe.probed_at || leftover.probed_at || new Date().toISOString(),
+      if (probe.fable && !fableTransport && freshOi) {
+        const planDenied = completeOfficialUsage && !hasFableUsage && isFablePlanDenied(probe.fable)
+        acc.unified.fable = {
+          limited: oiRejected,
+          banned: !!probe.fable.banned && !usageOk && (probe.usage_status === 401 || probe.usage_status === 403),
+          plan_denied: planDenied,
+          ok: completeOfficialUsage && hasFableUsage,
+          status: probe.fable.status || 0,
+          reset: probe.fable.reset_at || acc.unified['7d_oi']?.reset || null,
+          utilization: oiNorm ?? probe.fable.utilization ?? acc.unified['7d_oi']?.utilization ?? null,
+          model: probe.fable.model || 'claude-fable-5',
+          error: usageOk && Number(probe.fable.status) === 401 ? null : probe.fable.error || null,
+          probed_at: probe.probed_at || new Date().toISOString(),
+        }
+        // Only a complete official /usage classifies the plan; Fable hop only fills metadata.
+        if (completeOfficialUsage && hasFableUsage) {
+          acc.unified.account_tier = 'max'
+          acc.unified.account_tier_source = 'usage'
+        }
+      } else if (usageOk) {
+        const leftover = leftoverFable
+        if (completeOfficialUsage && hasFableUsage) {
+          acc.unified.account_tier = 'max'
+          acc.unified.account_tier_source = 'usage'
+          if (leftover.plan_denied || leftover.ok === false) {
+            acc.unified.fable = {
+              ...leftover,
+              plan_denied: false,
+              ok: true,
+              error: null,
+              probed_at: probe.probed_at || leftover.probed_at || new Date().toISOString(),
+            }
           }
         }
       }
-    }
-    acc.unified.source = 'vm-oauth-usage'
-    acc.unified.updated_at = new Date().toISOString()
-    acc.last_probe = {
-      at: probe.probed_at || new Date().toISOString(),
-      ok: !!probe.ok,
-      source: probe.source || 'vm-oauth-usage',
-      error:
-        usageErrorText({ error: probe.error || probe.usage_error || (usageOk ? null : probe.fable?.error) }) || null,
-      transport: fableTransport,
-    }
-    acc.unified.last_probe = acc.last_probe
-    if (usageOk) {
-      syncActiveToPassive(acc, nowIso)
-      healOfficialOverwriteExtra(acc, accountId, this.repo)
-      clearHeaderExhaustIfOfficialOpen(acc)
-    }
-    this._rollWindowHistory(acc)
-    const saved = this.repo.save(acc)
-    this._writeSessionWindow(saved)
-    if (usageOk) {
-      const observed5 = headerWindowOrEmpty(saved.unified, '5h')
-      const observed7 = headerWindowOrEmpty(saved.unified, '7d')
-      this._observeUtil(accountId, {
-        u5: observed5.utilization,
-        u7: observed7.utilization,
-        source: 'official',
-      })
-    }
-    if (usageOk && this.headerUnderSafety(saved)) {
-      this.clearQuotaExhaustedCooldown(accountId)
-    }
-    return saved
+      acc.unified.source = 'vm-oauth-usage'
+      acc.unified.updated_at = new Date().toISOString()
+      acc.last_probe = {
+        at: probe.probed_at || new Date().toISOString(),
+        ok: !!probe.ok,
+        source: probe.source || 'vm-oauth-usage',
+        error:
+          usageErrorText({ error: probe.error || probe.usage_error || (usageOk ? null : probe.fable?.error) }) || null,
+        transport: fableTransport,
+      }
+      acc.unified.last_probe = acc.last_probe
+      if (usageOk) {
+        syncActiveToPassive(acc, nowIso)
+        await healOfficialOverwriteExtra(acc, accountId, this.repo)
+        clearHeaderExhaustIfOfficialOpen(acc)
+      }
+      await this._rollWindowHistory(acc)
+      const saved = await this.repo.save(acc)
+      await this._writeSessionWindow(saved)
+      if (usageOk) {
+        const observed5 = headerWindowOrEmpty(saved.unified, '5h')
+        const observed7 = headerWindowOrEmpty(saved.unified, '7d')
+        this._observeUtil(accountId, {
+          u5: observed5.utilization,
+          u7: observed7.utilization,
+          source: 'official',
+        })
+      }
+      if (usageOk && this.headerUnderSafety(saved)) {
+        await this.clearQuotaExhaustedCooldown(accountId)
+      }
+      return saved
+    })
   }
 
   /**
    * Official Claude Code stream-json `rate_limit_event`.
    * Live CLI includes `unifiedWindows.*.utilization`; keep status + reset too.
    */
-  ingestCliRateLimit(accountId, rateLimitInfo, usageBody = null, { countRequest = null } = {}) {
-    const acc = this.ensure({ account_id: accountId })
-    const infos = Array.isArray(rateLimitInfo) ? rateLimitInfo : rateLimitInfo ? [rateLimitInfo] : []
-    for (const info of infos) {
-      if (!info || typeof info !== 'object') continue
-      const typ = String(info.rateLimitType || info.rate_limit_type || '')
-      const window = typ === 'seven_day' || typ === '7d' ? '7d' : typ === 'five_hour' || typ === '5h' ? '5h' : null
-      const windows = info.unifiedWindows || info.unified_windows || {}
-      if (window) {
-        const slot = window === '7d' ? windows.seven_day || windows['7d'] : windows.five_hour || windows['5h']
-        const utilization = officialUtilToExtra(slot?.utilization)
-        writeHeaderWindow(acc, window, {
-          status: info.status || (utilization != null ? statusFromUtil(utilization) : null),
-          reset: info.resetsAt != null || info.resets_at != null ? epochToIso(info.resetsAt ?? info.resets_at) : null,
-          utilization,
-        })
-        acc.unified.headers[window].rate_limit_type = typ || null
-        if (['rejected', 'rate_limited'].includes(String(info.status || '').toLowerCase())) {
-          acc.unified.headers.exhausted_at = new Date().toISOString()
+  async ingestCliRateLimit(accountId, rateLimitInfo, usageBody = null, { countRequest = null } = {}) {
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      const infos = Array.isArray(rateLimitInfo) ? rateLimitInfo : rateLimitInfo ? [rateLimitInfo] : []
+      for (const info of infos) {
+        if (!info || typeof info !== 'object') continue
+        const typ = String(info.rateLimitType || info.rate_limit_type || '')
+        const window = typ === 'seven_day' || typ === '7d' ? '7d' : typ === 'five_hour' || typ === '5h' ? '5h' : null
+        const windows = info.unifiedWindows || info.unified_windows || {}
+        if (window) {
+          const slot = window === '7d' ? windows.seven_day || windows['7d'] : windows.five_hour || windows['5h']
+          const utilization = officialUtilToExtra(slot?.utilization)
+          writeHeaderWindow(
+            acc,
+            window,
+            {
+              status: info.status || (utilization != null ? statusFromUtil(utilization) : null),
+              reset:
+                info.resetsAt != null || info.resets_at != null ? epochToIso(info.resetsAt ?? info.resets_at) : null,
+              utilization,
+            },
+            new Date().toISOString(),
+          )
+          acc.unified.headers[window].rate_limit_type = typ || null
+          if (['rejected', 'rate_limited'].includes(String(info.status || '').toLowerCase())) {
+            acc.unified.headers.exhausted_at = new Date().toISOString()
+          }
         }
+        if (info.overageStatus || info.overage_status) {
+          acc.unified.overage_status = info.overageStatus || info.overage_status
+        }
+        acc.last_cli_rate_limit = { ...info, at: new Date().toISOString() }
       }
-      if (info.overageStatus || info.overage_status) {
-        acc.unified.overage_status = info.overageStatus || info.overage_status
+      acc.unified.updated_at = new Date().toISOString()
+      acc.unified.source = 'claude_cli_rate_limit_event'
+
+      const shouldCount = countRequest == null ? usageBody?.input_tokens != null : !!countRequest
+      if (usageBody?.input_tokens != null) {
+        acc.tokens_in += Number(usageBody.input_tokens) || 0
+        acc.tokens_out += Number(usageBody.output_tokens) || 0
       }
-      acc.last_cli_rate_limit = { ...info, at: new Date().toISOString() }
-    }
-    acc.unified.updated_at = new Date().toISOString()
-    acc.unified.source = 'claude_cli_rate_limit_event'
+      if (shouldCount) acc.requests += 1
 
-    const shouldCount = countRequest == null ? usageBody?.input_tokens != null : !!countRequest
-    if (usageBody?.input_tokens != null) {
-      acc.tokens_in += Number(usageBody.input_tokens) || 0
-      acc.tokens_out += Number(usageBody.output_tokens) || 0
-    }
-    if (shouldCount) acc.requests += 1
+      await this.repo.addAllocation(accountId, {
+        at: new Date().toISOString(),
+        source: 'claude_cli',
+        util_5h: officialWindow(acc.unified, '5h').utilization,
+        util_7d: officialWindow(acc.unified, '7d').utilization,
+        status_5h: headerWindow(acc.unified, '5h').status || officialWindow(acc.unified, '5h').status,
+        status_7d: headerWindow(acc.unified, '7d').status || officialWindow(acc.unified, '7d').status,
+        claim: acc.unified.representative_claim,
+        tokens_in: usageBody?.input_tokens ?? null,
+        tokens_out: usageBody?.output_tokens ?? null,
+      })
 
-    this.repo.addAllocation(accountId, {
-      at: new Date().toISOString(),
-      source: 'claude_cli',
-      util_5h: officialWindow(acc.unified, '5h').utilization,
-      util_7d: officialWindow(acc.unified, '7d').utilization,
-      status_5h: headerWindow(acc.unified, '5h').status || officialWindow(acc.unified, '5h').status,
-      status_7d: headerWindow(acc.unified, '7d').status || officialWindow(acc.unified, '7d').status,
-      claim: acc.unified.representative_claim,
-      tokens_in: usageBody?.input_tokens ?? null,
-      tokens_out: usageBody?.output_tokens ?? null,
+      await this._rollWindowHistory(acc)
+      return this.repo.save(acc)
     })
-
-    this._rollWindowHistory(acc)
-    return this.repo.save(acc)
   }
 
   /**
@@ -565,8 +641,21 @@ export class AccountQuota {
     for (const vm of vms || []) this.setVmQuotaOverride(vm?.id, vm?.quota_override || null)
   }
 
-  canAccept(accountId, { tier = null, requestRisk = null, quotaRequest = null, account = undefined } = {}) {
-    const acc = account === undefined ? this.ensure({ account_id: accountId }) : account
+  /**
+   * 准入判定。不传 `account` 时先 await 读（必要时建）账号行，被拒时只把 `extra.last_blocked` 写回（字段级）；
+   * 传入 `account` 时只做内存判定，不写库（调度的资格计算）。
+   */
+  async canAccept(accountId, { account = undefined, ...opts } = {}) {
+    if (account !== undefined) return this.canAcceptAccount(accountId, account, opts)
+    const acc = await this.ensure({ account_id: accountId })
+    const blockedBefore = acc?.last_blocked
+    const gate = this.canAcceptAccount(accountId, acc, opts)
+    if (acc && acc.last_blocked !== blockedBefore) await this.repo.setLastBlocked(accountId, acc.last_blocked)
+    return gate
+  }
+
+  /** 同步准入判定（纯内存）：账号行由调用方读好传入；被拒时改 `acc.last_blocked`，是否落库由调用方决定。 */
+  canAcceptAccount(accountId, acc, { tier = null, requestRisk = null, quotaRequest = null } = {}) {
     if (!acc) return { ok: false, reason: 'account_missing' }
     const policy = this.policyFor(acc, { tier })
     const ratio = Number(policy.limit_5h ?? policy.safety_ratio ?? this.config.safety_ratio ?? 0.85)
@@ -591,7 +680,6 @@ export class AccountQuota {
     if (quotaConfig.block_on_5h && headerHardBlocked(acc.unified, '5h')) {
       const h5 = headerWindow(acc.unified, '5h')
       acc.last_blocked = { at: new Date().toISOString(), window: '5h', status: h5.status, source: 'headers' }
-      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_5h_cli',
@@ -605,7 +693,6 @@ export class AccountQuota {
     if (quotaConfig.block_on_7d && headerHardBlocked(acc.unified, '7d')) {
       const h7 = headerWindow(acc.unified, '7d')
       acc.last_blocked = { at: new Date().toISOString(), window: '7d', status: h7.status, source: 'headers' }
-      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_7d_cli',
@@ -626,7 +713,6 @@ export class AccountQuota {
 
     if (z5 === GATE_GATED) {
       acc.last_blocked = { at: new Date().toISOString(), window: '5h', utilization: u5, status: w5.status }
-      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_5h_safety',
@@ -644,7 +730,6 @@ export class AccountQuota {
 
     if (z7 === GATE_GATED) {
       acc.last_blocked = { at: new Date().toISOString(), window: '7d', utilization: u7, status: w7.status }
-      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_7d_safety',
@@ -725,13 +810,23 @@ export class AccountQuota {
 
     return { ok: true, warn_5h: u5 >= warnRatio, warn_7d: u7 >= Math.min(warnRatio, weeklyRatio) }
   }
+  /**
+   * 同步预占（竞态 R9、R10）：检查与自增之间没有 await。账号行由调用方先读好传入（`opts.account`）；还没有账号行时
+   * （`undefined`）按新账号的初始内容判定，并在后台建行（ensure）。被拒时只把 `extra.last_blocked` 在后台写回。
+   */
   tryAcquire(accountId, opts = {}) {
-    const acc = opts.account === undefined ? this.ensure({ account_id: accountId }) : opts.account
+    let acc = opts.account === undefined ? this.repo.cached(accountId) : opts.account
+    if (acc === undefined || acc === null) {
+      acc = this.newAccountRecord({ account_id: accountId })
+      this._background(this.ensure({ account_id: accountId }))
+    }
     if (!acc) return { ok: false, reason: 'account_missing' }
     if (!opts.skipGate) {
-      const gate = this.canAccept(accountId, { ...opts, account: acc })
+      const blockedBefore = acc.last_blocked
+      const gate = this.canAcceptAccount(accountId, acc, opts)
       if (!gate.ok) {
-        if (acc.last_blocked) this.repo.save(acc)
+        if (acc.last_blocked && acc.last_blocked !== blockedBefore)
+          this._background(this.repo.setLastBlocked(accountId, acc.last_blocked))
         return gate
       }
     }
@@ -749,9 +844,19 @@ export class AccountQuota {
     return { ok: true }
   }
 
-  /** sub2api 7d_oi: Fable-only window. Does not unschedulable the account. */
+  /** 同步路径上的落库（预占时的拒绝记录、首次建行）：不等待，失败只记日志。 */
+  _background(promise) {
+    Promise.resolve(promise).catch((error) =>
+      console.warn('[account-quota] background write failed:', error?.message || error),
+    )
+  }
+
+  /**
+   * sub2api 7d_oi: Fable-only window. Does not unschedulable the account.
+   * 同步判定：`account` 由调用方读好传入；不传时用本进程最近读到的账号行（AccountsRepo.cached），不读库。
+   */
   fableWindowLimited(accountId, now = Date.now(), account = undefined) {
-    const oi = (account === undefined ? this.repo.get(accountId) : account)?.unified?.['7d_oi']
+    const oi = (account === undefined ? this.repo.cached(accountId) : account)?.unified?.['7d_oi']
     if (!oi) return false
     const status = String(oi.status || '').toLowerCase()
     if (status !== 'rejected' && status !== 'rate_limited') return false
@@ -761,34 +866,25 @@ export class AccountQuota {
   }
 
   fableWindowResetAt(accountId, account = undefined) {
-    const reset = (account === undefined ? this.repo.get(accountId) : account)?.unified?.['7d_oi']?.reset
+    const u = (account === undefined ? this.repo.cached(accountId) : account)?.unified
+    const reset = u?.['7d_oi']?.reset ?? u?.fable?.reset ?? u?.fable?.reset_at
     if (!reset) return null
     const ms = parseResetMs(reset)
     return Number.isFinite(ms) ? ms : null
   }
 
-  /** Experimental 50/50 weekly split. Off unless quota.weekly_split.enabled (or the VM override). */
-  weeklySplitOf(accountId, account = undefined) {
-    const acc = account === undefined ? this.repo.get(accountId) : account
+  /** Per-account Fable window ceiling. VM enable overrides inherit the global percentage. `account` 同上。 */
+  weeklySplitOf(accountId, account = undefined, now = Date.now()) {
+    const acc = account === undefined ? this.repo.cached(accountId) || null : account
     const cfg = weeklySplitConfig(this.quotaConfigFor(acc))
     const u = acc?.unified || {}
     return computeWeeklySplit({
       enabled: cfg.enabled,
       fable_share: cfg.fable_share,
-      utilization_7d: headerWindowOrEmpty(u, '7d').utilization ?? officialWindow(u, '7d').utilization,
       utilization_7d_oi: u['7d_oi']?.utilization ?? u.fable?.utilization,
-      status_7d_oi: u['7d_oi']?.status,
-      reset_7d_oi: u['7d_oi']?.reset,
+      reset_7d_oi: u['7d_oi']?.reset ?? u.fable?.reset ?? u.fable?.reset_at,
+      now,
     })
-  }
-
-  weeklySplitResetAt(accountId, kind = 'regular', account = undefined) {
-    const acc = account === undefined ? this.repo.get(accountId) : account
-    const key = kind === 'fable' ? '7d_oi' : '7d'
-    const reset = acc?.unified?.[key]?.reset
-    if (!reset) return null
-    const ms = parseResetMs(reset)
-    return Number.isFinite(ms) ? ms : null
   }
 
   acquire(accountId) {
@@ -811,11 +907,11 @@ export class AccountQuota {
    * previous percent, so the next large request treats the reading as stale
    * until headers/official usage move.
    */
-  noteBandSettled(accountId) {
+  async noteBandSettled(accountId) {
     if (!accountId) return 0
     const stack = this.reservationBand.get(accountId)
     const reservedInBand = Array.isArray(stack) ? stack.some(Boolean) : false
-    if (!reservedInBand && !this._drainingNow(accountId)) return this.staleSettled.get(accountId) || 0
+    if (!reservedInBand && !(await this._drainingNow(accountId))) return this.staleSettled.get(accountId) || 0
     const next = (this.staleSettled.get(accountId) || 0) + 1
     this.staleSettled.set(accountId, next)
     return next
@@ -826,7 +922,8 @@ export class AccountQuota {
    * the block switches applied. Used by the seat planner to place new devices.
    */
   gateZoneOf(accountId, { tier = null, account = undefined } = {}) {
-    const acc = account === undefined ? this.ensure({ account_id: accountId }) : account
+    const acc =
+      account === undefined ? this.repo.cached(accountId) || this.newAccountRecord({ account_id: accountId }) : account
     const policy = this.policyFor(acc, { tier })
     const quotaConfig = this.quotaConfigFor(acc)
     const gate = quotaGateOf(quotaConfig)
@@ -841,8 +938,9 @@ export class AccountQuota {
     return worstGateZone(z5, z7)
   }
 
-  _drainingNow(accountId, { tier = null } = {}) {
-    return this.gateZoneOf(accountId, { tier }) === GATE_DRAINING
+  async _drainingNow(accountId, { tier = null } = {}) {
+    const account = await this.ensure({ account_id: accountId })
+    return this.gateZoneOf(accountId, { tier, account }) === GATE_DRAINING
   }
 
   /** Called only for a draining account: a large cold (or stale-reading large) call is not taken here. */
@@ -873,65 +971,98 @@ export class AccountQuota {
     if (source === 'official' || progressed || reset) this.staleSettled.set(accountId, 0)
   }
 
+  /** Only a confirmed upstream reset may clear these windows and start a new billing interval. */
+  async clearUsageWindows(accountId, windows, at = new Date().toISOString()) {
+    const keys = { five_hour: '5h', seven_day: '7d', seven_day_overage_included: '7d_oi' }
+    const selected = (windows || []).map((wire) => keys[wire]).filter(Boolean)
+    if (!selected.length) return null
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      const u = acc.unified
+      u.cleared_windows = u.cleared_windows || {}
+      u.official = u.official || {}
+      u.headers = u.headers || {}
+      for (const key of selected) {
+        const window = { utilization: 0, reset: null, status: 'allowed' }
+        u[key] = { ...window }
+        u.official[key] = { ...window }
+        u.headers[key] = { ...window }
+        u.cleared_windows[key] = at
+        if (key === '7d_oi' && u.fable) {
+          u.fable = { ...u.fable, utilization: 0, reset: null, limited: false }
+        }
+      }
+      u.official.updated_at = at
+      u.headers.updated_at = at
+      clearHeaderExhaustIfOfficialOpen(acc)
+      const saved = await this.repo.save(acc)
+      await this._writeSessionWindow(saved)
+      if (this.headerUnderSafety(saved)) await this.clearQuotaExhaustedCooldown(accountId)
+      return saved
+    })
+  }
+
   /**
    * Write effective 5h/7d windows back to SQLite when a reset has elapsed
    * or last_used proves a probe-source 100% is leftover from the previous window.
    */
-  persistEffectiveWindows(accountId, { now = Date.now() } = {}) {
+  async persistEffectiveWindows(accountId, { now = Date.now() } = {}) {
     if (!accountId) return null
-    const acc = this.repo.get(accountId)
-    if (!acc?.unified) return acc || null
-    const backoffExpired = expireUsageProbeBackoff(acc, now)
-    const lastUsedAt = this._lastUsedAt(accountId)
-    const next = applyEffectiveWindows(acc.unified, {
-      now,
-      lastUsedAt,
-      source: acc.unified.source || 'vm-oauth-usage',
-    })
-    const prev5 = officialWindow(acc.unified, '5h')
-    const prev7 = officialWindow(acc.unified, '7d')
-    const n5 = next['5h'] || {}
-    const n7 = next['7d'] || {}
-    const changed =
-      (n5.stale &&
-        (Number(prev5.utilization) !== Number(n5.utilization) ||
-          String(prev5.status || '') !== String(n5.status || ''))) ||
-      (n7.stale &&
-        (Number(prev7.utilization) !== Number(n7.utilization) ||
-          String(prev7.status || '') !== String(n7.status || '')))
-    let wiped = wipeElapsedHeaderWindows(acc.unified, { now })
-    const leftover = leftoverClearHeaderWindows(
-      wiped.changed ? { ...acc.unified, headers: wiped.headers } : acc.unified,
-      {
+    return this._mutate(async () => {
+      const acc = await this.repo.get(accountId)
+      if (!acc?.unified) return acc || null
+      const backoffExpired = expireUsageProbeBackoff(acc, now)
+      const lastUsedAt = await this._lastUsedAt(accountId)
+      const next = applyEffectiveWindows(acc.unified, {
         now,
         lastUsedAt,
-      },
-    )
-    if (leftover.changed) wiped = leftover
-    if (!changed && !wiped.changed) {
-      const healed = healOfficialOverwriteExtra(acc, accountId, this.repo)
-      if (!healed) {
-        if (backoffExpired) this.repo.save(acc)
-        if (this.headerUnderSafety(acc)) this.clearQuotaExhaustedCooldown(accountId)
-        return acc
+        source: acc.unified.source || 'vm-oauth-usage',
+      })
+      const prev5 = officialWindow(acc.unified, '5h')
+      const prev7 = officialWindow(acc.unified, '7d')
+      const n5 = next['5h'] || {}
+      const n7 = next['7d'] || {}
+      const changed =
+        (n5.stale &&
+          (Number(prev5.utilization) !== Number(n5.utilization) ||
+            String(prev5.status || '') !== String(n5.status || ''))) ||
+        (n7.stale &&
+          (Number(prev7.utilization) !== Number(n7.utilization) ||
+            String(prev7.status || '') !== String(n7.status || '')))
+      let wiped = wipeElapsedHeaderWindows(acc.unified, { now })
+      const leftover = leftoverClearHeaderWindows(
+        wiped.changed ? { ...acc.unified, headers: wiped.headers } : acc.unified,
+        {
+          now,
+          lastUsedAt,
+        },
+      )
+      if (leftover.changed) wiped = leftover
+      if (!changed && !wiped.changed) {
+        const healed = await healOfficialOverwriteExtra(acc, accountId, this.repo)
+        if (!healed) {
+          if (backoffExpired) await this.repo.save(acc)
+          if (this.headerUnderSafety(acc)) await this.clearQuotaExhaustedCooldown(accountId)
+          return acc
+        }
+      } else {
+        acc.unified = next
+        if (wiped.changed) {
+          if (wiped.headers) acc.unified.headers = wiped.headers
+          if (wiped.oi != null) acc.unified['7d_oi'] = wiped.oi
+        }
+        if (changed) {
+          writeOfficialWindow(acc, '5h', n5)
+          writeOfficialWindow(acc, '7d', n7)
+        }
+        await healOfficialOverwriteExtra(acc, accountId, this.repo)
       }
-    } else {
-      acc.unified = next
-      if (wiped.changed) {
-        if (wiped.headers) acc.unified.headers = wiped.headers
-        if (wiped.oi != null) acc.unified['7d_oi'] = wiped.oi
-      }
-      if (changed) {
-        writeOfficialWindow(acc, '5h', n5)
-        writeOfficialWindow(acc, '7d', n7)
-      }
-      healOfficialOverwriteExtra(acc, accountId, this.repo)
-    }
-    acc.unified.updated_at = new Date().toISOString()
-    const saved = this.repo.save(acc)
-    this._writeSessionWindow(saved)
-    if (this.headerUnderSafety(saved)) this.clearQuotaExhaustedCooldown(accountId)
-    return saved
+      acc.unified.updated_at = new Date().toISOString()
+      const saved = await this.repo.save(acc)
+      await this._writeSessionWindow(saved)
+      if (this.headerUnderSafety(saved)) await this.clearQuotaExhaustedCooldown(accountId)
+      return saved
+    })
   }
 
   officialUnderSafety(acc) {
@@ -953,11 +1084,11 @@ export class AccountQuota {
     return true
   }
 
-  clearQuotaExhaustedCooldown(accountId) {
+  async clearQuotaExhaustedCooldown(accountId) {
     if (!accountId || !this.runtimeRepo) return false
     let state = null
     try {
-      state = this.runtimeRepo.get?.(accountId)
+      state = await this.runtimeRepo.get?.(accountId)
     } catch {
       return false
     }
@@ -969,8 +1100,10 @@ export class AccountQuota {
     if (!quotaCool) return false
     if (!state.cooldown_until && !reason) return false
     try {
-      this.runtimeRepo.upsert?.({
-        ...state,
+      // 字段级写入（R12）：只清这几项，不把读到的整行写回
+      await this.runtimeRepo.upsert?.({
+        account_id: state.account_id || accountId,
+        vm_id: state.vm_id,
         status: 'ready',
         cooldown_until: null,
         cooldown_reason: null,
@@ -985,13 +1118,13 @@ export class AccountQuota {
     return true
   }
 
-  _lastUsedAt(accountId) {
+  async _lastUsedAt(accountId) {
     try {
-      const ms = Number(this.runtimeRepo?.get(accountId)?.last_used_at)
+      const ms = Number((await this.runtimeRepo?.get(accountId))?.last_used_at)
       if (Number.isFinite(ms) && ms > 0) return ms
     } catch {}
     try {
-      const row = this.repo.recentAllocations(accountId, 1)?.[0]
+      const row = (await this.repo.recentAllocations(accountId, 1))?.[0]
       if (!row?.at) return null
       const parsed = Date.parse(row.at)
       return Number.isFinite(parsed) ? parsed : null
@@ -1000,41 +1133,44 @@ export class AccountQuota {
     }
   }
 
-  snapshot() {
+  async snapshot() {
     const def = this.tiers?.default || {}
+    const listed = await this.repo.list()
     return {
       safety_ratio: def.limit_5h ?? def.safety_ratio ?? this.config.safety_ratio,
       weekly_safety_ratio: def.limit_7d ?? def.weekly_safety_ratio ?? this.config.weekly_safety_ratio,
       tiers: this.tiers,
-      accounts: this.repo.list().map((a) => {
-        const lastUsedAt = this._lastUsedAt(a.account_id)
-        const official = applyEffectiveWindows(a.unified, { lastUsedAt, source: a.unified?.source })
-        const listed = listQuotaFromHeaders(a.unified)
-        return {
-          account_id: a.account_id,
-          vm_id: a.vm_id,
-          email: a.email,
-          inflight: this.inflight.get(a.account_id) || 0,
-          max_concurrency: a.max_concurrency,
-          rpm: this._rpmCount(a.account_id).n,
-          max_rpm: a.max_rpm ?? 0,
-          rpm_reset_at: this._rpmCount(a.account_id).resetAt,
-          requests: a.requests,
-          tokens_in: a.tokens_in,
-          tokens_out: a.tokens_out,
-          cache_read_tokens: a.cache_read_tokens || 0,
-          cache_creation_tokens: a.cache_creation_tokens || 0,
-          last_used_at: lastUsedAt,
-          unified: {
-            ...official,
-            '5h': listed.utilization_5h != null || listed.status_5h ? listed['5h'] : official['5h'],
-            '7d': listed.utilization_7d != null || listed.status_7d ? listed['7d'] : official['7d'],
-          },
-          last_blocked: a.last_blocked,
-          window_history: a.window_history || null,
-          recent_allocations: this.repo.recentAllocations(a.account_id, 5),
-        }
-      }),
+      accounts: await Promise.all(
+        listed.map(async (a) => {
+          const lastUsedAt = await this._lastUsedAt(a.account_id)
+          const official = applyEffectiveWindows(a.unified, { lastUsedAt, source: a.unified?.source })
+          const listed = listQuotaFromHeaders(a.unified)
+          return {
+            account_id: a.account_id,
+            vm_id: a.vm_id,
+            email: a.email,
+            inflight: this.inflight.get(a.account_id) || 0,
+            max_concurrency: a.max_concurrency,
+            rpm: this._rpmCount(a.account_id).n,
+            max_rpm: a.max_rpm ?? 0,
+            rpm_reset_at: this._rpmCount(a.account_id).resetAt,
+            requests: a.requests,
+            tokens_in: a.tokens_in,
+            tokens_out: a.tokens_out,
+            cache_read_tokens: a.cache_read_tokens || 0,
+            cache_creation_tokens: a.cache_creation_tokens || 0,
+            last_used_at: lastUsedAt,
+            unified: {
+              ...official,
+              '5h': listed.utilization_5h != null || listed.status_5h ? listed['5h'] : official['5h'],
+              '7d': listed.utilization_7d != null || listed.status_7d ? listed['7d'] : official['7d'],
+            },
+            last_blocked: a.last_blocked,
+            window_history: a.window_history || null,
+            recent_allocations: await this.repo.recentAllocations(a.account_id, 5),
+          }
+        }),
+      ),
     }
   }
 
@@ -1099,175 +1235,199 @@ export class AccountQuota {
     return arr.length
   }
 
-  rebindToVm(accountUuid, vmId, { email = null } = {}) {
+  async rebindToVm(accountUuid, vmId, { email = null } = {}) {
     if (!accountUuid || !vmId) return null
-    const acc = this.ensure({ account_id: accountUuid, vm_id: vmId, email })
-    if (!acc) return null
-    if (acc.vm_id !== vmId || (email && acc.email !== email)) {
-      acc.vm_id = vmId
-      if (email) acc.email = email
-      return this.repo.save(acc)
-    }
-    return acc
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountUuid, vm_id: vmId, email })
+      if (!acc) return null
+      if (acc.vm_id !== vmId || (email && acc.email !== email)) {
+        acc.vm_id = vmId
+        if (email) acc.email = email
+        return this.repo.save(acc)
+      }
+      return acc
+    })
   }
 
   /**
    * A successful OAuth refresh proves the grant is live.
    * Drop leftover Fable / last_probe revoke strings so the panel resyncs.
    */
-  clearGrantRevokeLeftover(accountId) {
+  async clearGrantRevokeLeftover(accountId) {
     if (!accountId) return null
-    const acc = this.repo.get(accountId)
-    if (!acc) return null
-    const revoke = /access token has been revoked|token has been revoked|oauth_revoked/i
-    const u = acc.unified || {}
-    const lp = u.last_probe || acc.last_probe || null
-    const fb = u.fable || null
-    let changed = false
-    if (lp && revoke.test(String(lp.error || lp.message || ''))) {
-      acc.last_probe = { ...lp, ok: true, error: null }
-      u.last_probe = acc.last_probe
-      changed = true
-    }
-    if (fb && (fb.banned || revoke.test(String(fb.error || '')))) {
-      u.fable = {
-        ...fb,
-        banned: false,
-        plan_denied: revoke.test(String(fb.error || '')) ? false : !!fb.plan_denied,
-        error: revoke.test(String(fb.error || '')) ? null : fb.error || null,
+    return this._mutate(async () => {
+      const acc = await this.repo.get(accountId)
+      if (!acc) return null
+      const revoke = /access token has been revoked|token has been revoked|oauth_revoked/i
+      const u = acc.unified || {}
+      const lp = u.last_probe || acc.last_probe || null
+      const fb = u.fable || null
+      let changed = false
+      if (lp && revoke.test(String(lp.error || lp.message || ''))) {
+        acc.last_probe = { ...lp, ok: true, error: null }
+        u.last_probe = acc.last_probe
+        changed = true
       }
-      changed = true
-    }
-    if (!changed) return acc
-    acc.unified = u
-    acc.unified.updated_at = new Date().toISOString()
-    return this.repo.save(acc)
+      if (fb && (fb.banned || revoke.test(String(fb.error || '')))) {
+        u.fable = {
+          ...fb,
+          banned: false,
+          plan_denied: revoke.test(String(fb.error || '')) ? false : !!fb.plan_denied,
+          error: revoke.test(String(fb.error || '')) ? null : fb.error || null,
+        }
+        changed = true
+      }
+      if (!changed) return acc
+      acc.unified = u
+      acc.unified.updated_at = new Date().toISOString()
+      return this.repo.save(acc)
+    })
   }
 
-  setAccountTier(accountId, tier, { source = null } = {}) {
+  async setAccountTier(accountId, tier, { source = null } = {}) {
     const key = String(tier || '').toLowerCase()
     if (!accountId || (key !== 'pro' && key !== 'max')) return null
-    const acc = this.repo.get(accountId)
-    if (!acc) return null
-    if (acc.unified?.account_tier_source === 'profile' && source !== 'profile' && source !== 'usage') return acc
-    if (acc.unified?.account_tier === key && (acc.unified?.account_tier_source || null) === source) return acc
-    acc.unified = acc.unified || {}
-    acc.unified.account_tier = key
-    acc.unified.account_tier_source = source
-    acc.unified.updated_at = new Date().toISOString()
-    return this.repo.save(acc)
+    return this._mutate(async () => {
+      const acc = await this.repo.get(accountId)
+      if (!acc) return null
+      if (acc.unified?.account_tier_source === 'profile' && source !== 'profile' && source !== 'usage') return acc
+      if (acc.unified?.account_tier === key && (acc.unified?.account_tier_source || null) === source) return acc
+      acc.unified = acc.unified || {}
+      acc.unified.account_tier = key
+      acc.unified.account_tier_source = source
+      acc.unified.updated_at = new Date().toISOString()
+      return this.repo.save(acc)
+    })
   }
 
-  markModelUnsupported(accountId, model, durationMs = 60 * 60_000) {
+  async markModelUnsupported(accountId, model, durationMs = 60 * 60_000) {
     const key = resolvePolicyModelId(model) || String(model || '').trim()
     if (!accountId || !key) return null
-    const acc = this.repo.get(accountId)
-    if (!acc) return null
-    acc.unified = acc.unified || {}
-    acc.unified.model_denied_until = {
-      ...(acc.unified.model_denied_until || {}),
-      [key]: Date.now() + durationMs,
-    }
-    acc.unified.updated_at = new Date().toISOString()
-    return this.repo.save(acc)
+    return this._mutate(async () => {
+      const acc = await this.repo.get(accountId)
+      if (!acc) return null
+      acc.unified = acc.unified || {}
+      acc.unified.model_denied_until = {
+        ...(acc.unified.model_denied_until || {}),
+        [key]: Date.now() + durationMs,
+      }
+      acc.unified.updated_at = new Date().toISOString()
+      return this.repo.save(acc)
+    })
   }
 
-  clearModelUnsupported(accountId, model) {
+  async clearModelUnsupported(accountId, model) {
     const key = resolvePolicyModelId(model) || String(model || '').trim()
     if (!accountId || !key) return null
-    const acc = this.repo.get(accountId)
-    if (!acc?.unified?.model_denied_until?.[key]) return acc
-    const denied = { ...acc.unified.model_denied_until }
-    delete denied[key]
-    acc.unified.model_denied_until = denied
-    acc.unified.updated_at = new Date().toISOString()
-    return this.repo.save(acc)
+    return this._mutate(async () => {
+      const acc = await this.repo.get(accountId)
+      if (!acc?.unified?.model_denied_until?.[key]) return acc
+      const denied = { ...acc.unified.model_denied_until }
+      delete denied[key]
+      acc.unified.model_denied_until = denied
+      acc.unified.updated_at = new Date().toISOString()
+      return this.repo.save(acc)
+    })
   }
 
-  setMaxConcurrency(accountId, n, { override = false } = {}) {
-    const acc = this.ensure({ account_id: accountId })
-    if (!acc) return null
-    acc.max_concurrency = Math.max(0, Math.min(256, Number(n) || 0))
-    acc.concurrency_override = override ? 1 : 0
-    return this.repo.save(acc)
+  async setMaxConcurrency(accountId, n, { override = false } = {}) {
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      if (!acc) return null
+      acc.max_concurrency = Math.max(0, Math.min(256, Number(n) || 0))
+      acc.concurrency_override = override ? 1 : 0
+      return this.repo.save(acc)
+    })
   }
 
-  setMaxConcurrencyForVm(vmId, n) {
+  async setMaxConcurrencyForVm(vmId, n) {
     const v = Math.max(0, Math.min(256, Number(n) || 0))
-    const out = []
-    for (const a of this.repo.list()) {
-      if (a.vm_id === vmId || a.account_id === vmId) {
+    return this._mutate(async () => {
+      const out = []
+      for (const a of await this.repo.list()) {
+        if (a.vm_id === vmId || a.account_id === vmId) {
+          a.max_concurrency = v
+          out.push(await this.repo.save(a))
+        }
+      }
+      if (!out.length) out.push(await this.setMaxConcurrency(vmId, v))
+      return out
+    })
+  }
+
+  async applyDefaultConcurrency(n, { skipIds } = {}) {
+    const v = Math.max(0, Math.min(256, Number(n) || 0))
+    const skip = new Set(skipIds || [])
+    return this._mutate(async () => {
+      const out = []
+      for (const a of await this.repo.list()) {
+        if (skip.has(a.account_id) || skip.has(a.vm_id)) continue
         a.max_concurrency = v
-        out.push(this.repo.save(a))
+        out.push(await this.repo.save(a))
       }
-    }
-    if (!out.length) out.push(this.setMaxConcurrency(vmId, v))
-    return out
+      return out
+    })
   }
 
-  applyDefaultConcurrency(n, { skipIds } = {}) {
-    const v = Math.max(0, Math.min(256, Number(n) || 0))
-    const skip = new Set(skipIds || [])
-    const out = []
-    for (const a of this.repo.list()) {
-      if (skip.has(a.account_id) || skip.has(a.vm_id)) continue
-      a.max_concurrency = v
-      out.push(this.repo.save(a))
-    }
-    return out
+  async setMaxRpm(accountId, n, { override = false } = {}) {
+    return this._mutate(async () => {
+      const acc = await this.ensure({ account_id: accountId })
+      if (!acc) return null
+      acc.max_rpm = Math.max(0, Math.min(1e6, Number(n) || 0))
+      acc.rpm_override = override ? 1 : 0
+      return this.repo.save(acc)
+    })
   }
 
-  setMaxRpm(accountId, n, { override = false } = {}) {
-    const acc = this.ensure({ account_id: accountId })
-    if (!acc) return null
-    acc.max_rpm = Math.max(0, Math.min(1e6, Number(n) || 0))
-    acc.rpm_override = override ? 1 : 0
-    return this.repo.save(acc)
-  }
-
-  setMaxRpmForVm(vmId, n, { override = false } = {}) {
+  async setMaxRpmForVm(vmId, n, { override = false } = {}) {
     const v = Math.max(0, Math.min(1e6, Number(n) || 0))
-    const out = []
-    for (const a of this.repo.list()) {
-      if (a.vm_id === vmId || a.account_id === vmId) {
-        a.max_rpm = v
-        if (override) a.rpm_override = 1
-        out.push(this.repo.save(a))
+    return this._mutate(async () => {
+      const out = []
+      for (const a of await this.repo.list()) {
+        if (a.vm_id === vmId || a.account_id === vmId) {
+          a.max_rpm = v
+          if (override) a.rpm_override = 1
+          out.push(await this.repo.save(a))
+        }
       }
-    }
-    if (!out.length) out.push(this.setMaxRpm(vmId, v, { override }))
-    return out
+      if (!out.length) out.push(await this.setMaxRpm(vmId, v, { override }))
+      return out
+    })
   }
 
-  applyTierRpm(tiers, { skipIds } = {}) {
+  async applyTierRpm(tiers, { skipIds } = {}) {
     const policies = normalizeTiers(tiers, this.config, this.concurrency)
     const skip = new Set(skipIds || [])
-    const out = []
-    for (const a of this.repo.list()) {
-      if (skip.has(a.account_id) || skip.has(a.vm_id) || a.rpm_override) continue
-      const key = accountTierKey(a)
-      const v = Math.max(0, Math.min(1e6, Number(policies[key]?.max_rpm) || 0))
-      if (Number(a.max_rpm) === v) continue
-      a.max_rpm = v
-      out.push(this.repo.save(a))
-    }
-    return out
+    return this._mutate(async () => {
+      const out = []
+      for (const a of await this.repo.list()) {
+        if (skip.has(a.account_id) || skip.has(a.vm_id) || a.rpm_override) continue
+        const key = accountTierKey(a)
+        const v = Math.max(0, Math.min(1e6, Number(policies[key]?.max_rpm) || 0))
+        if (Number(a.max_rpm) === v) continue
+        a.max_rpm = v
+        out.push(await this.repo.save(a))
+      }
+      return out
+    })
   }
 
-  applyTierConcurrency(tiers, { skipIds } = {}) {
+  async applyTierConcurrency(tiers, { skipIds } = {}) {
     const policies = normalizeTiers(tiers, this.config, this.concurrency)
     const skip = new Set(skipIds || [])
-    const out = []
-    for (const a of this.repo.list()) {
-      if (skip.has(a.account_id) || skip.has(a.vm_id) || a.concurrency_override) continue
-      const key = accountTierKey(a)
-      const v = Math.max(0, Math.min(256, Number(policies[key]?.max_concurrency) || 2))
-      if (Number(a.max_concurrency) === v) continue
-      a.max_concurrency = v
-      a.concurrency_override = 0
-      out.push(this.repo.save(a))
-    }
-    return out
+    return this._mutate(async () => {
+      const out = []
+      for (const a of await this.repo.list()) {
+        if (skip.has(a.account_id) || skip.has(a.vm_id) || a.concurrency_override) continue
+        const key = accountTierKey(a)
+        const v = Math.max(0, Math.min(256, Number(policies[key]?.max_concurrency) || 2))
+        if (Number(a.max_concurrency) === v) continue
+        a.max_concurrency = v
+        a.concurrency_override = 0
+        out.push(await this.repo.save(a))
+      }
+      return out
+    })
   }
 
   nearLimit(acc) {
@@ -1308,18 +1468,30 @@ function isUnifiedRejected(h = {}) {
   return s5 === 'rejected' || s5 === 'rate_limited' || s7 === 'rejected' || s7 === 'rate_limited'
 }
 
-function writeHeaderWindow(acc, key, incoming = {}) {
+function writeHeaderWindow(acc, key, incoming = {}, sampledAt = null) {
   acc.unified.headers = acc.unified.headers || {}
   const cur = acc.unified.headers[key] || {}
   const next = {
     utilization: incoming.utilization != null ? incoming.utilization : (cur.utilization ?? null),
     reset: incoming.reset || incoming.resets_at || cur.reset || null,
     status: incoming.status || cur.status || null,
+    ...(sampledAt || cur.sampled_at ? { sampled_at: sampledAt || cur.sampled_at } : {}),
   }
   if (incoming.rate_limit_type || cur.rate_limit_type) {
     next.rate_limit_type = incoming.rate_limit_type || cur.rate_limit_type
   }
   acc.unified.headers[key] = next
+}
+
+function olderThanWindowSample(acc, key, sampledAt) {
+  const incoming = Date.parse(sampledAt || '')
+  if (!Number.isFinite(incoming)) return false
+  return [
+    acc.unified.headers?.[key]?.sampled_at,
+    acc.unified.official?.[key]?.sampled_at,
+    key === '7d_oi' ? acc.unified[key]?.sampled_at : null,
+    acc.unified.cleared_windows?.[key],
+  ].some((at) => Date.parse(at || '') > incoming)
 }
 
 function officialUtilToExtra(value) {
@@ -1368,31 +1540,44 @@ function syncActiveToPassive(acc, sampledAt) {
   const now = Date.now()
   for (const key of ['5h', '7d']) {
     const src = acc.unified.official?.[key] || acc.unified[key]
+    const windowSampleAt = src?.sampled_at || sampledAt
+    if (olderThanWindowSample(acc, key, windowSampleAt)) continue
     const extra = acc.unified.headers[key]
     const officialReset = src?.reset || src?.resets_at || null
     if (!shouldCopyOfficialToExtra(src, extra, now)) {
-      if (officialReset && extra && !extra.reset) writeHeaderWindow(acc, key, { reset: officialReset })
+      if (officialReset && extra && !extra.reset) writeHeaderWindow(acc, key, { reset: officialReset }, windowSampleAt)
       continue
     }
-    writeHeaderWindow(acc, key, {
-      utilization: officialUtilToExtra(src.utilization),
-      reset: officialReset || extra?.reset || null,
-      status: src.status || null,
-    })
+    writeHeaderWindow(
+      acc,
+      key,
+      {
+        utilization: officialUtilToExtra(src.utilization),
+        reset: officialReset || extra?.reset || null,
+        status: src.status || null,
+      },
+      windowSampleAt,
+    )
   }
   const oi = acc.unified['7d_oi']
-  if (oi && (oi.utilization != null || oi.status || oi.reset)) {
+  if (
+    oi &&
+    !olderThanWindowSample(acc, '7d_oi', oi.sampled_at || sampledAt) &&
+    (oi.utilization != null || oi.status || oi.reset)
+  ) {
     acc.unified.headers['7d_oi'] = {
       utilization: officialUtilToExtra(oi.utilization) ?? acc.unified.headers['7d_oi']?.utilization ?? null,
       reset: oi.reset || acc.unified.headers['7d_oi']?.reset || null,
       status: oi.status || acc.unified.headers['7d_oi']?.status || null,
+      sampled_at: oi.sampled_at || sampledAt,
     }
   }
-  acc.unified.headers.sampled_at = sampledAt || new Date().toISOString()
+  if (!acc.unified.headers.sampled_at || Date.parse(sampledAt) > Date.parse(acc.unified.headers.sampled_at))
+    acc.unified.headers.sampled_at = sampledAt
 }
 
-function lastHeaderAllocation(repo, accountId) {
-  const rows = repo?.recentAllocations?.(accountId, 12) || []
+async function lastHeaderAllocation(repo, accountId) {
+  const rows = (await repo?.recentAllocations?.(accountId, 12)) || []
   return rows.find((row) => row?.source === 'headers' && row.util_5h != null) || null
 }
 
@@ -1418,7 +1603,7 @@ function expireUsageProbeBackoff(acc, now = Date.now()) {
 }
 
 /** Undo leftover official 100% that was copied onto a still-open Extra window. */
-function healOfficialOverwriteExtra(acc, accountId, repo) {
+async function healOfficialOverwriteExtra(acc, accountId, repo) {
   if (!acc?.unified?.headers) return false
   const extra = acc.unified.headers['5h']
   const official = officialWindow(acc.unified, '5h')
@@ -1426,12 +1611,13 @@ function healOfficialOverwriteExtra(acc, accountId, repo) {
   if (extraIsLiveOpen(extra)) return false
   const sampled = acc.unified.headers.sampled_at
   const probeAt = acc.last_probe?.at || acc.unified.last_probe?.at
+  if (olderThanWindowSample(acc, '5h', official.sampled_at || probeAt)) return false
   if (sampled && probeAt) {
     const sampledMs = Date.parse(sampled)
     const probeMs = Date.parse(probeAt)
     if (Number.isFinite(sampledMs) && Number.isFinite(probeMs) && Math.abs(sampledMs - probeMs) > 5000) return false
   }
-  const last = lastHeaderAllocation(repo, accountId)
+  const last = await lastHeaderAllocation(repo, accountId)
   const prev = Number(last?.util_5h)
   if (!Number.isFinite(prev) || prev >= 0.95) return false
   writeHeaderWindow(acc, '5h', {
@@ -1443,24 +1629,34 @@ function healOfficialOverwriteExtra(acc, accountId, repo) {
   return true
 }
 
-function applyHeaderExhausted(acc, h = {}) {
+function applyHeaderExhausted(acc, h = {}, sampledAt = null) {
   const s5 = String(h['anthropic-ratelimit-unified-5h-status'] || '').toLowerCase()
   const s7 = String(h['anthropic-ratelimit-unified-7d-status'] || '').toLowerCase()
   const hit5 = s5 === 'rejected' || s5 === 'rate_limited'
   const hit7 = s7 === 'rejected' || s7 === 'rate_limited'
   if (hit7) {
-    writeHeaderWindow(acc, '7d', {
-      utilization: num(h['anthropic-ratelimit-unified-7d-utilization']),
-      reset: h['anthropic-ratelimit-unified-7d-reset'],
-      status: 'rejected',
-    })
+    writeHeaderWindow(
+      acc,
+      '7d',
+      {
+        utilization: num(h['anthropic-ratelimit-unified-7d-utilization']),
+        reset: h['anthropic-ratelimit-unified-7d-reset'],
+        status: 'rejected',
+      },
+      sampledAt,
+    )
   }
   if (hit5 || !hit7) {
-    writeHeaderWindow(acc, '5h', {
-      utilization: num(h['anthropic-ratelimit-unified-5h-utilization']),
-      reset: h['anthropic-ratelimit-unified-5h-reset'],
-      status: 'rejected',
-    })
+    writeHeaderWindow(
+      acc,
+      '5h',
+      {
+        utilization: num(h['anthropic-ratelimit-unified-5h-utilization']),
+        reset: h['anthropic-ratelimit-unified-5h-reset'],
+        status: 'rejected',
+      },
+      sampledAt,
+    )
   }
   acc.unified.headers.exhausted_at = new Date().toISOString()
 }
@@ -1474,12 +1670,16 @@ function dropElapsedReset(acc, key, incomingReset) {
   if (Number.isFinite(ms) && ms <= Date.now()) acc.unified.headers[key] = { ...cur, reset: null }
 }
 
-function writeOfficialWindow(acc, key, incoming = {}) {
+function writeOfficialWindow(acc, key, incoming = {}, sampledAt = null) {
+  if (sampledAt && olderThanWindowSample(acc, key, sampledAt)) return
   const next = applyOfficialWindow(incoming)
   if (!next) return
   acc.unified.official = acc.unified.official || {}
+  const at = sampledAt || incoming.sampled_at || acc.unified.official[key]?.sampled_at
+  if (at) next.sampled_at = at
   acc.unified.official[key] = next
-  acc.unified.official.updated_at = new Date().toISOString()
+  if (at && (!acc.unified.official.updated_at || Date.parse(at) > Date.parse(acc.unified.official.updated_at)))
+    acc.unified.official.updated_at = at
   acc.unified[key] = { ...next }
 }
 
@@ -1494,6 +1694,7 @@ function clearHeaderExhaustIfOfficialOpen(acc) {
   const o7 = acc.unified.official?.['7d'] || acc.unified['7d']
   if (
     officialOpen(o5) &&
+    !olderThanWindowSample(acc, '5h', o5?.sampled_at) &&
     headers['5h'] &&
     ['rejected', 'rate_limited'].includes(String(headers['5h'].status || '').toLowerCase())
   ) {
@@ -1501,12 +1702,19 @@ function clearHeaderExhaustIfOfficialOpen(acc) {
   }
   if (
     officialOpen(o7) &&
+    !olderThanWindowSample(acc, '7d', o7?.sampled_at) &&
     headers['7d'] &&
     ['rejected', 'rate_limited'].includes(String(headers['7d'].status || '').toLowerCase())
   ) {
     headers['7d'] = { ...headers['7d'], status: 'allowed' }
   }
-  if (officialOpen(o5) && officialOpen(o7)) headers.exhausted_at = null
+  if (
+    officialOpen(o5) &&
+    officialOpen(o7) &&
+    !olderThanWindowSample(acc, '5h', o5?.sampled_at) &&
+    !olderThanWindowSample(acc, '7d', o7?.sampled_at)
+  )
+    headers.exhausted_at = null
 }
 
 function statusFromUtil(u) {

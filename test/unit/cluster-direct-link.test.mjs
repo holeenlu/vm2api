@@ -154,25 +154,25 @@ test('dialGate reports refusals through ready and silence as unreachable', async
 })
 
 test('gate container: root keeps only DAC_OVERRIDE, only tls/ is writable, spec follows the config', () => {
-  const root = { uid: 0, gid: 0, root: '/root/.vm2api' }
+  const root = { uid: 0, gid: 0, root: '/root/.tapmodels' }
   const body = gateConfigBody({ host: root, link: { port: 7790, token: 't' } })
   assert.deepEqual(JSON.parse(body), {
     listen: '0.0.0.0:7790',
-    root: '/root/.vm2api',
+    root: '/root/.tapmodels',
     token: 't',
     tls_dir: '/etc/kin-slot-gate/tls',
   })
-  const a = gateContainer({ host: root, imageRef: 'vm2api/kin-slot-x:1', body, binaryDigest: 'd' })
+  const a = gateContainer({ host: root, imageRef: 'tapmodels/kin-slot-x:1', body, binaryDigest: 'd' })
   assert.deepEqual(a.spec.HostConfig.CapDrop, ['ALL'])
   assert.deepEqual(a.spec.HostConfig.CapAdd, ['DAC_OVERRIDE'])
   assert.equal(a.spec.HostConfig.ReadonlyRootfs, true)
   assert.deepEqual(a.spec.HostConfig.Binds, [
-    '/root/.vm2api/gate:/etc/kin-slot-gate:ro',
-    '/root/.vm2api/gate/tls:/etc/kin-slot-gate/tls',
-    '/root/.vm2api/vms:/root/.vm2api/vms:ro',
+    '/root/.tapmodels/gate:/etc/kin-slot-gate:ro',
+    '/root/.tapmodels/gate/tls:/etc/kin-slot-gate/tls',
+    '/root/.tapmodels/vms:/root/.tapmodels/vms:ro',
   ])
   const user = gateContainer({
-    host: { uid: 1000, gid: 1000, root: '/home/u/.vm2api' },
+    host: { uid: 1000, gid: 1000, root: '/home/u/.tapmodels' },
     imageRef: 'i',
     body,
     binaryDigest: 'd',
@@ -217,15 +217,15 @@ test('SocketRelay: direct dial, SSH fallback on null, local drop when the slot s
   assert.deepEqual(sshAsked, ['f.sock'])
 })
 
-function managerWithRepo(t) {
+async function managerWithRepo(t) {
   const db = new DatabaseSync(':memory:')
-  for (const name of ['026_cluster_nodes.sql', '039_cluster_node_direct_links.sql']) {
+  for (const name of ['026_cluster_nodes.sql', '045_cluster_node_direct_links.sql']) {
     db.exec(fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   }
   db.exec('PRAGMA foreign_keys = ON')
   t.after(() => db.close())
   const repo = new ClusterNodesRepo(db)
-  repo.insert({
+  await repo.insert({
     id: 'node-a',
     label: 'A',
     host: '203.0.113.5',
@@ -246,22 +246,22 @@ function managerWithRepo(t) {
 }
 
 test('direct link: token and pin survive edits and never leave; failures fall back to SSH with backoff', async (t) => {
-  const { db, repo, manager, warnings } = managerWithRepo(t)
+  const { db, repo, manager, warnings } = await managerWithRepo(t)
   const gate = await fakeGate(t)
 
   await manager.setDirectLink('node-a', { address: '127.0.0.1', port: 1025 })
-  const token = repo.getDirectLink('node-a').token
+  const token = (await repo.getDirectLink('node-a')).token
   assert.equal(await manager._dialDirect('node-a', 'vm-1', 'kernel'), null, 'no pin yet: SSH')
-  assert.equal(manager.get('node-a').direct_link.state, 'pending')
+  assert.equal((await manager.get('node-a')).direct_link.state, 'pending')
 
-  repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: TOKEN })
-  repo.setDirectLinkCert('node-a', gate.certSha256)
+  await repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: TOKEN })
+  await repo.setDirectLinkCert('node-a', gate.certSha256)
   await manager.setDirectLink('node-a', { address: gate.address, port: gate.port })
-  assert.equal(repo.getDirectLink('node-a').token, TOKEN, 'edit keeps the token')
+  assert.equal((await repo.getDirectLink('node-a')).token, TOKEN, 'edit keeps the token')
   assert.notEqual(token, TOKEN)
-  assert.equal(repo.getDirectLink('node-a').certSha256, gate.certSha256, 'edit keeps the pin')
-  assert.equal(manager.get('node-a').direct_link.state, 'ok')
-  const listed = JSON.stringify(manager.list())
+  assert.equal((await repo.getDirectLink('node-a')).certSha256, gate.certSha256, 'edit keeps the pin')
+  assert.equal((await manager.get('node-a')).direct_link.state, 'ok')
+  const listed = JSON.stringify(await manager.list())
   assert.equal(listed.includes(TOKEN), false)
   assert.equal(listed.includes(gate.certSha256), false)
 
@@ -271,28 +271,28 @@ test('direct link: token and pin survive edits and never leave; failures fall ba
   conn.sock.destroy()
   const missing = await manager._dialDirect('node-a', 'vm-2', 'kernel')
   await assert.rejects(missing.ready, { code: 'gate_no_socket' })
-  assert.equal(manager.get('node-a').direct_link.state, 'ok', 'a missing slot socket is not a link fault')
+  assert.equal((await manager.get('node-a')).direct_link.state, 'ok', 'a missing slot socket is not a link fault')
 
-  repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: 'c'.repeat(64) })
+  await repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: 'c'.repeat(64) })
   const refused = await manager._dialDirect('node-a', 'vm-1', 'kernel')
   await assert.rejects(refused.ready, { code: 'gate_auth' })
   assert.match(warnings.at(-1), /gate_auth/)
-  repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: TOKEN })
+  await repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: TOKEN })
   const before = gate.seen.length
   assert.equal(await manager._dialDirect('node-a', 'vm-1', 'kernel'), null, 'still in backoff')
   assert.equal(gate.seen.length, before)
-  assert.equal(manager.get('node-a').direct_link.state, 'down')
+  assert.equal((await manager.get('node-a')).direct_link.state, 'down')
   assert.ok(manager.directState.get('node-a').downUntil <= Date.now() + DIRECT_LINK_BACKOFF_MS)
   await manager._probeDirect('node-a')
-  assert.equal(manager.get('node-a').direct_link.state, 'ok', 'a good ping lifts the backoff')
+  assert.equal((await manager.get('node-a')).direct_link.state, 'ok', 'a good ping lifts the backoff')
 
-  repo.setDirectLink('node-a', { address: '127.0.0.1', port: 1, token: TOKEN })
+  await repo.setDirectLink('node-a', { address: '127.0.0.1', port: 1, token: TOKEN })
   assert.equal(await manager._dialDirect('node-a', 'vm-1', 'kernel'), null, 'unreachable: SSH')
   assert.match(warnings.at(-1), /gate_unreachable/)
 
   await manager.clearDirectLink('node-a')
-  assert.equal(manager.get('node-a').direct_link, null)
-  repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: TOKEN })
+  assert.equal((await manager.get('node-a')).direct_link, null)
+  await repo.setDirectLink('node-a', { address: gate.address, port: gate.port, token: TOKEN })
   db.prepare('DELETE FROM cluster_nodes WHERE id = ?').run('node-a')
-  assert.equal(repo.getDirectLink('node-a'), null, 'removing the node drops its link')
+  assert.equal(await repo.getDirectLink('node-a'), null, 'removing the node drops its link')
 })

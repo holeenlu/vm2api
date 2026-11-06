@@ -100,7 +100,7 @@ test('diagnosis: reports error (kernel_slots_closed) when all slots are closed',
   }
 })
 
-test('vmTimeoutTracker and FailoverRunner: 3 consecutive silent timeouts mark kernel fault', () => {
+test('vmTimeoutTracker and FailoverRunner: 3 consecutive silent timeouts mark kernel fault', async () => {
   const vmId = 'vm-stall-test'
   kernelFaults.delete(vmId)
   vmTimeoutTracker.reset(vmId)
@@ -120,15 +120,15 @@ test('vmTimeoutTracker and FailoverRunner: 3 consecutive silent timeouts mark ke
   const policy = { reason: 'provider_timeout' }
 
   // Attempt 1: timeout
-  runner.noteUnitHealth(selected, policy, timeoutResult)
+  await runner.noteUnitHealth(selected, policy, timeoutResult)
   assert.equal(kernelFaults.has(vmId), false)
 
   // Attempt 2: timeout
-  runner.noteUnitHealth(selected, policy, timeoutResult)
+  await runner.noteUnitHealth(selected, policy, timeoutResult)
   assert.equal(kernelFaults.has(vmId), false)
 
   // Attempt 3: timeout -> trips circuit, marks kernel fault
-  runner.noteUnitHealth(selected, policy, timeoutResult)
+  await runner.noteUnitHealth(selected, policy, timeoutResult)
   assert.equal(kernelFaults.has(vmId), true)
   assert.match(kernelFaults.get(vmId), /consecutive_timeouts/)
 
@@ -137,7 +137,7 @@ test('vmTimeoutTracker and FailoverRunner: 3 consecutive silent timeouts mark ke
   kernelFaults.delete(vmId)
 })
 
-test('vmTimeoutTracker: success resets consecutive timeout counter', () => {
+test('vmTimeoutTracker: success resets consecutive timeout counter', async () => {
   const vmId = 'vm-success-reset'
   vmTimeoutTracker.reset(vmId)
   kernelFaults.delete(vmId)
@@ -156,8 +156,8 @@ test('vmTimeoutTracker: success resets consecutive timeout counter', () => {
   const policy = { reason: 'provider_timeout' }
 
   // 2 timeouts
-  runner.noteUnitHealth(selected, policy, timeoutResult)
-  runner.noteUnitHealth(selected, policy, timeoutResult)
+  await runner.noteUnitHealth(selected, policy, timeoutResult)
+  await runner.noteUnitHealth(selected, policy, timeoutResult)
   assert.equal(vmTimeoutTracker.counts.get(vmId)?.count, 2)
 
   // 1 success
@@ -169,7 +169,7 @@ test('vmTimeoutTracker: success resets consecutive timeout counter', () => {
     role: 'assistant',
     content: [{ type: 'text', text: 'hello' }],
   }
-  runner.noteUnitHealth(selected, {}, successResult)
+  await runner.noteUnitHealth(selected, {}, successResult)
   assert.equal(vmTimeoutTracker.counts.has(vmId), false)
   assert.equal(kernelFaults.has(vmId), false)
 })

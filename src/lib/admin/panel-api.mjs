@@ -10,6 +10,7 @@ import { THINKING_DISPLAY_MODES } from '../protocol/thinking.mjs'
 import { readSlotProcessStatus } from '../vm/slot-process-status.mjs'
 import os from 'node:os'
 import { usagePoolEnabled, usageRead } from '../db/sqlite-pool.mjs'
+import { listRuntimeVmVendors } from '../vendor/repos/resources-repo.mjs'
 import path from 'node:path'
 import {
   listVms,
@@ -20,6 +21,7 @@ import {
   persistAccountTier,
   isCodexVm,
   migrateVmSchedule,
+  clearLegacyProxyScheduleOff,
 } from '../vm/vm-registry.mjs'
 import { clearRecoverableVmCooldown, markVmRefreshError } from '../oauth/oauth-credentials.mjs'
 import {
@@ -58,7 +60,8 @@ import {
   evaluateAccount,
   credStatusFromAvailability,
   isLeftoverQuotaScheduleOff,
-  isQuotaWindowReason,
+  isAccountRestrictionReason,
+  accountLimitReason,
   resolveScheduleState,
 } from '../pool/availability.mjs'
 import { isLeftoverGrantRevokeRuntime, viewRuntimeWithoutLeftoverRevoke } from '../pool/schedule-eligibility.mjs'
@@ -80,7 +83,7 @@ import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
 import { publicNotifyConfig, summarizePoolAvailability } from './notify.mjs'
 import { cacheHitStats } from './cache-metrics.mjs'
-import { estimateWindow, projectWindowRemaining, usedRatioOf } from './window-estimate.mjs'
+import { estimateFromForecast, projectWindowRemaining, usedRatioOf } from './window-estimate.mjs'
 import { shanghaiDayStartIso } from './pricing.mjs'
 import {
   AGENT_STANDING_MAX,
@@ -88,7 +91,6 @@ import {
   OVERLAY_PRESETS,
   PERSONA_PRESETS,
   canonicalPersonaCompat,
-  parsePersonaHides,
   validatePersonaTemplate,
 } from '../identity/persona-template.mjs'
 import { PERSONA_STANDING_MAX } from '../identity/crs-persona.mjs'
@@ -107,7 +109,7 @@ export function ok(data, meta) {
 }
 
 /** Start/create `allocated_proxy` must never carry SOCKS credentials. */
-export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'admin', nodes = [] } = {}) {
+export function publicAllocatedProxy(proxyPool, bound, { nodeId = null, role = 'super_admin', nodes = [] } = {}) {
   if (!bound) return null
   const raw = bound.id && proxyPool?.state?.proxies?.find((p) => p.id === bound.id)
   let view =
@@ -291,7 +293,7 @@ export function publicPhysicalFeatures(vm) {
 }
 
 /** Clear runtime cooldown, leftover /usage 429 flag, and sticky pins for a slot. */
-export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolScheduler = null, id } = {}) {
+export async function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolScheduler = null, id } = {}) {
   const vm = getVm(cfg?.paths?.project, id)
   if (!vm) {
     return fail(
@@ -303,7 +305,7 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
       }),
     )
   }
-  const acc = findAccount(accountQuota, vm)
+  const acc = await findAccount(accountQuota, vm)
   const keys = [...new Set([vm.account_uuid, vm.claude?.account_uuid, acc?.account_id, vm.id].filter(Boolean))]
   const repo = accountQuota?.runtimeRepo
   let runtimeCleared = 0
@@ -311,10 +313,10 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
   let headersRefreshed = 0
   for (const key of keys) {
     try {
-      if (repo?.clearAccountCooldown?.(key, { vmId: vm.id })) runtimeCleared += 1
+      if (await repo?.clearAccountCooldown?.(key, { vmId: vm.id })) runtimeCleared += 1
     } catch {}
     try {
-      const row = accountQuota?.repo?.get?.(key)
+      const row = await accountQuota?.repo?.get?.(key)
       if (!row?.unified) continue
       let changed = false
       if (row.unified.usage_rate_limited_until || row.unified.last_probe?.rate_limited) {
@@ -329,19 +331,20 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
         changed = true
         headersRefreshed += 1
       }
-      if (changed) accountQuota.repo.save(row)
+      if (changed) await accountQuota.repo.save(row)
     } catch {}
     try {
-      stickyRouter?.unbindByAccount?.({ accountId: key, vmId: vm.id })
+      await stickyRouter?.unbindByAccount?.({ accountId: key, vmId: vm.id })
     } catch {}
   }
   const vmPath = path.join(cfg.paths.project, 'vms', `${vm.id}.json`)
   try {
     clearRecoverableVmCooldown(vmPath)
   } catch {}
+  const legacyProxyScheduleOff = await clearLegacyProxyScheduleOff(cfg.paths.project, vm.id)
   const live = getVm(cfg.paths.project, vm.id) || vm
   try {
-    poolScheduler?.syncQuotaSchedule?.(live, acc)
+    await poolScheduler?.syncQuotaSchedule?.(live, acc)
   } catch {}
   try {
     poolScheduler?.notifyCapacity?.(acc?.account_id || vm.claude?.account_uuid || vm.id)
@@ -359,22 +362,23 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
     runtime_cleared: runtimeCleared,
     usage_flag_cleared: usageFlagCleared,
     headers_refreshed: headersRefreshed,
+    legacy_proxy_schedule_off_cleared: !!legacyProxyScheduleOff?.schedulable,
   })
 }
 
 /** Same key as PoolScheduler: full vm record (listVms summaries drop `claude`), slot identity first. */
-function circuitViewFor(vm, projectRoot) {
+async function circuitViewFor(vm, projectRoot) {
   try {
     const full = (projectRoot && vm?.id && getVm(projectRoot, vm.id)) || vm
     const accountId = accountIdOf(full, projectRoot || null)
-    return accountId ? { account_id: accountId, ...unitCircuit.view(accountId) } : null
+    return accountId ? { account_id: accountId, ...(await unitCircuit.view(accountId)) } : null
   } catch {
     return null
   }
 }
 
 /** POST /vms/:id/circuit/reset — operator closes a tripped Claude unit circuit. */
-export function resetVmCircuit({ cfg, poolScheduler = null, id } = {}) {
+export async function resetVmCircuit({ cfg, poolScheduler = null, id } = {}) {
   const vm = getVm(cfg?.paths?.project, id)
   if (!vm) {
     return fail(
@@ -387,11 +391,11 @@ export function resetVmCircuit({ cfg, poolScheduler = null, id } = {}) {
     )
   }
   const accountId = accountIdOf(vm, cfg.paths.project)
-  if (accountId) unitCircuit.reset(accountId)
+  if (accountId) await unitCircuit.reset(accountId)
   try {
     poolScheduler?.notifyCapacity?.(accountId)
   } catch {}
-  return ok({ id: vm.id, circuit: circuitViewFor(vm, cfg.paths.project) })
+  return ok({ id: vm.id, circuit: await circuitViewFor(vm, cfg.paths.project) })
 }
 
 /** A stored 100% / rejected window would re-park the slot on the next schedule. */
@@ -437,11 +441,6 @@ export function validatePersonaRoutingPatch(body = {}) {
     const raw = String(compat.overlay_preset).trim()
     if (!OVERLAY_PRESETS.includes(raw)) {
       problems.push(`overlay_preset 必须是 ${OVERLAY_PRESETS.join(' / ')}，收到 ${raw}`)
-    }
-  }
-  if (compat.persona_hides != null && compat.persona_hides !== '') {
-    if (typeof compat.persona_hides !== 'boolean' && parsePersonaHides(compat.persona_hides) == null) {
-      problems.push('persona_hides 必须是布尔')
     }
   }
   if (compat.persona_standing != null && String(compat.persona_standing).length > PERSONA_STANDING_MAX) {
@@ -634,25 +633,28 @@ export async function buildDashboard({
   clusterNodes = [],
 }) {
   try {
-    accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
+    await accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
   } catch {}
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
   const poolSnap = snapshotPool(proxyPool)
-  const listed = listVms(cfg.paths.project, routingConfig)
+  const listed = await listVms(cfg.paths.project, routingConfig)
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
-  const vms = listed.map((v) =>
+  const snap = await accountQuota.snapshot()
+  const runtimes = await runtimeStates(accountQuota)
+  const vms = await mapVms(listed, (v) =>
     enrichVm(v, accountQuota, active, {
+      runtimes,
       routingConfig,
       pool,
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
       clusterNodes,
-      role: 'admin',
+      role: 'super_admin',
+      accounts: snap.accounts || [],
     }),
   )
-  const snap = accountQuota.snapshot()
   const accounts = liveAccounts(snap.accounts, listed)
   const peak5 = Math.max(0, ...accounts.map((a) => Number(a.unified?.['5h']?.utilization || 0)), 0)
   const peak7 = Math.max(0, ...accounts.map((a) => Number(a.unified?.['7d']?.utilization || 0)), 0)
@@ -675,13 +677,7 @@ export async function buildDashboard({
 
   const billing = stampVmBilling(
     vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), snap.accounts || [])
-      } catch {
-        return null
-      }
-    })(),
+    attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms, snap.accounts || []), snap.accounts || []),
   )
 
   let dbTotals = null
@@ -699,14 +695,14 @@ export async function buildDashboard({
   }
   if (!dbTotals) {
     try {
-      dbTotals = requestLog?.totals() || null
+      dbTotals = (await requestLog?.totals()) || null
     } catch {
       dbTotals = null
     }
   }
   if (!opsWindow) {
     try {
-      opsWindow = requestLog?.windowStats?.({ since: opsSince }) || null
+      opsWindow = (await requestLog?.windowStats?.({ since: opsSince })) || null
     } catch {
       opsWindow = null
     }
@@ -715,7 +711,7 @@ export async function buildDashboard({
   return ok({
     health: {
       status: 'ok',
-      service: 'vm2api',
+      service: 'tapmodels',
       rewrite: cfg.rewrite?.enabled ? 'on' : 'off',
       base_url: cfg.base_url,
     },
@@ -751,7 +747,7 @@ export async function buildDashboard({
     vms,
     routing: {
       sticky_enabled: !!routingConfig?.sticky?.enabled,
-      sticky_sessions: stickyRouter.stats()?.active_sessions ?? 0,
+      sticky_sessions: (await stickyRouter.stats())?.active_sessions ?? 0,
       safety_ratio: routingConfig?.quota?.safety_ratio ?? 0.85,
       weekly_safety_ratio: routingConfig?.quota?.weekly_safety_ratio ?? 0.8,
       tiers: normalizeTiers(routingConfig?.tiers, routingConfig?.quota, routingConfig?.concurrency),
@@ -774,20 +770,25 @@ export async function buildVmList({
   poolScheduler = null,
   proxyPool = null,
   ownerUserId = null,
-  role = 'admin',
+  role = 'super_admin',
   requestLog = null,
   clusterNodes = [],
+  db = null,
 } = {}) {
   try {
-    accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
+    await accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
   } catch {}
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
   const poolSnap = snapshotPool(proxyPool)
-  const listed = filterVmsForPanel(listVms(cfg.paths.project, routingConfig), { role, userId: ownerUserId })
+  const listed = filterVmsForPanel(await listVms(cfg.paths.project, routingConfig), { role, userId: ownerUserId })
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
-  const vms = listed.map((v) =>
+  const vendorByVmId = role === 'super_admin' ? await vmVendorMetadata(db || proxyPool?.db, listed) : null
+  const accounts = await accountSnapshotRows(accountQuota)
+  const runtimes = await runtimeStates(accountQuota)
+  const vms = await mapVms(listed, (v) =>
     enrichVm(v, accountQuota, active, {
+      runtimes,
       routingConfig,
       pool,
       poolSnap,
@@ -795,25 +796,11 @@ export async function buildVmList({
       projectRoot: cfg.paths.project,
       clusterNodes,
       role,
+      vendorByVmId,
+      accounts,
     }),
   )
-  const accounts = (() => {
-    try {
-      return accountQuota?.snapshot?.().accounts || []
-    } catch {
-      return []
-    }
-  })()
-  stampVmBilling(
-    vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
-      } catch {
-        return null
-      }
-    })(),
-  )
+  stampVmBilling(vms, attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms, accounts), accounts))
   return ok({
     items: vms,
     active_vm: active,
@@ -837,7 +824,7 @@ export async function buildVmDetail({
   kernelHealth = null,
   slotProcessStatus = readSlotProcessStatus,
   clusterNodes = [],
-  role = 'admin',
+  role = 'super_admin',
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -853,9 +840,11 @@ export async function buildVmDetail({
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
   const poolSnap = snapshotPool(proxyPool)
-  const listed = [summarizeVm(vm, cfg.paths.project, routingConfig)]
+  const listed = [await summarizeVm(vm, cfg.paths.project, routingConfig)]
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed, { cacheMs: 0 })
-  const summary = enrichVm(listed[0], accountQuota, active, {
+  const accounts = await accountSnapshotRows(accountQuota)
+  const summary = await enrichVm(listed[0], accountQuota, active, {
+    runtimes: await runtimeStates(accountQuota),
     routingConfig,
     pool,
     poolSnap,
@@ -863,19 +852,15 @@ export async function buildVmDetail({
     projectRoot: cfg.paths.project,
     clusterNodes,
     role,
+    vendorByVmId: role === 'super_admin' ? await vmVendorMetadata(proxyPool?.db, listed) : null,
+    accounts,
   })
-  const acc = findAccount(accountQuota, summary)
-  const billing = (() => {
-    try {
-      return panelBillingStats(requestLog, accountQuota, [summary])
-    } catch {
-      return null
-    }
-  })()
+  const acc = findAccountIn(accounts, summary)
+  const billing = await panelBillingStats(requestLog, accountQuota, [summary], accounts)
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
   const gpt = isCodexVm(vm)
-  applyCostFields(summary, cost, { coveredSince: billing?.log_coverage_start })
-  const detail = buildAccountBilling(cost, billing, {
+  applyCostFields(summary, cost)
+  const detail = await buildAccountBilling(cost, billing, {
     vmId: summary.id,
     accountId: acc?.account_id || summary.account_uuid,
     requestLog,
@@ -917,7 +902,7 @@ export async function buildVmDetail({
     account: acc
       ? {
           account_id: acc.account_id,
-          ...quotaFromAccount(acc, accountQuota?.config),
+          ...quotaFromAccount(acc, accountQuota?.quotaConfigFor?.(acc) ?? accountQuota?.config),
           inflight: acc.inflight,
           max_concurrency: acc.max_concurrency,
           rpm: acc.rpm || 0,
@@ -933,7 +918,7 @@ export async function buildVmDetail({
           window_7d_cost: cost?.window_7d_cost || 0,
           last_blocked: acc.last_blocked,
           recent: (acc.recent_allocations || []).slice(-10),
-          runtime_window: runtimeWindow(accountQuota, acc.account_id),
+          runtime_window: await runtimeWindow(accountQuota, acc.account_id),
         }
       : null,
     official_cc: gpt ? null : readOfficialCcStatus(officialCcHome(cfg.paths.project, id)),
@@ -960,9 +945,9 @@ export async function buildVmDetail({
 }
 
 /** Structured session-window / rate-limit state from account_runtime_states. */
-function runtimeWindow(accountQuota, accountId) {
+async function runtimeWindow(accountQuota, accountId) {
   try {
-    const state = accountQuota?.runtimeRepo?.get?.(accountId)
+    const state = await accountQuota?.runtimeRepo?.get?.(accountId)
     if (!state) return null
     return {
       rate_limited_at: state.rate_limited_at,
@@ -1043,10 +1028,11 @@ function claudeResetFail(result) {
   )
 }
 
-export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
+export async function buildClaudeResetQuery({ cfg, id, accountQuota, transport, now } = {}) {
   const result = await queryClaudeResetCredits({
     projectRoot: cfg.paths.project,
     vmId: id,
+    accountQuota,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
   })
@@ -1058,10 +1044,11 @@ export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
   })
 }
 
-export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, transport, now } = {}) {
+export async function buildClaudeResetRedeem({ cfg, id, accountQuota, idempotencyKey, transport, now } = {}) {
   const result = await redeemClaudeResetCredit({
     projectRoot: cfg.paths.project,
     vmId: id,
+    accountQuota,
     idempotencyKey,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
@@ -1074,9 +1061,9 @@ export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, transpor
   })
 }
 
-function applyFableProbeResult(accountQuota, accountId, found) {
+async function applyFableProbeResult(accountQuota, accountId, found) {
   if (found?.tier !== 'pro' && found?.tier !== 'max') return null
-  const saved = accountQuota.repo.get(accountId)
+  const saved = await accountQuota.repo.get(accountId)
   if (!saved || !found.fable) return found.tier
   const prev = saved.unified?.fable || {}
   saved.unified = saved.unified || {}
@@ -1093,7 +1080,7 @@ function applyFableProbeResult(accountQuota, accountId, found) {
     reset: found.fable.reset_at || prev.reset || null,
     probed_at: new Date().toISOString(),
   }
-  accountQuota.repo.save(saved)
+  await accountQuota.repo.save(saved)
   return found.tier
 }
 function fatalUsageCredentialFailure(result = {}) {
@@ -1114,6 +1101,7 @@ export async function buildProbeOne({
   usageCache = null,
   hop = true,
   fableProbe = probeFableEntitlement,
+  probeEntitlement = true,
   routingConfig = {},
 } = {}) {
   const vm = getVm(cfg.paths.project, id)
@@ -1180,24 +1168,26 @@ export async function buildProbeOne({
   const accountId = vm.claude?.account_uuid || vm.id
   if (vm.claude?.account_uuid) {
     try {
-      accountQuota.rebindToVm(vm.claude.account_uuid, vm.id, { email: vm.claude?.email || null })
+      await accountQuota.rebindToVm(vm.claude.account_uuid, vm.id, { email: vm.claude?.email || null })
     } catch {}
   }
-  accountQuota.ensure({
+  await accountQuota.ensure({
     account_id: accountId,
     vm_id: vm.id,
     email: vm.email || vm.codex?.email || vm.claude?.email,
     max_concurrency: vm.policy?.maxConcurrency,
     max_rpm: vm.policy?.maxRpm ?? 0,
   })
-  const acc = accountQuota.repo.get(accountId)
+  const acc = await accountQuota.repo.get(accountId)
   const q = quotaFromAccount(acc)
   const storedTier = vm.claude?.account_tier || acc?.unified?.account_tier || q.account_tier || null
-  const includeFable = shouldProbeFable({
-    fable: q.fable || acc?.unified?.fable || {},
-    quota: { ...acc?.unified, ...q },
-    storedTier,
-  })
+  const includeFable =
+    probeEntitlement &&
+    shouldProbeFable({
+      fable: q.fable || acc?.unified?.fable || {},
+      quota: { ...acc?.unified, ...q },
+      storedTier,
+    })
   const cache = usageCache || getUsageCache()
   if (force) cache.clear(accountId)
   const skipHop = !shouldHopOfficialUsage(acc?.unified, { hop, force })
@@ -1222,13 +1212,18 @@ export async function buildProbeOne({
       })
     } catch {}
   }
-  if (!skipHop) accountQuota.ingestOAuthUsage(accountId, result)
-  if (isSetupTokenMode(credentialModeOfVm(vm)) && (force || includeFable) && !result.usage_scope_missing) {
+  if (!skipHop) await accountQuota.ingestOAuthUsage(accountId, result)
+  if (
+    probeEntitlement &&
+    isSetupTokenMode(credentialModeOfVm(vm)) &&
+    (force || includeFable) &&
+    !result.usage_scope_missing
+  ) {
     try {
       await applyFableProbeResult(accountQuota, accountId, await fableProbe({ exec, timeoutMs: 20000 }))
     } catch {}
   }
-  const after = accountQuota.repo.get(accountId)
+  const after = await accountQuota.repo.get(accountId)
   const qAfter = quotaFromAccount(after)
   const rateLimited = isOfficialUsageRateLimited(result)
   const passive = rateLimited ? probeFromPassiveHeaders(after?.unified || acc?.unified || {}) : null
@@ -1251,10 +1246,10 @@ export async function buildProbeOne({
   ).key
   const completeUsage = result.ok === true && result.limits_present === true
   if (completeUsage && (result.account_tier === 'pro' || result.account_tier === 'max')) {
-    accountQuota.setAccountTier(accountId, result.account_tier, { source: 'usage' })
+    await accountQuota.setAccountTier(accountId, result.account_tier, { source: 'usage' })
     persistAccountTier(cfg.paths.project, id, result.account_tier, { source: 'usage' })
   } else if (completeUsage && (tier === 'pro' || tier === 'max')) {
-    accountQuota.setAccountTier(accountId, tier, { source: 'usage' })
+    await accountQuota.setAccountTier(accountId, tier, { source: 'usage' })
     persistAccountTier(cfg.paths.project, id, tier, { source: 'usage' })
   }
   const availability = evaluateAccount({
@@ -1342,7 +1337,7 @@ export async function buildProbeOne({
   }
   // Display metadata is separate from the authoritative usage/auth probe.
   // Reading cached headers must not heal credential failures or clear backoff.
-  const checked = accountQuota.repo.get(accountId)
+  const checked = await accountQuota.repo.get(accountId)
   checked.unified = checked.unified || {}
   checked.unified.last_probe_check = {
     at: data.probed_at,
@@ -1352,12 +1347,12 @@ export async function buildProbeOne({
     error: data.error,
     data_at: data.via === 'passive-headers' ? checked.unified.headers?.sampled_at || null : data.probed_at,
   }
-  accountQuota.repo.save(checked)
+  await accountQuota.repo.save(checked)
   return ok(data)
 }
 
 export async function buildProbeAll({ cfg, accountQuota, hop = true, force = true, routingConfig = {} } = {}) {
-  const vms = listVms(cfg.paths.project, routingConfig)
+  const vms = await listVms(cfg.paths.project, routingConfig)
   const items = []
   for (const s of vms) {
     const one = await buildProbeOne({ cfg, accountQuota, id: s.id, hop, force, routingConfig })
@@ -1371,22 +1366,16 @@ export async function buildProbeAll({ cfg, accountQuota, hop = true, force = tru
   return ok({ items, total: items.length })
 }
 
-export function buildUsage({ accountQuota, cfg, requestLog = null }) {
-  const snap = accountQuota.snapshot()
-  const listed = listVms(cfg?.paths?.project)
-  const billing = (() => {
-    try {
-      return panelBillingStats(requestLog, accountQuota, listed)
-    } catch {
-      return null
-    }
-  })()
+export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
+  const snap = await accountQuota.snapshot()
+  const listed = await listVms(cfg?.paths?.project)
+  const billing = await panelBillingStats(requestLog, accountQuota, listed, snap.accounts || [])
   const costByKey = indexBillingAccounts(billing)
   const listedById = new Map(listed.map((vm) => [vm.id, vm]))
   const accounts = liveAccounts(snap.accounts, listed).map((a) => {
     const cost = lookupBilling(costByKey, a)
     const vm = a.vm_id ? getVm(cfg?.paths?.project, a.vm_id) : null
-    const quota = quotaFromAccount(a, accountQuota?.config)
+    const quota = quotaFromAccount(a, accountQuota?.quotaConfigFor?.(a) ?? accountQuota?.config)
     const codexVm = vm && isCodexVm(vm) ? listedById.get(vm.id) || vm : null
     return {
       account_id: a.account_id,
@@ -1425,12 +1414,7 @@ export function buildUsage({ accountQuota, cfg, requestLog = null }) {
         cache_read_tokens: cost?.today_cache_read_tokens || cost?.today?.cache_read_tokens || 0,
         cache_creation_tokens: cost?.today_cache_creation_tokens || cost?.today?.cache_creation_tokens || 0,
       }).cache_hit_rate,
-      ...windowEstimates(
-        codexVm ? { ...quota, ...(codexVm.codex_usage?.quota || {}) } : quota,
-        cost,
-        billing?.log_coverage_start,
-        !!codexVm,
-      ),
+      ...windowEstimates(codexVm ? { ...quota, ...(codexVm.codex_usage?.quota || {}) } : quota, cost, !!codexVm),
       near_limit:
         accountQuota?.nearLimit?.(a) ??
         isNearLimit(
@@ -1490,7 +1474,7 @@ function presentInference(inference) {
   return out
 }
 
-export function buildRouting({ routingConfig, stickyRouter }) {
+export async function buildRouting({ routingConfig, stickyRouter }) {
   const tiers = normalizeTiers(routingConfig?.tiers, routingConfig?.quota, routingConfig?.concurrency)
   return ok({
     sticky: routingConfig?.sticky || {},
@@ -1510,7 +1494,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     notify: publicNotifyConfig(routingConfig?.notify),
     vm: normalizeVmConfig(routingConfig?.vm),
     telemetry: { upload_interval_seconds: telemetryUploadInterval(routingConfig) },
-    sessions: stickyRouter.stats(),
+    sessions: await stickyRouter.stats(),
   })
 }
 
@@ -1523,47 +1507,38 @@ export async function snapshotAccountPool({
   requestLog = null,
 }) {
   try {
-    accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
+    await accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
   } catch {}
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
   const poolSnap = snapshotPool(proxyPool)
-  const listed = listVms(cfg.paths.project, routingConfig)
+  const listed = await listVms(cfg.paths.project, routingConfig)
   let liveById = null
   try {
     liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
   } catch {
     liveById = null
   }
-  const vms = listed.map((v) =>
+  const accounts = await accountSnapshotRows(accountQuota)
+  const runtimes = await runtimeStates(accountQuota)
+  const vms = await mapVms(listed, (v) =>
     enrichVm(v, accountQuota, active, {
+      runtimes,
       routingConfig,
       pool,
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
+      accounts,
     }),
   )
-  const accounts = (() => {
-    try {
-      return accountQuota?.snapshot?.().accounts || []
-    } catch {
-      return []
-    }
-  })()
   const billing = stampVmBilling(
     vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
-      } catch {
-        return null
-      }
-    })(),
+    attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms, accounts), accounts),
   )
   let today = null
   try {
-    today = requestLog?.windowStats?.({ since: shanghaiDayStartIso() }) || null
+    today = (await requestLog?.windowStats?.({ since: shanghaiDayStartIso() })) || null
   } catch {
     today = null
   }
@@ -1608,8 +1583,13 @@ export function quotaFromAccount(acc, quotaConfig) {
   const extra = u.extra_usage || null
   const o5 = u.official?.['5h'] || u['5h'] || {}
   const o7 = u.official?.['7d'] || u['7d'] || {}
-  const o5Limited = isOfficialWindowLimited(o5)
-  const o7Limited = isOfficialWindowLimited(o7)
+  const newerHeader = (key, official) => {
+    const headerAt = Date.parse(u.headers?.[key]?.sampled_at || '')
+    const officialAt = Date.parse(official.sampled_at || '')
+    return Number.isFinite(headerAt) && Number.isFinite(officialAt) && headerAt > officialAt
+  }
+  const o5Limited = isOfficialWindowLimited(o5) && !newerHeader('5h', o5)
+  const o7Limited = isOfficialWindowLimited(o7) && !newerHeader('7d', o7)
   const effectiveU5 = o5Limited
     ? 1.0
     : listed.utilization_5h != null
@@ -1635,7 +1615,8 @@ export function quotaFromAccount(acc, quotaConfig) {
     reset_5h: listed.reset_5h || o5.reset || null,
     reset_7d: listed.reset_7d || o7.reset || null,
     reset_7d_sonnet: sonnet.reset || null,
-    reset_7d_oi: oi.reset || listed.reset_7d_oi || null,
+    reset_7d_oi: oi.reset || listed.reset_7d_oi || fable?.reset || fable?.reset_at || null,
+    cleared_windows: u.cleared_windows || null,
     status_5h: effectiveStatus5,
     status_7d: effectiveStatus7,
     status_7d_sonnet: sonnet.status || null,
@@ -1653,9 +1634,8 @@ export function quotaFromAccount(acc, quotaConfig) {
     computeWeeklySplit({
       enabled: cfg.enabled,
       fable_share: cfg.fable_share,
-      utilization_7d: q.utilization_7d,
       utilization_7d_oi: q.utilization_7d_oi,
-      status_7d_oi: q.status_7d_oi,
+      reset_7d_oi: q.reset_7d_oi,
     }),
   )
   if (split) q.weekly_split = split
@@ -1752,7 +1732,7 @@ function canImportCredential(v, hit) {
   return !!(base.url || (base.host && base.port) || v.proxy_id)
 }
 
-function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
+function mergeVmProxy(v, poolSnap, { role = 'super_admin', nodes = [] } = {}) {
   const hit = poolProxyForVm(v, poolSnap)
   const base = v.proxy || {}
   const configured = proxyConfigured(v, hit)
@@ -1786,7 +1766,29 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
   }
 }
 
-function enrichVm(v, accountQuota, active, extras = {}) {
+async function vmVendorMetadata(db, vms) {
+  if (!db?.prepare || !Array.isArray(vms) || !vms.length) return new Map()
+  const ids = vms.map((v) => String(v.id)).filter(Boolean)
+  if (!ids.length) return new Map()
+  try {
+    const rows = await listRuntimeVmVendors(db, ids)
+    const out = new Map()
+    for (const row of rows) {
+      const id = String(row.runtime_vm_id || '')
+      if (!id || out.has(id)) continue
+      out.set(id, {
+        vendor_id: row.vendor_id || null,
+        vendor_name: row.vendor_name || null,
+        notes: typeof row.vendor_notes === 'string' ? row.vendor_notes : '',
+      })
+    }
+    return out
+  } catch {
+    return new Map()
+  }
+}
+
+async function enrichVm(v, accountQuota, active, extras = {}) {
   if (extras.projectRoot && isLeftoverQuotaScheduleOff(v)) {
     migrateVmSchedule(extras.projectRoot, v.id)
     const fresh = getVm(extras.projectRoot, v.id)
@@ -1800,8 +1802,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       }
     }
   }
-  const acc = findAccount(accountQuota, v)
-  const runtime = findRuntime(accountQuota, v)
+  const acc = findAccountIn(extras.accounts, v)
+  const runtime = await findRuntime(accountQuota, v, acc, extras.runtimes)
   const liveCred = extras.liveById instanceof Map ? extras.liveById.get(v.id) : extras.liveById?.[v.id]
   const workerCred = liveCred || runtime?.worker_status?.credential || null
   const quotaOverride = isCodexVm(v) ? null : v.quota_override || null
@@ -1821,7 +1823,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   })
   const isCodex = isCodexVm(v)
   // OpenAI quota mirrors are observations; admission uses the current raw windows and policy.
-  if (isCodex && isQuotaWindowReason(v.temp_unschedulable_reason)) {
+  if (isCodex && isAccountRestrictionReason(v.temp_unschedulable_reason)) {
     v = { ...v, temp_unschedulable_until: null, temp_unschedulable_reason: null }
   }
   const openAIGlobalPolicy = normalizeOpenAIQuotaPolicy(extras.routingConfig?.codex?.quota)
@@ -1830,7 +1832,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const u5 = mergedQuota.utilization_5h
   const u7 = mergedQuota.utilization_7d
   const merged = mergeVmProxy(v, extras.poolSnap || null, {
-    role: extras.role || 'admin',
+    role: extras.role || 'super_admin',
     nodes: extras.clusterNodes || [],
   })
   const expiresAt = normalizePanelExpiresAt(v.expires_at, workerCred?.expires_at)
@@ -1877,7 +1879,12 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       }) || { active: 0, max: codexMaxSessions(v), idle_min: 5 }
     : null
   const seatRow = isCodex ? null : extras.pool?.seats?.[v.id] || null
-  const liveHardBlock = hardBlockOf(runtime)
+  const limitSource = { unified: acc?.unified || {}, quota: mergedQuota }
+  const rawHardBlock = hardBlockOf(runtime)
+  const liveHardBlock = rawHardBlock && {
+    ...rawHardBlock,
+    reason: accountLimitReason(rawHardBlock.reason, limitSource),
+  }
   const availability = evaluateAccount({
     vm: v,
     account: isCodex ? {} : acc || {},
@@ -1912,10 +1919,10 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const activeHoursZone = activeHoursZoneOf(activeHours, v)
   const activeHoursState = evaluateActiveHours(activeHours, undefined, v.timezone)
   if (isCodex && v.quota_policy?.reason && (availability.accept || availability.key === 'quota')) {
-    const window = v.quota_policy.reason.includes('5h') ? '5h' : '7d'
+    const window = /^quota_(5h|7d)/.exec(v.quota_policy.reason)?.[1] || null
     Object.assign(availability, {
       key: 'quota',
-      text: `${window} 限制`,
+      text: window ? `${window} 限制` : '限流中',
       accept: false,
       usable: true,
       reason: v.quota_policy.reason,
@@ -1943,15 +1950,17 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     v.cooldown_until ||
     availability.until ||
     null
-  const restrictionReason =
+  const restrictionReason = accountLimitReason(
     liveHardBlock?.reason ||
-    runtime?.cooldown_reason ||
-    v.claude?.temp_unschedulable_reason ||
-    v.temp_unschedulable_reason ||
-    v.cooldown_reason ||
-    availability.reason ||
-    null
-  const circuit = isCodex ? null : circuitViewFor(v, extras.projectRoot)
+      runtime?.cooldown_reason ||
+      v.claude?.temp_unschedulable_reason ||
+      v.temp_unschedulable_reason ||
+      v.cooldown_reason ||
+      availability.reason ||
+      null,
+    limitSource,
+  )
+  const circuit = isCodex ? null : await circuitViewFor(v, extras.projectRoot)
   const seatsMax = isCodex ? null : resolveSessionSlots(v, extras.routingConfig || {})
   const triad = resolveScheduleState({
     vm: v,
@@ -1963,6 +1972,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     sessions: isCodex ? { active: codexSessions?.active, max: codexSessions?.max } : null,
   })
   return {
+    groups: v.groups || [],
+    groups_version: v.groups_version || 0,
     id: v.id,
     name: v.name,
     status: v.status,
@@ -1982,8 +1993,15 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     region: v.region || null,
     node_id: v.node_id || null,
     owner_user_id: v.owner_user_id || null,
+    ...(extras.vendorByVmId instanceof Map
+      ? {
+          vendor_id: extras.vendorByVmId.get(String(v.id))?.vendor_id || null,
+          vendor_name: extras.vendorByVmId.get(String(v.id))?.vendor_name || null,
+          notes: extras.vendorByVmId.get(String(v.id))?.notes || '',
+        }
+      : {}),
     origin: v.origin || null,
-    ...(canRevealClusterNodes(extras.role || 'admin') && v.node_id
+    ...(canRevealClusterNodes(extras.role || 'super_admin') && v.node_id
       ? { node_name: nodeNameOf(extras.clusterNodes, v.node_id) }
       : {}),
     timezone: v.timezone || null,
@@ -2057,6 +2075,14 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     codex_credits: isCodex ? v.codex_credits || v.codex?.credits || null : null,
     claude_reset_credits: isCodex ? null : v.claude_reset_credits || null,
     plan_type: isCodex ? v.plan_type || null : null,
+    // 账号资料（官方 profile / ChatGPT 账号检查）：套餐、限额档、订阅渠道、订阅到期与续费
+    chatgpt_plan_type: isCodex ? v.chatgpt_plan_type || null : null,
+    chatgpt_subscription_active_until: isCodex ? v.chatgpt_subscription_active_until || null : null,
+    subscription_will_renew: isCodex ? (v.subscription?.will_renew ?? null) : null,
+    subscription_type: v.subscription_type || null,
+    rate_limit_tier: isCodex ? null : v.rate_limit_tier || null,
+    billing_type: v.billing_type || null,
+    subscription_updated_at: v.subscription_updated_at || null,
     ...(q.weekly_split ? { weekly_split: q.weekly_split } : {}),
     fable_inflight: fablePool.fable_inflight,
     fable_max: fablePool.fable_max,
@@ -2173,30 +2199,58 @@ export function isSeedAccountRow(account) {
   return util === 0 && (status === 'active' || !w5.status) && !unified.official
 }
 
-export function findAccount(accountQuota, vm) {
-  if (!accountQuota || typeof accountQuota.snapshot !== 'function') return null
-  const snap = accountQuota.snapshot()
-  const accounts = snap.accounts || []
+// A snapshot costs one query per account; panel builders take it once and pass `accounts`.
+/** The account row of this VM; reads the quota snapshot when `accounts` is not given. */
+export async function findAccount(accountQuota, vm, accounts = null) {
+  if (!accounts) {
+    if (!accountQuota || typeof accountQuota.snapshot !== 'function') return null
+    accounts = (await accountQuota.snapshot()).accounts || []
+  }
+  return findAccountIn(accounts, vm)
+}
+
+/** Same match over rows already read (`accountQuota.snapshot().accounts`). */
+export function findAccountIn(accounts, vm) {
+  accounts = accounts || []
   const uuid = vm.account_uuid || vm.claude?.account_uuid || null
   if (uuid) {
     const byUuid = accounts.find((a) => a.account_id === uuid)
     if (byUuid && !isSeedAccountRow(byUuid)) return byUuid
   }
+  const usable = (a) => !isLeftoverVmKeyedAccount(a, vm) && !isSeedAccountRow(a)
   return (
-    accounts.find(
-      (a) => (a.vm_id === vm.id || a.account_id === vm.id) && !isLeftoverVmKeyedAccount(a, vm) && !isSeedAccountRow(a),
-    ) || (uuid ? accounts.find((a) => a.account_id === uuid) : null)
+    // No uuid: requests are booked under vm.id; an older uuid-keyed row sharing vm_id is a stale import.
+    (!uuid && accounts.find((a) => a.account_id === vm.id && usable(a))) ||
+    accounts.find((a) => (a.vm_id === vm.id || a.account_id === vm.id) && usable(a)) ||
+    (uuid ? accounts.find((a) => a.account_id === uuid) : null)
   )
 }
 
-function findRuntime(accountQuota, vm) {
+/** Runtime states keyed by account id, read once per panel list (`runtimeRepo.list()`). */
+async function runtimeStates(accountQuota) {
+  try {
+    const repo = accountQuota?.runtimeRepo
+    if (!repo?.list) return null
+    return new Map((await repo.list()).map((state) => [state.account_id, state]))
+  } catch {
+    return null
+  }
+}
+
+/** Process each VM in order; the per-VM reads are awaited one at a time. */
+async function mapVms(list, fn) {
+  const out = []
+  for (const item of list) out.push(await fn(item))
+  return out
+}
+
+async function findRuntime(accountQuota, vm, acc, states = null) {
   try {
     const repo = accountQuota?.runtimeRepo
     if (!repo?.get) return null
-    const acc = findAccount(accountQuota, vm)
     const keys = [vm.account_uuid, acc?.account_id, vm.id].filter(Boolean)
     for (const key of keys) {
-      const state = repo.get(key)
+      const state = states ? states.get(key) || null : await repo.get(key)
       if (!state) continue
       const cred = state.worker_status?.credential || {}
       const err = String(state.worker_status?.last_error || state.last_error || '')
@@ -2207,14 +2261,14 @@ function findRuntime(accountQuota, vm) {
           /refresh_token_missing|invalid_grant|worker_unhealthy/.test(err + String(state.status || '')))
       const live = !!(vm.has_refresh || vm.has_token || vm.account_uuid)
       if (leftover && live) continue
-      return freshenRuntimeState(state, vm, repo)
+      return await freshenRuntimeState(state, vm, repo)
     }
   } catch {}
   return null
 }
 
 /** Drop stale worker TTL / last_error / leftover revoke when vm.json already has a live ticket. */
-function freshenRuntimeState(state, vm, repo = null) {
+async function freshenRuntimeState(state, vm, repo = null) {
   if (!state) return state
   if (
     isLeftoverGrantRevokeRuntime(state, vm, {
@@ -2225,7 +2279,7 @@ function freshenRuntimeState(state, vm, repo = null) {
     })
   ) {
     try {
-      repo?.clearGrantRevokeCooldown?.(state.account_id, { vmId: vm.id })
+      await repo?.clearGrantRevokeCooldown?.(state.account_id, { vmId: vm.id })
     } catch {}
     state = viewRuntimeWithoutLeftoverRevoke(state, vm, {
       has_token: vm.has_token || vm.claude?.has_access,
@@ -2368,16 +2422,17 @@ function attachBillingMeta(billing, accounts = []) {
   }
 }
 
-function accountWindowsForBilling(accountQuota, vms = []) {
+async function accountSnapshotRows(accountQuota) {
+  try {
+    return (await accountQuota?.snapshot?.())?.accounts || []
+  } catch {
+    return []
+  }
+}
+
+function accountWindowsForBilling(accountQuota, vms = [], accounts = []) {
   const listed = Array.isArray(vms) ? vms : []
   const byVm = new Map(listed.map((vm) => [vm.id, vm]))
-  const accounts = (() => {
-    try {
-      return accountQuota?.snapshot?.().accounts || []
-    } catch {
-      return []
-    }
-  })()
   const windows = []
   const seen = new Set()
   for (const acc of accounts) {
@@ -2390,7 +2445,7 @@ function accountWindowsForBilling(accountQuota, vms = []) {
   for (const vm of listed) {
     const key = `${vm.account_uuid || vm.id}\0${vm.id}`
     if (seen.has(key) || seen.has(`${vm.account_uuid || ''}\0${vm.id}`)) continue
-    const acc = findAccount(accountQuota, vm)
+    const acc = findAccountIn(accounts, vm)
     windows.push(billingWindowOf(acc?.account_id || vm.account_uuid || vm.id, vm.id, vm, quotaFromAccount(acc)))
   }
   return windows
@@ -2406,19 +2461,25 @@ function billingWindowOf(accountId, vmId, vm, q) {
     reset_5h: (codex ? codexQuota.reset_5h : q.reset_5h) || vm.reset_5h || null,
     reset_7d: (codex ? codexQuota.reset_7d : q.reset_7d) || vm.reset_7d || null,
     reset_7d_oi: codex ? null : q.reset_7d_oi || vm.reset_7d_oi || null,
+    cleared_windows: (codex ? codexQuota.cleared_windows : q.cleared_windows) || null,
   }
 }
 
-function panelBillingStats(requestLog, accountQuota, vms) {
+async function panelBillingStats(requestLog, accountQuota, vms, accounts = undefined) {
   if (!requestLog?.billingStats) return null
-  return requestLog.billingStats({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+  try {
+    const rows = accounts === undefined ? await accountSnapshotRows(accountQuota) : accounts
+    return await requestLog.billingStats({ accountWindows: accountWindowsForBilling(accountQuota, vms, rows) })
+  } catch {
+    return null
+  }
 }
 
 function stampVmBilling(vms, billing) {
   if (!billing) return null
   const index = indexBillingAccounts(billing)
   for (const vm of vms || []) {
-    applyCostFields(vm, lookupBilling(index, vm), { coveredSince: billing.log_coverage_start })
+    applyCostFields(vm, lookupBilling(index, vm))
   }
   return billing
 }
@@ -2453,7 +2514,7 @@ function tokenTotal(row) {
   )
 }
 
-function applyCostFields(target, cost, { coveredSince = null } = {}) {
+function applyCostFields(target, cost) {
   if (!target) return
   const today = cost?.today && typeof cost.today === 'object' ? cost.today : null
   const todayInput = Number(cost?.today_input_tokens ?? (today?.input_tokens || 0))
@@ -2481,55 +2542,44 @@ function applyCostFields(target, cost, { coveredSince = null } = {}) {
   target.window_7d_success = cost?.window_7d_success || 0
   target.window_7d_errors = cost?.window_7d_errors || 0
   target.window_7d_tokens = cost?.window_7d_tokens || 0
-  Object.assign(target, windowEstimates(target, cost, coveredSince, isCodexVm(target)))
+  Object.assign(target, windowEstimates(target, cost, isCodexVm(target)))
 }
 
 /** Window capacity from official spend ÷ used% on the same aligned window. */
-function windowEstimates(quota, cost, coveredSince, codex) {
+function windowEstimates(quota, cost, codex) {
   const fable = cost?.window_fable || null
   const hasFableWindow = !codex && (quota?.utilization_7d_oi != null || !!quota?.reset_7d_oi)
   return {
     window_fable_cost: Number(fable?.cost || 0),
-    estimate_5h: estimateWindow({
+    estimate_5h: estimateFromForecast({
+      forecast: cost?.forecast_5h,
       spentUsd: cost?.window_5h_cost,
-      tokens: cost?.window_5h_tokens,
       usedRatio: usedRatioOf(quota?.utilization_5h),
-      reset: quota?.reset_5h,
-      windowStart: cost?.window_5h_start,
-      coveredSince,
-      unpricedRequests: cost?.window_5h_unpriced,
     }),
-    estimate_7d: estimateWindow({
+    estimate_7d: estimateFromForecast({
+      forecast: cost?.forecast_7d,
       spentUsd: cost?.window_7d_cost,
-      tokens: cost?.window_7d_tokens,
       usedRatio: usedRatioOf(quota?.utilization_7d),
-      reset: quota?.reset_7d,
-      windowStart: cost?.window_7d_start,
-      coveredSince,
-      unpricedRequests: cost?.window_7d_unpriced,
     }),
     estimate_fable: hasFableWindow
-      ? estimateWindow({
+      ? estimateFromForecast({
+          forecast: cost?.forecast_fable,
           spentUsd: fable?.cost,
-          tokens: fable?.tokens,
           usedRatio: usedRatioOf(quota?.utilization_7d_oi),
-          reset: quota?.reset_7d_oi,
-          windowStart: fable?.start,
-          coveredSince,
-          unpricedRequests: fable?.unpriced,
         })
       : null,
   }
 }
 
 /** The last closed 5h / 7d window with its official spend, from the slot's window archive. */
-function closedWindowView(history, key, { vmId, accountId, requestLog }) {
+async function closedWindowView(history, key, { vmId, accountId, requestLog }) {
   const win = lastClosedWindow(history, key)
   if (!win) return null
   let row = null
   try {
     // `until` is inclusive in the log filter; stop 1 ms short so the boundary request counts once.
-    row = requestLog?.costBetween?.({ since: win.start, until: Date.parse(win.end) - 1, vmId, accountId }) || null
+    row =
+      (await requestLog?.costBetween?.({ since: win.start, until: Date.parse(win.end) - 1, vmId, accountId })) || null
   } catch {
     row = null
   }
@@ -2543,7 +2593,7 @@ function closedWindowView(history, key, { vmId, accountId, requestLog }) {
   }
 }
 
-function buildAccountBilling(
+async function buildAccountBilling(
   cost,
   billing,
   { vmId, accountId, requestLog, windowHistory = null, estimate5h = null, coveredSince = null } = {},
@@ -2591,20 +2641,20 @@ function buildAccountBilling(
   const total = periodView(cost)
   let byModel = []
   try {
-    byModel = requestLog?.costByModel?.({ vmId, accountId }) || []
+    byModel = (await requestLog?.costByModel?.({ vmId, accountId })) || []
   } catch {
     byModel = []
   }
   if (!cost && !byModel.length) return null
   let usageStats = null
   try {
-    usageStats = vmId ? requestLog?.vmUsageStats?.({ vmId, days: 30 }) || null : null
+    usageStats = vmId ? (await requestLog?.vmUsageStats?.({ vmId, days: 30 })) || null : null
   } catch {
     usageStats = null
   }
   const scope = { vmId, accountId, requestLog }
-  const prev5h = closedWindowView(windowHistory, '5h', scope)
-  const prev7d = closedWindowView(windowHistory, '7d', scope)
+  const prev5h = await closedWindowView(windowHistory, '5h', scope)
+  const prev7d = await closedWindowView(windowHistory, '7d', scope)
   return {
     source: billing?.source || 'anthropic-official',
     currency: billing?.currency || 'USD',

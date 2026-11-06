@@ -2,9 +2,11 @@
  * proxies repository — SOCKS5 pool rows + pool config in settings.
  * The ProxyPool keeps its working set in memory (probe loop mutates it);
  * this repo is the persistence surface: loadAll / replaceAll.
+ * 行读写经 DbClient 异步访问（R6 B6c）；代理池落盘改为合并的异步写回后（R6 B8，ProxyPool.save），同步出口 replaceAllSync 已删除。
  */
 
-import { getDb, withTransaction } from '../database.mjs'
+import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
 import { SettingsRepo } from './settings-repo.mjs'
 
 const CONFIG_KEY = 'proxy_pool_config'
@@ -22,6 +24,9 @@ const COLUMNS = [
   'name',
   'label',
   'owner_user_id',
+  'vendor_id',
+  'vendor_resource_id',
+  'platforms_json',
   'bound_vm_id',
   'consecutive_failures',
   'latency_ms',
@@ -48,44 +53,72 @@ const COLUMNS = [
   'created_at',
   'updated_at',
   'domain_forward',
+  'quality_json',
+  'quality_version',
+  'expires_at',
+  'fallback_mode',
+  'backup_proxy_id',
+  'max_websocket_connections',
+  'request_location_mode',
+  'location_country',
+  'location_region',
+  'location_city',
+  'location_timezone',
 ]
 
 function rowToProxy(row) {
   if (!row) return null
   // ProxyPool still speaks `scheme`; the column is sub2api's `protocol`.
-  return { ...row, scheme: row.protocol, enabled: !!row.enabled, domain_forward: !!row.domain_forward }
+  let platforms = []
+  try {
+    const parsed = JSON.parse(row.platforms_json || '[]')
+    platforms = Array.isArray(parsed) ? parsed : []
+  } catch {}
+  return {
+    ...row,
+    scheme: row.protocol,
+    platforms,
+    enabled: !!row.enabled,
+    domain_forward: !!row.domain_forward,
+  }
+}
+
+const LOAD_ALL_SQL = 'SELECT * FROM proxies ORDER BY created_at, id'
+const CLEAR_SQL = 'DELETE FROM proxies'
+const INSERT_SQL = `
+      INSERT INTO proxies (${COLUMNS.join(', ')})
+      VALUES (${COLUMNS.map(() => '?').join(', ')})
+    `
+
+function insertParams(p) {
+  return COLUMNS.map((c) => {
+    if (c === 'enabled') return p.enabled === false ? 0 : 1
+    if (c === 'domain_forward') return p.domain_forward ? 1 : 0
+    if (c === 'quality_version') return p.quality_version || 0
+    if (c === 'fallback_mode') return p.fallback_mode || 'none'
+    if (c === 'max_websocket_connections') return Math.max(0, Number(p.max_websocket_connections) || 0)
+    if (c === 'request_location_mode') return p.request_location_mode || 'inherit'
+    if (c === 'protocol') return p.protocol ?? p.scheme ?? 'socks5'
+    if (c === 'platforms_json') return JSON.stringify(Array.isArray(p.platforms) ? p.platforms : [])
+    if (c === 'name') return p.name ?? (p.host && p.port != null ? `${p.host}:${p.port}` : p.id)
+    return p[c] ?? null
+  })
 }
 
 export class ProxiesRepo {
   constructor(db = getDb()) {
     this.db = db
     this.settings = new SettingsRepo(db)
-    this._all = db.prepare('SELECT * FROM proxies ORDER BY created_at, id')
-    this._clear = db.prepare('DELETE FROM proxies')
-    this._insert = db.prepare(`
-      INSERT INTO proxies (${COLUMNS.join(', ')})
-      VALUES (${COLUMNS.map(() => '?').join(', ')})
-    `)
   }
 
-  loadAll() {
-    return this._all.all().map(rowToProxy)
+  async loadAll() {
+    return (await dbClient(this.db).many(LOAD_ALL_SQL)).map(rowToProxy)
   }
 
-  replaceAll(proxies = []) {
-    withTransaction(this.db, () => {
-      this._clear.run()
-      for (const p of proxies) {
-        this._insert.run(
-          ...COLUMNS.map((c) => {
-            if (c === 'enabled') return p.enabled === false ? 0 : 1
-            if (c === 'domain_forward') return p.domain_forward ? 1 : 0
-            if (c === 'protocol') return p.protocol ?? p.scheme ?? 'socks5'
-            if (c === 'name') return p.name ?? (p.host && p.port != null ? `${p.host}:${p.port}` : p.id)
-            return p[c] ?? null
-          }),
-        )
-      }
+  async replaceAll(proxies = []) {
+    await dbClient(this.db).tx(async (tx) => {
+      await tx.run(CLEAR_SQL)
+      for (const p of proxies) await tx.run(INSERT_SQL, ...insertParams(p))
     })
   }
 
@@ -93,7 +126,7 @@ export class ProxiesRepo {
     return this.settings.get(CONFIG_KEY, fallback)
   }
 
-  setConfig(config) {
+  async setConfig(config) {
     return this.settings.set(CONFIG_KEY, config)
   }
 }

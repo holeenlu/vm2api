@@ -1,6 +1,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
+import { ApiKeysRepo } from '../../src/lib/db/repos/api-keys-repo.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { classifierFixture } from '../fixtures/auto-mode.mjs'
@@ -51,6 +52,7 @@ for (const classifier of [false, true]) {
         stickyRouter: {},
         accountQuota: {},
         apiKeyStore: {
+          canAccept: (record) => ({ ok: true, record }),
           acquire: () => {
             admissions++
             return { ok: true }
@@ -69,6 +71,17 @@ for (const classifier of [false, true]) {
         routingConfig: { failover: {} },
         groupsRepo: { rateMultiplier: () => 1 },
       })
+      // tapmodels 商业 Key 校验库中真实记录（同 forced-tool-choice），夹具 Key 需先落库
+      const keyId = `${classifier ? 'classifier' : 'ordinary'}-${JSON.stringify(invalid)}`
+      const key = await new ApiKeysRepo().insert({
+        id: keyId,
+        key: keyId,
+        key_hash: keyId,
+        status: 'active',
+        category: 'oauth',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
       const req = {
         method: 'POST',
         url: '/v1/messages',
@@ -76,7 +89,7 @@ for (const classifier of [false, true]) {
           ? { 'user-agent': 'claude-cli/2.1.293 (external, cli)', 'anthropic-beta': 'claude-code-20250219' }
           : { 'user-agent': 'test-client' },
         apiKeyKind: 'managed',
-        apiKeyRecord: { category: 'oauth', user_id: 'admin' },
+        apiKeyRecord: key,
         once() {},
         off() {},
       }

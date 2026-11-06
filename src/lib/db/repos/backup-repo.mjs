@@ -1,9 +1,11 @@
 /**
  * backup_records repository — ledger of local backup archives
  * (sub2api backup_records counterpart).
+ * 经 DbClient 异步访问（R6 B6b）。
  */
 
 import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
 
 const COLUMNS = [
   'id',
@@ -29,20 +31,23 @@ function fromRow(row) {
   return { ...row, includes }
 }
 
+const INSERT_SQL = `
+      INSERT INTO backup_records (${COLUMNS.join(', ')})
+      VALUES (${COLUMNS.map(() => '?').join(', ')})
+    `
+const GET_SQL = 'SELECT * FROM backup_records WHERE id = ?'
+const LIST_SQL = 'SELECT * FROM backup_records ORDER BY created_at DESC LIMIT ?'
+const REMOVE_SQL = 'DELETE FROM backup_records WHERE id = ?'
+
 export class BackupRepo {
   constructor(db = getDb()) {
     this.db = db
-    this._insert = db.prepare(`
-      INSERT INTO backup_records (${COLUMNS.join(', ')})
-      VALUES (${COLUMNS.map(() => '?').join(', ')})
-    `)
-    this._get = db.prepare('SELECT * FROM backup_records WHERE id = ?')
-    this._list = db.prepare('SELECT * FROM backup_records ORDER BY created_at DESC LIMIT ?')
-    this._remove = db.prepare('DELETE FROM backup_records WHERE id = ?')
+    this.client = dbClient(db)
   }
 
-  insert(rec) {
-    this._insert.run(
+  async insert(rec) {
+    await this.client.run(
+      INSERT_SQL,
       ...COLUMNS.map((c) => {
         if (c === 'includes_json') return rec.includes ? JSON.stringify(rec.includes) : (rec.includes_json ?? null)
         return rec[c] ?? null
@@ -51,32 +56,32 @@ export class BackupRepo {
     return this.get(rec.id)
   }
 
-  get(id) {
-    return fromRow(this._get.get(id))
+  async get(id) {
+    return fromRow(await this.client.one(GET_SQL, id))
   }
 
-  list({ limit = 100 } = {}) {
-    return this._list.all(Math.max(1, Math.min(500, Number(limit) || 100))).map(fromRow)
+  async list({ limit = 100 } = {}) {
+    return (await this.client.many(LIST_SQL, Math.max(1, Math.min(500, Number(limit) || 100)))).map(fromRow)
   }
 
-  remove(id) {
-    return this._remove.run(id).changes > 0
+  async remove(id) {
+    return (await this.client.run(REMOVE_SQL, id)).changes > 0
   }
 
-  lastSuccessful({ kinds = null } = {}) {
-    const rows = this.list({ limit: 200 })
+  async lastSuccessful({ kinds = null } = {}) {
+    const rows = await this.list({ limit: 200 })
     return rows.find((r) => r.status === 'ok' && (!kinds || kinds.includes(r.kind))) || null
   }
 
   /** Successful non-pre_restore backups beyond `keep` newest. */
-  beyondRetention(keep) {
-    const rows = this.list({ limit: 500 }).filter((r) => r.status === 'ok' && r.kind !== 'pre_restore')
+  async beyondRetention(keep) {
+    const rows = (await this.list({ limit: 500 })).filter((r) => r.status === 'ok' && r.kind !== 'pre_restore')
     return rows.slice(Math.max(0, keep))
   }
 
   /** pre_restore backups beyond `keep` newest. */
-  preRestoreBeyond(keep = 3) {
-    const rows = this.list({ limit: 500 }).filter((r) => r.status === 'ok' && r.kind === 'pre_restore')
+  async preRestoreBeyond(keep = 3) {
+    const rows = (await this.list({ limit: 500 })).filter((r) => r.status === 'ok' && r.kind === 'pre_restore')
     return rows.slice(Math.max(0, keep))
   }
 }

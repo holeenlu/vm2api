@@ -83,10 +83,10 @@ test('explicit canonical overrides win over legacy fields in either insertion or
   }
 })
 
-test('loading a persisted disabled legacy model keeps both request spellings disabled', () => {
+test('loading a persisted disabled legacy model keeps both request spellings disabled', async () => {
   openDatabase({ dbPath: ':memory:' })
   try {
-    new SettingsRepo().set('model_policy', {
+    await new SettingsRepo().set('model_policy', {
       catalog_mode: 'worker_only',
       models: { [legacy]: { enabled: false } },
       aliases: { private: legacy },
@@ -104,10 +104,10 @@ test('loading a persisted disabled legacy model keeps both request spellings dis
     assert.deepEqual(filterPublicModelIds([legacy, canonical]), [canonical, 'auto'])
     getModelPolicy().models.auto.enabled = false
     assert.deepEqual(filterPublicModelIds([canonical]), [canonical])
-    syncWorkerModelsIntoPolicy([legacy])
+    await syncWorkerModelsIntoPolicy([legacy])
     assert.ok(!getPolicyCatalogIds().includes(legacy))
   } finally {
-    closeDatabase()
+    await closeDatabase()
     loadModelPolicy()
     clearModelsCache()
   }

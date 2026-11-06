@@ -43,9 +43,11 @@ function remapVia(result) {
 }
 
 export async function callCodexKernel(opts = {}) {
+  const { onSendState = null } = opts
   return remapVia(
     await callGoWorker({
       ...opts,
+      onSendState,
       maxRequestBytes: maxRequestBytes(opts.routing),
       exec: withCodexKernelExec(opts.exec),
       requestPath: '/internal/v1/codex/responses',
@@ -54,9 +56,11 @@ export async function callCodexKernel(opts = {}) {
 }
 
 export async function streamCodexKernel(opts = {}) {
+  const { onSendState = null } = opts
   return remapVia(
     await streamGoWorker({
       ...opts,
+      onSendState,
       maxRequestBytes: maxRequestBytes(opts.routing),
       exec: withCodexKernelExec(opts.exec),
       requestPath: '/internal/v1/codex/responses',

@@ -63,24 +63,24 @@ test('once the current reset passes it reads as the closed window', () => {
   })
 })
 
-test('AccountQuota archives the 5h window across header readings and persists it', () => {
+test('AccountQuota archives the 5h window across header readings and persists it', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-winhist-'))
   const q = new AccountQuota({ dataDir, config: {} })
   const sec = (ms) => String(Math.floor(ms / 1000))
   const t = Date.now()
-  q.ingestHeaders('a-hist', {
+  await q.ingestHeaders('a-hist', {
     'anthropic-ratelimit-unified-5h-utilization': '0.6',
     'anthropic-ratelimit-unified-5h-reset': sec(t + H),
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  q.ingestHeaders('a-hist', {
+  await q.ingestHeaders('a-hist', {
     'anthropic-ratelimit-unified-5h-utilization': '0.01',
     'anthropic-ratelimit-unified-5h-reset': sec(t + 5 * H),
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  const hist = q.repo.get('a-hist').window_history
+  const hist = (await q.repo.get('a-hist')).window_history
   assert.equal(hist['5h'].prev.used_ratio, 0.6)
   assert.equal(hist['5h'].current.used_ratio, 0.01)
-  const snap = q.snapshot().accounts.find((a) => a.account_id === 'a-hist')
+  const snap = (await q.snapshot()).accounts.find((a) => a.account_id === 'a-hist')
   assert.equal(snap.window_history['5h'].prev.used_ratio, 0.6)
 })

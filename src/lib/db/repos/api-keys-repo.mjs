@@ -8,6 +8,7 @@
  */
 
 import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
 
 const COLUMNS = [
   'id',
@@ -31,12 +32,10 @@ const COLUMNS = [
   'key_prefix',
   'key_suffix',
   'category',
-  'group_type',
-  'allowed_vms',
-  'vm_pool_id',
   'key_secret',
   'user_id',
   'group_id',
+  'created_by_user_id',
   'quota',
   'quota_used',
   'rate_limit_5h',
@@ -51,6 +50,9 @@ const COLUMNS = [
   'ip_whitelist',
   'ip_blacklist',
   'deleted_at',
+  'peer_sharing',
+  'codex_client_profile',
+  'codex_route',
 ]
 
 const WINDOWS = [
@@ -77,33 +79,32 @@ const NUMERIC_DEFAULT_0 = new Set([
 
 function rowToRec(row) {
   if (!row) return null
-  return { ...row }
+  return Object.fromEntries(COLUMNS.map((c) => [c, row[c]]))
 }
 
 function toValue(rec, c) {
   const v = rec[c]
   if (v == null) {
     if (c === 'category') return 'oauth'
-    if (c === 'group_type') return 'all'
-    if (c === 'allowed_vms') return '[]'
+    if (c === 'peer_sharing') return '{}'
     return NUMERIC_DEFAULT_0.has(c) ? 0 : null
   }
   return v
 }
 
-export class ApiKeysRepo {
-  constructor(db = getDb()) {
-    this.db = db
-    this._list = db.prepare('SELECT * FROM api_keys WHERE deleted_at IS NULL ORDER BY created_at')
-    this._get = db.prepare('SELECT * FROM api_keys WHERE id = ? AND deleted_at IS NULL')
-    this._getByKey = db.prepare('SELECT * FROM api_keys WHERE key = ? AND deleted_at IS NULL')
-    this._getByHash = db.prepare('SELECT * FROM api_keys WHERE key_hash = ? AND deleted_at IS NULL')
-    this._insert = db.prepare(`
+const LIST_SQL = 'SELECT * FROM api_keys WHERE deleted_at IS NULL ORDER BY created_at'
+const GET_SQL = 'SELECT * FROM api_keys WHERE id = ? AND deleted_at IS NULL'
+const GET_BY_KEY_SQL = 'SELECT * FROM api_keys WHERE key = ? AND deleted_at IS NULL'
+const GET_BY_HASH_SQL = 'SELECT * FROM api_keys WHERE key_hash = ? AND deleted_at IS NULL'
+const INSERT_SQL = `
       INSERT INTO api_keys (${COLUMNS.join(', ')})
       VALUES (${COLUMNS.map(() => '?').join(', ')})
-    `)
-    this._delete = db.prepare('DELETE FROM api_keys WHERE id = ?')
-    this._recordUsage = db.prepare(`
+    `
+const UPDATE_COLUMNS = COLUMNS.filter((c) => c !== 'id')
+const UPDATE_SQL = `UPDATE api_keys SET ${UPDATE_COLUMNS.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`
+const DELETE_SQL =
+  "UPDATE api_keys SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),status='disabled' WHERE id=? AND deleted_at IS NULL"
+const RECORD_USAGE_SQL = `
       UPDATE api_keys SET
         requests = requests + 1,
         quota_requests_used = quota_requests_used + 1,
@@ -118,41 +119,47 @@ export class ApiKeysRepo {
         last_used_at = ?,
         updated_at = ?
       WHERE id = ?
-    `)
+    `
+// 竞态 R8：额度用尽的状态翻转是条件更新，只在仍为 active 且已用额度达到上限时改状态，不整行写回覆盖并发修改的其他字段
+const MARK_QUOTA_EXHAUSTED_SQL =
+  "UPDATE api_keys SET status='quota_exhausted', updated_at=? WHERE id=? AND deleted_at IS NULL AND status='active' AND quota>0 AND quota_used>=quota"
+
+/** 数据访问经 DbClient 异步执行（R6 B7a）。 */
+export class ApiKeysRepo {
+  constructor(db = getDb()) {
+    this.db = db
+    this.client = dbClient(db)
   }
 
-  list() {
-    return this._list.all().map(rowToRec)
+  async list() {
+    return (await this.client.many(LIST_SQL)).map(rowToRec)
   }
 
-  getById(id) {
-    return rowToRec(this._get.get(id))
+  async getById(id) {
+    return rowToRec(await this.client.one(GET_SQL, id))
   }
 
-  getByKey(key) {
-    return rowToRec(this._getByKey.get(key))
+  async getByKey(key) {
+    return rowToRec(await this.client.one(GET_BY_KEY_SQL, key))
   }
 
-  getByHash(hash) {
-    return rowToRec(this._getByHash.get(hash))
+  async getByHash(hash) {
+    return rowToRec(await this.client.one(GET_BY_HASH_SQL, hash))
   }
 
-  insert(rec) {
-    this._insert.run(...COLUMNS.map((c) => toValue(rec, c)))
+  async insert(rec) {
+    await this.client.run(INSERT_SQL, ...COLUMNS.map((c) => toValue(rec, c)))
     return this.getById(rec.id)
   }
 
   /** Full-row update from a record object (id immutable). */
-  update(rec) {
-    const cols = COLUMNS.filter((c) => c !== 'id')
-    const sql = `UPDATE api_keys SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`
-    this.db.prepare(sql).run(...cols.map((c) => toValue(rec, c)), rec.id)
+  async update(rec) {
+    await this.client.run(UPDATE_SQL, ...UPDATE_COLUMNS.map((c) => toValue(rec, c)), rec.id)
     return this.getById(rec.id)
   }
 
-  remove(id) {
-    const info = this._delete.run(id)
-    return info.changes > 0
+  async remove(id) {
+    return (await this.client.run(DELETE_SQL, id)).changes > 0
   }
 
   /**
@@ -167,14 +174,18 @@ export class ApiKeysRepo {
     return { usage: (Number(rec[key.usage]) || 0) + cost, start: rec[key.start] }
   }
 
-  recordUsage(id, { tokens_in = 0, tokens_out = 0, cache_read_tokens = 0, cache_creation_tokens = 0, cost = 0 } = {}) {
-    const rec = this.getById(id)
+  async recordUsage(
+    id,
+    { tokens_in = 0, tokens_out = 0, cache_read_tokens = 0, cache_creation_tokens = 0, cost = 0 } = {},
+  ) {
+    const rec = await this.getById(id)
     if (!rec) return null
     const nowMs = Date.now()
     const now = new Date(nowMs).toISOString()
     const usd = Number(cost) || 0
     const w = WINDOWS.map((win) => this._rollWindow(rec, win, usd, nowMs))
-    this._recordUsage.run(
+    await this.client.run(
+      RECORD_USAGE_SQL,
       Number(tokens_in) || 0,
       Number(tokens_out) || 0,
       Number(cache_read_tokens) || 0,
@@ -193,7 +204,12 @@ export class ApiKeysRepo {
     return this.getById(id)
   }
 
-  count() {
-    return this.db.prepare('SELECT COUNT(*) c FROM api_keys WHERE deleted_at IS NULL').get().c
+  /** 竞态 R8：USD 额度用尽时条件翻转为 quota_exhausted；返回是否改了状态。 */
+  async markQuotaExhausted(id, now = new Date().toISOString()) {
+    return (await this.client.run(MARK_QUOTA_EXHAUSTED_SQL, now, id)).changes > 0
+  }
+
+  async count() {
+    return (await this.client.one('SELECT COUNT(*) c FROM api_keys WHERE deleted_at IS NULL')).c
   }
 }

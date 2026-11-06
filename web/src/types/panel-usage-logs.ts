@@ -2,7 +2,7 @@
  * 滚动日志页（`/logs`）的前后端契约。
  *
  * 形状对齐 claude-code-hub 的 `UsageLogRow` / `UsageLogSummary`，字段口径按
- * vm2api 的 `usage_logs` + JOIN（users / api_keys / vms / accounts /
+ * tapmodels 的 `usage_logs` + JOIN（users / api_keys / vms / accounts /
  * request_attempts）落地。后端：`src/lib/db/repos/usage-logs-view.mjs`，
  * 路由：`src/lib/admin/panel-routes.mjs` 的 `/api/panel/usage-logs*`。
  *
@@ -11,7 +11,7 @@
  * 仍服务于错误归集与导出，由 `types/panel-logs.ts` 描述。
  */
 
-/** 单次上游尝试，`request_attempts` 直出，按 `attemptNumber` 升序构成供应商链。 */
+/** 单次上游尝试，`request_attempts` 直出，按 `attemptNumber` 升序构成账号决策链。 */
 export type ProviderChainItem = {
   attemptNumber: number
   vmId: string | null
@@ -33,12 +33,18 @@ export type ProviderChainItem = {
   downstreamCommitted: boolean
   /** 调度总耗时，包含实际排队；历史记录没有拆分。 */
   waitMs: number | null
-  queueWaitMs: number | null
-  schedulingMs: number | null
+  queueWaitMs?: number | null
+  schedulingMs?: number | null
   ttftMs: number | null
   latencyMs: number | null
   startedAt: string | null
   completedAt: string | null
+  /** Gateway Worker 尝试的执行通道（native / bps），其他执行方式为 null。 */
+  route?: string | null
+  /** BPS 尝试到达的阶段，用于定位失败环节。 */
+  stage?: string | null
+  /** 失败尝试的上游错误原文（Gateway Worker，已截断）。 */
+  errorMessage?: string | null
 }
 
 /**
@@ -56,6 +62,18 @@ export type CostBreakdown = {
   groupMultiplier: number | null
   /** 计价命中的模型键（`pricing_model`），`unpriced` 表示无价表。 */
   pricingModel: string | null
+  /**
+   * 成本所依据的上游原始 token。行上的 token 字段是客户计费口径，
+   * 网关注入或缓存改归档时两者不同，单价必须按这里算。
+   */
+  tokens?: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheCreation: number | null
+    cacheCreation5m: number | null
+    cacheCreation1h: number | null
+  }
 }
 
 /** 本次请求生效的特殊开关，渲染成 badge / 详情「特殊设置」区。 */
@@ -81,8 +99,10 @@ export type CacheTtlApplied = '5m' | '1h' | 'mixed' | null
 export type ReasoningEffort =
   'none' | 'minimal' | 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-/** 滚动日志的一行。`null` = 本行该字段为空（vm2api 不产出的 hub 字段已整体删去）。 */
+/** 滚动日志的一行。`null` = 本行该字段为空（tapmodels 不产出的 hub 字段已整体删去）。 */
 export type UsageLogRow = {
+  billingStatus?: string
+  groupId?: number | null
   /** `usage_logs.id`（`log_<12hex>`），游标 tiebreaker。 */
   id: string
   requestId: string | null
@@ -110,12 +130,18 @@ export type UsageLogRow = {
   model: string | null
   /** 客户端请求的模型（重定向前，`requested_model`）。 */
   originalModel: string | null
-  /** 上游回报的模型（`upstream_model`）。 */
+  /** 真实上游响应模型（response_model）；历史 Codex 记录未知，不从发送模型推断。 */
   actualResponseModel: string | null
   /** 0 | 1 | null（null = 上游未声明模型）。 */
   modelMismatch: number | null
   /** 入站路径，例如 `/v1/messages`。 */
   endpoint: string | null
+  /** 入站方式：http / websocket（Responses WebSocket）；099 之前的历史行为 null。 */
+  inboundTransport?: 'http' | 'websocket' | null
+  /** 实际发往上游的路径（不含主机与查询串）；未发往上游为 null。仅超级管理员。 */
+  upstreamEndpoint?: string | null
+  /** 上游传输方式；无法确定为 null。仅超级管理员。 */
+  upstreamTransport?: 'http' | 'websocket' | null
   protocol: string | null
   method: string | null
   statusCode: number | null
@@ -162,6 +188,22 @@ export type UsageLogRow = {
   serviceTier: string | null
   /** 上游 `response.service_tier` 回显；与 serviceTier 不同即档位被上游改写。 */
   upstreamServiceTier: string | null
+  /** Gateway 请求诊断（迁移 092，仅超级管理员可见） */
+  errorKind?: string | null
+  /** Gateway 请求的授权方式：native（原生 Codex OAuth）/ bps（Excel Basispoints） */
+  authorizationMode?: 'native' | 'bps' | null
+  upstreamError?: {
+    code?: string
+    type?: string
+    message?: string
+    param?: string
+    close_reason?: string
+    last_event_type?: string
+  } | null
+  websocketCloseCode?: number | null
+  continuationUnavailableReason?: string | null
+  upstreamConnectionExitReason?: string | null
+  retryAfterMs?: number | null
   /** Anthropic speed：`fast` | `standard`。 */
   speed: string | null
   /** 长上下文（1M）计价档是否生效；null = 未计价。 */
@@ -209,11 +251,14 @@ export type UsageLogsBatchResult = {
  * 括号内为查询串参数名。分页另带 `cursor_created_at` / `cursor_id` / `limit`(≤100，默认 50)。
  */
 export type UsageLogFilters = {
+  scope?: 'mine'
+  errorsOnly?: boolean
+  groupId?: string
   /** (`user_id`) user 角色由后端强制为本人，忽略下发值。 */
   userId?: string
   /** (`key_id`) */
   keyId?: string
-  /** (`vm_id`) 供应商 = 槽位。 */
+  /** (`vm_id`) 槽位筛选。 */
   vmId?: string
   /** (`account_id`) */
   accountId?: string
@@ -221,15 +266,13 @@ export type UsageLogFilters = {
   sessionId?: string
   /** (`model`) 匹配 model 或 requested_model。 */
   model?: string
-  /** (`endpoint`) 精确匹配 path。 */
-  endpoint?: string
-  /** (`protocol`) */
-  protocol?: string
+  /** (`platform`) 上游账号所属平台；未路由时按模型、再按入站协议族归类。 */
+  platform?: UsagePlatform
   /** (`status_code`) 精确状态码。 */
   statusCode?: number
   /** (`exclude_status_200=1`) 只看非 2xx；与 statusCode 互斥，后者优先。 */
   excludeStatus200?: boolean
-  /** (`model_mismatch=1`) */
+  /** (`model_mismatch=1`) 上游模型审计：只看计费/实际响应模型不一致（仅超级管理员）。 */
   modelMismatch?: boolean
   /** (`min_attempt_count`) 只看 `attempt_count >= n`，「有重试」= 2。 */
   minAttemptCount?: number
@@ -239,8 +282,6 @@ export type UsageLogFilters = {
   excludeErrorClass?: string
   /** (`include_muted=1`) 不套用任何屏蔽。 */
   includeMuted?: boolean
-  /** (`log_mode=debug`) 只看 debug 采样行。 */
-  debugOnly?: boolean
   /** (`start_time`) ISO-8601，含。 */
   startTime?: string
   /** (`end_time`) ISO-8601，不含。 */
@@ -272,21 +313,40 @@ export type UsageLogsSummary = {
 }
 
 /** `GET /api/panel/usage-logs/filter-options` 的 `data`（惰性拉取）。user 角色只含本人数据。 */
+/** 使用记录的平台口径，与分组平台一致。 */
+export const USAGE_PLATFORMS = ['anthropic', 'openai'] as const
+export type UsagePlatform = (typeof USAGE_PLATFORMS)[number]
+
 export type UsageLogFilterOptions = {
+  /** `platform` 为 mixed 时两个平台都可；`models` 为分组模型白名单，空数组表示不限。 */
+  groups: {
+    id: string
+    name: string
+    platform: UsagePlatform | 'mixed' | null
+    models: string[]
+  }[]
   users: { id: string; name: string }[]
   keys: { id: string; name: string; userId: string | null }[]
-  vms: { id: string; name: string }[]
-  accounts: { id: string; name: string }[]
-  models: string[]
-  protocols: string[]
-  endpoints: string[]
+  /** 仅超级管理员可见；`groupIds` 为所属分组。 */
+  vms: {
+    id: string
+    name: string
+    platform: UsagePlatform | null
+    groupIds: string[]
+  }[]
+  /** 仅超级管理员可见；`platform` 为 null 表示无法判定；`groupIds` 按所在槽位 / 上游 API / Gateway 账号归属。 */
+  accounts: {
+    id: string
+    name: string
+    platform: UsagePlatform | null
+    groupIds: string[]
+  }[]
+  /** `platform` 按价格目录识别，未知模型为 null。 */
+  models: { id: string; platform: UsagePlatform | null }[]
   statusCodes: number[]
 }
 
-/** `GET /api/panel/usage-logs/session-suggestions?q=&limit=` 的 `data`：出站会话 id 前缀匹配，最新优先。 */
-export type UsageLogSessionSuggestions = string[]
-
-/** 近 N 分钟内有请求的出站会话（vm2api 只在请求完成时落库，没有「进行中」态）。 */
+/** 近 N 分钟内有请求的出站会话（tapmodels 只在请求完成时落库，没有「进行中」态）。 */
 export type ActiveSession = {
   sessionId: string
   /** 该出站会话最近一行对应的客户端会话 id。 */

@@ -32,7 +32,7 @@ function writeVm(root, id, rec = {}) {
   return file
 }
 
-test('atomicWriteJson writes valid JSON and leaves no temp files', () => {
+test('atomicWriteJson writes valid JSON and leaves no temp files', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vf-'))
   const p = path.join(dir, 'vm.json')
   atomicWriteJson(p, { a: 1 }, { mode: 0o600 })
@@ -42,7 +42,7 @@ test('atomicWriteJson writes valid JSON and leaves no temp files', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('writeJsonIfChanged skips identical content', () => {
+test('writeJsonIfChanged skips identical content', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vf-'))
   const p = path.join(dir, 'vm.json')
   assert.equal(writeJsonIfChanged(p, { a: 1 }), true)
@@ -112,7 +112,7 @@ test('a synchronously throwing VM task releases its busy state and allows anothe
   assert.equal(vmLockBusy(key), false)
 })
 
-test('getVm returns null for missing files and throws on corrupt JSON or I/O', () => {
+test('getVm returns null for missing files and throws on corrupt JSON or I/O', async () => {
   const root = makeProject()
   try {
     assert.equal(getVm(root, 'missing'), null)
@@ -128,36 +128,29 @@ test('getVm returns null for missing files and throws on corrupt JSON or I/O', (
     )
     writeVm(root, 'ok', { status: 'stopped' })
     assert.equal(getVm(root, 'ok').id, 'ok')
-    const listed = listVms(root)
-      .map((vm) => vm.id)
-      .sort()
+    const listed = (await listVms(root)).map((vm) => vm.id).sort()
     assert.deepEqual(listed, ['ok'])
-    assert.equal(persistCodexQuotaSnapshot(root, 'bad', { planType: 'plus' }), null)
+    assert.equal(await persistCodexQuotaSnapshot(root, 'bad', { planType: 'plus' }), null)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('listVms and readCodexAccounts keep swallowing unreadable files', () => {
+test('listVms and readCodexAccounts keep swallowing unreadable files', async () => {
   const root = makeProject()
   try {
     writeVm(root, 'ok')
     fs.writeFileSync(path.join(root, 'vms', 'broken.json'), '{')
     fs.mkdirSync(path.join(root, 'vms', 'vm-cred'))
     fs.writeFileSync(path.join(root, 'vms', 'vm-cred', 'codex-credentials.json'), '{')
-    assert.deepEqual(
-      listVms(root)
-        .map((vm) => vm.id)
-        .sort(),
-      ['ok'],
-    )
+    assert.deepEqual((await listVms(root)).map((vm) => vm.id).sort(), ['ok'])
     assert.deepEqual(readCodexAccounts(root, 'vm-cred'), [])
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('cached getVm follows atomic rename and external rewrite', () => {
+test('cached getVm follows atomic rename and external rewrite', async () => {
   const root = makeProject()
   try {
     const file = writeVm(root, 'vm-01', { name: 'one' })
@@ -171,7 +164,7 @@ test('cached getVm follows atomic rename and external rewrite', () => {
   }
 })
 
-test('mutating a parsed vm record does not poison the next read', () => {
+test('mutating a parsed vm record does not poison the next read', async () => {
   const root = makeProject()
   try {
     writeVm(root, 'vm-01', { name: 'plain' })
@@ -185,7 +178,7 @@ test('mutating a parsed vm record does not poison the next read', () => {
   }
 })
 
-test('writeCodexAccounts replacement is visible on the next credential read', () => {
+test('writeCodexAccounts replacement is visible on the next credential read', async () => {
   const root = makeProject()
   try {
     fs.mkdirSync(path.join(root, 'vms', 'vm-01'), { recursive: true })
@@ -198,7 +191,7 @@ test('writeCodexAccounts replacement is visible on the next credential read', ()
   }
 })
 
-test('wipeSlotHome drops cached credential text for that slot', () => {
+test('wipeSlotHome drops cached credential text for that slot', async () => {
   const root = makeProject()
   try {
     writeVm(root, 'vm-07')
@@ -215,7 +208,7 @@ test('wipeSlotHome drops cached credential text for that slot', () => {
   }
 })
 
-test('read cache evicts the oldest path after the fixed bound', () => {
+test('read cache evicts the oldest path after the fixed bound', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vf-evict-'))
   try {
     invalidateReadCache()
@@ -247,7 +240,7 @@ test('read cache evicts the oldest path after the fixed bound', () => {
   }
 })
 
-test('disabled cache still distinguishes missing, corrupt, and I/O', () => {
+test('disabled cache still distinguishes missing, corrupt, and I/O', async () => {
   const registryHref = pathToFileURL(path.join(REPO_ROOT, 'src/lib/vm/vm-registry.mjs')).href
   const script = `
     import assert from 'node:assert/strict'
@@ -267,7 +260,7 @@ test('disabled cache still distinguishes missing, corrupt, and I/O', () => {
       assert.equal(getVm(root, 'ok').id, 'ok')
       fs.writeFileSync(path.join(root, 'vms', 'ok.json'), JSON.stringify({ id: 'ok', name: 'rewritten' }))
       assert.equal(getVm(root, 'ok').name, 'rewritten')
-      assert.deepEqual(listVms(root).map((vm) => vm.id).sort(), ['ok'])
+      assert.deepEqual((await listVms(root)).map((vm) => vm.id).sort(), ['ok'])
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }

@@ -13,8 +13,10 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { isApiError } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
 import { Badge } from '@/components/ui/badge'
@@ -44,21 +46,24 @@ import {
   type KernelTarget,
 } from './queries'
 
-const KERNEL_NAMES = { 'cli-node': 'cli-node', crag: 'CRAG' } as const
-const LICENSE_LABELS: Record<CragLicenseStatus['status'], string> = {
-  valid: '授权有效',
-  unlicensed: '未授权',
-  expired: '已到期',
-  not_yet_valid: '尚未生效',
-  invalid: '授权无效',
-  unconfigured: '未配置',
+const KERNEL_NAMES = {
+  'cli-node': 'cli-node',
+  crag: /* i18n-exempt "CRAG" -- Licensed kernel product name, identical in every locale. */ 'CRAG',
+} as const
+const LICENSE_STATUS_KEYS: Record<CragLicenseStatus['status'], string> = {
+  valid: 'wrap:licenseValid',
+  unlicensed: 'wrap:licenseUnlicensed',
+  expired: 'wrap:licenseExpired',
+  not_yet_valid: 'wrap:licenseNotYetValid',
+  invalid: 'wrap:licenseInvalid',
+  unconfigured: 'wrap:licenseUnconfigured',
 }
-const VM_STATUS: Record<string, string> = {
-  running: '运行中',
-  stopped: '已停用',
-  created: '未启动',
-  unknown: '未知',
-  error: '异常',
+const VM_STATUS_KEYS: Record<string, string> = {
+  running: 'wrap:vmRunning',
+  stopped: 'wrap:vmStopped',
+  created: 'wrap:vmCreated',
+  unknown: 'wrap:vmUnknown',
+  error: 'wrap:vmError',
 }
 
 type InstallProgress = {
@@ -69,16 +74,26 @@ type InstallProgress = {
 }
 
 export function WrapSamplePage() {
+  const { t } = useTranslation('wrap')
   const qc = useQueryClient()
   const catalog = useQuery(kernelCatalogQueryOptions())
   const dashboard = useQuery(dashboardQueryOptions())
   const me = useQuery(meQueryOptions())
-  const canEdit = me.data?.role === 'admin'
+  // /api/panel/kernels* is super_admin-only in the local capability ACL.
+  const canEdit = me.data?.role === 'super_admin'
   const [drafts, setDrafts] = useState<Record<string, KernelId>>({})
   const [confirm, setConfirm] = useState<KernelTarget[] | null>(null)
   const [licenseVm, setLicenseVm] = useState<Vm | null>(null)
   const [installing, setInstalling] = useState(false)
   const [job, setJob] = useState<InstallProgress | null>(null)
+  const licenseLabel = (status: CragLicenseStatus['status']) =>
+    LICENSE_STATUS_KEYS[status]
+      ? t(LICENSE_STATUS_KEYS[status])
+      : t('wrap:statusUnknown')
+  const vmStatusLabel = (status?: string) =>
+    status && VM_STATUS_KEYS[status]
+      ? t(VM_STATUS_KEYS[status])
+      : status || t('wrap:vmUnknown')
   const [pullError, setPullError] = useState<{
     kernel: KernelId
     message: string
@@ -106,12 +121,12 @@ export function WrapSamplePage() {
       await qc.invalidateQueries({
         queryKey: kernelCatalogQueryOptions().queryKey,
       })
-      toast.success(`${KERNEL_NAMES[kernel]} 安装包已更新`)
+      toast.success(t('wrap:packageUpdated', { kernel: KERNEL_NAMES[kernel] }))
     },
     onError: (error: Error, kernel) => {
       const message =
         isApiError(error) && error.code === 'crag_v2_asset_missing'
-          ? '发布源尚无 CRAG 授权包，现有版本未改动。'
+          ? t('wrap:cragAssetMissing')
           : error.message
       setPullError({ kernel, message })
     },
@@ -136,7 +151,11 @@ export function WrapSamplePage() {
         !catalog.data?.kernels.some((p) => p.id === target.kernel && p.ready)
     )
     if (missingPackage) {
-      toast.error(`请先下载 ${KERNEL_NAMES[missingPackage.kernel]} 安装包`)
+      toast.error(
+        t('wrap:downloadPackageFirst', {
+          kernel: KERNEL_NAMES[missingPackage.kernel],
+        })
+      )
       return
     }
     const unsupported = targets.find((target) => {
@@ -149,7 +168,9 @@ export function WrapSamplePage() {
     })
     if (unsupported) {
       toast.error(
-        `${vmById.get(unsupported.id)?.name || unsupported.id} 仅能安装默认内核`
+        t('wrap:defaultKernelOnly', {
+          name: vmById.get(unsupported.id)?.name || unsupported.id,
+        })
       )
       return
     }
@@ -159,7 +180,9 @@ export function WrapSamplePage() {
     )
     if (unlicensed && targets.length === 1) {
       const vm = vmById.get(unlicensed.id)
-      toast.error(`${vm?.name || unlicensed.id} 需要 CRAG 授权`)
+      toast.error(
+        t('wrap:cragLicenseRequired', { name: vm?.name || unlicensed.id })
+      )
       if (vm) setLicenseVm(vm)
       return
     }
@@ -192,10 +215,14 @@ export function WrapSamplePage() {
             ...target,
             ok: false,
             stopped: false,
-            error: '未收到该 VM 的安装结果',
+            error: t('wrap:noInstallResult'),
           }
           if (result.ok && !result.stopped)
-            result = { ...result, ok: false, error: '服务未确认关闭' }
+            result = {
+              ...result,
+              ok: false,
+              error: t('wrap:stopNotConfirmed'),
+            }
         } catch (error) {
           const data = isApiError(error)
             ? (error.data as { items?: KernelInstallItem[] } | undefined)
@@ -210,7 +237,9 @@ export function WrapSamplePage() {
             code: item?.code || (isApiError(error) ? error.code : undefined),
             error:
               item?.error ||
-              (error instanceof Error ? error.message : '安装失败'),
+              (error instanceof Error
+                ? error.message
+                : t('wrap:installFailed')),
           }
         }
         if (!result.ok) failures++
@@ -226,9 +255,12 @@ export function WrapSamplePage() {
       }
       if (failures)
         toast.error(
-          `${targets.length - failures}/${targets.length} 台安装成功，请检查失败项`
+          t('wrap:installPartial', {
+            ok: targets.length - failures,
+            total: targets.length,
+          })
         )
-      else toast.success(`${targets.length} 台内核已安装，服务保持关闭`)
+      else toast.success(t('wrap:installDone', { total: targets.length }))
     } finally {
       setJob((previous) =>
         previous ? { ...previous, activeId: null } : previous
@@ -238,7 +270,7 @@ export function WrapSamplePage() {
           queryKey: kernelCatalogQueryOptions().queryKey,
         }),
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
-        qc.invalidateQueries({ queryKey: ['panel', 'vms'] }),
+        qc.invalidateQueries({ queryKey: panelQueryKeys.vms() }),
       ])
       setInstalling(false)
     }
@@ -246,8 +278,8 @@ export function WrapSamplePage() {
 
   return (
     <PageHeader
-      title='内核'
-      description='cli-node 默认免费，CRAG 使用注册码授权。'
+      title={t('wrap:title')}
+      description={t('wrap:description')}
       extra={
         <Button
           variant='ghost'
@@ -259,7 +291,7 @@ export function WrapSamplePage() {
           }}
         >
           <RefreshCw aria-hidden='true' />
-          刷新
+          {t('wrap:refresh')}
         </Button>
       }
     >
@@ -275,7 +307,7 @@ export function WrapSamplePage() {
       >
         <div className='space-y-7 motion-reduce:[&_svg]:animate-none'>
           <section
-            aria-label='可用内核'
+            aria-label={t('wrap:availableKernels')}
             className='divide-y rounded-xl border bg-card'
           >
             {catalog.data?.kernels.map((product) => (
@@ -300,7 +332,7 @@ export function WrapSamplePage() {
                       {KERNEL_NAMES[product.id]}
                     </h3>
                     <Badge variant='secondary'>
-                      {product.paid ? '付费 · 授权码' : '默认 · 免费'}
+                      {product.paid ? t('wrap:paidBadge') : t('wrap:freeBadge')}
                     </Badge>
                   </div>
                   <div className='mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-base sm:text-sm'>
@@ -315,10 +347,12 @@ export function WrapSamplePage() {
                       ) : (
                         <TriangleAlert aria-hidden='true' className='size-4' />
                       )}
-                      {product.ready ? '已下载' : '未就绪'}
+                      {product.ready
+                        ? t('wrap:downloaded')
+                        : t('wrap:notReady')}
                     </span>
                     <span className='text-muted-foreground'>
-                      {product.version || '版本未记录'}
+                      {product.version || t('wrap:versionUnknown')}
                     </span>
                   </div>
                   {product.error && !product.ready ? (
@@ -344,13 +378,15 @@ export function WrapSamplePage() {
                 <Button
                   variant='outline'
                   className='h-11'
-                  aria-label={`拉取 ${KERNEL_NAMES[product.id]} 最新二进制`}
+                  aria-label={t('wrap:pullLatestLabel', {
+                    kernel: KERNEL_NAMES[product.id],
+                  })}
                   disabled={!canEdit || busy}
                   loading={pull.isPending && pull.variables === product.id}
                   onClick={() => pull.mutate(product.id)}
                 >
                   <Download aria-hidden='true' />
-                  拉取最新
+                  {t('wrap:pullLatest')}
                 </Button>
               </div>
             ))}
@@ -360,10 +396,10 @@ export function WrapSamplePage() {
             <div className='flex flex-wrap items-end justify-between gap-3'>
               <div>
                 <h3 id='kernel-vms-heading' className='text-lg font-semibold'>
-                  VM 安装
+                  {t('wrap:vmInstall')}
                 </h3>
                 <p className='mt-1 text-base text-muted-foreground sm:text-sm'>
-                  按所选内核重装，完成后保持停用。
+                  {t('wrap:vmInstallHint')}
                 </p>
               </div>
               <Button
@@ -374,7 +410,9 @@ export function WrapSamplePage() {
                 onClick={() => requestInstall(allTargets)}
               >
                 <Power aria-hidden='true' />
-                全部重装并停用{rows.length ? ` · ${rows.length} 台` : ''}
+                {rows.length
+                  ? t('wrap:reinstallAllStopCount', { total: rows.length })
+                  : t('wrap:reinstallAllStop')}
               </Button>
             </div>
 
@@ -403,14 +441,25 @@ export function WrapSamplePage() {
                       />
                     )}
                     {installing
-                      ? `正在安装 ${Math.min(job.completed + (job.activeId ? 1 : 0), job.total)}/${job.total}`
-                      : `已完成：${succeededCount} 台成功${failedCount ? `，${failedCount} 台失败` : ''}`}
+                      ? t('wrap:installingProgress', {
+                          done: Math.min(
+                            job.completed + (job.activeId ? 1 : 0),
+                            job.total
+                          ),
+                          total: job.total,
+                        })
+                      : failedCount
+                        ? t('wrap:finishedSummaryFailed', {
+                            ok: succeededCount,
+                            failed: failedCount,
+                          })
+                        : t('wrap:finishedSummary', { ok: succeededCount })}
                   </span>
                   {!installing ? (
                     <Button
                       variant='ghost'
                       className='size-11 p-0'
-                      aria-label='收起安装结果'
+                      aria-label={t('wrap:dismissResults')}
                       onClick={() => setJob(null)}
                     >
                       <X aria-hidden='true' />
@@ -418,7 +467,7 @@ export function WrapSamplePage() {
                   ) : null}
                 </div>
                 <Progress
-                  aria-label='内核安装进度'
+                  aria-label={t('wrap:installProgress')}
                   value={(job.completed / job.total) * 100}
                   className='h-1.5'
                 />
@@ -427,15 +476,15 @@ export function WrapSamplePage() {
 
             {!rows.length ? (
               <div className='rounded-xl border border-dashed py-12 text-center text-muted-foreground'>
-                暂无 Claude VM。
+                {t('wrap:noClaudeVms')}
                 <Link to='/vm' className='ml-2 underline underline-offset-4'>
-                  前往创建
+                  {t('wrap:goCreate')}
                 </Link>
               </div>
             ) : (
               <div
                 role='table'
-                aria-label='VM 内核安装'
+                aria-label={t('wrap:vmKernelTable')}
                 aria-colcount={4}
                 className='overflow-hidden rounded-xl border bg-card'
               >
@@ -443,11 +492,11 @@ export function WrapSamplePage() {
                   role='row'
                   className='hidden grid-cols-[minmax(160px,1fr)_minmax(180px,230px)_minmax(160px,1fr)_120px] gap-4 border-b bg-muted/40 px-5 py-3 text-sm text-muted-foreground xl:grid'
                 >
-                  <div role='columnheader'>虚拟机</div>
-                  <div role='columnheader'>安装内核</div>
-                  <div role='columnheader'>授权</div>
+                  <div role='columnheader'>{t('wrap:colVm')}</div>
+                  <div role='columnheader'>{t('wrap:colKernel')}</div>
+                  <div role='columnheader'>{t('wrap:colLicense')}</div>
                   <div role='columnheader' className='text-right'>
-                    操作
+                    {t('wrap:colActions')}
                   </div>
                 </div>
                 <div role='rowgroup' className='divide-y'>
@@ -491,10 +540,8 @@ export function WrapSamplePage() {
                               aria-hidden='true'
                             />
                             {result?.stopped
-                              ? '已停用'
-                              : VM_STATUS[vm.status || 'unknown'] ||
-                                vm.status ||
-                                '未知'}
+                              ? t('wrap:vmStopped')
+                              : vmStatusLabel(vm.status)}
                             {installed?.version &&
                             installed.kernel === currentKernel ? (
                               <span>{installed.version}</span>
@@ -520,15 +567,21 @@ export function WrapSamplePage() {
                               )}
                               <span>
                                 {result.ok
-                                  ? '安装完成，服务已停用'
-                                  : `${result.error || '安装失败'}${result.stopped ? '；服务已停用' : ''}`}
+                                  ? t('wrap:installedStopped')
+                                  : result.stopped
+                                    ? t('wrap:failedStopped', {
+                                        error:
+                                          result.error ||
+                                          t('wrap:installFailed'),
+                                      })
+                                    : result.error || t('wrap:installFailed')}
                               </span>
                             </p>
                           ) : null}
                         </div>
                         <div role='cell' className='min-w-0 space-y-1.5'>
                           <span className='text-sm text-muted-foreground xl:hidden'>
-                            安装内核
+                            {t('wrap:colKernel')}
                           </span>
                           <Select
                             value={kernel}
@@ -543,25 +596,27 @@ export function WrapSamplePage() {
                           >
                             <SelectTrigger
                               className='w-full text-base data-[size=default]:h-11 sm:text-sm'
-                              aria-label={`${vm.name || vm.id} 安装内核`}
+                              aria-label={t('wrap:kernelSelectLabel', {
+                                name: vm.name || vm.id,
+                              })}
                             >
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent className='motion-reduce:animate-none [&_[role=option]]:min-h-11'>
                               <SelectItem value='cli-node'>
-                                cli-node · 默认
+                                {t('wrap:optionCli')}
                               </SelectItem>
                               <SelectItem
                                 value='crag'
                                 disabled={nativeUnsupported}
                               >
-                                CRAG · 付费
+                                {t('wrap:optionCrag')}
                               </SelectItem>
                             </SelectContent>
                           </Select>
                           {changed ? (
                             <span className='text-sm text-muted-foreground'>
-                              待安装
+                              {t('wrap:pendingInstall')}
                             </span>
                           ) : null}
                         </div>
@@ -580,10 +635,10 @@ export function WrapSamplePage() {
                                   }
                                 >
                                   {nativeUnsupported
-                                    ? '仅支持本地 Docker'
+                                    ? t('wrap:localDockerOnly')
                                     : license
-                                      ? LICENSE_LABELS[license.status]
-                                      : '状态未知'}
+                                      ? licenseLabel(license.status)
+                                      : t('wrap:statusUnknown')}
                                 </div>
                                 {license?.valid && license.expires_at ? (
                                   <div className='text-sm text-muted-foreground tabular-nums'>
@@ -599,15 +654,19 @@ export function WrapSamplePage() {
                                 className='h-11'
                                 disabled={!canEdit || busy || nativeUnsupported}
                                 onClick={() => setLicenseVm(vm)}
-                                aria-label={`管理 ${vm.name || vm.id} CRAG 授权`}
+                                aria-label={t('wrap:manageLicense', {
+                                  name: vm.name || vm.id,
+                                })}
                               >
                                 <KeyRound aria-hidden='true' />
-                                {license?.valid ? '续期' : '激活'}
+                                {license?.valid
+                                  ? t('wrap:renew')
+                                  : t('wrap:activate')}
                               </Button>
                             </>
                           ) : (
                             <span className='text-base text-muted-foreground sm:text-sm'>
-                              无需授权
+                              {t('wrap:noLicenseNeeded')}
                             </span>
                           )}
                         </div>
@@ -624,13 +683,18 @@ export function WrapSamplePage() {
                               (kernel === 'crag' && nativeUnsupported)
                             }
                             loading={active}
-                            aria-label={`${changed ? '安装' : '重装'} ${vm.name || vm.id} 并停用`}
+                            aria-label={t(
+                              changed
+                                ? 'wrap:installAndStopLabel'
+                                : 'wrap:reinstallAndStopLabel',
+                              { name: vm.name || vm.id }
+                            )}
                             onClick={() =>
                               requestInstall([{ id: vm.id, kernel }])
                             }
                           >
                             <Power aria-hidden='true' />
-                            {changed ? '安装' : '重装'}
+                            {changed ? t('wrap:install') : t('wrap:reinstall')}
                           </Button>
                         </div>
                       </div>
@@ -641,7 +705,7 @@ export function WrapSamplePage() {
             )}
             {!canEdit ? (
               <p className='text-sm text-muted-foreground'>
-                仅管理员可安装或管理授权。
+                {t('wrap:superAdminOnly')}
               </p>
             ) : null}
           </section>
@@ -654,12 +718,14 @@ export function WrapSamplePage() {
         }}
         title={
           confirm?.length === 1
-            ? `重装 ${vmById.get(confirm[0].id)?.name || confirm[0].id} 并停用？`
-            : `重装全部 ${confirm?.length || 0} 台 VM 并停用？`
+            ? t('wrap:confirmReinstallOne', {
+                name: vmById.get(confirm[0].id)?.name || confirm[0].id,
+              })
+            : t('wrap:confirmReinstallAllVms', { total: confirm?.length || 0 })
         }
-        desc='按所选内核安装，完成后服务保持关闭。凭据、授权和工作数据保留。'
-        confirmText='重装并停用'
-        cancelBtnText='取消'
+        desc={t('wrap:confirmReinstallDescription')}
+        confirmText={t('wrap:reinstallAndStop')}
+        cancelBtnText={t('wrap:cancel')}
         disabled={missingLicenses.length > 0}
         destructive
         className='motion-reduce:animate-none [&_button]:min-h-11'
@@ -677,19 +743,19 @@ export function WrapSamplePage() {
                 {vmById.get(target.id)?.name || target.id}
               </span>
               <span className='shrink-0 font-medium'>
-                {KERNEL_NAMES[target.kernel]}
                 {target.kernel === 'crag' &&
                 !catalog.data?.licenses[target.id]?.valid
-                  ? ' · 待授权'
-                  : ''}
+                  ? t('wrap:kernelPendingLicense', {
+                      kernel: KERNEL_NAMES[target.kernel],
+                    })
+                  : KERNEL_NAMES[target.kernel]}
               </span>
             </li>
           ))}
         </ul>
         {missingLicenses.length ? (
           <p role='alert' className='text-sm text-destructive'>
-            {missingLicenses.length} 台 CRAG 尚未授权，请先在对应 VM
-            行激活。未执行任何重装或停用。
+            {t('wrap:missingLicenses', { total: missingLicenses.length })}
           </p>
         ) : null}
       </ConfirmDialog>

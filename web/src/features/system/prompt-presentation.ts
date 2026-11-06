@@ -1,3 +1,4 @@
+import { t as tr } from '@/i18n'
 import type { RawBlock } from '@/lib/persona-template'
 
 const VARIABLES: Record<string, string> = {
@@ -5,25 +6,29 @@ const VARIABLES: Record<string, string> = {
   harness_303: 'official_harness',
   guidance_303: 'official_guidance',
   env_303: 'environment',
+  env_instructions_303: 'environment_instructions',
+  env_timezone: 'slot_timezone',
+  env_locale: 'slot_locale',
 }
 
-const LABELS: Record<string, [string, string]> = {
-  billing: ['计费归因', '保留请求所需的计费标识'],
-  identity: [
-    '身份',
-    "You are Claude Code, Anthropic's official CLI for Claude.",
-  ],
-  harness: ['核心提示词', '工作方式、工具使用与执行规则'],
-  guidance: ['行为指引', '交互规范与记忆指引'],
-  dynamic_boundary: ['动态边界', '仅供 cli-hop 拆分，不出站'],
-  caller_system: ['调用方提示词', '追加请求中的 system 内容'],
-  env: ['运行环境', '工作目录、平台与终端信息'],
-  env_official: ['运行环境', '工作目录、平台、终端与时区'],
-  env_extra: ['模型附加句', '当前模型的补充说明'],
+const LABEL_KEYS: Record<string, string> = {
+  billing: 'system:sync14008BlocksBilling',
+  identity: 'system:sync14008BlocksIdentity',
+  harness: 'system:sync14008BlocksHarness',
+  guidance: 'system:sync14008BlocksGuidance',
+  dynamic_boundary: 'system:sync14008BlocksDynamicBoundary',
+  caller_system: 'system:sync14008BlocksCallerSystem',
+  env: 'system:sync14008BlocksEnv',
+  env_official: 'system:sync14008BlocksEnvOfficial',
+  env_extra: 'system:sync14008BlocksEnvExtra',
+  env_instructions: 'system:sync14008BlocksEnvInstructions',
+  env_timezone: 'system:sync14008BlocksEnvTimezone',
+  env_locale: 'system:sync14008BlocksEnvLocale',
+  custom: 'system:sync14008BlocksCustom',
 }
-
 export function promptBlockLabel(id: string): [string, string] {
-  return LABELS[id] || ['自定义提示词', '自定义注入内容']
+  const key = LABEL_KEYS[id] || LABEL_KEYS.custom
+  return [tr(key + 'Label'), tr(key + 'Description')]
 }
 
 // Display aliases never reach the gateway; saved templates keep its canonical variables.

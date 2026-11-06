@@ -19,6 +19,17 @@ test('panel admin has no hard-coded password fallback', async () => {
   }
 })
 
+test('redactSecretText masks whole sk-ant tokens, including underscores and corrupt tails', async () => {
+  const { redactSecretText, redactSecrets } = await import('../../src/lib/core/security.mjs')
+  const head = 'sk-ant-oat01-' + 'a'.repeat(60) + '_tail_part'
+  const corrupt = `Header '14' has invalid value: 'Bearer ${head} GX-yjZ-\u0445yy1\u00d7gAA'`
+  const masked = redactSecretText(corrupt)
+  assert.equal(masked, "Header '14' has invalid value: 'Bearer ***REDACTED***'")
+  assert.doesNotMatch(redactSecretText(`token=${head}`), /tail_part/)
+  assert.doesNotMatch(redactSecrets({ error: corrupt }), /GX-yjZ|tail_part/)
+  assert.equal(JSON.parse(redactSecrets({ error: corrupt })).error, masked)
+})
+
 test('panelCookieSecure follows PUBLIC_SCHEME then the request', async () => {
   const { panelCookieSecure, panelSessionCookie } = await import(`../../src/lib/core/security.mjs?cookie=${Date.now()}`)
   assert.equal(panelCookieSecure({}, { PUBLIC_SCHEME: 'http' }), false)
@@ -40,7 +51,7 @@ test('panel session persistence stores only token hashes', async () => {
     const security = await import(`../../src/lib/core/security.mjs?session=${Date.now()}`)
     const token = security.createPanelSession('admin', 60_000)
     assert.match(token, /^kin-panel-/)
-    assert.equal(security.verifyPanelSession(token).user, 'admin')
+    assert.equal((await security.verifyPanelSession(token)).user, 'admin')
     const file = path.join(dir, 'panel-sessions.json')
     const stored = fs.readFileSync(file, 'utf8')
     assert.doesNotMatch(stored, /kin-panel-/)
@@ -51,7 +62,7 @@ test('panel session persistence stores only token hashes', async () => {
       [],
     )
     security.revokePanelSession(token)
-    assert.equal(security.verifyPanelSession(token), null)
+    assert.equal(await security.verifyPanelSession(token), null)
   } finally {
     if (previous == null) delete process.env.KIN_DATA_DIR
     else process.env.KIN_DATA_DIR = previous
@@ -72,7 +83,7 @@ test('verifyPanelSession sliding-renews exp when remaining TTL is under half', a
     const expBeforeVerify = before[storedKey].exp
 
     const security2 = await import(`../../src/lib/core/security.mjs?slide2=${Date.now()}`)
-    assert.equal(security2.verifyPanelSession(token)?.user, 'admin')
+    assert.equal((await security2.verifyPanelSession(token))?.user, 'admin')
     const after = JSON.parse(fs.readFileSync(file, 'utf8'))
     const expAfterVerify = after[storedKey].exp
     assert.ok(expBeforeVerify <= Date.now() + 61_000)
@@ -100,7 +111,7 @@ test('verifyPanelSession does not renew when more than half of TTL remains', asy
     fs.writeFileSync(file, JSON.stringify(raw))
 
     const security2 = await import(`../../src/lib/core/security.mjs?norel2=${Date.now()}`)
-    assert.equal(security2.verifyPanelSession(token)?.user, 'admin')
+    assert.equal((await security2.verifyPanelSession(token))?.user, 'admin')
     const after = JSON.parse(fs.readFileSync(file, 'utf8'))
     assert.equal(after[storedKey].exp, raw[storedKey].exp)
   } finally {
@@ -120,13 +131,13 @@ test('verifyPanelSession skips a second disk write when TTL was just renewed', a
     const file = path.join(dir, 'panel-sessions.json')
 
     const security2 = await import(`../../src/lib/core/security.mjs?twice2=${Date.now()}`)
-    assert.ok(security2.verifyPanelSession(token))
+    assert.ok(await security2.verifyPanelSession(token))
     const afterFirst = JSON.parse(fs.readFileSync(file, 'utf8'))
     const storedKey = Object.keys(afterFirst)[0]
     const expAfterFirst = afterFirst[storedKey].exp
     const mtimeAfterFirst = fs.statSync(file).mtimeMs
 
-    assert.ok(security2.verifyPanelSession(token))
+    assert.ok(await security2.verifyPanelSession(token))
     const afterSecond = JSON.parse(fs.readFileSync(file, 'utf8'))
     assert.equal(afterSecond[storedKey].exp, expAfterFirst)
     assert.equal(fs.statSync(file).mtimeMs, mtimeAfterFirst)
@@ -144,13 +155,13 @@ test('existing loose panel session file is tightened on load', async () => {
   const file = path.join(dir, 'panel-sessions.json')
   fs.writeFileSync(
     file,
-    JSON.stringify({ 'kin-panel-load': { user: 'admin', role: 'admin', exp: Date.now() + 60_000 } }),
+    JSON.stringify({ 'kin-panel-load': { user: 'admin', role: 'super_admin', exp: Date.now() + 60_000 } }),
   )
   fs.chmodSync(file, 0o644)
   try {
     const security = await import(`../../src/lib/core/security.mjs?tighten=${Date.now()}`)
     assert.equal(fs.statSync(file).mode & 0o777, 0o600)
-    assert.equal(security.verifyPanelSession('kin-panel-load').user, 'admin')
+    assert.equal((await security.verifyPanelSession('kin-panel-load')).user, 'admin')
   } finally {
     if (previous == null) delete process.env.KIN_DATA_DIR
     else process.env.KIN_DATA_DIR = previous

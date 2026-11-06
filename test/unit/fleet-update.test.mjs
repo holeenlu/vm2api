@@ -76,7 +76,7 @@ test('fleet reload awaits engine-aware runtime and passes routing', async () => 
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('degraded worker without OAuth still counts as up', () => {
+test('degraded worker without OAuth still counts as up', async () => {
   assert.equal(isWorkerProcessUp({ ok: false, status: 'degraded', vm_id: 'vm-02' }), true)
   assert.equal(isWorkerProcessUp({ code: 'worker_unavailable' }), false)
 })
@@ -96,7 +96,7 @@ test('fleet collect skips reload', async () => {
   })
   assert.equal(reloads, 0)
   assert.equal(report.ok_count, 1)
-  assert.equal(fleetStatus(root)[0].id, 'vm-01')
+  assert.equal((await fleetStatus(root))[0].id, 'vm-01')
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -166,4 +166,22 @@ test('native telemetry publication uses the current stored VM kind and reports u
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('mixed fleet telemetry refresh skips Codex without changing its policy', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-mixed-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeSlot(root, 'vm-01', { platform: 'openai' })
+  writeSlot(root, 'vm-02', { platform: 'anthropic' })
+  const visited = []
+  const result = await runFleetUpdate(root, {
+    action: 'telemetry',
+    telemetryFn: async ({ vm }) => {
+      visited.push(vm.id)
+      return { ok: true }
+    },
+  })
+  assert.deepEqual(visited, ['vm-02'])
+  assert.equal(result.failed_count, 0)
+  assert.equal(result.skipped_count, 1)
 })

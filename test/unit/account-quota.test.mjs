@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import { AccountQuota, extraHeadersFromLimitError } from '../../src/lib/pool/account-quota.mjs'
 import { parseResetMs } from '../../src/lib/pool/quota-window.mjs'
 
@@ -10,37 +11,37 @@ function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kin-quota-'))
 }
 
-test('ensure seeds account and is idempotent', () => {
-  const q = new AccountQuota({
+test('ensure seeds account and is idempotent', async () => {
+  const q = await AccountQuota.create({
     dataDir: tmpDir(),
     config: {},
     accounts: [{ account_id: 'a1', vm_id: 'vm-1', email: 'a@x' }],
   })
-  const acc = q.ensure({ account_id: 'a1' })
+  const acc = await q.ensure({ account_id: 'a1' })
   assert.equal(acc.vm_id, 'vm-1')
   assert.equal(acc.email, 'a@x')
   assert.equal(acc.requests, 0)
   assert.equal(acc.unified['5h'].status, 'active')
 })
 
-test('a model entitlement rejection is persisted for that account and model', () => {
+test('a model entitlement rejection is persisted for that account and model', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'a-denied' })
-  q.markModelUnsupported('a-denied', 'claude-fable-5')
-  const until = q.repo.get('a-denied').unified.model_denied_until['claude-fable-5']
+  await q.ensure({ account_id: 'a-denied' })
+  await q.markModelUnsupported('a-denied', 'claude-fable-5')
+  const until = (await q.repo.get('a-denied')).unified.model_denied_until['claude-fable-5']
   assert.ok(until > Date.now())
   assert.ok(until <= Date.now() + 60 * 60_000)
-  q.clearModelUnsupported('a-denied', 'claude-fable-5')
-  assert.equal(q.repo.get('a-denied').unified.model_denied_until['claude-fable-5'], undefined)
+  await q.clearModelUnsupported('a-denied', 'claude-fable-5')
+  assert.equal((await q.repo.get('a-denied')).unified.model_denied_until['claude-fable-5'], undefined)
 })
 
 function futureReset(msFromNow) {
   return new Date(Date.now() + msFromNow).toISOString()
 }
 
-test('ingestHeaders updates unified windows + counters + allocations', () => {
+test('ingestHeaders updates unified windows + counters + allocations', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'a2',
     {
       'anthropic-ratelimit-unified-5h-utilization': '0.42',
@@ -49,7 +50,7 @@ test('ingestHeaders updates unified windows + counters + allocations', () => {
     },
     { input_tokens: 100, output_tokens: 20 },
   )
-  const snap = q.snapshot()
+  const snap = await q.snapshot()
   const acc = snap.accounts.find((a) => a.account_id === 'a2')
   assert.equal(acc.unified['5h'].utilization, 0.42)
   assert.equal(acc.unified['7d'].utilization, 0.1)
@@ -61,14 +62,14 @@ test('ingestHeaders updates unified windows + counters + allocations', () => {
   assert.ok(acc.unified.headers.sampled_at)
 })
 
-test('ingestHeaders countRequest:false does not overwrite Extra with hello 0%', () => {
+test('ingestHeaders countRequest:false does not overwrite Extra with hello 0%', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders('a-health', {
+  await q.ingestHeaders('a-health', {
     'anthropic-ratelimit-unified-5h-utilization': '0.91',
     'anthropic-ratelimit-unified-5h-status': 'rejected',
     'anthropic-ratelimit-unified-5h-reset': futureReset(4 * 3600_000),
   })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'a-health',
     {
       'anthropic-ratelimit-unified-5h-utilization': '0.18',
@@ -78,7 +79,7 @@ test('ingestHeaders countRequest:false does not overwrite Extra with hello 0%', 
     { input_tokens: 40, output_tokens: 8 },
     { countRequest: false },
   )
-  const acc = q.snapshot().accounts.find((a) => a.account_id === 'a-health')
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === 'a-health')
   assert.equal(acc.unified.headers['5h'].utilization, 0.91)
   assert.equal(acc.unified.headers['5h'].status, 'rejected')
   assert.equal(acc.requests, 1)
@@ -86,11 +87,11 @@ test('ingestHeaders countRequest:false does not overwrite Extra with hello 0%', 
   assert.equal(acc.recent_allocations.length, 1)
 })
 
-test('ingestHeaders accumulates cache tokens and mirrors the session window', () => {
+test('ingestHeaders accumulates cache tokens and mirrors the session window', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
   const windows = []
   q.attachRuntimeRepo({ updateWindow: (accountId, patch) => windows.push({ accountId, ...patch }) })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'a-cache',
     {
       'anthropic-ratelimit-unified-5h-utilization': '0.2',
@@ -104,8 +105,8 @@ test('ingestHeaders accumulates cache tokens and mirrors the session window', ()
       cache_creation_input_tokens: 7,
     },
   )
-  q.ingestHeaders('a-cache', {}, { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 2 })
-  const acc = q.snapshot().accounts.find((a) => a.account_id === 'a-cache')
+  await q.ingestHeaders('a-cache', {}, { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 2 })
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === 'a-cache')
   assert.equal(acc.cache_read_tokens, 5)
   assert.equal(acc.cache_creation_tokens, 7)
   assert.equal(windows.length, 2)
@@ -115,9 +116,9 @@ test('ingestHeaders accumulates cache tokens and mirrors the session window', ()
   assert.equal(windows[0].sessionWindowStatus, 'allowed')
 })
 
-test('ingestHeaders reads OpenAI prompt_tokens_details cache fields', () => {
+test('ingestHeaders reads OpenAI prompt_tokens_details cache fields', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'a-oa',
     {},
     {
@@ -126,60 +127,60 @@ test('ingestHeaders reads OpenAI prompt_tokens_details cache fields', () => {
       prompt_tokens_details: { cached_tokens: 11, cache_creation_tokens: 3 },
     },
   )
-  const acc = q.snapshot().accounts.find((a) => a.account_id === 'a-oa')
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === 'a-oa')
   assert.equal(acc.tokens_in, 6)
   assert.equal(acc.tokens_out, 4)
   assert.equal(acc.cache_read_tokens, 11)
   assert.equal(acc.cache_creation_tokens, 3)
 })
 
-test('test-chat last_probe does not overwrite a successful usage probe', () => {
+test('test-chat last_probe does not overwrite a successful usage probe', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.recordLastProbe('a-keep', { ok: true, source: 'vm-oauth-usage' })
-  q.recordLastProbe('a-keep', {
+  await q.recordLastProbe('a-keep', { ok: true, source: 'vm-oauth-usage' })
+  await q.recordLastProbe('a-keep', {
     ok: false,
     source: 'test-chat',
     error: 'OAuth access token has been revoked.',
   })
-  const acc = q.repo.get('a-keep')
+  const acc = await q.repo.get('a-keep')
   assert.equal(acc.unified.last_probe.source, 'vm-oauth-usage')
   assert.equal(acc.unified.last_probe.ok, true)
 })
 
-test('canAccept blocks at safety ratio and records last_blocked', () => {
+test('canAccept blocks at safety ratio and records last_blocked', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestHeaders('a3', { 'anthropic-ratelimit-unified-5h-utilization': '0.96' })
-  const gate = q.canAccept('a3')
+  await q.ingestHeaders('a3', { 'anthropic-ratelimit-unified-5h-utilization': '0.96' })
+  const gate = await q.canAccept('a3')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'quota_5h_safety')
-  const acc = q.snapshot().accounts.find((a) => a.account_id === 'a3')
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === 'a3')
   assert.equal(acc.last_blocked.window, '5h')
 })
 
-test('cli rate_limit_event blocks via status', () => {
+test('cli rate_limit_event blocks via status', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestCliRateLimit('a4', { rateLimitType: 'five_hour', status: 'rejected', resetsAt: 1893456000 })
-  const gate = q.canAccept('a4')
+  await q.ingestCliRateLimit('a4', { rateLimitType: 'five_hour', status: 'rejected', resetsAt: 1893456000 })
+  const gate = await q.canAccept('a4')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'quota_5h_cli')
 })
 
-test('official 26 percent does not trip the quota gate', () => {
+test('official 26 percent does not trip the quota gate', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestHeaders('pct-26', {
+  await q.ingestHeaders('pct-26', {
     'anthropic-ratelimit-unified-5h-utilization': '26',
     'anthropic-ratelimit-unified-5h-status': 'rejected',
     'anthropic-ratelimit-unified-5h-reset': futureReset(4 * 3600_000),
   })
-  const gate = q.canAccept('pct-26')
+  const gate = await q.canAccept('pct-26')
   assert.equal(gate.ok, true)
-  assert.equal(q.headerUnderSafety(q.repo.get('pct-26')), true)
+  assert.equal(q.headerUnderSafety(await q.repo.get('pct-26')), true)
 })
 
 test('extraHeadersFromLimitError fills Extra 5h + reset from the text when wrap omits headers', () => {
@@ -200,39 +201,39 @@ test('extraHeadersFromLimitError fills Extra 5h + reset from the text when wrap 
   assert.equal(kept['anthropic-ratelimit-unified-5h-status'], 'allowed_warning')
 })
 
-test('limit error without a fresh reset does not inherit the elapsed reset', () => {
+test('limit error without a fresh reset does not inherit the elapsed reset', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
   const elapsed = String(Math.floor((Date.now() - 3_600_000) / 1000))
-  q.ingestHeaders('elapsed-5h', {
+  await q.ingestHeaders('elapsed-5h', {
     'anthropic-ratelimit-unified-5h-status': 'allowed',
     'anthropic-ratelimit-unified-5h-utilization': '0.4',
     'anthropic-ratelimit-unified-5h-reset': elapsed,
   })
-  q.ingestHeaders('elapsed-5h', extraHeadersFromLimitError('hit your limit', {}), null, {
+  await q.ingestHeaders('elapsed-5h', extraHeadersFromLimitError('hit your limit', {}), null, {
     exhausted: true,
     countRequest: false,
   })
-  const acc = q.repo.get('elapsed-5h')
+  const acc = await q.repo.get('elapsed-5h')
   assert.equal(acc.unified.headers['5h'].status, 'rejected')
   assert.equal(acc.unified.headers['5h'].reset, null)
   assert.ok(acc.unified.headers.exhausted_at)
 })
 
-test('cli rate_limit_event copies unifiedWindows utilization', () => {
+test('cli rate_limit_event copies unifiedWindows utilization', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestCliRateLimit('a4-util', {
+  await q.ingestCliRateLimit('a4-util', {
     rateLimitType: 'five_hour',
     status: 'allowed',
     resetsAt: 1893456000,
     unifiedWindows: { five_hour: { utilization: 81 } },
   })
-  const acc = q.snapshot().accounts.find((a) => a.account_id === 'a4-util')
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === 'a4-util')
   assert.equal(acc.unified.headers['5h'].utilization, 0.81)
   assert.equal(acc.unified.headers['5h'].status, 'allowed')
 })
 
-test('tryAcquire enforces and releases the configured concurrency cap', () => {
-  const q = new AccountQuota({
+test('tryAcquire enforces and releases the configured concurrency cap', async () => {
+  const q = await AccountQuota.create({
     dataDir: tmpDir(),
     accounts: [{ account_id: 'acc-reserve', max_concurrency: 1, concurrency_override: 1 }],
   })
@@ -243,13 +244,17 @@ test('tryAcquire enforces and releases the configured concurrency cap', () => {
   q.release('acc-reserve')
 })
 
-test('state persists across re-open (same dataDir)', () => {
+test('state persists across re-open (same dataDir)', async () => {
   const dir = tmpDir()
   const q1 = new AccountQuota({ dataDir: dir, config: {} })
-  q1.ingestHeaders('a5', { 'anthropic-ratelimit-unified-7d-utilization': '0.5' }, { input_tokens: 7, output_tokens: 3 })
+  await q1.ingestHeaders(
+    'a5',
+    { 'anthropic-ratelimit-unified-7d-utilization': '0.5' },
+    { input_tokens: 7, output_tokens: 3 },
+  )
 
   const q2 = new AccountQuota({ dataDir: dir, config: {} })
-  const acc = q2.snapshot().accounts.find((a) => a.account_id === 'a5')
+  const acc = (await q2.snapshot()).accounts.find((a) => a.account_id === 'a5')
   assert.ok(acc)
   assert.equal(acc.unified['7d'].utilization, 0.5)
   assert.equal(acc.tokens_in, 7)
@@ -257,95 +262,95 @@ test('state persists across re-open (same dataDir)', () => {
   assert.equal(acc.recent_allocations.length, 1)
 })
 
-test('allocations trimmed to 50 per account', () => {
+test('allocations trimmed to 50 per account', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
   for (let i = 0; i < 60; i++) {
-    q.ingestHeaders('a6', { 'anthropic-ratelimit-unified-5h-utilization': String(i / 100) })
+    await q.ingestHeaders('a6', { 'anthropic-ratelimit-unified-5h-utilization': String(i / 100) })
   }
-  assert.equal(q.repo.allocationCount('a6'), 50)
-  const recent = q.repo.recentAllocations('a6', 5)
+  assert.equal(await q.repo.allocationCount('a6'), 50)
+  const recent = await q.repo.recentAllocations('a6', 5)
   assert.equal(recent.length, 5)
   assert.equal(recent[4].util_5h, 0.59)
 })
 
-test('max_concurrency 0 blocks instead of treating as unlimited', () => {
+test('max_concurrency 0 blocks instead of treating as unlimited', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { concurrency: { default_max_per_account: 20 } } })
-  q.ensure({ account_id: 'zero', max_concurrency: 0 })
-  q.setMaxConcurrency('zero', 0, { override: true })
-  const gate = q.canAccept('zero')
+  await q.ensure({ account_id: 'zero', max_concurrency: 0 })
+  await q.setMaxConcurrency('zero', 0, { override: true })
+  const gate = await q.canAccept('zero')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'concurrency_limit')
   assert.equal(gate.detail.max, 0)
 })
 
-test('rebindToVm moves the UUID row onto the new slot', () => {
+test('rebindToVm moves the UUID row onto the new slot', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: '1c5a7a73', vm_id: 'vm-02', email: 'old@x' })
-  q.rebindToVm('1c5a7a73', 'vm-04', { email: 'new@x' })
-  const acc = q.snapshot().accounts.find((a) => a.account_id === '1c5a7a73')
+  await q.ensure({ account_id: '1c5a7a73', vm_id: 'vm-02', email: 'old@x' })
+  await q.rebindToVm('1c5a7a73', 'vm-04', { email: 'new@x' })
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === '1c5a7a73')
   assert.equal(acc.vm_id, 'vm-04')
   assert.equal(acc.email, 'new@x')
 })
 
-test('concurrency inflight gate stays in memory', () => {
+test('concurrency inflight gate stays in memory', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { concurrency: { default_max_per_account: 1 } } })
-  q.ensure({ account_id: 'a7' })
-  q.setMaxConcurrency('a7', 1, { override: true })
+  await q.ensure({ account_id: 'a7' })
+  await q.setMaxConcurrency('a7', 1, { override: true })
   q.acquire('a7')
-  const gate = q.canAccept('a7')
+  const gate = await q.canAccept('a7')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'concurrency_limit')
   q.release('a7')
-  assert.equal(q.canAccept('a7').ok, true)
+  assert.equal((await q.canAccept('a7')).ok, true)
 })
 
-test('rpm window blocks then recovers', () => {
+test('rpm window blocks then recovers', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'rpm-acc', max_concurrency: 8 })
-  q.setMaxRpm('rpm-acc', 2, { override: true })
+  await q.ensure({ account_id: 'rpm-acc', max_concurrency: 8 })
+  await q.setMaxRpm('rpm-acc', 2, { override: true })
   assert.equal(q.tryAcquire('rpm-acc').ok, true)
   q.release('rpm-acc')
   assert.equal(q.tryAcquire('rpm-acc').ok, true)
   q.release('rpm-acc')
-  const gate = q.canAccept('rpm-acc')
+  const gate = await q.canAccept('rpm-acc')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'rpm_limit')
   assert.equal(gate.detail.max, 2)
   assert.ok(gate.detail.reset_at > Date.now())
 })
 
-test('max_rpm 0 is unlimited', () => {
+test('max_rpm 0 is unlimited', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'rpm-off', max_concurrency: 8, max_rpm: 0 })
+  await q.ensure({ account_id: 'rpm-off', max_concurrency: 8, max_rpm: 0 })
   for (let i = 0; i < 5; i++) {
     assert.equal(q.tryAcquire('rpm-off').ok, true)
     q.release('rpm-off')
   }
-  assert.equal(q.canAccept('rpm-off').ok, true)
+  assert.equal((await q.canAccept('rpm-off')).ok, true)
 })
 
-test('quota gate still blocks before RPM wait', () => {
+test('quota gate still blocks before RPM wait', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, block_on_5h: true, block_on_7d: true } },
   })
-  q.ensure({ account_id: 'rpm-quota', max_concurrency: 8, max_rpm: 60 })
-  q.ingestHeaders('rpm-quota', {
+  await q.ensure({ account_id: 'rpm-quota', max_concurrency: 8, max_rpm: 60 })
+  await q.ingestHeaders('rpm-quota', {
     'anthropic-ratelimit-unified-5h-utilization': '1',
     'anthropic-ratelimit-unified-5h-status': 'rejected',
     'anthropic-ratelimit-unified-5h-reset': new Date(Date.now() + 3600_000).toISOString(),
   })
-  const gate = q.canAccept('rpm-quota')
+  const gate = await q.canAccept('rpm-quota')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'quota_5h_cli')
 })
 
-test('ingestOAuthUsage stores 5h/7d and isolated fable limit', () => {
+test('ingestOAuthUsage stores 5h/7d and isolated fable limit', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-fable', {
+  await q.ingestOAuthUsage('acc-fable', {
     ok: true,
     five_hour: { utilization: 0.2, resets_at: '2026-08-18T20:00:00Z', status: 'allowed' },
     seven_day: { utilization: 0.4, resets_at: '2026-08-24T00:00:00Z', status: 'allowed' },
@@ -362,7 +367,7 @@ test('ingestOAuthUsage stores 5h/7d and isolated fable limit', () => {
     seven_day_oi: { utilization: 0.54, resets_at: '2026-08-25T00:00:00Z', status: 'allowed' },
     probed_at: '2026-08-18T12:00:00Z',
   })
-  const acc = q.repo.get('acc-fable')
+  const acc = await q.repo.get('acc-fable')
   assert.equal(acc.unified['5h'].utilization, 0.2)
   assert.equal(acc.unified['7d'].utilization, 0.4)
   assert.equal(acc.unified.fable.limited, false)
@@ -370,16 +375,16 @@ test('ingestOAuthUsage stores 5h/7d and isolated fable limit', () => {
   assert.equal(acc.unified['7d_oi'].utilization, 0.54)
   assert.equal(acc.unified['7d_oi'].status, 'allowed')
   assert.equal(acc.unified.seven_day_sonnet.utilization, 0.1)
-  const gate = q.canAccept('acc-fable')
+  const gate = await q.canAccept('acc-fable')
   assert.equal(gate.ok, true, 'fable weekly limit must not block the whole account')
 })
 
-test('official /usage 429 keeps the last successful probe', () => {
+test('official /usage 429 keeps the last successful probe', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-rl', {
+  await q.ingestOAuthUsage('acc-rl', {
     ok: true,
     source: 'official-cc-usage',
     usage_status: 200,
@@ -387,7 +392,7 @@ test('official /usage 429 keeps the last successful probe', () => {
     seven_day: { utilization: 0.48, status: 'allowed' },
     probed_at: '2026-08-25T04:00:00.000Z',
   })
-  q.ingestOAuthUsage('acc-rl', {
+  await q.ingestOAuthUsage('acc-rl', {
     ok: false,
     source: 'official-cc-usage',
     usage_status: 429,
@@ -395,7 +400,7 @@ test('official /usage 429 keeps the last successful probe', () => {
     usage_error: 'Rate limited. Please try again later.',
     probed_at: '2026-08-25T05:35:00.000Z',
   })
-  const acc = q.repo.get('acc-rl')
+  const acc = await q.repo.get('acc-rl')
   const lp = acc.unified.last_probe
   assert.equal(lp.ok, true)
   assert.equal(lp.error, null)
@@ -404,12 +409,12 @@ test('official /usage 429 keeps the last successful probe', () => {
   assert.ok(Date.parse(acc.unified.usage_rate_limited_until) > Date.now())
 })
 
-test('usage ok plus fable 401 does not poison last_probe with revoke text', () => {
+test('usage ok plus fable 401 does not poison last_probe with revoke text', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-pro-401', {
+  await q.ingestOAuthUsage('acc-pro-401', {
     ok: true,
     usage_status: 200,
     five_hour: { utilization: 0, status: 'allowed' },
@@ -424,48 +429,48 @@ test('usage ok plus fable 401 does not poison last_probe with revoke text', () =
     },
     probed_at: '2026-08-22T08:42:00.000Z',
   })
-  const acc = q.repo.get('acc-pro-401')
+  const acc = await q.repo.get('acc-pro-401')
   assert.equal(acc.unified.last_probe.error, null)
   assert.equal(acc.unified.last_probe.ok, true)
   assert.equal(acc.unified.fable.banned, false)
   assert.equal(acc.unified.fable.plan_denied, false)
-  q.clearGrantRevokeLeftover('acc-pro-401')
-  const after = q.repo.get('acc-pro-401')
+  await q.clearGrantRevokeLeftover('acc-pro-401')
+  const after = await q.repo.get('acc-pro-401')
   assert.equal(after.unified.last_probe.error, null)
   assert.equal(after.unified.fable.plan_denied, false)
   assert.equal(after.unified.account_tier, undefined)
 })
 
-test('Fable 403 does not classify Pro when official usage cannot verify the grant', () => {
+test('Fable 403 does not classify Pro when official usage cannot verify the grant', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestOAuthUsage('acc-uncertain-403', {
+  await q.ingestOAuthUsage('acc-uncertain-403', {
     ok: false,
     usage_status: 500,
     fable: { ok: false, plan_denied: true, status: 403, model: 'claude-fable-5' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-uncertain-403')
+  const acc = await q.repo.get('acc-uncertain-403')
   assert.equal(acc.unified.account_tier, undefined)
   assert.equal(acc.unified.fable.plan_denied, false)
 })
 
-test('official usage without Fable evidence does not classify an unprobed account as Pro', () => {
+test('official usage without Fable evidence does not classify an unprobed account as Pro', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestOAuthUsage('acc-unprobed', {
+  await q.ingestOAuthUsage('acc-unprobed', {
     ok: true,
     usage_status: 200,
     usage_has_fable: false,
     five_hour: { utilization: 0.1, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-unprobed')
+  const acc = await q.repo.get('acc-unprobed')
   assert.equal(acc.unified.account_tier, undefined)
   assert.equal(acc.unified.fable, undefined)
 })
 
-test('complete official usage without Fable classifies Pro', () => {
+test('complete official usage without Fable classifies Pro', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestOAuthUsage('acc-complete-pro', {
+  await q.ingestOAuthUsage('acc-complete-pro', {
     ok: true,
     usage_status: 200,
     limits_present: true,
@@ -474,16 +479,16 @@ test('complete official usage without Fable classifies Pro', () => {
     seven_day: { utilization: 0.2, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-complete-pro')
+  const acc = await q.repo.get('acc-complete-pro')
   assert.equal(acc.unified.usage_has_fable, false)
   assert.equal(acc.unified.account_tier, 'pro')
 })
 
-test('complete official usage overrides a stale profile tier', () => {
+test('complete official usage overrides a stale profile tier', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'acc-stale-profile' })
-  q.setAccountTier('acc-stale-profile', 'max', { source: 'profile' })
-  q.ingestOAuthUsage('acc-stale-profile', {
+  await q.ensure({ account_id: 'acc-stale-profile' })
+  await q.setAccountTier('acc-stale-profile', 'max', { source: 'profile' })
+  await q.ingestOAuthUsage('acc-stale-profile', {
     ok: true,
     usage_status: 200,
     limits_present: true,
@@ -492,72 +497,72 @@ test('complete official usage overrides a stale profile tier', () => {
     seven_day: { utilization: 0.2, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-stale-profile')
+  const acc = await q.repo.get('acc-stale-profile')
   assert.equal(acc.unified.account_tier, 'pro')
   assert.equal(acc.unified.account_tier_source, 'usage')
 })
 
-test('setup-token usage scope failure preserves historical tier and does not mark grant dead', () => {
+test('setup-token usage scope failure preserves historical tier and does not mark grant dead', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'acc-setup-scope' })
-  q.setAccountTier('acc-setup-scope', 'max', { source: 'usage' })
-  q.ingestOAuthUsage('acc-setup-scope', {
+  await q.ensure({ account_id: 'acc-setup-scope' })
+  await q.setAccountTier('acc-setup-scope', 'max', { source: 'usage' })
+  await q.ingestOAuthUsage('acc-setup-scope', {
     ok: false,
     usage_status: 403,
     usage_scope_missing: true,
     usage_error: '当前凭证缺少 user:profile scope，需导入完整 OAuth 后才能探测官方 /usage',
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-setup-scope')
+  const acc = await q.repo.get('acc-setup-scope')
   assert.equal(acc.unified.account_tier, 'max')
   assert.equal(acc.unified.fable, undefined)
   assert.equal(acc.unified.last_probe.ok, false)
   assert.match(acc.unified.last_probe.error, /user:profile/)
 })
 
-test('incomplete official usage without Fable does not downgrade a stored Max', () => {
+test('incomplete official usage without Fable does not downgrade a stored Max', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'acc-incomplete-max' })
-  q.setAccountTier('acc-incomplete-max', 'max', { source: 'usage' })
-  q.ingestOAuthUsage('acc-incomplete-max', {
+  await q.ensure({ account_id: 'acc-incomplete-max' })
+  await q.setAccountTier('acc-incomplete-max', 'max', { source: 'usage' })
+  await q.ingestOAuthUsage('acc-incomplete-max', {
     ok: true,
     usage_status: 200,
     usage_has_fable: false,
     five_hour: { utilization: 0.1, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-incomplete-max')
+  const acc = await q.repo.get('acc-incomplete-max')
   assert.equal(acc.unified.usage_has_fable, undefined)
   assert.equal(acc.unified.account_tier, 'max')
 })
 
-test('clearGrantRevokeLeftover drops stale revoke after refresh', () => {
+test('clearGrantRevokeLeftover drops stale revoke after refresh', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-stale', {
+  await q.ingestOAuthUsage('acc-stale', {
     ok: false,
     usage_status: 401,
     fable: { ok: false, banned: true, status: 401, error: 'OAuth access token has been revoked.' },
     usage_error: 'OAuth access token has been revoked.',
     probed_at: '2026-08-22T08:42:00.000Z',
   })
-  assert.match(String(q.repo.get('acc-stale').unified.last_probe.error || ''), /revoked/i)
-  q.clearGrantRevokeLeftover('acc-stale')
-  const acc = q.repo.get('acc-stale')
+  assert.match(String((await q.repo.get('acc-stale')).unified.last_probe.error || ''), /revoked/i)
+  await q.clearGrantRevokeLeftover('acc-stale')
+  const acc = await q.repo.get('acc-stale')
   assert.equal(acc.unified.last_probe.error, null)
   assert.equal(acc.unified.fable.banned, false)
   assert.equal(acc.unified.fable.plan_denied, false)
   assert.equal(acc.unified.account_tier, undefined)
 })
 
-test('clearGrantRevokeLeftover keeps stored Max off leftover Fable revoke', () => {
+test('clearGrantRevokeLeftover keeps stored Max off leftover Fable revoke', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-max', {
+  await q.ingestOAuthUsage('acc-max', {
     ok: true,
     usage_status: 200,
     limits_present: true,
@@ -568,48 +573,48 @@ test('clearGrantRevokeLeftover keeps stored Max off leftover Fable revoke', () =
     seven_day_oi: { utilization: 0.1, resets_at: '2026-09-01T00:00:00Z', status: 'allowed' },
     probed_at: '2026-08-22T08:42:00.000Z',
   })
-  assert.equal(q.repo.get('acc-max').unified.account_tier, 'max')
-  q.ingestOAuthUsage('acc-max', {
+  assert.equal((await q.repo.get('acc-max')).unified.account_tier, 'max')
+  await q.ingestOAuthUsage('acc-max', {
     ok: false,
     usage_status: 401,
     fable: { ok: false, banned: true, status: 401, error: 'OAuth access token has been revoked.' },
     usage_error: 'OAuth access token has been revoked.',
     probed_at: '2026-08-27T08:00:00.000Z',
   })
-  q.clearGrantRevokeLeftover('acc-max')
-  const acc = q.repo.get('acc-max')
+  await q.clearGrantRevokeLeftover('acc-max')
+  const acc = await q.repo.get('acc-max')
   assert.equal(acc.unified.account_tier, 'max')
   assert.equal(acc.unified.fable.banned, false)
   assert.equal(acc.unified.fable.plan_denied, false)
 })
 
-test('fable 429 without 7d_oi window does not invent a full Fable quota', () => {
+test('fable 429 without 7d_oi window does not invent a full Fable quota', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-pro', {
+  await q.ingestOAuthUsage('acc-pro', {
     ok: true,
     five_hour: { utilization: 0.1, status: 'allowed' },
     seven_day: { utilization: 0.2, status: 'allowed' },
     fable: { ok: false, limited: true, banned: false, plan_denied: false, status: 429, model: 'claude-fable-5' },
     probed_at: '2026-08-22T00:00:00Z',
   })
-  const acc = q.repo.get('acc-pro')
+  const acc = await q.repo.get('acc-pro')
   assert.equal(acc.unified.fable.limited, false)
   assert.equal(acc.unified.fable.plan_denied, false)
   assert.equal(acc.unified.account_tier, undefined)
   assert.equal(acc.unified['7d_oi']?.status || null, null)
-  assert.equal(q.canAccept('acc-pro').ok, true)
+  assert.equal((await q.canAccept('acc-pro')).ok, true)
   assert.equal(q.fableWindowLimited('acc-pro'), false)
 })
 
-test('official usage without Fable hop does not turn leftover 429 into Pro', () => {
+test('official usage without Fable hop does not turn leftover 429 into Pro', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-pro-skip', {
+  await q.ingestOAuthUsage('acc-pro-skip', {
     ok: true,
     five_hour: { utilization: 0.1, status: 'allowed' },
     seven_day: { utilization: 0.2, status: 'allowed' },
@@ -624,8 +629,8 @@ test('official usage without Fable hop does not turn leftover 429 into Pro', () 
     },
     probed_at: '2026-08-22T00:00:00Z',
   })
-  assert.equal(q.repo.get('acc-pro-skip').unified.account_tier, undefined)
-  q.ingestOAuthUsage('acc-pro-skip', {
+  assert.equal((await q.repo.get('acc-pro-skip')).unified.account_tier, undefined)
+  await q.ingestOAuthUsage('acc-pro-skip', {
     ok: true,
     usage_status: 200,
     source: 'official-cc-usage',
@@ -633,19 +638,19 @@ test('official usage without Fable hop does not turn leftover 429 into Pro', () 
     seven_day: { utilization: 0.11, status: 'allowed' },
     probed_at: '2026-08-24T00:00:00Z',
   })
-  const acc = q.repo.get('acc-pro-skip')
+  const acc = await q.repo.get('acc-pro-skip')
   assert.equal(acc.unified.fable.plan_denied, false)
   assert.equal(acc.unified.fable.ok, false)
   assert.equal(acc.unified.fable.error, 'Error')
   assert.equal(acc.unified.account_tier, undefined)
 })
 
-test('Fable hop alone does not classify Pro; complete usage can flip stored Pro to Max', () => {
+test('Fable hop alone does not classify Pro; complete usage can flip stored Pro to Max', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-mispro', {
+  await q.ingestOAuthUsage('acc-mispro', {
     ok: true,
     usage_status: 200,
     five_hour: { utilization: 0.1, status: 'allowed' },
@@ -653,9 +658,9 @@ test('Fable hop alone does not classify Pro; complete usage can flip stored Pro 
     fable: { ok: false, plan_denied: true, status: 403, model: 'claude-fable-5' },
     probed_at: '2026-08-22T00:00:00Z',
   })
-  assert.equal(q.repo.get('acc-mispro').unified.account_tier, undefined)
-  q.setAccountTier('acc-mispro', 'pro', { source: 'usage' })
-  q.ingestOAuthUsage('acc-mispro', {
+  assert.equal((await q.repo.get('acc-mispro')).unified.account_tier, undefined)
+  await q.setAccountTier('acc-mispro', 'pro', { source: 'usage' })
+  await q.ingestOAuthUsage('acc-mispro', {
     ok: true,
     usage_status: 200,
     limits_present: true,
@@ -666,150 +671,150 @@ test('Fable hop alone does not classify Pro; complete usage can flip stored Pro 
     fable: { ok: false, plan_denied: true, status: 403, model: 'claude-fable-5' },
     probed_at: '2026-08-24T00:00:00Z',
   })
-  const acc = q.repo.get('acc-mispro')
+  const acc = await q.repo.get('acc-mispro')
   assert.equal(acc.unified.account_tier, 'max')
   assert.equal(acc.unified.usage_has_fable, true)
   assert.equal(acc.unified.fable.plan_denied, false)
   assert.equal(acc.unified.fable.ok, true)
 })
 
-test('7d_oi window is Fable-only and does not block the account', () => {
+test('7d_oi window is Fable-only and does not block the account', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
   const reset = futureReset(7 * 24 * 3600_000)
-  q.ingestHeaders('acc-oi', {
+  await q.ingestHeaders('acc-oi', {
     'anthropic-ratelimit-unified-7d_oi-utilization': '1',
     'anthropic-ratelimit-unified-7d_oi-status': 'rejected',
     'anthropic-ratelimit-unified-7d_oi-reset': reset,
     'anthropic-ratelimit-unified-representative-claim': 'seven_day_overage_included',
   })
-  assert.equal(q.canAccept('acc-oi').ok, true)
+  assert.equal((await q.canAccept('acc-oi')).ok, true)
   assert.equal(q.fableWindowLimited('acc-oi'), true)
   assert.equal(q.fableWindowResetAt('acc-oi'), Date.parse(reset))
 })
 
-test('7d_oi rejected with elapsed second-level reset is not Fable-limited', () => {
+test('7d_oi rejected with elapsed second-level reset is not Fable-limited', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
   const now = Date.parse('2026-10-19T09:00:00Z')
   const resetSec = '1792206000'
-  const acc = q.ensure({ account_id: 'acc-oi-elapsed' })
+  const acc = await q.ensure({ account_id: 'acc-oi-elapsed' })
   acc.unified['7d_oi'] = {
     utilization: 1,
     reset: resetSec,
     status: 'rejected',
     claim: 'seven_day_overage_included',
   }
-  q.repo.save(acc)
+  await q.repo.save(acc)
   assert.ok(parseResetMs(resetSec) <= now)
   assert.equal(q.fableWindowLimited('acc-oi-elapsed', now), false)
   assert.equal(q.fableWindowResetAt('acc-oi-elapsed'), parseResetMs(resetSec))
 })
 
-test('7d_oi rejected without reset stays Fable-limited', () => {
+test('7d_oi rejected without reset stays Fable-limited', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  const acc = q.ensure({ account_id: 'acc-oi-no-reset' })
+  const acc = await q.ensure({ account_id: 'acc-oi-no-reset' })
   acc.unified['7d_oi'] = { utilization: 1, status: 'rejected' }
-  q.repo.save(acc)
+  await q.repo.save(acc)
   assert.equal(q.fableWindowLimited('acc-oi-no-reset'), true)
   assert.equal(q.fableWindowResetAt('acc-oi-no-reset'), null)
 })
 
-test('7d_oi rejected with future second-level reset stays Fable-limited', () => {
+test('7d_oi rejected with future second-level reset stays Fable-limited', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
   const now = Date.parse('2026-10-19T09:00:00Z')
   const resetSec = '1792810800'
-  const acc = q.ensure({ account_id: 'acc-oi-future' })
+  const acc = await q.ensure({ account_id: 'acc-oi-future' })
   acc.unified['7d_oi'] = { utilization: 1, reset: resetSec, status: 'rejected' }
-  q.repo.save(acc)
+  await q.repo.save(acc)
   assert.ok(parseResetMs(resetSec) > now)
   assert.equal(q.fableWindowLimited('acc-oi-future', now), true)
   assert.equal(q.fableWindowResetAt('acc-oi-future'), parseResetMs(resetSec))
 })
 
-test('persistEffectiveWindows clears elapsed unified 7d_oi', () => {
+test('persistEffectiveWindows clears elapsed unified 7d_oi', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
   const now = Date.parse('2026-10-19T09:00:00Z')
-  const acc = q.ensure({ account_id: 'acc-wipe-oi' })
+  const acc = await q.ensure({ account_id: 'acc-wipe-oi' })
   acc.unified['7d_oi'] = { utilization: 1, reset: '1792206000', status: 'rejected' }
   acc.unified.headers = { '5h': { utilization: 0.1, status: 'allowed', reset: '2099-01-01T00:00:00Z' } }
-  q.repo.save(acc)
-  q.persistEffectiveWindows('acc-wipe-oi', { now })
-  const oi = q.repo.get('acc-wipe-oi').unified['7d_oi']
+  await q.repo.save(acc)
+  await q.persistEffectiveWindows('acc-wipe-oi', { now })
+  const oi = (await q.repo.get('acc-wipe-oi')).unified['7d_oi']
   assert.equal(oi.utilization, 0)
   assert.equal(oi.status, 'active')
   assert.equal(oi.stale_reason, 'reset_elapsed')
 })
 
-test('probe 5h rejected with no last_used stays a hard block until reset', () => {
+test('probe 5h rejected with no last_used stays a hard block until reset', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
   const reset = new Date(Date.now() + 4 * 3600_000).toISOString()
-  q.ingestOAuthUsage('acc-sticky', {
+  await q.ingestOAuthUsage('acc-sticky', {
     ok: true,
     five_hour: { utilization: 1, resets_at: reset, status: 'rejected' },
     seven_day: { utilization: 0, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  assert.equal(q.canAccept('acc-sticky').ok, false)
-  const acc = q.snapshot().accounts.find((a) => a.account_id === 'acc-sticky')
+  assert.equal((await q.canAccept('acc-sticky')).ok, false)
+  const acc = (await q.snapshot()).accounts.find((a) => a.account_id === 'acc-sticky')
   assert.equal(Number(acc.unified['5h'].utilization), 1)
   assert.equal(acc.unified['5h'].status, 'rejected')
 })
 
-test('official probe fills Extra reset when Extra has usage but no reset', () => {
+test('official probe fills Extra reset when Extra has usage but no reset', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders('acc-no-reset', {
+  await q.ingestHeaders('acc-no-reset', {
     'anthropic-ratelimit-unified-5h-utilization': '0.44',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  assert.equal(q.repo.get('acc-no-reset').unified.headers['5h'].reset, null)
+  assert.equal((await q.repo.get('acc-no-reset')).unified.headers['5h'].reset, null)
   const reset = futureReset(4 * 3600_000)
-  q.ingestOAuthUsage('acc-no-reset', {
+  await q.ingestOAuthUsage('acc-no-reset', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 0.12, status: 'allowed', resets_at: reset },
     seven_day: { utilization: 0.08, status: 'allowed', resets_at: futureReset(6 * 24 * 3600_000) },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-no-reset')
+  const acc = await q.repo.get('acc-no-reset')
   assert.equal(acc.unified.headers['5h'].utilization, 0.44)
   assert.equal(acc.unified.headers['5h'].reset, reset)
 })
 
-test('official leftover 100% does not overwrite live Extra allowed', () => {
+test('official leftover 100% does not overwrite live Extra allowed', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestHeaders('acc-live', {
+  await q.ingestHeaders('acc-live', {
     'anthropic-ratelimit-unified-5h-utilization': '0.36',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
     'anthropic-ratelimit-unified-5h-reset': futureReset(4 * 3600_000),
   })
-  q.ingestOAuthUsage('acc-live', {
+  await q.ingestOAuthUsage('acc-live', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 1, resets_at: new Date(Date.now() + 3600_000).toISOString(), status: 'rejected' },
     seven_day: { utilization: 0.3, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-live')
+  const acc = await q.repo.get('acc-live')
   assert.equal(acc.unified.official['5h'].utilization, 1)
   assert.equal(acc.unified.headers['5h'].utilization, 0.36)
   assert.equal(acc.unified.headers['5h'].status, 'allowed')
-  assert.equal(q.canAccept('acc-live').ok, true)
+  assert.equal((await q.canAccept('acc-live')).ok, true)
 })
 
-test('successful probe overwrites leftover rejected when official percent is low', () => {
+test('successful probe overwrites leftover rejected when official percent is low', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'acc-stale-status',
     {
       'anthropic-ratelimit-unified-5h-utilization': '1',
@@ -818,25 +823,25 @@ test('successful probe overwrites leftover rejected when official percent is low
     null,
     { exhausted: true, status: 429 },
   )
-  q.ingestOAuthUsage('acc-stale-status', {
+  await q.ingestOAuthUsage('acc-stale-status', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 0.12, resets_at: new Date(Date.now() + 3600_000).toISOString(), status: 'allowed' },
     seven_day: { utilization: 0.2, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-stale-status')
+  const acc = await q.repo.get('acc-stale-status')
   assert.equal(acc.unified['5h'].utilization, 0.12)
   assert.equal(acc.unified['5h'].status, 'allowed')
-  assert.equal(q.canAccept('acc-stale-status').ok, true)
+  assert.equal((await q.canAccept('acc-stale-status')).ok, true)
 })
 
-test('probe 5h rejected stays blocked when last_used is missing', () => {
+test('probe 5h rejected stays blocked when last_used is missing', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-no-used', {
+  await q.ingestOAuthUsage('acc-no-used', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: {
@@ -847,12 +852,12 @@ test('probe 5h rejected stays blocked when last_used is missing', () => {
     seven_day: { utilization: 0, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const gate = q.canAccept('acc-no-used')
+  const gate = await q.canAccept('acc-no-used')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'quota_5h_cli')
 })
 
-test('probe 5h rejected stays blocked when the slot was used in this window', () => {
+test('probe 5h rejected stays blocked when the slot was used in this window', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
@@ -861,20 +866,20 @@ test('probe 5h rejected stays blocked when the slot was used in this window', ()
   q.attachRuntimeRepo({
     get: () => ({ last_used_at: Date.now() - 60_000 }),
   })
-  q.ingestOAuthUsage('acc-hot', {
+  await q.ingestOAuthUsage('acc-hot', {
     ok: true,
     five_hour: { utilization: 1, resets_at: reset, status: 'rejected' },
     seven_day: { utilization: 0, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const gate = q.canAccept('acc-hot')
+  const gate = await q.canAccept('acc-hot')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'quota_5h_cli')
 })
 
-test('persistEffectiveWindows writes a cleared 5h after reset elapsed', () => {
+test('persistEffectiveWindows writes a cleared 5h after reset elapsed', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestOAuthUsage('acc-persist', {
+  await q.ingestOAuthUsage('acc-persist', {
     ok: true,
     source: 'vm-oauth-usage',
     five_hour: {
@@ -885,29 +890,29 @@ test('persistEffectiveWindows writes a cleared 5h after reset elapsed', () => {
     seven_day: { utilization: 0.2, status: 'allowed' },
     probed_at: new Date(Date.now() - 3600_000).toISOString(),
   })
-  const saved = q.persistEffectiveWindows('acc-persist')
+  const saved = await q.persistEffectiveWindows('acc-persist')
   assert.equal(Number(saved.unified['5h'].utilization), 0)
   assert.equal(saved.unified['5h'].status, 'active')
   assert.equal(saved.unified['5h'].stale, true)
-  assert.equal(q.canAccept('acc-persist').ok, true)
+  assert.equal((await q.canAccept('acc-persist')).ok, true)
 })
 
-test('elapsed 5h reset is not a hard block even after a live header write', () => {
+test('elapsed 5h reset is not a hard block even after a live header write', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.95, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestHeaders('acc-elapsed', {
+  await q.ingestHeaders('acc-elapsed', {
     'anthropic-ratelimit-unified-5h-utilization': '1',
     'anthropic-ratelimit-unified-5h-status': 'rejected',
     'anthropic-ratelimit-unified-5h-reset': new Date(Date.now() - 60_000).toISOString(),
   })
-  assert.equal(q.canAccept('acc-elapsed').ok, true)
+  assert.equal((await q.canAccept('acc-elapsed')).ok, true)
 })
 
-test('429 unified exhausted marks headers rejected without inventing official 100%', () => {
+test('429 unified exhausted marks headers rejected without inventing official 100%', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'acc-429',
     {
       'anthropic-ratelimit-unified-5h-utilization': '0.84',
@@ -916,33 +921,33 @@ test('429 unified exhausted marks headers rejected without inventing official 10
     null,
     { exhausted: true, status: 429 },
   )
-  const acc = q.repo.get('acc-429')
+  const acc = await q.repo.get('acc-429')
   assert.equal(acc.unified.headers['5h'].status, 'rejected')
   assert.equal(acc.unified.headers['5h'].utilization, 0.84)
   assert.notEqual(acc.unified.official?.['5h']?.utilization, 1)
-  assert.equal(q.canAccept('acc-429').ok, false)
+  assert.equal((await q.canAccept('acc-429')).ok, false)
 })
 
-test('local 429 without quota evidence does not reject the 5h window', () => {
+test('local 429 without quota evidence does not reject the 5h window', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ingestHeaders('acc-local-429', {
+  await q.ingestHeaders('acc-local-429', {
     'anthropic-ratelimit-unified-5h-utilization': '0.23',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
     'anthropic-ratelimit-unified-7d-utilization': '0.04',
     'anthropic-ratelimit-unified-7d-status': 'allowed',
   })
-  q.ingestHeaders('acc-local-429', {}, null, { status: 429, exhausted: false, countRequest: false })
-  q.ingestHeaders('acc-local-503', {
+  await q.ingestHeaders('acc-local-429', {}, null, { status: 429, exhausted: false, countRequest: false })
+  await q.ingestHeaders('acc-local-503', {
     'anthropic-ratelimit-unified-5h-utilization': '0.23',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  q.ingestHeaders('acc-local-503', {}, null, { status: 503, exhausted: false, countRequest: false })
-  const local = q.repo.get('acc-local-429')
+  await q.ingestHeaders('acc-local-503', {}, null, { status: 503, exhausted: false, countRequest: false })
+  const local = await q.repo.get('acc-local-429')
   assert.equal(local.unified.headers['5h'].status, 'allowed')
   assert.equal(local.unified.headers['5h'].utilization, 0.23)
   assert.equal(local.unified.headers['7d'].status, 'allowed')
-  assert.equal(q.repo.get('acc-local-503').unified.headers['5h'].status, 'allowed')
-  q.ingestHeaders(
+  assert.equal((await q.repo.get('acc-local-503')).unified.headers['5h'].status, 'allowed')
+  await q.ingestHeaders(
     'acc-header-429',
     {
       'anthropic-ratelimit-unified-5h-utilization': '0.9',
@@ -951,46 +956,46 @@ test('local 429 without quota evidence does not reject the 5h window', () => {
     null,
     { status: 429, exhausted: false, countRequest: false },
   )
-  assert.equal(q.repo.get('acc-header-429').unified.headers['5h'].status, 'rejected')
-  assert.equal(q.canAccept('acc-local-429').ok, true)
-  assert.equal(q.canAccept('acc-header-429').ok, false)
+  assert.equal((await q.repo.get('acc-header-429')).unified.headers['5h'].status, 'rejected')
+  assert.equal((await q.canAccept('acc-local-429')).ok, true)
+  assert.equal((await q.canAccept('acc-header-429')).ok, false)
 })
 
-test('stuck 5h header with growing tokens does not lift official utilization', () => {
+test('stuck 5h header with growing tokens does not lift official utilization', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { block_on_5h: true }, tiers: { default: { limit_5h: 0.85 } } },
   })
-  q.ingestOAuthUsage('acc-stall', {
+  await q.ingestOAuthUsage('acc-stall', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 0.44, status: 'allowed', resets_at: futureReset(4 * 3600_000) },
     seven_day: { utilization: 0.36, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'acc-stall',
     { 'anthropic-ratelimit-unified-5h-utilization': '0.44' },
     { input_tokens: 100, output_tokens: 20 },
   )
-  q.ingestHeaders(
+  await q.ingestHeaders(
     'acc-stall',
     { 'anthropic-ratelimit-unified-5h-utilization': '0.44' },
     { input_tokens: 8000, output_tokens: 2000 },
   )
-  const acc = q.repo.get('acc-stall')
+  const acc = await q.repo.get('acc-stall')
   assert.equal(acc.unified.official['5h'].utilization, 0.44)
   assert.equal(acc.unified['5h'].utilization, 0.44)
   assert.equal(acc.unified.header_stall, 0)
-  assert.equal(q.canAccept('acc-stall').ok, true)
+  assert.equal((await q.canAccept('acc-stall')).ok, true)
 })
 
-test('official /usage 40 percent is 0.40 and stays under the 80 percent gate', () => {
+test('official /usage 40 percent is 0.40 and stays under the 80 percent gate', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, weekly_safety_ratio: 0.8, block_on_5h: true, block_on_7d: true } },
   })
-  q.ingestOAuthUsage('acc-40', {
+  await q.ingestOAuthUsage('acc-40', {
     ok: true,
     source: 'official-cc-usage',
     interpretations: {
@@ -1001,12 +1006,12 @@ test('official /usage 40 percent is 0.40 and stays under the 80 percent gate', (
     },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-40')
+  const acc = await q.repo.get('acc-40')
   assert.equal(acc.unified.official['5h'].utilization, 0.4)
-  assert.equal(q.canAccept('acc-40').ok, true)
+  assert.equal((await q.canAccept('acc-40')).ok, true)
 })
 
-test('persistEffectiveWindows clears leftover quota cooldown when official is under the gate', () => {
+test('persistEffectiveWindows clears leftover quota cooldown when official is under the gate', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, block_on_5h: true, block_on_7d: true } },
@@ -1014,8 +1019,8 @@ test('persistEffectiveWindows clears leftover quota cooldown when official is un
   const runtime = new Map()
   q.attachRuntimeRepo({
     get: (id) => runtime.get(id) || null,
-    upsert: (row) => {
-      runtime.set(row.account_id, { ...runtime.get(row.account_id), ...row })
+    upsert: async (row) => {
+      runtime.set(row.account_id, { ...(await runtime.get(row.account_id)), ...row })
     },
     updateWindow: () => {},
   })
@@ -1025,25 +1030,25 @@ test('persistEffectiveWindows clears leftover quota cooldown when official is un
     cooldown_until: Date.now() + 3600_000,
     cooldown_reason: 'account_quota_exhausted',
   })
-  q.ingestOAuthUsage('acc-reconcile', {
+  await q.ingestOAuthUsage('acc-reconcile', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 0.44, status: 'allowed', resets_at: futureReset(4 * 3600_000) },
     seven_day: { utilization: 0.36, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  assert.equal(runtime.get('acc-reconcile').cooldown_until, null)
+  assert.equal((await runtime.get('acc-reconcile')).cooldown_until, null)
   runtime.set('acc-reconcile', {
-    ...runtime.get('acc-reconcile'),
+    ...(await runtime.get('acc-reconcile')),
     cooldown_until: Date.now() + 3600_000,
     cooldown_reason: 'account_quota_exhausted',
   })
-  q.persistEffectiveWindows('acc-reconcile')
-  assert.equal(runtime.get('acc-reconcile').cooldown_until, null)
-  assert.equal(q.canAccept('acc-reconcile').ok, true)
+  await q.persistEffectiveWindows('acc-reconcile')
+  assert.equal((await runtime.get('acc-reconcile')).cooldown_until, null)
+  assert.equal((await q.canAccept('acc-reconcile')).ok, true)
 })
 
-test('official 0.44 allowed overwrites local 0.9 and clears quota cooldown', () => {
+test('official 0.44 allowed overwrites local 0.9 and clears quota cooldown', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, block_on_5h: true, block_on_7d: true } },
@@ -1051,8 +1056,8 @@ test('official 0.44 allowed overwrites local 0.9 and clears quota cooldown', () 
   const runtime = new Map()
   q.attachRuntimeRepo({
     get: (id) => runtime.get(id) || null,
-    upsert: (row) => {
-      runtime.set(row.account_id, { ...runtime.get(row.account_id), ...row })
+    upsert: async (row) => {
+      runtime.set(row.account_id, { ...(await runtime.get(row.account_id)), ...row })
     },
     updateWindow: () => {},
   })
@@ -1062,7 +1067,7 @@ test('official 0.44 allowed overwrites local 0.9 and clears quota cooldown', () 
     cooldown_until: Date.now() + 3600_000,
     cooldown_reason: 'account_quota_exhausted',
   })
-  q.ingestOAuthUsage('acc-clear', {
+  await q.ingestOAuthUsage('acc-clear', {
     ok: true,
     source: 'official-cc-usage',
     // 0.85 line + 0.05 default overshoot.
@@ -1070,24 +1075,24 @@ test('official 0.44 allowed overwrites local 0.9 and clears quota cooldown', () 
     seven_day: { utilization: 0.36, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  assert.equal(q.canAccept('acc-clear').ok, false)
-  q.ingestOAuthUsage('acc-clear', {
+  assert.equal((await q.canAccept('acc-clear')).ok, false)
+  await q.ingestOAuthUsage('acc-clear', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 0.44, status: 'allowed', resets_at: futureReset(4 * 3600_000) },
     seven_day: { utilization: 0.36, status: 'allowed' },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-clear')
+  const acc = await q.repo.get('acc-clear')
   assert.equal(acc.unified.official['5h'].utilization, 0.44)
-  assert.equal(q.canAccept('acc-clear').ok, true)
-  assert.equal(runtime.get('acc-clear').cooldown_until, null)
-  assert.equal(runtime.get('acc-clear').cooldown_reason, null)
+  assert.equal((await q.canAccept('acc-clear')).ok, true)
+  assert.equal((await runtime.get('acc-clear')).cooldown_until, null)
+  assert.equal((await runtime.get('acc-clear')).cooldown_reason, null)
 })
 
-test('/usage 40 writes Extra 0.40; 1 percent writes 0.01 not 1.0', () => {
+test('/usage 40 writes Extra 0.40; 1 percent writes 0.01 not 1.0', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { quota: { safety_ratio: 0.85, block_on_5h: true } } })
-  q.ingestOAuthUsage('acc-scale', {
+  await q.ingestOAuthUsage('acc-scale', {
     ok: true,
     source: 'official-cc-usage',
     interpretations: {
@@ -1098,18 +1103,18 @@ test('/usage 40 writes Extra 0.40; 1 percent writes 0.01 not 1.0', () => {
     },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-scale')
+  const acc = await q.repo.get('acc-scale')
   assert.equal(acc.unified.headers['5h'].utilization, 0.4)
   assert.equal(acc.unified.headers['7d'].utilization, 0.01)
   assert.notEqual(acc.unified.headers['7d'].utilization, 1)
 })
 
-test('official 0.90 plus header 0.40 is schedulable', () => {
+test('official 0.90 plus header 0.40 is schedulable', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, weekly_safety_ratio: 0.8, block_on_5h: true, block_on_7d: true } },
   })
-  const acc = q.ensure({ account_id: 'acc-mix-open' })
+  const acc = await q.ensure({ account_id: 'acc-mix-open' })
   acc.unified.official = {
     '5h': { utilization: 0.9, status: 'allowed', reset: futureReset(4 * 3600_000) },
     '7d': { utilization: 0.9, status: 'allowed' },
@@ -1121,16 +1126,16 @@ test('official 0.90 plus header 0.40 is schedulable', () => {
     '5h': { utilization: 0.4, status: 'allowed', reset: futureReset(4 * 3600_000) },
     '7d': { utilization: 0.2, status: 'allowed' },
   }
-  q.repo.save(acc)
-  assert.equal(q.canAccept('acc-mix-open').ok, true)
+  await q.repo.save(acc)
+  assert.equal((await q.canAccept('acc-mix-open')).ok, true)
 })
 
-test('header 0.90 plus official 0.40 hits the 5h gate', () => {
+test('header 0.90 plus official 0.40 hits the 5h gate', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: { quota: { safety_ratio: 0.85, weekly_safety_ratio: 0.8, block_on_5h: true, block_on_7d: true } },
   })
-  const acc = q.ensure({ account_id: 'acc-mix-shut' })
+  const acc = await q.ensure({ account_id: 'acc-mix-shut' })
   acc.unified.official = {
     '5h': { utilization: 0.4, status: 'allowed', reset: futureReset(4 * 3600_000) },
   }
@@ -1138,46 +1143,46 @@ test('header 0.90 plus official 0.40 hits the 5h gate', () => {
     sampled_at: new Date().toISOString(),
     '5h': { utilization: 0.9, status: 'allowed', reset: futureReset(4 * 3600_000) },
   }
-  q.repo.save(acc)
-  const gate = q.canAccept('acc-mix-shut')
+  await q.repo.save(acc)
+  const gate = await q.canAccept('acc-mix-shut')
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'quota_5h_safety')
 })
 
-test('elapsed Extra is not restored from leftover official 100%', () => {
+test('elapsed Extra is not restored from leftover official 100%', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { quota: { safety_ratio: 0.85, block_on_5h: true } } })
   const nextReset = new Date(Date.now() + 4 * 3600_000).toISOString()
-  q.ingestOAuthUsage('acc-restore', {
+  await q.ingestOAuthUsage('acc-restore', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 1, status: 'rejected', resets_at: nextReset },
     seven_day: { utilization: 0.2, status: 'allowed', resets_at: nextReset },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-restore')
+  const acc = await q.repo.get('acc-restore')
   acc.unified.headers['5h'] = {
     utilization: 1,
     status: 'rejected',
     reset: new Date(Date.now() - 30_000).toISOString(),
   }
-  q.repo.save(acc)
-  const saved = q.persistEffectiveWindows('acc-restore')
+  await q.repo.save(acc)
+  const saved = await q.persistEffectiveWindows('acc-restore')
   assert.equal(Number(saved.unified.headers['5h'].utilization), 0)
   assert.equal(saved.unified.headers['5h'].status, 'active')
-  assert.equal(q.canAccept('acc-restore').ok, true)
+  assert.equal((await q.canAccept('acc-restore')).ok, true)
 })
 
-test('already-wiped Extra stays empty when official leftover is still 100%', () => {
+test('already-wiped Extra stays empty when official leftover is still 100%', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { quota: { safety_ratio: 0.85, block_on_5h: true } } })
   const nextReset = new Date(Date.now() + 4 * 3600_000).toISOString()
-  q.ingestOAuthUsage('acc-stale-wipe', {
+  await q.ingestOAuthUsage('acc-stale-wipe', {
     ok: true,
     source: 'official-cc-usage',
     five_hour: { utilization: 1, status: 'rejected', resets_at: nextReset },
     seven_day: { utilization: 0.2, status: 'allowed', resets_at: nextReset },
     probed_at: new Date().toISOString(),
   })
-  const acc = q.repo.get('acc-stale-wipe')
+  const acc = await q.repo.get('acc-stale-wipe')
   acc.unified.headers['5h'] = {
     utilization: 0,
     status: 'active',
@@ -1185,22 +1190,22 @@ test('already-wiped Extra stays empty when official leftover is still 100%', () 
     stale: true,
     stale_reason: 'reset_elapsed',
   }
-  q.repo.save(acc)
-  const saved = q.persistEffectiveWindows('acc-stale-wipe')
+  await q.repo.save(acc)
+  const saved = await q.persistEffectiveWindows('acc-stale-wipe')
   assert.equal(Number(saved.unified.headers['5h'].utilization), 0)
   assert.equal(saved.unified.headers['5h'].status, 'active')
-  assert.equal(q.canAccept('acc-stale-wipe').ok, true)
+  assert.equal((await q.canAccept('acc-stale-wipe')).ok, true)
 })
 
-test('persistEffectiveWindows heals Extra overwritten by leftover official 100%', () => {
+test('persistEffectiveWindows heals Extra overwritten by leftover official 100%', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { quota: { safety_ratio: 0.85, block_on_5h: true } } })
   const reset = futureReset(4 * 3600_000)
-  q.ingestHeaders('acc-heal', {
+  await q.ingestHeaders('acc-heal', {
     'anthropic-ratelimit-unified-5h-utilization': '0.36',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
     'anthropic-ratelimit-unified-5h-reset': reset,
   })
-  const acc = q.repo.get('acc-heal')
+  const acc = await q.repo.get('acc-heal')
   acc.unified.official = {
     '5h': { utilization: 1, status: 'rejected', reset },
     '7d': { utilization: 0.5, status: 'allowed' },
@@ -1210,41 +1215,112 @@ test('persistEffectiveWindows heals Extra overwritten by leftover official 100%'
   acc.unified.headers.sampled_at = '2026-08-25T08:40:57.012Z'
   acc.last_probe = { ok: true, source: 'official-cc-usage', at: '2026-08-25T08:40:57.012Z' }
   acc.unified.last_probe = acc.last_probe
-  q.repo.save(acc)
-  const saved = q.persistEffectiveWindows('acc-heal')
+  await q.repo.save(acc)
+  const saved = await q.persistEffectiveWindows('acc-heal')
   assert.equal(Number(saved.unified.headers['5h'].utilization), 0.36)
   assert.equal(saved.unified.headers['5h'].status, 'allowed')
-  assert.equal(q.canAccept('acc-heal').ok, true)
+  assert.equal((await q.canAccept('acc-heal')).ok, true)
 })
 
-test('elapsed header reset wipes Extra and becomes schedulable', () => {
+test('elapsed header reset wipes Extra and becomes schedulable', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: { quota: { safety_ratio: 0.85, block_on_5h: true } } })
-  q.ingestHeaders('acc-wipe', {
+  await q.ingestHeaders('acc-wipe', {
     'anthropic-ratelimit-unified-5h-utilization': '0.91',
     'anthropic-ratelimit-unified-5h-status': 'rejected',
     'anthropic-ratelimit-unified-5h-reset': new Date(Date.now() - 30_000).toISOString(),
   })
-  assert.equal(q.canAccept('acc-wipe').ok, true)
-  const saved = q.persistEffectiveWindows('acc-wipe')
+  assert.equal((await q.canAccept('acc-wipe')).ok, true)
+  const saved = await q.persistEffectiveWindows('acc-wipe')
   assert.equal(Number(saved.unified.headers['5h'].utilization), 0)
   assert.equal(saved.unified.headers['5h'].status, 'active')
 })
 
 test('complete usage may replace a profile-sourced tier', async () => {
   const quota = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  quota.ensure({ account_id: 'acct-profile', vm_id: 'vm-01' })
-  quota.setAccountTier('acct-profile', 'pro', { source: 'profile' })
-  quota.setAccountTier('acct-profile', 'max')
-  assert.equal(quota.repo.get('acct-profile').unified.account_tier, 'pro')
-  quota.ingestOAuthUsage('acct-profile', {
+  await quota.ensure({ account_id: 'acct-profile', vm_id: 'vm-01' })
+  await quota.setAccountTier('acct-profile', 'pro', { source: 'profile' })
+  await quota.setAccountTier('acct-profile', 'max')
+  assert.equal((await quota.repo.get('acct-profile')).unified.account_tier, 'pro')
+  await quota.ingestOAuthUsage('acct-profile', {
     ok: true,
     usage_status: 200,
     limits_present: true,
     usage_has_fable: true,
     seven_day_oi: { utilization: 0.2, resets_at: '2026-09-30T00:00:00Z' },
   })
-  assert.equal(quota.repo.get('acct-profile').unified.account_tier, 'max')
-  assert.equal(quota.repo.get('acct-profile').unified.account_tier_source, 'usage')
-  quota.setAccountTier('acct-profile', 'max', { source: 'profile' })
-  assert.equal(quota.repo.get('acct-profile').unified.account_tier, 'max')
+  assert.equal((await quota.repo.get('acct-profile')).unified.account_tier, 'max')
+  assert.equal((await quota.repo.get('acct-profile')).unified.account_tier_source, 'usage')
+  await quota.setAccountTier('acct-profile', 'max', { source: 'profile' })
+  assert.equal((await quota.repo.get('acct-profile')).unified.account_tier, 'max')
+})
+
+test('Fable reset-only headers advance that window without clearing utilization or refreshing other windows', async (t) => {
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const q = new AccountQuota({ db, config: {} })
+  const firstReset = futureReset(3 * 86400_000)
+  await q.ingestHeaders('fable-reset-only', {
+    'anthropic-ratelimit-unified-5h-utilization': '0.2',
+    'anthropic-ratelimit-unified-7d_oi-utilization': '0.87',
+    'anthropic-ratelimit-unified-7d_oi-status': 'allowed_warning',
+    'anthropic-ratelimit-unified-7d_oi-reset': firstReset,
+  })
+  const first = await q.repo.get('fable-reset-only')
+  t.mock.timers.tick(1000)
+  const secondReset = futureReset(4 * 86400_000)
+  await q.ingestHeaders('fable-reset-only', { 'anthropic-ratelimit-unified-7d_oi-reset': secondReset })
+  const next = await q.repo.get('fable-reset-only')
+  assert.equal(next.unified['7d_oi'].reset, secondReset)
+  assert.equal(next.unified['7d_oi'].utilization, 0.87)
+  assert.equal(next.unified['7d_oi'].status, 'allowed_warning')
+  assert.ok(Date.parse(next.unified['7d_oi'].sampled_at) > Date.parse(first.unified['7d_oi'].sampled_at))
+  assert.equal(next.unified.headers['5h'].sampled_at, first.unified.headers['5h'].sampled_at)
+})
+
+test('older official cache cannot overwrite newer per-window response samples or clear a fresh hard rejection', async (t) => {
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const q = new AccountQuota({ db, config: {} })
+  const stale = {
+    ok: true,
+    usage_status: 200,
+    source: 'official-cc-usage',
+    probed_at: new Date().toISOString(),
+    limits_present: true,
+    usage_has_fable: false,
+    five_hour: { utilization: 0.3, status: 'allowed', resets_at: futureReset(4 * 3600_000) },
+    seven_day: { utilization: 0.2, status: 'allowed', resets_at: futureReset(6 * 86400_000) },
+  }
+  await q.ingestOAuthUsage('cache-order', stale)
+  t.mock.timers.tick(1000)
+  await q.ingestHeaders('cache-order', {
+    'anthropic-ratelimit-unified-5h-utilization': '0.95',
+    'anthropic-ratelimit-unified-5h-status': 'rejected',
+    'anthropic-ratelimit-unified-7d-utilization': '0.62',
+    'anthropic-ratelimit-unified-7d_oi-utilization': '0.41',
+    'anthropic-ratelimit-unified-7d_oi-reset': futureReset(5 * 86400_000),
+  })
+  const observed = (await q.repo.get('cache-order')).unified
+  t.mock.timers.tick(1000)
+  await q.ingestOAuthUsage('cache-order', stale)
+  let current = (await q.repo.get('cache-order')).unified
+  for (const key of ['5h', '7d', '7d_oi']) assert.deepEqual(current.headers[key], observed.headers[key])
+  assert.deepEqual(current['7d_oi'], observed['7d_oi'])
+  assert.equal(current.headers.exhausted_at, observed.headers.exhausted_at)
+  assert.equal((await q.canAccept('cache-order')).ok, false)
+
+  // A newer response with only 5h data must not relabel and recopy an old 7d sample.
+  await q.ingestOAuthUsage('cache-order', {
+    ok: true,
+    probed_at: new Date().toISOString(),
+    five_hour: { utilization: 0, status: 'allowed' },
+  })
+  current = (await q.repo.get('cache-order')).unified
+  assert.equal(current.headers['5h'].utilization, 0)
+  assert.equal(current.headers['5h'].status, 'allowed')
+  assert.deepEqual(current.headers['7d'], observed.headers['7d'])
+  assert.deepEqual(current['7d_oi'], observed['7d_oi'])
+  assert.equal((await q.canAccept('cache-order')).ok, true)
 })

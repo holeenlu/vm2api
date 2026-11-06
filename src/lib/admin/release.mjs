@@ -16,16 +16,17 @@ const MODULE_PROJECT = path.resolve(__dirname, '..', '..', '..')
 const execFileAsync = promisify(execFile)
 const UPGRADE_SCRIPT = fs.readFileSync(path.join(MODULE_PROJECT, 'scripts', 'panel-upgrade.sh'), 'utf8')
 
-export const GITHUB_REPO = 'dofastted/vm2api'
+export const GITHUB_REPO = 'holeenlu/vm2api'
 export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh`
 export const DOCKER_SOCK = '/var/run/docker.sock'
 
 const DEFAULT_CACHE_MS = 5 * 60 * 1000
 const GITHUB_TIMEOUT_MS = 8000
 const releaseCache = { at: 0, value: null, error: null }
+let releaseCheckSequence = 0
 
 export function projectRoot(explicit) {
-  return explicit || process.env.KIN_PROJECT_ROOT || process.env.VM2API_HOST_ROOT || MODULE_PROJECT
+  return explicit || process.env.KIN_PROJECT_ROOT || process.env.TAPMODELS_HOST_ROOT || MODULE_PROJECT
 }
 
 export function readLocalVersion(root = projectRoot()) {
@@ -54,7 +55,7 @@ export function readLocalVersion(root = projectRoot()) {
 }
 
 const ARCH_ALIASES = Object.freeze({ amd64: 'amd64', x86_64: 'amd64', x64: 'amd64', arm64: 'arm64', aarch64: 'arm64' })
-const RELEASE_TAG_RE = /^v?(\d+\.\d+\.\d+)(?:-(amd64|x86_64|arm64|aarch64))?$/i
+const RELEASE_TAG_RE = /^v?(\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?)(?:-(amd64|x86_64|arm64|aarch64))?$/i
 
 /** Docker architecture name for uname / Node / Docker spellings; '' when unsupported. */
 export function normalizeArch(value) {
@@ -85,7 +86,7 @@ export function normalizeTag(value) {
 }
 
 export function isReleaseTag(value) {
-  return /^v\d+\.\d+\.\d+$/.test(String(value || '').trim())
+  return /^v\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?$/.test(String(value || '').trim())
 }
 
 /**
@@ -100,10 +101,11 @@ export function imageTagFor(tag, arch = process.arch) {
   return target === 'arm64' ? `${parsed.tag}-arm64` : parsed.tag
 }
 
+/** Numeric application versions: legacy X.Y.Z is revision zero of X.Y.Z.N. */
 export function compareSemver(a, b) {
   const pa = parseSemver(a)
   const pb = parseSemver(b)
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     if (pa[i] > pb[i]) return 1
     if (pa[i] < pb[i]) return -1
   }
@@ -113,7 +115,7 @@ export function compareSemver(a, b) {
 function parseSemver(value) {
   const n = normalizeVersion(value)
   const parts = n.split('.').map((x) => Number.parseInt(x, 10))
-  return [parts[0] || 0, parts[1] || 0, parts[2] || 0]
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0, parts[3] || 0]
 }
 
 function bulletsOf(body) {
@@ -158,7 +160,7 @@ export function parseChangelog(markdown) {
       })
       continue
     }
-    const m = heading.match(/^v?(\d+\.\d+\.\d+)\s*[—–-]\s*(\d{4}-\d{2}-\d{2})?/)
+    const m = heading.match(/^v?(\d+\.\d+\.\d+(?:\.(?:0|[1-9]\d*))?)\s*[—–-]\s*(\d{4}-\d{2}-\d{2})?/)
     if (!m) continue
     entries.push({
       version: m[1],
@@ -208,10 +210,10 @@ export function defaultUpgradeCommand() {
 export function githubApiHeaders(accept = 'application/vnd.github+json') {
   const headers = {
     Accept: accept,
-    'User-Agent': 'vm2api-release-check',
+    'User-Agent': 'tapmodels-release-check',
     'X-GitHub-Api-Version': '2022-11-28',
   }
-  const token = process.env.GITHUB_TOKEN || process.env.VM2API_GITHUB_TOKEN
+  const token = process.env.GITHUB_TOKEN || process.env.TAPMODELS_GITHUB_TOKEN
   if (token) headers.Authorization = `Bearer ${token}`
   return headers
 }
@@ -228,7 +230,7 @@ export function publicRelease(payload) {
   return {
     version,
     tag: normalizeTag(version),
-    name: payload.name || `vm2api ${version}`,
+    name: payload.name || `tapmodels ${version}`,
     html_url: payload.html_url || `https://github.com/${GITHUB_REPO}/releases/tag/${normalizeTag(version)}`,
     published_at: payload.published_at || payload.created_at || null,
     notes: String(payload.body || '').trim(),
@@ -239,57 +241,74 @@ export async function fetchLatestRelease({
   fetchImpl = globalThis.fetch,
   now = Date.now,
   cacheMs = DEFAULT_CACHE_MS,
+  force = false,
 } = {}) {
   const ts = now()
-  if (releaseCache.value && ts - releaseCache.at < cacheMs) {
+  if (!force && releaseCache.value && ts - releaseCache.at < cacheMs) {
     return { release: releaseCache.value, error: releaseCache.error, cached: true }
   }
+  const sequence = ++releaseCheckSequence
+  const finish = (release, error) => {
+    // A slow earlier lookup must not replace the result of a newer manual check.
+    if (sequence === releaseCheckSequence) {
+      releaseCache.at = ts
+      releaseCache.value = release
+      releaseCache.error = error
+    }
+    return { release, error, cached: false }
+  }
   if (!fetchImpl) {
-    releaseCache.at = ts
-    releaseCache.error = 'fetch_unavailable'
-    return { release: releaseCache.value, error: 'fetch_unavailable', cached: false }
+    return finish(releaseCache.value, 'fetch_unavailable')
   }
   try {
-    const res = await fetchImpl(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
-      headers: githubHeaders(),
+    const url = new URL(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
+    // GitHub and intermediaries can cache /latest even after a release is published.
+    if (force) url.searchParams.set('_check', `${ts}-${sequence}`)
+    const res = await fetchImpl(url.href, {
+      headers: { ...githubHeaders(), ...(force ? { 'Cache-Control': 'no-cache' } : {}) },
+      ...(force ? { cache: 'no-store' } : {}),
       signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
     })
     if (!res.ok) {
-      const error = `github_http_${res.status}`
-      releaseCache.at = ts
-      releaseCache.error = error
-      return { release: releaseCache.value, error, cached: false }
+      return finish(releaseCache.value, `github_http_${res.status}`)
     }
     const release = publicRelease(await res.json())
     if (!release) {
-      const error = 'github_empty'
-      releaseCache.at = ts
-      releaseCache.error = error
-      return { release: releaseCache.value, error, cached: false }
+      return finish(releaseCache.value, 'github_empty')
     }
-    releaseCache.at = ts
-    releaseCache.value = release
-    releaseCache.error = null
-    return { release, error: null, cached: false }
+    return finish(release, null)
   } catch (err) {
     const error = String(err?.message || err || 'github_unreachable')
-    releaseCache.at = ts
-    releaseCache.error = error
-    return { release: releaseCache.value, error, cached: false }
+    return finish(releaseCache.value, error)
   }
 }
 
 export function clearReleaseCache() {
+  releaseCheckSequence++
   releaseCache.at = 0
   releaseCache.value = null
   releaseCache.error = null
 }
 
-export async function buildUpdateStatus({ projectRoot: root, currentVersion, upgrade, fetchImpl, now, cacheMs } = {}) {
+export async function buildUpdateStatus({
+  projectRoot: root,
+  currentVersion,
+  upgrade,
+  fetchImpl,
+  now,
+  cacheMs,
+  force,
+  skipRemote = false,
+} = {}) {
   const project = projectRoot(root)
   const current = currentVersion || readLocalVersion(project)
   const entries = loadChangelog(project)
-  const remote = await fetchLatestRelease({ fetchImpl, now, cacheMs })
+  // While the helper is replacing this control plane, polling GitHub adds no
+  // useful information and can turn a healthy in-progress update into a
+  // misleading "check failed" state when the release API times out.
+  const remote = skipRemote
+    ? { release: null, error: null }
+    : await fetchLatestRelease({ fetchImpl, now, cacheMs, force })
   const latest = remote.error ? null : remote.release?.version || null
   const newer = changelogSince(entries, current)
   const updateAvailable = latest ? compareSemver(latest, current) > 0 : null
@@ -300,7 +319,7 @@ export async function buildUpdateStatus({ projectRoot: root, currentVersion, upg
     latest,
     latest_tag: latest ? normalizeTag(latest) : null,
     update_available: updateAvailable,
-    check_status: latest ? 'ok' : 'failed',
+    check_status: skipRemote ? 'not_checked' : latest ? 'ok' : 'failed',
     html_url: remote.release?.html_url || `https://github.com/${GITHUB_REPO}/releases`,
     published_at: remote.release?.published_at || null,
     name: remote.release?.name || null,
@@ -336,7 +355,7 @@ function which(cmd) {
  * control-plane container's own mounts; identity when running natively.
  */
 export function hostRoot(root) {
-  const explicit = String(process.env.VM2API_HOST_ROOT || process.env.KIN_HOST_ROOT || '').trim()
+  const explicit = String(process.env.TAPMODELS_HOST_ROOT || process.env.KIN_HOST_ROOT || '').trim()
   if (explicit) return explicit
   return toHostPath(projectRoot(root), { projectRoot: projectRoot(root) })
 }
@@ -364,7 +383,7 @@ export async function hostUpgradeDeployment({
   execFileImpl = execFileAsync,
 } = {}) {
   if (!containerized || !canSpawnHostUpgrade({ dockerBin, sock })) return null
-  const names = [...new Set([hostname, env.VM2API_CONTAINER_NAME].filter(Boolean))]
+  const names = [...new Set([hostname, env.TAPMODELS_CONTAINER_NAME].filter(Boolean))]
   for (const name of names) {
     try {
       const container = await inspectContainer(name, { dockerBin, execFileImpl })
@@ -379,7 +398,7 @@ export async function hostUpgradeDeployment({
         !container.State?.Running ||
         !container.Id ||
         container.Config?.Hostname !== hostname ||
-        labels['com.docker.compose.service'] !== 'vm2api' ||
+        labels['com.docker.compose.service'] !== 'tapmodels' ||
         !/^[a-z0-9][a-z0-9_-]*$/.test(project || '') ||
         !path.isAbsolute(root || '') ||
         !files.length ||
@@ -393,7 +412,7 @@ export async function hostUpgradeDeployment({
         files,
         container: String(container.Name || name).replace(/^\//, ''),
         id: container.Id,
-        helper: `vm2api-upgrade-${project}`,
+        helper: `tapmodels-upgrade-${project}`,
       }
     } catch {
       // Try the hostname when an explicitly configured name is stale.
@@ -410,14 +429,40 @@ export async function readHostUpgradeStatus(options = {}) {
       dockerBin: options.dockerBin || which('docker'),
       execFileImpl: options.execFileImpl || execFileAsync,
     })
-    const target = container.Config?.Labels?.['vm2api.upgrade.target']
+    const target = container.Config?.Labels?.['tapmodels.upgrade.target']
     if (!isReleaseTag(target)) return null
     const state = container.State || {}
+    let progress = null
+    try {
+      const file = path.join(deployment.root, '.tapmodels-upgrade-status')
+      const values = Object.fromEntries(
+        fs
+          .readFileSync(file, 'utf8')
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => {
+            const index = line.indexOf('=')
+            return index === -1 ? [line, ''] : [line.slice(0, index), line.slice(index + 1)]
+          }),
+      )
+      if (!values.target || values.target === target) {
+        const parsedProgress = Number(values.progress)
+        progress = {
+          phase: values.phase || null,
+          progress: Number.isFinite(parsedProgress) ? parsedProgress : null,
+          message: values.message || null,
+          updated_at: values.updated_at || null,
+        }
+      }
+    } catch {
+      // The helper may not have written its first status record yet.
+    }
     return {
       state: state.Status === 'exited' ? (state.ExitCode === 0 ? 'succeeded' : 'failed') : 'running',
       target,
       exit_code: state.Status === 'exited' ? state.ExitCode : null,
       log_command: `docker logs ${deployment.helper}`,
+      ...(progress || {}),
     }
   } catch {
     return null
@@ -463,7 +508,7 @@ export async function startHostUpgrade({
       error: { message: `版本后缀 -${requested.arch} 与控制面架构 ${hostArch} 不符`, code: 'arch_mismatch' },
     }
   }
-  const status = await buildUpdateStatus({ projectRoot: root, currentVersion, fetchImpl, now })
+  const status = await buildUpdateStatus({ projectRoot: root, currentVersion, fetchImpl, now, force: true })
   if (!requested && status.source_error) {
     return {
       status: 502,
@@ -522,7 +567,7 @@ export async function startHostUpgrade({
         '--name',
         deployment.helper,
         '--label',
-        `vm2api.upgrade.target=${target}`,
+        `tapmodels.upgrade.target=${target}`,
         '-v',
         `${deployment.root}:${deployment.root}`,
         '-v',

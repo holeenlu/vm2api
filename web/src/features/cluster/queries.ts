@@ -1,4 +1,3 @@
-import { queryOptions } from '@tanstack/react-query'
 import type {
   ClusterNodePatch,
   ClusterNodeUpdateProbe,
@@ -11,8 +10,10 @@ import type {
 } from '@/types/panel-cluster'
 import type { RuntimeType } from '@/types/panel-vm'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
+import { queryOptions } from '@/lib/query-options'
 
-export const CLUSTER_NODES_KEY = ['panel', 'cluster', 'nodes'] as const
+export const CLUSTER_NODES_KEY = panelQueryKeys.clusterNodes()
 
 export function clusterNodesQueryOptions(refetchInterval = 5000) {
   return queryOptions({
@@ -26,7 +27,7 @@ export function clusterNodesQueryOptions(refetchInterval = 5000) {
   })
 }
 
-export const CLUSTER_LOCAL_KEY = ['panel', 'cluster', 'local'] as const
+export const CLUSTER_LOCAL_KEY = panelQueryKeys.clusterLocal()
 
 /** 服务端缓存 30s；`refresh` 强制重新观测（两次远端 exec）。 */
 export function clusterLocalQueryOptions() {
@@ -41,7 +42,7 @@ export function clusterLocalQueryOptions() {
 
 export function dockerInfoQueryOptions(nodeId: string, enabled: boolean) {
   return queryOptions({
-    queryKey: ['panel', 'cluster', nodeId, 'docker', 'info'] as const,
+    queryKey: panelQueryKeys.clusterDockerInfo(nodeId),
     queryFn: () =>
       api<DockerInfo>(`/api/panel/cluster/nodes/${nodeId}/docker/info`),
     enabled,
@@ -51,7 +52,7 @@ export function dockerInfoQueryOptions(nodeId: string, enabled: boolean) {
 
 export function dockerContainersQueryOptions(nodeId: string, enabled: boolean) {
   return queryOptions({
-    queryKey: ['panel', 'cluster', nodeId, 'docker', 'containers'] as const,
+    queryKey: panelQueryKeys.clusterContainers(nodeId),
     queryFn: () =>
       api<{ items: DockerContainer[] }>(
         `/api/panel/cluster/nodes/${nodeId}/docker/containers`
@@ -92,26 +93,25 @@ export function updateClusterNode(
 
 /**
  * 放置预检。服务端是 POST（要实际 SSH 过去跑检查），但语义是只读观测，
- * 按 节点 + 内核 缓存成 query；不自动轮询，由调用方手动 refetch。
+ * 按 节点 + 内核 + 运行时 + 单槽内存缓存成 query；不自动轮询，由调用方手动 refetch。
  */
 export function nodePreflightQueryOptions(
   nodeId: string,
   kernel: string,
-  runtimeType: RuntimeType = 'docker'
+  runtimeType: RuntimeType = 'docker',
+  memory?: string
 ) {
   return queryOptions({
-    queryKey: [
-      'panel',
-      'cluster',
+    queryKey: panelQueryKeys.clusterPreflight(
       nodeId,
-      'preflight',
       kernel,
       runtimeType,
-    ] as const,
+      memory
+    ),
     queryFn: () =>
       api<NodePreflight>(
         `${nodePath(nodeId)}/preflight`,
-        jsonBody({ kernel, runtime_type: runtimeType })
+        jsonBody({ kernel, runtime_type: runtimeType, memory })
       ),
     enabled: !!nodeId && !!kernel,
     staleTime: 0,
@@ -127,7 +127,7 @@ export function slotImageJobQueryOptions(
   enabled: boolean
 ) {
   return queryOptions({
-    queryKey: ['panel', 'cluster', nodeId, 'slot-image', kernel] as const,
+    queryKey: panelQueryKeys.clusterSlotImage(nodeId, kernel),
     queryFn: () =>
       api<SlotImageJob | null>(
         `${nodePath(nodeId)}/slot-image?kernel=${encodeURIComponent(kernel)}`
