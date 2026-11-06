@@ -96,7 +96,7 @@ export async function readNodeHost(client) {
     uid: Number(uid),
     gid: Number(gid),
     home,
-    root: `${home.replace(/\/+$/, '')}/.vm2api`,
+    root: `${home.replace(/\/+$/, '')}/.tapmodels`,
     sudo: sudo === 'sudo',
     platform: nodePlatformOf(kernel),
   }
@@ -140,7 +140,7 @@ export async function verifyNodeRuntimes(client, host, vms, previousHost) {
       !info ||
       (runtime.container_id && info.Id !== runtime.container_id) ||
       info.Config?.Labels?.['kin.vm.id'] !== vm.id ||
-      info.Config?.Labels?.['vm2api.cluster'] !== '1'
+      info.Config?.Labels?.['tapmodels.cluster'] !== '1'
     )
       throw runtimeMismatch()
     if (host.uid !== 0 && runtime.user !== `${host.uid}:${host.gid}`) throw runtimeMismatch()

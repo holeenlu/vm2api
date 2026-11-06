@@ -32,6 +32,12 @@
 
 四闸不全 → 非官方，走人设。虚拟机测试入站会先铺 4 块官方 system + 官方 UA，因此分类为 `claude_code_official`。
 
+### 桌面端连接检测与 CLI 侧查询（上游 1.4.045）
+
+开启 `compatibility.claude_code_only` 时，Claude Desktop（4.4212.0 起）的自定义 Gateway 登录检测在 Anthropic Messages 入口本地直接回 `OK`：须为 Electron UA（含 `Claude/x.y.z` 与 `Electron/x.y.z`）、`anthropic-version: 2023-06-01`，正文只有 `model`（claude-haiku/sonnet/opus 系列）、`max_tokens` 1 或 16、单条 user `"."`，不流式。该探测不选账号、不运行模型、零用量，请求日志记为 `desktop-connection-probe`；任何其它形状仍按正常准入。开关关闭时它是普通请求。
+
+CLI 自己的侧查询（WebSearch 工具的检索轮、WebFetch 页面摘要）不带 `claude-code-20250219` beta，按固定形状放行，其余官方指纹检查照常；中转的官方 Claude Code 还须带有效 `user_id` 与官方 system，单独粘贴一行计费头不能通过。
+
 ## 非官方人设
 
 每次请求热读 `routing.compatibility`（改盘无需重启 Node）。仓库配置为：
@@ -41,7 +47,6 @@
 | `persona_preset` | `official_full` | 使用独立的完整官方模板；`official` 保留原有官方提示词 |
 | `overlay_preset` | `off` | 不向首条 user 注入 overlay |
 | `persona_park` | `false` | 与 `overlay_preset=off` 对齐 |
-| `cache_ttl` | `1h` | Node 重写时新增点的缺省 TTL；`x-kin-cache-ttl` 参与首次会话选择，不覆盖 native 透传 caller / 模板显式 TTL |
 
 **official / official_full 模板**统一采用 2.1.303 OAuth 抓包中的 harness + guidance；顶层 `system` 只装提示词与调用方 `caller_system`。Environment 放入 `messages[].role=system`，不打缓存点，不混入顶层提示词。身份和 billing 入口跟随 `cc_entrypoint`。所有档位均使用 2.1.303，不再提供单独的 `official_303` 选项；旧值读写时归一为 `official_full`，旧开关和模板迁移到完整版，已有明确的完整版配置优先。
 
@@ -53,11 +58,10 @@
 
 **按档开关**（`{official,official_full,zero,custom}: boolean`）：
 - `agent_standing_presets`：是否写常驻约束，缺 map 或缺 key 视为关。控制台开关、预览与 Node 出站使用同一缺省语义。
-- `agent_standing_hide_presets`：常驻约束是否从客户端 usage 中扣除，缺 map/key 视为开，独立于整档遮罩；未启用约束时不扣约束 token。cli-hop 0注入 同样生效。
 - `persona_env_presets`：是否写生成的 `{{env}}` / `{{env_timezone_only}}` / `{{env_official}}` 及槽位 `{{timezone}}`，缺 map/key 视为开。关闭时删除生成的整个环境块（含官方完整档 continuation 环境块），不留下带 cache 的零宽环境占位；调用方或自定义模板字面写入的 Environment / 时区保留，不用槽位时区覆盖。控制台预览与最终出站一致，各档独立。
 - `persona_env_instructions_presets`：完整版长环境说明，缺 map/key 视为关。
 - `persona_timezone_presets` / `persona_locale_presets`：独立加载槽位时区 / locale，缺 map/key 视为关。`persona_env_presets=false` 同时停用所有生成的环境消息，包括模型附加句；调用方已有 `role=system` 原文保留。
-- `persona_hide_presets`：整档 usage 遮罩（billing / identity / agent / Environment 等 `hide:true` 块）。缺 key 时依次回落旧全局 `persona_hides`、该档模板的 `hide` 标记（默认 zero 开、其余关）。槽位单独指定人设时读该槽位档的开关；cli-hop 0注入 关掉后 CLI billing + Environment 计入 usage。
+- 计费头（`x-anthropic-billing-header`，含按整个请求体封装的 `cch` 与随会话变化的 `cc_prompt_id`）每轮都会变，模板渲染后统一放到最后一个 system 缓存断点与 CLI 拆分点之后（`parkBillingAfterCacheBoundary`），否则缓存前缀每次都不同、永远命中不了（2026-11-05 修复，回归测试 `billing-cache-prefix.test.mjs`）。`zero` 的计费头带身份句、是 cli-node 布局锚点，位置不动。
 
 native cli-hop 优先完整保留 Node 已组装、带 billing 的 wire system，不在后面重加槽内 Environment。Node 关闭当前档 Environment 时，CLI 预处理保留调用方环境原文，HTTP 出站也跳过槽位时区刷新；没有调用方环境就不发送 Environment 块。启用时沿用原有槽位环境规则。调用方真正的 `You are an agent for Claude Code...` 和 `Notes:` 不会被当作自产内容删除。无 Node billed wire system 的独立 CLI fallback 仍沿用自己的布局，不在本次修改范围；槽位必须使用支持 wire-system 保留的 CLI 产物，旧 ELF 不会因修改控制面配置而自动更新。
 
@@ -73,9 +77,14 @@ native cli-hop 优先完整保留 Node 已组装、带 billing 的 wire system�
 
 Go worker JSON 透传，不必因人设重建 worker。
 
-### usage 遮罩
+### 客户用量与计费（2026-11-05 起）
 
-全部非官方协议（Messages / Chat / Completions / Responses）回包 usage 按「没有被网关改写的 system、没有注入 tools」显示：藏网关注入的 persona system 块与 server tools，保留用户 prompt 与用户自己的 tools，抹掉因 persona 产生的官方 cache。官方 CC 不遮罩。
+网关注入的内容（persona system 块、身份句、Environment、注入的工具）不向客户计费，也不出现在回给客户的 usage 里；所有预设、cli-hop / HTTP hop / API 直连一致，回包 usage 与计费用同一份换算（`src/lib/protocol/customer-usage.mjs`）。原面板「usage 遮罩」开关（`persona_hide_presets` / `persona_hides` / `agent_standing_hide_presets`）随之删除。
+
+- 注入量按注入文本字符数 ÷ 3 估算（注入的 web_search 工具按实测 2794 token），按 cache_read → 1h 写入 → 5m 写入 → input 的顺序扣减，不出现负数；扣减后至少保留客户自己文字的「字符数 ÷ 4」。估算对英文偏高、对客户有利。
+- 缓存按客户自己的请求意图计价：请求里没有任何 `cache_control` 且没带 `x-kin-cache-ttl` → 缓存读写都按普通 input 计；有标记但有未写 ttl 的 → 缓存写入按 5m 价；全部显式写 ttl（含 1h）或请求头显式要求 → 按上游实际分桶。网关为自身效率仍可在上游开启缓存。
+- 只有成功且不是拒答的结果计费（槽位路径与 API 路径同一规则 `meterableResult`）；拒答、失败、中途截断不计费，`billing_status=unmetered`。每个请求只在提交日志时结算一次，重试或换号的中间尝试不计费。
+- `usage_logs` 的 token 主列（input、缓存读写及 5m/1h 拆分）是客户计费口径，与计费、回给客户的 usage 同源，面板、导出、统计全平台按这一口径展示；两种口径不同时，上游真实消耗另存在 `upstream_*` 列（NULL 表示与主列相同，只对超管可见）。`total_cost` 等成本列仍是上游真实消耗按官方价计算的结果，账号成本汇总 `usage_cost_hourly`、成本重算、槽位额度预测、供应商结算与门户负载都读上游口径（`COALESCE(upstream_x, x)`）；`actual_cost` 是客户价（客户口径用量 × 倍率）。output_tokens 两种口径相同。
 
 ## DSH 工具结果裁剪与缓存
 
@@ -89,7 +98,7 @@ DSH 在压缩压力下会把旧工具结果改为前4096码点、固定middle-pr
 
 ## thinking 与 max_tokens
 
-`max_tokens` **就是** thinking 预算（thinking + 可见输出共享）。缺失时用该模型目录的 `max_tokens_default`，目录没有时用 4096。调用方有值且低于 `compatibility.min_max_tokens` 时默认抬到该值，模式「不改」则不抬。仅当超过模型 `max_tokens_cap` 时 `applyMaxTokensCap` 下调。
+`max_tokens` **就是** thinking 预算（thinking + 可见输出共享）。原生 `/v1/messages` 按官方规则校验客户原始请求（`anthropic-official-shape.mjs`，清洗之前）：缺 `max_tokens`、非正整数、空 `messages`、未知 role、除末尾 assistant 预填外的空 content，一律返回 400 `invalid_request_error`，不再修补后照常执行计费（会话中段 `system` 与 `developer` 消息保留）。其他入口缺失时用该模型目录的 `max_tokens_default`，目录没有时用 4096。调用方有值且低于 `compatibility.min_max_tokens` 时，模式 `floor` 抬到该值、模式「不改」（`preserve`）保留客户的值（只在 thinking 预算违反上游规则时补足）；仓库默认改为「不改」，否则客户会拿到并支付超出所请求数量的输出，生产需在面板「设置 → 槽位 → 探测」的「thinking 合法间隔」一行，把「max_tokens 抬升模式」改为「不改」。仅当超过模型 `max_tokens_cap` 时 `applyMaxTokensCap` 下调。
 
 | 模型 | thinking |
 |------|----------|
@@ -105,8 +114,8 @@ DSH 在压缩压力下会把旧工具结果改为前4096码点、固定middle-pr
 
 - 存盘的 `kin-cc-headers.json` **只**留 `anthropic-version` / `anthropic-beta`。UA、stainless、session、accept-language 只出槽位指纹 + 代码 pin。
 - 出站 UA 使用 `claude-cli/<当前档版本> (external, <CLAUDE_CODE_ENTRYPOINT>)`，缺省 `cli`；kernel 启动的 Agent SDK CLI 槽设置为 `sdk-cli`。Stainless 是 `js` / `Linux` / `x64` / `node` / `v26.3.0` / `0.128.0`，`retry-count=0`；CLI 把配置的毫秒 timeout 转为秒写入头（缺省 `600`）。CCH 是 billing body 参数，不属于 UA。
-- cli-node SDK 请求显式带 `Accept: application/json, text/event-stream`、`Accept-Encoding: gzip, br`。`Content-Length` 在 CCH 密封和最终序列化之后按 UTF-8 字节数设置；不是响应长度，不能拿它填写 SSE 响应。该补齐构建尚未进 payload，不能据代码或 envelope 推断运行中的 CLI 已发送这些头。
-- 新 CLI 在最终 `fetch` 调用前，经任务隔离的内部事件回传请求头。debug 日志的 `outbound_headers_source=cli_final` 时，`outbound_headers` 才是此处采集的实际值；凭证及未列入公开清单的自定义头值在离开 CLI 前脱敏。此值不含底层 HTTP 实现后加的 Host / HTTP/2 伪头，不是 TLS 抓包。内部事件不下发调用方、不计作首 token 或启动上游 idle 计时；重试记录最后一次采集结果。
+- cli-node SDK 请求显式带 `Accept: application/json`、`Accept-Encoding: gzip, deflate, br, zstd`。`Content-Length` 在 CCH 密封和最终序列化之后按 UTF-8 字节数设置；不是响应长度，不能拿它填写 SSE 响应。本轮 payload 已锁定具备此能力的 `cb2f8fb9`；实际采集仍以 `cli_final` 来源标记为准。
+- 新 CLI 在最终 `fetch` 调用前，经任务隔离的内部事件回传请求头。debug 日志的 `outbound_headers_source=cli_final` 时，`outbound_headers` 才是此处采集的实际值；凭证及未列入公开清单的自定义头值在离开 CLI 前脱敏。此值不含底层 HTTP 实现后加的 Accept-Encoding、Host / HTTP/2 伪头，不是 TLS 抓包。内部事件不下发调用方、不计作首 token 或启动上游 idle 计时；重试记录最后一次采集结果。
 - Node → worker 的头另存 `worker_envelope_headers`。旧 CLI 无回传或该次尝试尚未发送时，最终头为 null、source 为 `unavailable`，不回退成 envelope。旧日志缺少 source，保留原值但不标为最终值。`outbound_body` 仍是 worker envelope 的请求体，未改为 CLI 最终序列化字节；需同时升级 Node / web / cli-node，kernel 已有的通道无需修改。
 - 非官方裸模型 **不注入、不重放** `context-1m-2025-08-07`。入站末尾 `[1m]`（如 `claude-sonnet-5[1m]`）在矩阵允许时注入该 beta（官方/非官方都算）。
 - 官方 CC：矩阵 `betas.pass_context_1m` 决定透传/剥离；未入库时回退 `defaults.context_1m_whitelist`（seed：`sonnet-5*`）。同一 `[1m]` 后缀在允许时也会注入。
@@ -153,7 +162,9 @@ Rikka / 客户端 `search_web`、`scrape_web` **不是** Anthropic 自带搜索�
 
 HTTP hop 与 cli-hop（`prepareCliHopBody`）共用内容预过滤，但缓存职责不同。cli-hop 首跳保留签名可用的 thinking 指纹，没有可用签名的删掉；签名修复重试才清除其余块。官方家族开启 `official_cc_passthrough` 时，Node 保留 system/tools/messages 的 caller marker、显式 TTL、缺失 TTL 和位置，不添点、不裁剪；超过四点、thinking marker、非法 TTL 或 5m（含缺失）后出现 1h，在调度前返回 `400 invalid_cache_control`。
 
-关闭透传或非官方请求仍走 Node rewrite：清除 caller marker，生成最后消息及 `messages.length>=4` 时倒数第二 user 的点，TTL 用入站会话 pin 值。应用 persona 后，模板显式 TTL 保留，只补自产缺失 TTL；超额时优先删 tools、system 尾部的自产点。非法模板返回 request-scoped 400，零上游执行，不换号、不冷却。
+非官方 cli-hop 的缓存 TTL 沿用请求头、显式入站标记、面板默认值的解析顺序，同一会话内保持；官方透传保留调用方原始缓存位置和 TTL。重写路径（非 zero、非已组装模板）由官方 system 模板占 1–2 个断点，消息侧固定打在当前尾部与上一条 user；调用方自己的消息断点与尾部断点放得进剩余预算（总数不超过 4）时原位保留并改用本请求 TTL，上一条 user 的断点只占仍空着的位置，放不下时只留网关的两处（#524：换号后稳定的历史锚点不再被抹掉）。非官方请求继续按现有 persona 与身份替换规则处理，已撤回的 OMP 图片尾置实现不恢复。
+
+部署须同时更新 Node 控制面和 deploy/payload.json 锁定的 CLI，重启 Node 并同步槽位组件。分类器保持独立契约；HTTP hop 原有缓存整流继续使用。用量以真实上游返回的 5m/1h 缓存桶为准，计量条件按上游对应链路判断，不建立资金待对账状态，不能把本地布局检查当作真实缓存命中或费用下降的证明。
 
 识别为官方 Claude Code 家族但未开 `official_cc_passthrough` 时，请求与第三方一样先剥离成标准 Anthropic 结构，再按槽位档重写 system；识别本身不再保留入站 system。凡经重写的入站（官方家族与第三方客户端一样），不写 `ttl` 的 marker 都表示未选择，渲染前按会话 pin 值补齐（调用方显式 `5m` / `1h` 保留，前面已有 5m 时补 5m），cli-hop、HTTP hop 与 API 直连一致。只有协议页打开透传，官方家族才跳过剥离与重写，按前文 `official_cc_passthrough` 的规则处理。入站请求头不能跳过剥离。
 
@@ -191,7 +202,6 @@ native CLI `2.1.296` 保留带 billing 的 wire system（含官方 CLI / 子代�
 | 头 | 作用 |
 |----|------|
 | `x-kin-delivery: verified` | 缓冲到终态 |
-| `x-kin-cache-ttl: 1h` | Node 重写模式的首次会话 TTL 选择；不覆盖 native 透传 caller / 模板显式 TTL |
 | `x-kin-vm` | 仅 master：钉槽（虚拟机测试 loopback） |
 | `x-session-id` 等 | sticky 键，见 `routing.sticky` |
 | `x-kin-debug` / `x-kin-log` | 单请求日志模式覆盖 |

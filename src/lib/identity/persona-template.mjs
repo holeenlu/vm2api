@@ -5,7 +5,7 @@
  * / overlay_templates). The console edits it as JSONL — one single-line JSON
  * object per system block — and round-trips losslessly.
  *
- * Meta keys (id / note / drop_if_empty / hide) are stripped at render time.
+ * Meta keys (id / note / drop_if_empty / role) are stripped at render time.
  * Only type / text / cache_control reach Anthropic.
  *
  * The built-in presets render the legacy builders' bytes except for the
@@ -24,7 +24,7 @@ export const OFFICIAL_303_PRESET = 'official_303'
 export const OVERLAY_PRESETS = Object.freeze(['off', 'official', 'minimal', 'custom'])
 export const DEFAULT_OVERLAY_PRESET = 'off'
 
-export const PERSONA_TEMPLATE_META_KEYS = Object.freeze(['id', 'note', 'drop_if_empty', 'hide', 'role'])
+export const PERSONA_TEMPLATE_META_KEYS = Object.freeze(['id', 'note', 'drop_if_empty', 'role'])
 export const PERSONA_TEMPLATE_BLOCK_MAX = 40_000
 export const PERSONA_TEMPLATE_TOTAL_MAX = 200_000
 export const PERSONA_TEMPLATE_BLOCKS_MAX = 24
@@ -352,11 +352,7 @@ export function agentStandingText(compat = {}) {
   return String(raw).trim().slice(0, AGENT_STANDING_MAX)
 }
 
-/**
- * Per-preset switch maps (agent_standing_presets / agent_standing_hide_presets /
- * persona_env_presets). Standing injection is opt-in per preset; other maps
- * remain opt-out for backwards-compatible masking/env behavior.
- */
+/** Per-preset switch maps. persona_env_presets is opt-out; every other map is opt-in per preset. */
 export function presetFlagEnabled(compat, field, preset) {
   const optIn = [
     'agent_standing_presets',
@@ -374,15 +370,10 @@ export function presetFlagEnabled(compat, field, preset) {
   return value !== false
 }
 
-/**
- * Per-preset boolean maps validated on PUT. `persona_hide_presets` is the whole
- * usage mask; a missing key there falls back to the template hide flags.
- */
+/** Per-preset boolean maps validated on PUT. */
 export const PRESET_FLAG_FIELDS = Object.freeze([
   'agent_standing_presets',
-  'agent_standing_hide_presets',
   'persona_env_presets',
-  'persona_hide_presets',
   'model_env_extra_presets',
   'persona_env_instructions_presets',
   'persona_timezone_presets',
@@ -584,21 +575,6 @@ export function renderOverlayTemplate(blocks, vars = {}) {
   if (!body) return ''
   if (!wrapper) return body
   return renderText(wrapper.text, { ...vars, overlay_body: body })
-}
-
-/** True when any block asks to be hidden from the caller's usage numbers. */
-export function templateHidesAnything(blocks) {
-  return Array.isArray(blocks) && blocks.some((block) => block?.hide === true)
-}
-
-/** Explicit routing.compatibility.persona_hides. null = follow the template hide flags. */
-export function parsePersonaHides(value) {
-  if (value === true || value === false) return value
-  if (value == null || value === '') return null
-  const raw = String(value).trim().toLowerCase()
-  if (raw === 'true' || raw === '1' || raw === 'on') return true
-  if (raw === 'false' || raw === '0' || raw === 'off') return false
-  return null
 }
 
 function templateFrom(templates, key, defaults) {

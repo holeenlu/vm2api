@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
-import { fmtAgo } from '@/lib/format'
+import { useTranslation, Trans } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { formatAgo as fmtAgo } from '@/features/logs/display-time'
 import {
   type ProxyHover,
   useProxyHoverId,
@@ -12,6 +13,7 @@ import {
   REGION_ANY,
   type RegionGroup,
   proxyRegion,
+  regionLabel,
 } from './proxy-region'
 import {
   PROXY_HEALTH_KEYS,
@@ -81,6 +83,8 @@ export function ProxyOverview({
   /** 无绑定权限时待接代理只展示，不能拖。 */
   canBind?: boolean
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const counts = useMemo(() => {
     const out = Object.fromEntries(
       PROXY_HEALTH_KEYS.map((k) => [k, 0])
@@ -100,7 +104,7 @@ export function ProxyOverview({
     }
     return max ? new Date(max).toISOString() : ''
   }, [proxies])
-  const clusters = useMemo(() => {
+  const byCountry = useMemo(() => {
     const byCountry = new Map<string, VmProxySnap[]>()
     for (const p of proxies) {
       const key = proxyRegion(p).country
@@ -108,19 +112,17 @@ export function ProxyOverview({
       if (list) list.push(p)
       else byCountry.set(key, [p])
     }
-    return regions
-      .filter((g) => byCountry.has(g.country))
-      .map((g) => {
-        const list = byCountry.get(g.country) || []
-        return {
-          country: g.country,
-          label: g.label,
-          proxies: list,
-          // 与地区栏同一个数：按当前席位 / 健康 / 搜索筛选算，不是整池空位。
-          free: g.free,
-        }
-      })
-  }, [proxies, regions])
+    return byCountry
+  }, [proxies])
+  // Group membership is memoized; translated labels are resolved on every render.
+  const clusters = regions
+    .filter((g) => byCountry.has(g.country))
+    .map((g) => ({
+      country: g.country,
+      label: regionLabel(g.country),
+      proxies: byCountry.get(g.country) || [],
+      free: g.free,
+    }))
   // 行数按 SOCKS5 的上限定：本地代理上限常常大很多，让它多占几列，而不是把整张图拉高。
   const rows = useMemo(() => {
     const socks = proxies.filter((p) => !proxyIsLocal(p))
@@ -147,19 +149,25 @@ export function ProxyOverview({
             id='proxy-seat-title'
             className='flex items-baseline gap-2 text-sm font-semibold tracking-[-0.01em]'
           >
-            席位
+            {translate('proxies:seats')}
             <span className='text-xs font-normal text-muted-foreground tabular-nums'>
-              <span className='text-base font-[620] tracking-[-0.02em] text-foreground'>
-                {slotsUsed}
-              </span>{' '}
-              / {slotsCap || '—'} 已绑
+              <Trans
+                ns='proxies'
+                i18nKey='boundCapacity'
+                values={{ used: slotsUsed, capacity: slotsCap || '—' }}
+                components={{
+                  used: (
+                    <span className='text-base font-[620] tracking-[-0.02em] text-foreground' />
+                  ),
+                }}
+              />
             </span>
           </h3>
           <dl className='flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs'>
-            <Figure label='空余席位' value={freeSeats} />
-            <Figure label='代理' value={proxies.length} />
+            <Figure label={translate('proxies:freeSeats')} value={freeSeats} />
+            <Figure label={translate('proxies:proxy')} value={proxies.length} />
             <Figure
-              label='池外槽位'
+              label={translate('proxies:outsidePoolSlots')}
               value={loose.length}
               tone={stranded ? 'bad' : undefined}
             />
@@ -168,7 +176,7 @@ export function ProxyOverview({
         {proxies.length ? (
           <div
             role='group'
-            aria-label='按健康筛选'
+            aria-label={translate('proxies:filterHealth')}
             className='-mx-1.5 flex flex-wrap items-center gap-0.5'
           >
             {PROXY_HEALTH_KEYS.map((k) => (
@@ -199,7 +207,7 @@ export function ProxyOverview({
                 aria-hidden='true'
                 className='size-2 shrink-0 rounded-full border border-muted-foreground/60'
               />
-              空位
+              {translate('proxies:freeSeat')}
             </span>
           </div>
         ) : null}
@@ -208,8 +216,11 @@ export function ProxyOverview({
       {proxies.length ? (
         <>
           <p className='sr-only'>
-            共 {proxies.length} 条代理，已绑 {slotsUsed} 个席位，空余{' '}
-            {freeSeats} 个。
+            {translate('proxies:seatMapSummary', {
+              proxies: proxies.length,
+              used: slotsUsed,
+              free: freeSeats,
+            })}
           </p>
           <div className='mt-3 flex flex-wrap items-end gap-x-6 gap-y-3'>
             {clusters.map((c) => {
@@ -226,7 +237,11 @@ export function ProxyOverview({
                           : { country: c.country, city: '' }
                       )
                     }
-                    title={`${c.label}：${c.proxies.length} 条代理，当前筛选下空位 ${c.free}。点击筛选该地区`}
+                    title={translate('proxies:regionFilterHint', {
+                      p0: c.label,
+                      p1: c.proxies.length,
+                      p2: c.free,
+                    })}
                     className={cn(
                       '-mx-1 mb-1.5 flex items-baseline gap-1.5 rounded px-1 text-[11px] whitespace-nowrap transition-colors hover:bg-accent/60',
                       on ? 'text-primary' : 'text-muted-foreground'
@@ -248,7 +263,7 @@ export function ProxyOverview({
                           : 'text-muted-foreground/70'
                       )}
                     >
-                      空 {c.free}
+                      {translate('proxies:clusterFreeSeats', { count: c.free })}
                     </span>
                   </button>
                   <div
@@ -275,27 +290,30 @@ export function ProxyOverview({
             hover={hover}
             byId={byId}
             poolLimit={poolLimit}
-            idle={`${lastProbe ? `最近探测 ${fmtAgo(lastProbe)}` : '还没有探测记录'} · 每 ${probeMin} 分钟自动探测 · 一个点一个席位，点地区名筛选，点一列定位到表格行`}
+            idle={translate('proxies:seatMapHint', {
+              p0: lastProbe
+                ? translate('proxies:lastProbe', { p0: fmtAgo(lastProbe) })
+                : translate('proxies:noProbeHistory'),
+              count: probeMin,
+            })}
           />
         </>
       ) : (
         <p className='mt-2 text-xs text-muted-foreground'>
-          池里还没有代理。导入后每条代理在这里占一列，点数即它的绑定上限。
+          {translate('proxies:emptyPoolHint')}
         </p>
       )}
 
       {loose.length ? (
         <div
           className='mt-2 flex items-center gap-x-3 border-t pt-2'
-          title={
-            canBind ? '拖到表格行上即可绑定；已绑的槽位也能拖去换绑' : undefined
-          }
+          title={canBind ? translate('proxies:dragBindHint') : undefined}
         >
           <h4 className='flex shrink-0 items-center gap-2 text-xs font-medium'>
-            待接代理 {loose.length}
+            {translate('proxies:awaitingProxyCount', { count: loose.length })}
             {stranded ? (
               <span className='font-normal text-[color:var(--status-bad)]'>
-                {stranded} 台出站被拒
+                {translate('proxies:rejectedSlotCount', { count: stranded })}
               </span>
             ) : null}
           </h4>
@@ -313,13 +331,13 @@ export function ProxyOverview({
           </div>
           {canBind && proxies.length ? (
             <p className='hidden shrink-0 text-[11px] text-muted-foreground xl:block'>
-              拖到表格行上绑定
+              {translate('proxies:dragToBind')}
             </p>
           ) : null}
         </div>
       ) : vms.length ? (
         <p className='mt-2 border-t pt-2 text-[11px] text-muted-foreground'>
-          {vms.length} 台槽位都已接代理。
+          {translate('proxies:allSlotsBound', { count: vms.length })}
         </p>
       ) : null}
     </section>
@@ -340,6 +358,8 @@ function Figure({
   value: number
   tone?: 'bad'
 }) {
+  useTranslation('proxies')
+
   return (
     <div className='flex items-baseline gap-1.5'>
       <dt className='text-muted-foreground'>{label}</dt>
@@ -374,6 +394,8 @@ function ProxyDots({
   hover: ProxyHover
   onLocate: (id: string) => void
 }) {
+  useTranslation('proxies')
+
   const id = proxy.id || ''
   const lit = useProxyHovered(hover, id)
   const used = proxyBoundIds(proxy).length
@@ -443,6 +465,8 @@ function SeatReadout({
   /** 没有悬停时显示的说明。 */
   idle: string
 }) {
+  const { t: translate } = useTranslation('proxies')
+
   const id = useProxyHoverId(hover)
   const p = id ? byId.get(id) : undefined
   return (
@@ -464,7 +488,11 @@ function SeatReadout({
             {PROXY_HEALTH_LABEL[proxyHealthKey(p)]}
           </span>
           {p.latency_ms != null ? (
-            <span className='shrink-0 tabular-nums'>{p.latency_ms}ms</span>
+            <span className='shrink-0 tabular-nums'>
+              {translate('proxies:latencyValue', {
+                milliseconds: p.latency_ms,
+              })}
+            </span>
           ) : null}
         </>
       ) : (

@@ -2,10 +2,19 @@
 # Every boot: slot user, 9p mounts, payload links, identity, DNS.
 # Params come from guest.env on the NoCloud seed ISO (volid cidata),
 # regenerated each runner start; cloud-init itself runs once per overlay.
+#
+# `kin-guest-setup payload` only refreshes the guest-local copies of the payload
+# binaries (kin-kernel.service runs it before every kernel start, #681).
 set -eu
 
 log() { echo "kin-guest-setup: $*" >&2; }
 die() { echo "kin-guest-setup: $*" >&2; exit 1; }
+
+# Payload layout; overridable only so tests can run the payload step in a temp dir.
+KIN_PAYLOAD_ROOT=${KIN_PAYLOAD_ROOT:-/opt/kin-payload}
+KIN_PAYLOAD_CACHE=${KIN_PAYLOAD_CACHE:-/var/lib/kin-payload/bin}
+KIN_LOCAL_BIN=${KIN_LOCAL_BIN:-/usr/local/bin}
+KIN_DROP_CACHES=${KIN_DROP_CACHES:-/proc/sys/vm/drop_caches}
 
 load_env() {
   seed=''
@@ -83,18 +92,127 @@ has_share() {
   echo ",${KIN_KVM_SHARES:-home,run}," | grep -q ",${wanted},"
 }
 
-link_payload() {
-  if [ -d /opt/kin-payload/usr/local/bin ]; then
-    for f in /opt/kin-payload/usr/local/bin/*; do
-      [ -e "$f" ] || continue
-      ln -sfn "$f" "/usr/local/bin/$(basename "$f")"
-    done
+sha256_of() {
+  sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# Point $KIN_LOCAL_BIN/<name> at $1 with one rename, so a concurrent exec never
+# finds the name missing (ln -sfn unlinks first).
+swap_link() {
+  target=$1
+  link="$KIN_LOCAL_BIN/$2"
+  tmp="$KIN_LOCAL_BIN/.$2.kin-link.$$"
+  rm -f "$tmp"
+  ln -s "$target" "$tmp" && mv -f "$tmp" "$link"
+}
+
+# #681: the payload share is 9p cache=loose, which never revalidates. When the host
+# swaps a binary (upgrade, rename into the staging dir), a guest that executes it
+# straight from the share can page in a mix of the old and new file: kin-worker
+# died with SIGSEGV (exit 139) after upgrades. Each binary is copied to guest-local
+# disk under its content hash and run from there; a new hash gets a new copy.
+cache_payload_bin() {
+  src=$1
+  name=$(basename "$src")
+  sum=$(sha256_of "$src")
+  [ -n "$sum" ] || return 1
+  dest="$KIN_PAYLOAD_CACHE/$name-$sum"
+  if [ ! -x "$dest" ] || [ "$(sha256_of "$dest")" != "$sum" ]; then
+    tmp="$KIN_PAYLOAD_CACHE/.$name.copy.$$"
+    rm -f "$tmp"
+    cp "$src" "$tmp" || { rm -f "$tmp"; return 1; }
+    # A host swap while copying would leave two versions in one file.
+    if [ "$(sha256_of "$tmp")" != "$sum" ]; then
+      rm -f "$tmp"
+      return 1
+    fi
+    chmod 0755 "$tmp" && mv -f "$tmp" "$dest" || {
+      rm -f "$tmp"
+      return 1
+    }
   fi
+  swap_link "$dest" "$name" || return 1
+  # Running processes keep their unlinked copy; only the current hash stays on disk.
+  # Only "<name>-<64 hex>" copies of this binary: a bare "$name-*" would also match another binary whose name
+  # starts with "$name-" and leave its link dangling while it refreshes.
+  for old in "$KIN_PAYLOAD_CACHE/$name"-*; do
+    [ "$old" = "$dest" ] && continue
+    suffix=${old#"$KIN_PAYLOAD_CACHE/$name"-}
+    case "$suffix" in
+      *[!0-9a-f]* | "") continue ;;
+    esac
+    [ "${#suffix}" -eq 64 ] && rm -f "$old"
+  done
+}
+
+cache_payload_bins() {
+  bindir="$KIN_PAYLOAD_ROOT/usr/local/bin"
+  [ -d "$bindir" ] || return 0
+  cache_ok=1
+  { mkdir -p "$KIN_PAYLOAD_CACHE" && chmod 0755 "$KIN_PAYLOAD_CACHE"; } 2>/dev/null || cache_ok=0
+  for f in "$bindir"/*; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f")
+    if [ "$cache_ok" = 1 ] && { cache_payload_bin "$f" || cache_payload_bin "$f"; }; then
+      continue
+    fi
+    # Disk full, unwritable, or the file kept changing: keep the slot usable on the share.
+    log "payload $name not cached; linking the 9p copy"
+    swap_link "$f" "$name" || ln -sfn "$f" "$KIN_LOCAL_BIN/$name" || log "payload $name not linked"
+  done
+}
+
+# Refresh after boot (kernel restart): forget what the loose 9p cache remembers
+# about the share, so a binary the host replaced since boot is read whole.
+refresh_payload() {
+  [ -d "$KIN_PAYLOAD_ROOT/usr/local/bin" ] || return 0
+  sync
+  echo 3 > "$KIN_DROP_CACHES" 2>/dev/null || log "drop_caches unavailable; payload may read stale"
+  cache_payload_bins
+}
+
+link_payload() {
+  cache_payload_bins
   if [ -e /opt/kin-payload/opt/kin ] || [ -d /opt/kin-payload/opt/kin ]; then
     ln -sfn /opt/kin-payload/opt/kin /opt/kin
   fi
   if [ -e /opt/kin-payload/opt/kin-live ] || [ -d /opt/kin-payload/opt/kin-live ]; then
     ln -sfn /opt/kin-payload/opt/kin-live /opt/kin-live
+  fi
+}
+
+# install-guest.sh installs these once per overlay; the seed carries the runner's
+# current copies every boot. Bring changed ones in, then rerun the new setup once.
+sync_guest_assets() {
+  [ -n "${seed:-}" ] || return 0
+  changed=0
+  self=0
+  for pair in \
+    kin-guest-setup:/usr/local/sbin/kin-guest-setup:0755 \
+    kin-kernel-start:/usr/local/sbin/kin-kernel-start:0755 \
+    kin-kernel-relay.py:/usr/local/sbin/kin-kernel-relay:0755 \
+    kin-guest-setup.service:/etc/systemd/system/kin-guest-setup.service:0644 \
+    kin-kernel.service:/etc/systemd/system/kin-kernel.service:0644 \
+    kin-kernel-relay.service:/etc/systemd/system/kin-kernel-relay.service:0644; do
+    from="$seed/${pair%%:*}"
+    rest=${pair#*:}
+    to=${rest%%:*}
+    mode=${rest#*:}
+    [ -f "$from" ] || continue
+    cmp -s "$from" "$to" 2>/dev/null && continue
+    # Rename into place: this shell is still reading the old kin-guest-setup.
+    install -m "$mode" "$from" "$to.kin-new.$$" && mv -f "$to.kin-new.$$" "$to" || {
+      rm -f "$to.kin-new.$$"
+      continue
+    }
+    changed=1
+    [ "$to" = /usr/local/sbin/kin-guest-setup ] && self=1
+  done
+  [ "$changed" = 1 ] || return 0
+  systemctl daemon-reload 2>/dev/null || true
+  if [ "$self" = 1 ] && [ -z "${KIN_GUEST_SETUP_REEXEC:-}" ]; then
+    log "guest assets updated from seed; rerunning setup"
+    KIN_GUEST_SETUP_REEXEC=1 exec /usr/local/sbin/kin-guest-setup "$@"
   fi
 }
 
@@ -173,7 +291,13 @@ relax_selinux() {
   fi
 }
 
+if [ "${1:-}" = payload ]; then
+  refresh_payload
+  exit 0
+fi
+
 load_env
+sync_guest_assets "$@"
 [ -n "${KIN_KVM_UID:-}" ] || die "KIN_KVM_UID missing in guest.env"
 [ -n "${KIN_KVM_GID:-}" ] || die "KIN_KVM_GID missing in guest.env"
 

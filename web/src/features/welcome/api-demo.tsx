@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { cn } from '@/lib/utils'
+import { useTranslation } from 'react-i18next'
+import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { CopyButton } from '@/components/copy-chip'
 
 type Demo = {
@@ -9,25 +11,6 @@ type Demo = {
   auth: string
   body: string[]
   response: string[]
-  tone: { text: string; border: string; badge: string }
-}
-
-const TONES = {
-  violet: {
-    text: 'text-violet-600 dark:text-violet-300',
-    border: 'border-violet-500',
-    badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-300',
-  },
-  emerald: {
-    text: 'text-emerald-600 dark:text-emerald-300',
-    border: 'border-emerald-500',
-    badge: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300',
-  },
-  amber: {
-    text: 'text-amber-600 dark:text-amber-300',
-    border: 'border-amber-500',
-    badge: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
-  },
 }
 
 // Example payloads mirror the three entries documented on /guide/api.
@@ -49,7 +32,6 @@ const DEMOS: Demo[] = [
       '  "usage": { "input_tokens": 8, "output_tokens": 5 }',
       '}',
     ],
-    tone: TONES.violet,
   },
   {
     id: 'chat',
@@ -66,7 +48,6 @@ const DEMOS: Demo[] = [
       '  "choices": [{ "message": { "content": "Hello!" } }]',
       '}',
     ],
-    tone: TONES.emerald,
   },
   {
     id: 'responses',
@@ -80,21 +61,22 @@ const DEMOS: Demo[] = [
       '  "output": [{ "type": "message", "content": [ … ] }]',
       '}',
     ],
-    tone: TONES.amber,
   },
 ]
 
 const STRING_RE = /"[^"]*"/g
 
-/** Colors JSON-ish lines: keys sky, string values amber, punctuation muted. */
+/** Use the shared selection and primary colors for readable code in both themes. */
 function Json({ line }: { line: string }) {
+  useTranslation('welcome')
+
   const parts: React.ReactNode[] = []
   let cursor = 0
   for (const m of line.matchAll(STRING_RE)) {
     const start = m.index ?? 0
     if (start > cursor)
       parts.push(
-        <span key={`p${start}`} className='text-foreground/55'>
+        <span key={`p${start}`} className='text-muted-foreground'>
           {line.slice(cursor, start)}
         </span>
       )
@@ -105,11 +87,7 @@ function Json({ line }: { line: string }) {
     parts.push(
       <span
         key={`s${start}`}
-        className={
-          isKey
-            ? 'text-sky-700 dark:text-sky-300'
-            : 'text-amber-700 dark:text-amber-300'
-        }
+        className={isKey ? 'text-select-fg' : 'text-primary'}
       >
         {m[0]}
       </span>
@@ -118,17 +96,19 @@ function Json({ line }: { line: string }) {
   }
   if (cursor < line.length)
     parts.push(
-      <span key='tail' className='text-foreground/55'>
+      <span key='tail' className='text-muted-foreground'>
         {line.slice(cursor)}
       </span>
     )
-  return <div className='break-words whitespace-pre-wrap'>{parts}</div>
+  return <span className='block'>{parts}</span>
 }
 
 /** Static request/response card: switching tabs is the only interaction. */
 export function ApiDemo({ baseUrl }: { baseUrl: string }) {
-  const [active, setActive] = useState(0)
-  const demo = DEMOS[active]
+  const { t } = useTranslation('welcome')
+
+  const [active, setActive] = useState(DEMOS[0].id)
+  const demo = DEMOS.find((item) => item.id === active) ?? DEMOS[0]
   const curl = [
     `curl -X POST "${baseUrl}${demo.path}" \\`,
     `  -H "${demo.auth}" \\`,
@@ -139,110 +119,83 @@ export function ApiDemo({ baseUrl }: { baseUrl: string }) {
   ].join('\n')
 
   return (
-    <div className='mx-auto w-full max-w-2xl overflow-hidden rounded-2xl border border-border/60 bg-white/95 shadow-[0_20px_50px_-25px_rgba(15,23,42,0.18)] backdrop-blur-sm dark:border-white/[0.06] dark:bg-[#0b0f17]/95 dark:shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)]'>
-      <div
-        role='tablist'
-        aria-label='接口示例'
-        className='flex items-center gap-1 border-b border-border/50 px-2 sm:px-3 dark:border-white/[0.05]'
-      >
-        {DEMOS.map((d, i) => (
-          <button
-            key={d.id}
-            type='button'
-            role='tab'
-            aria-selected={i === active}
-            onClick={() => setActive(i)}
-            className={cn(
-              '-mb-px border-b-2 px-2.5 py-2.5 text-[11px] font-medium tracking-wide transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none sm:px-3 sm:text-xs',
-              i === active
-                ? `${d.tone.border} ${d.tone.text}`
-                : 'border-transparent text-foreground/40 hover:text-foreground/70'
-            )}
+    <Tabs
+      value={active}
+      onValueChange={setActive}
+      className='mx-auto w-full max-w-2xl min-w-0 gap-0 overflow-hidden rounded-xl border bg-card shadow-sm'
+    >
+      <div className='flex flex-wrap items-center justify-between gap-2 border-b px-3 py-3 sm:px-4'>
+        <TabsList aria-label={t('welcome:apiExample')}>
+          {DEMOS.map((item) => (
+            <TabsTrigger key={item.id} value={item.id} className='px-3 text-xs'>
+              {item.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        <CopyButton
+          text={curl}
+          label={t('welcome:copyCurl', { client: demo.label })}
+          className='shrink-0'
+        />
+      </div>
+
+      <TabsContent value={demo.id} className='min-w-0'>
+        <div className='flex min-w-0 items-center gap-2 border-b px-4 py-3 sm:px-5'>
+          <Badge variant='secondary' className='font-mono text-xs'>
+            POST
+          </Badge>
+          <code className='min-w-0 font-mono text-xs break-all text-foreground'>
+            {demo.path}
+          </code>
+        </div>
+
+        <div className='px-4 py-4 sm:px-5'>
+          <p className='mb-3 text-xs font-medium text-muted-foreground'>
+            {t('welcome:request')}
+          </p>
+          <pre
+            tabIndex={0}
+            aria-label={t('welcome:request')}
+            className='min-h-48 overflow-x-auto rounded-md font-mono text-xs leading-6 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
           >
-            {d.label}
-          </button>
-        ))}
-        <div className='ml-auto flex items-center gap-1'>
-          <span className='inline-block size-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.45)]' />
-          <span className='pr-1 font-mono text-[10px] tracking-wider text-foreground/40 uppercase'>
-            200 ok
-          </span>
-          <CopyButton text={curl} label={`复制 ${demo.label} curl`} />
+            <code>
+              {curl.split('\n').map((line, i) => (
+                <Json key={i} line={line} />
+              ))}
+            </code>
+          </pre>
         </div>
-      </div>
 
-      <div className='flex items-center gap-2.5 border-b border-border/40 px-5 py-3 dark:border-white/[0.04]'>
-        <span
-          className={cn(
-            'rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider',
-            demo.tone.badge
-          )}
-        >
-          POST
-        </span>
-        <code className='truncate font-mono text-[12.5px] text-foreground/75'>
-          {demo.path}
-        </code>
-      </div>
-
-      <div className='font-mono text-[12.5px] leading-[1.6]'>
-        <div className='min-h-[200px] px-5 py-4'>
-          <span className='text-[10px] font-semibold tracking-[0.18em] text-foreground/30 uppercase'>
-            Request
-          </span>
-          <div className='mt-2'>
-            <div>
-              <span className='font-medium text-emerald-600 dark:text-emerald-400'>
-                curl
-              </span>{' '}
-              <span className='text-blue-600 dark:text-blue-400'>-X POST</span>{' '}
-              <span className='text-amber-700 dark:text-amber-300'>
-                "{baseUrl}
-                {demo.path}"
-              </span>{' '}
-              <span className='text-foreground/55'>\</span>
-            </div>
-            <div className='ps-[2ch]'>
-              <span className='text-blue-600 dark:text-blue-400'>-H</span>{' '}
-              <span className='text-amber-700 dark:text-amber-300'>
-                "{demo.auth}"
-              </span>{' '}
-              <span className='text-foreground/55'>\</span>
-            </div>
-            <div className='ps-[2ch]'>
-              <span className='text-blue-600 dark:text-blue-400'>-d</span>{' '}
-              <span className='text-amber-700 dark:text-amber-300'>'{'{'}</span>
-            </div>
-            {demo.body.map((line) => (
-              <div key={line} className='ps-[4ch]'>
-                <Json line={line} />
-              </div>
-            ))}
-            <div className='ps-[2ch] text-amber-700 dark:text-amber-300'>
-              {'}'}'
-            </div>
+        <div className='border-t bg-muted/30 px-4 py-4 sm:px-5'>
+          <div className='mb-3 flex items-center justify-between gap-2'>
+            <p className='text-xs font-medium text-muted-foreground'>
+              {t('welcome:response')}
+            </p>
+            <Badge
+              variant='outline'
+              className='border-primary/20 bg-accent font-mono text-xs text-accent-foreground uppercase'
+            >
+              200 ok
+            </Badge>
           </div>
+          <pre
+            tabIndex={0}
+            aria-label={t('welcome:response')}
+            className='min-h-30 overflow-x-auto rounded-md font-mono text-xs leading-6 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
+          >
+            <code>
+              {demo.response.map((line, i) => (
+                <Json key={i} line={line} />
+              ))}
+            </code>
+          </pre>
         </div>
-        <div className='min-h-[150px] border-t border-border/40 bg-muted/20 px-5 py-4 dark:border-white/[0.05] dark:bg-white/[0.015]'>
-          <span className='text-[10px] font-semibold tracking-[0.18em] text-foreground/30 uppercase'>
-            Response
-          </span>
-          <div className='mt-2'>
-            {demo.response.map((line, i) => (
-              <Json key={i} line={line} />
-            ))}
-          </div>
-        </div>
-      </div>
+      </TabsContent>
 
-      <div className='flex items-center justify-between border-t border-border/40 bg-muted/30 px-5 py-2.5 dark:border-white/[0.05] dark:bg-white/[0.02]'>
-        <span className='text-[10px] tracking-wider text-foreground/40 uppercase'>
-          sk-vm-xxxx 为占位符
-        </span>
-        <span className='font-mono text-[10px] tracking-wider text-foreground/30 uppercase'>
-          stream · sse
-        </span>
+      <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t px-4 py-3 text-xs text-muted-foreground sm:px-5'>
+        <span>{t('welcome:placeholderKey')}</span>
+        <span className='font-mono uppercase'>stream · sse</span>
       </div>
-    </div>
+    </Tabs>
   )
 }

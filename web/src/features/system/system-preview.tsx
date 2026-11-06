@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { t as tr } from '@/i18n'
 import type { PersonaPreset } from '@/types/panel-routing'
-import { Copy, EyeOff, FileText } from 'lucide-react'
+import { Copy, FileText } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import {
   PREVIEW_CALLER_AGENT,
@@ -12,8 +14,6 @@ import {
   dropLegacyAutoScope,
   envTimezoneText,
   estimateTokens,
-  personaHideEnabled,
-  personaPresetLabel,
   presetFlagEnabled,
   migrateLegacyOfficialTemplate,
   previewModelSentence,
@@ -36,6 +36,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { systemPresetLabel } from './preset-label'
 import { promptBlockLabel } from './prompt-presentation'
 import { personaPreviewVarsQueryOptions } from './queries'
 
@@ -82,6 +83,8 @@ export function SystemPreview({
   blocks: RawBlock[]
   compat: Record<string, unknown>
 }) {
+  const { t } = useTranslation('system')
+
   const dash = useQuery(dashboardQueryOptions())
   const [withCaller, setWithCaller] = useState(true)
   const zones = [
@@ -101,10 +104,6 @@ export function SystemPreview({
   })
 
   const standing = agentStandingVar(compat, preset).trimEnd()
-  const standingMasked =
-    !!standing &&
-    presetFlagEnabled(compat, 'agent_standing_hide_presets', preset)
-  const blocksMasked = personaHideEnabled(compat, preset, blocks)
   const selected = selectedPreviewBlocks(
     migrateLegacyOfficialTemplate(preset, blocks),
     compat,
@@ -142,8 +141,10 @@ export function SystemPreview({
         region:
           block.id === 'caller_system' &&
           source.some((template) => template.id === 'caller_system')
-            ? 'messages · 首条 user'
-            : 'system',
+            ? tr('system:sync14008UserReminder')
+            : source.find((item) => item.id === block.id)?.role === 'system'
+              ? tr('system:sync14008MessageEnvironment')
+              : tr('system:sync14008TopLevel'),
       }))
     : []
   const plain = rendered.map((block) => block.text).join('\n\n')
@@ -154,20 +155,22 @@ export function SystemPreview({
       <CardHeader className='space-y-2 px-4'>
         <div className='flex items-center gap-2'>
           <FileText className='size-4 text-muted-foreground' aria-hidden />
-          <CardTitle className='text-base'>出站预览</CardTitle>
+          <CardTitle className='text-base'>
+            {tr('system:sync14008OutboundPreview')}
+          </CardTitle>
           <Badge variant='secondary' className='font-normal'>
-            {personaPresetLabel(preset)}
+            {systemPresetLabel(preset)}
           </Badge>
           <Button
             type='button'
             size='icon'
             variant='ghost'
             className='ml-auto size-7 cursor-pointer'
-            aria-label='复制 system prompt'
+            aria-label={t('system:copyPrompt')}
             disabled={!plain}
             onClick={() => {
               void navigator.clipboard.writeText(plain)
-              toast.success('已复制')
+              toast.success(t('system:copied'))
             }}
           >
             <Copy />
@@ -179,7 +182,7 @@ export function SystemPreview({
               <SelectTrigger
                 size='sm'
                 className='h-7 cursor-pointer font-mono text-[11px]'
-                aria-label='预览用槽位时区'
+                aria-label={tr('system:previewTimezone')}
               >
                 <SelectValue />
               </SelectTrigger>
@@ -201,7 +204,7 @@ export function SystemPreview({
               <SelectTrigger
                 size='sm'
                 className='h-7 cursor-pointer font-mono text-[11px]'
-                aria-label='预览用模型'
+                aria-label={tr('system:previewModel')}
               >
                 <SelectValue />
               </SelectTrigger>
@@ -233,12 +236,12 @@ export function SystemPreview({
           ) : null}
           <label className='ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground'>
             <Switch
-              aria-label='显示调用方示例（仅预览）'
+              aria-label={tr('system:sync14008CallerExampleLabel')}
               aria-describedby='preview-caller-effect'
               checked={withCaller}
               onCheckedChange={setWithCaller}
             />
-            调用方示例 · 仅预览
+            {tr('system:sync14008CallerExample')}
           </label>
         </div>
         {!withCaller ? (
@@ -246,11 +249,11 @@ export function SystemPreview({
             id='preview-caller-effect'
             className='text-xs text-muted-foreground'
           >
-            仅隐藏调用方提示词示例，不移除请求中的 system 内容。
+            {tr('system:sync14008HideCallerHelp')}
           </p>
         ) : (
           <span id='preview-caller-effect' className='sr-only'>
-            关闭仅隐藏调用方提示词示例，不修改实际请求。
+            {tr('system:sync14008HideCallerPreviewHelp')}
           </span>
         )}
       </CardHeader>
@@ -266,64 +269,51 @@ export function SystemPreview({
           </p>
         ) : rendered.length ? (
           <ol className='space-y-2'>
-            {rendered.map((block, i) => {
-              const blockMasked = blocksMasked && block.hide
-              const masked =
-                blockMasked || (standingMasked && block.text.includes(standing))
-              return (
-                <li
-                  key={`${block.id}-${i}`}
-                  className='overflow-hidden rounded-md border border-border/60'
-                >
-                  <div className='flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/40 bg-muted/30 px-3 py-2 font-mono text-[10px] text-muted-foreground'>
-                    <span className='tabular-nums'>{i + 1}</span>
-                    <span className='truncate'>
-                      {promptBlockLabel(block.id)[0]}
+            {rendered.map((block, i) => (
+              <li
+                key={`${block.id}-${i}`}
+                className='overflow-hidden rounded-md border border-border/60'
+              >
+                <div className='flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/40 bg-muted/30 px-3 py-2 font-mono text-[10px] text-muted-foreground'>
+                  <span className='tabular-nums'>{i + 1}</span>
+                  <span className='truncate'>
+                    {promptBlockLabel(block.id)[0]}
+                  </span>
+                  <span className='break-all'>{block.region}</span>
+                  <span className='ml-auto flex items-center gap-1.5'>
+                    {block.ttl ? <span>{block.ttl}</span> : null}
+                    {block.scope ? <span>{block.scope}</span> : null}
+                    <span className='tabular-nums'>
+                      ≈{estimateTokens(block.text)}
                     </span>
-                    <span className='break-all'>{block.region}</span>
-                    <span className='ml-auto flex items-center gap-1.5'>
-                      {block.ttl ? <span>{block.ttl}</span> : null}
-                      {block.scope ? <span>{block.scope}</span> : null}
-                      {masked ? (
-                        <span
-                          className='flex items-center gap-0.5'
-                          title={
-                            blockMasked
-                              ? '注入块不计 usage'
-                              : '常驻约束不计 usage'
-                          }
-                        >
-                          <EyeOff className='size-3' aria-hidden />
-                          {blockMasked ? '遮罩' : '约束遮罩'}
-                        </span>
-                      ) : null}
-                      <span className='tabular-nums'>
-                        ≈{estimateTokens(block.text)}
-                      </span>
-                    </span>
-                  </div>
-                  {block.placeholder ? (
-                    <p className='px-2.5 py-2 text-[11px] text-muted-foreground italic'>
-                      零宽占位
-                    </p>
-                  ) : (
-                    <pre className='px-3 py-3 font-mono text-xs leading-6 break-words whitespace-pre-wrap'>
-                      {highlight(block.text, marks)}
-                    </pre>
-                  )}
-                </li>
-              )
-            })}
+                  </span>
+                </div>
+                {block.placeholder ? (
+                  <p className='px-2.5 py-2 text-[11px] text-muted-foreground italic'>
+                    {t('system:zeroWidthPlaceholder')}
+                  </p>
+                ) : (
+                  <pre className='px-3 py-3 font-mono text-xs leading-6 break-words whitespace-pre-wrap'>
+                    {highlight(block.text, marks)}
+                  </pre>
+                )}
+              </li>
+            ))}
           </ol>
         ) : (
-          <p className='text-xs text-muted-foreground'>无 system 块</p>
+          <p className='text-xs text-muted-foreground'>
+            {t('system:noSystemBlocks')}
+          </p>
         )}
       </CardContent>
       {rendered.length ? (
         <div className='flex items-center justify-between border-t border-border/40 px-4 pt-3 font-mono text-[10px] text-muted-foreground tabular-nums'>
-          <span>{rendered.length} 块</span>
+          <span>{t('system:blockCount', { count: rendered.length })}</span>
           <span>
-            {plain.length} 字符 · ≈{estimateTokens(plain)} tok
+            {t('system:promptSize', {
+              count: plain.length,
+              tokens: estimateTokens(plain),
+            })}
           </span>
         </div>
       ) : null}

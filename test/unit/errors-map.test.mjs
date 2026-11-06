@@ -18,6 +18,16 @@ import {
   CLIENT_POOL_UNAVAILABLE_MESSAGE,
 } from '../../src/lib/core/errors.mjs'
 
+test('a slot cli_error echoing the account Authorization header reaches the client masked', () => {
+  const token = 'sk-ant-oat01-' + 'c'.repeat(60) + '_t GX-\u0445\u00d7'
+  const mapped = mapUpstreamError(502, {
+    error: { type: 'api_error', code: 'cli_error', message: `Header '14' has invalid value: 'Bearer ${token}'` },
+  })
+  assert.equal(mapped.status, 502)
+  assert.equal(mapped.body.error.code, 'cli_error')
+  assert.equal(mapped.body.error.message, "Header '14' has invalid value: 'Bearer ***REDACTED***'")
+})
+
 test('an empty pool is a 503 "no available account", never a load message', () => {
   const mapped = mapUpstreamError(503, {
     error: { type: 'api_error', code: 'account_pool_exhausted', message: 'No eligible Claude accounts remain' },

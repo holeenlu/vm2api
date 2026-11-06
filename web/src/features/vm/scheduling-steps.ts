@@ -1,6 +1,7 @@
-/** 并发档位；0 = 不限（只在单槽覆盖里给出，分档默认至少 1）。 */
+import { localizedOption } from './localized-option'
+
 export const CONC_STEPS: [number, string][] = [
-  [0, '不限'],
+  localizedOption(0, 'vm:schedulingSteps.unlimited'),
   [1, '1'],
   [2, '2'],
   [4, '4'],
@@ -12,7 +13,7 @@ export const CONC_STEPS: [number, string][] = [
 ]
 
 export const RPM_STEPS: [number, string][] = [
-  [0, '不限'],
+  localizedOption(0, 'vm:schedulingSteps.unlimited'),
   [10, '10'],
   [15, '15'],
   [20, '20'],
@@ -36,4 +37,27 @@ export function withCurrent(
   return [...steps, [current, String(current)] as [number, string]].sort(
     (a, b) => a[0] - b[0]
   )
+}
+
+/** Codex 选槽权重（#772）：后端 PATCH 校验 1–100；默认 1；权重高的一档先被选。 */
+export const CODEX_WEIGHT_DEFAULT = 1
+export const CODEX_WEIGHT_STEPS: [number, string][] = [
+  1, 2, 3, 5, 10, 20, 50, 100,
+].map((n): [number, string] => [n, String(n)])
+
+export function codexWeightOf(vm: { weight?: number | null }): number {
+  const weight = Number(vm.weight ?? CODEX_WEIGHT_DEFAULT)
+  return Number.isInteger(weight) && weight >= 1 && weight <= 100
+    ? weight
+    : CODEX_WEIGHT_DEFAULT
+}
+
+/** PATCH 值：undefined = 不变；null = 回到默认 1。 */
+export function codexWeightPatch(
+  before: number,
+  draft: { own: boolean; value: number }
+): number | null | undefined {
+  const next = draft.own ? draft.value : CODEX_WEIGHT_DEFAULT
+  if (next === before) return undefined
+  return next === CODEX_WEIGHT_DEFAULT ? null : next
 }

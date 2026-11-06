@@ -36,6 +36,7 @@ import { bindVmProxy, getVm, patchVmRecord, vmHasSchedulableCredential } from '.
 import {
   applyClearUnschedulable,
   applyUnschedulable,
+  clearLegacyProxyScheduleOff as clearLegacyProxyScheduleOffState,
   deriveScheduleFields,
   migrateScheduleRecord,
 } from '../pool/schedule-state.mjs'
@@ -205,7 +206,7 @@ async function egressCheck(vm, projectRoot, probes) {
     return check('egress', label, 'error', 'egress_network_missing', '本机出口网络 kin-eg-px-local 不存在')
   }
   if (isCodexVm(vm)) return check('egress', label, 'ok', null, `Codex 内核直接走代理 ${proxy.id}`)
-  const st = probes.socksEgress(projectRoot, proxy.id)
+  const st = await probes.socksEgress(projectRoot, proxy.id)
   if (st?.ok) return check('egress', label, 'ok', null, `出口桥 kin-egress 运行中（${proxy.id}）`)
   const why = st?.reason === 'not_listening' ? '进程在但未监听' : '进程不在'
   return check('egress', label, 'error', 'egress_down', `本机出口桥 kin-egress ${why}（${proxy.id}）`, {
@@ -321,10 +322,10 @@ function watchdogCheck(vm, engine, watchdog, internal) {
   const fault = kernelFaults.get(vm.id)
   if (fault) {
     const why = internal ? `：${redactSecrets(fault)}` : ''
-    return check('watchdog', label, 'error', 'kernel_faulted', `自动重启已用尽，已停止调度${why}`)
+    return check('watchdog', label, 'error', 'kernel_faulted', `自动恢复次数已用尽，已停止调度${why}`)
   }
   const n = watchdog?.restartsInWindow?.(vm.id) || 0
-  if (n) return check('watchdog', label, 'warn', 'watchdog_restarting', `近一小时已自动重启容器 ${n} 次`)
+  if (n) return check('watchdog', label, 'warn', 'watchdog_restarting', `近一小时已尝试恢复服务 ${n} 次`)
   return check('watchdog', label, 'ok', null, '无故障记录')
 }
 
@@ -407,11 +408,11 @@ export async function powerOnSlot({
   } catch (error) {
     return { ok: false, status: 400, code: error.code, error: error.message }
   }
-  const bound = proxyPool.ensureBoundToVm(id, vm.proxy?.id || null)
+  const bound = await proxyPool.ensureBoundToVm(id, vm.proxy?.id || null)
   if (!bound) {
     return { ok: false, status: 409, code: 'proxy_required', error: 'No SOCKS5 is bound or free for this VM' }
   }
-  bindVmProxy(projectRoot, id, bound)
+  await bindVmProxy(projectRoot, id, bound)
   await (fillTimezone || ((vmId) => fillVmTimezoneFromExit(projectRoot, proxyPool, vmId)))(id)
   vm = getVm(projectRoot, id) || vm
   const runtimeBeforeBoot = structuredClone(vm.runtime || {})
@@ -429,7 +430,11 @@ export async function powerOnSlot({
   const runtime = boot.runtime || boot.docker?.runtime
   vm =
     patchVmRecord(projectRoot, id, (record) => {
+      if (by === 'recover_ok') clearLegacyProxyScheduleOffState(record)
+      // Clear proxy-owned state before migration; otherwise a derived legacy
+      // proxy reason can be converted into a generic failure first.
       migrateScheduleRecord(record)
+      if (by === 'recover_ok') clearLegacyProxyScheduleOffState(record)
       if (by === 'start' && record.schedule_off_reason === 'stopped') {
         delete record.schedule_off
         delete record.schedule_off_reason
@@ -596,22 +601,23 @@ export async function recoverSlot({
   }
 }
 
-function nodeLinkReady(nodeId) {
+async function nodeLinkReady(nodeId) {
   try {
-    return cluster()?.get(nodeId)?.link?.state === 'ready'
+    return (await cluster()?.get(nodeId))?.link?.state === 'ready'
   } catch {
     return false
   }
 }
 
 /**
- * Control-plane boot: a slot recorded as running whose container is gone or
- * exited is booted once, serially. Node slots whose link is not up yet are
- * left to the watchdog.
+ * Control-plane boot: revive missing/exited containers and restore Codex
+ * kernels, which lived in the replaced control plane even when the slot's
+ * container stayed up. Node slots whose link is not up yet are left to the watchdog.
  */
 export async function reviveDownSlots({
   vms,
   powerOn,
+  restoreRuntime = null,
   inspect = inspectSlotContainer,
   linkReady = nodeLinkReady,
   watchdog = null,
@@ -622,7 +628,7 @@ export async function reviveDownSlots({
     if (vm?.status !== 'running') continue
     if (vm.migration_pending || ['running', 'needs_attention'].includes(vm.slot_migration?.status)) continue
     const nodeId = vmNodeId(vm)
-    if (nodeId && !linkReady(nodeId)) continue
+    if (nodeId && !(await linkReady(nodeId))) continue
     let state
     try {
       state = await inspect(vm)
@@ -630,14 +636,22 @@ export async function reviveDownSlots({
       logger.warn(`[slot-revive] ${vm.id} inspect failed: ${error?.message || error}`)
       continue
     }
-    if (state.running) continue
+    const restore = state.running && isCodexVm(vm) && typeof restoreRuntime === 'function'
+    if (state.running && !restore) continue
     await watchdog?.hold?.(vm.id)
     try {
-      const result = await powerOn(vm.id)
+      const result = await (restore ? restoreRuntime : powerOn)(vm.id)
       revived.push({ id: vm.id, ok: !!result?.ok, code: result?.code || null })
       if (result?.ok)
-        logger.warn(`[slot-revive] ${vm.id} container was ${state.exists ? state.status : 'missing'}; booted`)
+        logger.warn(
+          restore
+            ? `[slot-revive] ${vm.id} Codex inference runtime restored`
+            : `[slot-revive] ${vm.id} container was ${state.exists ? state.status : 'missing'}; booted`,
+        )
       else logger.warn(`[slot-revive] ${vm.id} boot failed: ${result?.code || ''} ${result?.error || ''}`)
+    } catch (error) {
+      revived.push({ id: vm.id, ok: false, code: error?.code || 'runtime_start_failed' })
+      logger.warn(`[slot-revive] ${vm.id} boot failed: ${error?.message || error}`)
     } finally {
       watchdog?.release?.(vm.id)
     }

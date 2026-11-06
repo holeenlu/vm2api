@@ -1,18 +1,13 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { VmProxySnap } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { importErrorMessage } from '@/lib/import-errors'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { SearchSelect } from '@/components/search-select'
 import { StatusMark } from '@/components/status-mark'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import {
@@ -87,6 +82,8 @@ export function ImportProxyStep({
   /** 槽位所在节点；本地代理按节点名标「节点名local代理」。 */
   nodeId?: string | null
 }) {
+  const { t } = useTranslation('import')
+
   const px = useQuery(proxiesQueryOptions())
   const qc = useQueryClient()
   const pasteRef = useRef<HTMLTextAreaElement>(null)
@@ -124,7 +121,7 @@ export function ImportProxyStep({
         body: JSON.stringify({ vm_id: vmId }),
       }),
     onSuccess: async () => {
-      toast.success('已绑到本槽')
+      toast.success(t('import:bound'))
       await refresh()
     },
     onError: (error: Error) => toast.error(importErrorMessage(error)),
@@ -139,7 +136,7 @@ export function ImportProxyStep({
     const text = (el?.value || '').trim()
     if (!text) return true
     if (!vmId) {
-      toast.error('请先选择空槽')
+      toast.error(t('import:selectSlotFirst'))
       return false
     }
     setBusy(true)
@@ -150,7 +147,7 @@ export function ImportProxyStep({
       })
       if (el) el.value = ''
       if (d.bound?.id || d.bound?.bound_vm_id) {
-        toast.success('已写入 SOCKS5 并绑到本槽')
+        toast.success(t('import:proxySaved'))
         await refresh()
         return true
       }
@@ -172,11 +169,11 @@ export function ImportProxyStep({
             body: JSON.stringify({ vm_id: vmId }),
           }
         )
-        toast.success('该条已在池中，已绑到本槽')
+        toast.success(t('import:existingProxyBound'))
         await refresh()
         return true
       }
-      toast.error('未能绑到本槽')
+      toast.error(t('import:bindFailed'))
       return false
     } catch (error) {
       toast.error(importErrorMessage(error as Error))
@@ -191,41 +188,24 @@ export function ImportProxyStep({
   return (
     <div className='space-y-3'>
       <div className='flex flex-wrap items-center gap-2'>
-        <Select
-          value={bound?.id || ''}
-          onValueChange={(id) => bindOne.mutate(id)}
-          disabled={pending || !proxies.length}
-        >
-          <SelectTrigger className='min-w-[220px] flex-1' aria-label='选择出口'>
-            <SelectValue
-              placeholder={
-                proxies.length
-                  ? bound
-                    ? '已绑定，可改选'
-                    : '选择出口（本地代理 / SOCKS5）'
-                  : '代理池为空'
-              }
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((p) => {
-              const here = proxyBoundIds(p).includes(vmId)
-              const full =
-                !here && proxyBoundIds(p).length >= proxyBindLimit(p, poolLimit)
-              const bad = proxyIsInvalid(p)
-              return (
-                <SelectItem
-                  key={p.id}
-                  value={p.id || ''}
-                  disabled={!here && (full || bad)}
-                >
-                  {proxyOptionLabel(p, poolLimit, labelOpts)}
-                  {full ? ' · 已绑满' : ''}
-                </SelectItem>
-              )
-            })}
-          </SelectContent>
-        </Select>
+        <SearchSelect
+          className='min-w-56 flex-1'
+          label={t('import:selectEgress')}
+          value={bound?.id}
+          options={options.map((p) => ({
+            id: p.id || '',
+            name: proxyOptionLabel(p, poolLimit, labelOpts),
+            disabled:
+              pending ||
+              (!proxyBoundIds(p).includes(vmId) &&
+                (proxyBoundIds(p).length >= proxyBindLimit(p, poolLimit) ||
+                  proxyIsInvalid(p))),
+          }))}
+          searchPlaceholder={t('import:searchEgress')}
+          onChange={(id) => {
+            if (id) bindOne.mutate(id)
+          }}
+        />
         {bound ? (
           <StatusMark
             tone={{
@@ -250,7 +230,7 @@ export function ImportProxyStep({
         <Textarea
           ref={pasteRef}
           rows={2}
-          aria-label='粘贴 SOCKS5'
+          aria-label={t('import:pasteProxy')}
           placeholder={'host:port:user:pass\nsocks5://user:pass@host:1080'}
           onBlur={() => void flushPaste()}
         />
@@ -261,13 +241,11 @@ export function ImportProxyStep({
           loading={pending}
           onClick={() => void flushPaste()}
         >
-          导入并绑定
+          {t('import:importAndBind')}
         </Button>
       </div>
 
-      <p className='text-xs text-muted-foreground'>
-        账密只入库不回显。换票前会先落地未提交的粘贴，避免还走旧代理。
-      </p>
+      <p className='text-xs text-muted-foreground'>{t('import:proxyHelp')}</p>
     </div>
   )
 }

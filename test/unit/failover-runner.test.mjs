@@ -197,7 +197,7 @@ test('slot_busy spill serves the turn elsewhere but keeps the session pinned', a
   })
   const callerSession = 'slot-busy-caller'
   const stickyKey = sticky.canonicalSessionKey(callerSession)
-  sticky.bind(stickyKey, { accountId: 'account-1', vmId: 'vm-01', sessionId: 'stored-home' }, { countHit: false })
+  await sticky.bind(stickyKey, { accountId: 'account-1', vmId: 'vm-01', sessionId: 'stored-home' }, { countHit: false })
   const selections = [1, 2].map((n) => ({
     ok: true,
     accountId: `account-${n}`,
@@ -247,11 +247,14 @@ test('slot_busy spill serves the turn elsewhere but keeps the session pinned', a
   })
   assert.equal(result.ok, true)
   assert.equal(result.accountId, 'account-2')
-  assert.deepEqual((({ accountId, vmId, sessionId }) => ({ accountId, vmId, sessionId }))(sticky.resolve(stickyKey)), {
-    accountId: 'account-1',
-    vmId: 'vm-01',
-    sessionId: 'stored-home',
-  })
+  assert.deepEqual(
+    (({ accountId, vmId, sessionId }) => ({ accountId, vmId, sessionId }))(await sticky.resolve(stickyKey)),
+    {
+      accountId: 'account-1',
+      vmId: 'vm-01',
+      sessionId: 'stored-home',
+    },
+  )
 })
 
 test('a late device-affinity hop does not overwrite a newer cross-account session pin', async (t) => {
@@ -263,7 +266,11 @@ test('a late device-affinity hop does not overwrite a newer cross-account sessio
   })
   const callerSession = 'device-move-race'
   const stickyKey = sticky.canonicalSessionKey(callerSession)
-  sticky.bind(stickyKey, { accountId: 'account-1', vmId: 'vm-01', sessionId: 'old-outbound' }, { countHit: false })
+  await sticky.bind(
+    stickyKey,
+    { accountId: 'account-1', vmId: 'vm-01', sessionId: 'old-outbound' },
+    { countHit: false },
+  )
   const scheduler = new Scheduler([
     { ...candidate(2), selectionReason: 'device-affinity', seatKey: `seat:sess:${callerSession}` },
   ])
@@ -275,8 +282,8 @@ test('a late device-affinity hop does not overwrite a newer cross-account sessio
     stickyKey,
     seatKey: `seat:sess:${callerSession}`,
     applyAttempt: (body) => ({ body, meta: { sessionId: 'moved-outbound' } }),
-    callAttempt: () => {
-      sticky.bind(
+    callAttempt: async () => {
+      await sticky.bind(
         stickyKey,
         { accountId: 'account-3', vmId: 'vm-03', sessionId: 'newer-outbound' },
         { allowMove: true, replaceSession: true },
@@ -285,7 +292,7 @@ test('a late device-affinity hop does not overwrite a newer cross-account sessio
     },
   })
   assert.equal(result.ok, true)
-  const bound = sticky.resolve(stickyKey)
+  const bound = await sticky.resolve(stickyKey)
   assert.equal(bound.accountId, 'account-3')
   assert.equal(bound.vmId, 'vm-03')
   assert.equal(bound.sessionId, 'newer-outbound')
@@ -1025,7 +1032,7 @@ for (const cancellation of ['result', 'throw']) {
       })
       assert.equal(result.status, turn === 50 ? 499 : 200)
       if (turn === 50) assert.equal(result.body.error.code, 'client_cancelled')
-      const bound = sticky.resolve(stickyKey)
+      const bound = await sticky.resolve(stickyKey)
       assert.equal(bound.sessionId, originalSession, `persisted session changed at turn ${turn}`)
       assert.equal(bound.vmId, 'vm-01', `dialog forgot the VM at turn ${turn}`)
       assert.equal(bound.slotIndex, null, `ended dialog kept the slot at turn ${turn}`)
@@ -1045,7 +1052,11 @@ test('failed hops before a cross-account VM move persist that VM outbound sessio
   })
   const callerSession = 'failed-hop-caller'
   const stickyKey = sticky.canonicalSessionKey(callerSession)
-  sticky.bind(stickyKey, { accountId: 'account-old', vmId: 'vm-old', sessionId: 'stored-old' }, { countHit: false })
+  await sticky.bind(
+    stickyKey,
+    { accountId: 'account-old', vmId: 'vm-old', sessionId: 'stored-old' },
+    { countHit: false },
+  )
   const selections = [
     { ok: true, vmId: 'vm-old', accountId: 'account-old', release() {} },
     { ok: true, vmId: 'vm-mid', accountId: 'account-mid', release() {} },
@@ -1107,12 +1118,112 @@ test('failed hops before a cross-account VM move persist that VM outbound sessio
     applyAttempt,
     callAttempt: () => success(),
   })
-  const stored = sticky.resolve(stickyKey)
+  const stored = await sticky.resolve(stickyKey)
   assert.equal(stored.vmId, 'vm-home')
   assert.equal(stored.accountId, 'account-home')
   assert.equal(stored.sessionId, seen[2].sessionId)
   assert.equal(seen[3].sessionId, seen[2].sessionId)
   assert.notEqual(seen[2].sessionId, seen[1].sessionId)
+})
+
+test('a seat granted on another account moves the pin so the next turn reuses its session', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-seat-move-'))
+  const sticky = new StickyRouter({ dataDir, config: { sticky: { enabled: true } } })
+  t.after(() => {
+    sticky.db.close()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  const callerSession = 'seat-move-caller'
+  const stickyKey = sticky.canonicalSessionKey(callerSession)
+  await sticky.bind(stickyKey, { accountId: 'account-1', vmId: 'vm-01', sessionId: 'stored-old' }, { countHit: false })
+  // Device affinity seats the session on vm-03 while the pin still names vm-01.
+  const scheduler = {
+    async selectAndReserve() {
+      return { ok: true, vmId: 'vm-03', accountId: 'account-3', seatKey: 'seat:dev', release() {} }
+    },
+    markSuccess() {},
+    markCooldown() {},
+    releaseAccountSessions() {},
+  }
+  const runner = new FailoverRunner({ scheduler, stickyRouter: sticky, config: { same_account_retry_delay_ms: 0 } })
+  const seen = []
+  let clock = 1_000
+  const applyAttempt = (body, selected, extra) => {
+    const sessionId = resolveOutboundSessionId(callerSession, {
+      boundSessionId: extra.stickyBound?.sessionId,
+      boundVmId: extra.stickyBound?.vmId,
+      vmId: selected.vmId,
+      epoch: `${clock++}:${selected.vmId}`,
+    })
+    seen.push(sessionId)
+    return { body, meta: { sessionId } }
+  }
+  for (const requestId of ['req-1', 'req-2', 'req-3']) {
+    await runner.run({
+      requestId,
+      canonicalBody: { model: 'claude-opus-test' },
+      model: 'claude-opus-test',
+      stickyKey,
+      seatKey: 'seat:dev',
+      applyAttempt,
+      callAttempt: () => success(),
+    })
+  }
+  const stored = await sticky.resolve(stickyKey)
+  assert.equal(stored.vmId, 'vm-03')
+  assert.equal(stored.accountId, 'account-3')
+  assert.equal(stored.sessionId, seen[0])
+  assert.deepEqual(seen, [seen[0], seen[0], seen[0]])
+})
+
+test('a seated turn that only spilled the pinned account for capacity keeps the pin', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-seat-spill-'))
+  const sticky = new StickyRouter({ dataDir, config: { sticky: { enabled: true } } })
+  t.after(() => {
+    sticky.db.close()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  const callerSession = 'seat-spill-caller'
+  const stickyKey = sticky.canonicalSessionKey(callerSession)
+  await sticky.bind(stickyKey, { accountId: 'account-1', vmId: 'vm-01', sessionId: 'stored-home' }, { countHit: false })
+  const selections = [1, 2].map((n) => ({
+    ok: true,
+    accountId: `account-${n}`,
+    vmId: `vm-0${n}`,
+    seatKey: 'seat:dev',
+    release() {},
+  }))
+  let index = 0
+  const scheduler = {
+    async selectAndReserve() {
+      return selections[Math.min(index++, selections.length - 1)]
+    },
+    markSuccess() {},
+    markCooldown() {},
+    releaseAccountSessions() {},
+  }
+  const runner = new FailoverRunner({ scheduler, stickyRouter: sticky, config: { same_account_retry_delay_ms: 0 } })
+  await runner.run({
+    requestId: 'req-seat-spill',
+    canonicalBody: { model: 'claude-opus-test' },
+    model: 'claude-opus-test',
+    stickyKey,
+    seatKey: 'seat:dev',
+    applyAttempt: (body, selected) => ({ body, meta: { sessionId: `sent-${selected.vmId}` } }),
+    callAttempt: ({ candidate: selected }) =>
+      selected.accountId === 'account-1'
+        ? {
+            ok: false,
+            status: 503,
+            terminalState: 'rejected',
+            body: { error: { type: 'api_error', code: 'slot_busy', message: 'no free slot' } },
+          }
+        : success(),
+  })
+  const stored = await sticky.resolve(stickyKey)
+  assert.equal(stored.vmId, 'vm-01')
+  assert.equal(stored.accountId, 'account-1')
+  assert.equal(stored.sessionId, 'stored-home')
 })
 
 for (const cancellation of ['result', 'throw']) {

@@ -1,5 +1,16 @@
+import { PROXY_DIRECT, PROXY_SAVED } from '@/features/proxies/proxy-picker'
+
 export const DEFAULT_URL = 'https://api.anthropic.com'
-export const DIRECT = '__direct__'
+export const DIRECT = PROXY_DIRECT
+
+/**
+ * 请求里的代理字段。已存的手填代理地址（PROXY_SAVED）不发 proxy_id，
+ * 让服务端沿用 key 上保存的 proxy_url。
+ */
+export function proxyIdField(proxyId: string): { proxy_id?: string } {
+  return proxyId === PROXY_SAVED ? {} : { proxy_id: proxyId }
+}
+
 export type ApiProtocol = 'anthropic' | 'openai'
 export const API_DEFAULTS = {
   anthropic: { baseUrl: DEFAULT_URL, authScheme: 'x_api_key' },
@@ -18,6 +29,8 @@ export type StoredSnapshot = {
   baseUrl: string
   authScheme: AuthScheme
   proxyId: string
+  /** 端点已保存模型的名称与别名（小写），保存时不再作为新获取的模型回传 */
+  modelIds?: string[]
 }
 
 export type EndpointDraft = {
@@ -40,7 +53,7 @@ type StoredItem = {
   risk_review_enabled?: boolean
   base_url?: string
   auth_scheme?: string
-  api_key_entries?: { id?: string; proxy_id?: string }[]
+  api_key_entries?: { id?: string; proxy_id?: string; has_proxy?: boolean }[]
   models?: { id?: string; name?: string; alias?: string }[]
 }
 export function draftFromStored(item: StoredItem): EndpointDraft {
@@ -54,10 +67,18 @@ export function draftFromStored(item: StoredItem): EndpointDraft {
       item.protocol === 'openai' || item.auth_scheme === 'authorization_bearer'
         ? 'authorization_bearer'
         : 'x_api_key',
-    proxyId: key?.proxy_id || DIRECT,
+    proxyId: key?.proxy_id || (key?.has_proxy ? PROXY_SAVED : DIRECT),
   }
   const existingModels = (item.models || [])
     .map((m) => (m.alias || m.name || m.id || '').trim())
+    .filter(Boolean)
+  stored.modelIds = (item.models || [])
+    .flatMap((m) => [m.name, m.alias, m.id])
+    .map((v) =>
+      String(v || '')
+        .trim()
+        .toLowerCase()
+    )
     .filter(Boolean)
   return {
     id: item.id,
@@ -88,7 +109,6 @@ export function endpointSaveRequest(
   const protocol = item.protocol || 'anthropic'
   const baseUrl = item.baseUrl.trim() || API_DEFAULTS[protocol].baseUrl
   const apiKey = item.apiKey.trim()
-  const proxyId = item.proxyId === DIRECT ? '' : item.proxyId
   if (!item.storedId) {
     const names = item.fetchedModels?.length
       ? item.fetchedModels
@@ -108,7 +128,7 @@ export function endpointSaveRequest(
         name: baseUrl,
         base_url: baseUrl,
         auth_scheme: item.authScheme,
-        proxy_id: proxyId,
+        ...proxyIdField(item.proxyId),
         key_id: item.keyId || '',
         api_key: apiKey,
         models: names.map((name) => ({ name, alias: name })),
@@ -125,7 +145,8 @@ export function endpointSaveRequest(
     (!was || item.riskReviewEnabled !== (was.riskReviewEnabled === true))
   )
     body.risk_review_enabled = item.riskReviewEnabled
-  if (!was || item.proxyId !== was.proxyId) body.proxy_id = proxyId
+  if (!was || item.proxyId !== was.proxyId)
+    Object.assign(body, proxyIdField(item.proxyId))
   if (!was || item.authScheme !== was.authScheme)
     body.auth_scheme = item.authScheme
   if (
@@ -136,8 +157,14 @@ export function endpointSaveRequest(
     body.base_url = baseUrl
     if (protocol !== (was.protocol || 'anthropic')) body.protocol = protocol
   }
-  if (item.fetchedModels?.length) {
-    body.fetched_models = item.fetchedModels.map((name) => ({
+  // 只回传本次新获取的模型：预填的已保存模型以别名展示，若当作名称回传，服务端按名称合并会
+  // 为带自定义别名的模型新增一条重复项（上游 1.4.048 缺陷，tapmodels 修正）
+  const storedIds = new Set(item.stored?.modelIds || [])
+  const fresh = (item.fetchedModels || []).filter(
+    (name) => !storedIds.has(name.trim().toLowerCase())
+  )
+  if (fresh.length) {
+    body.fetched_models = fresh.map((name) => ({
       name,
       alias: name,
     }))

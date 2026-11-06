@@ -47,15 +47,17 @@ function remapVia(result) {
 }
 
 export async function callRustKernel(opts = {}) {
+  const { onSendState = null } = opts
   const licensed = licenseCheck(opts)
   if (!licensed.ok) return cragLicenseDeniedResult(licensed)
-  return remapVia(await callGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
+  return remapVia(await callGoWorker({ ...opts, onSendState, exec: withRustKernelExec(opts.exec) }))
 }
 
 export async function streamRustKernel(opts = {}) {
+  const { onSendState = null } = opts
   const licensed = licenseCheck(opts)
   if (!licensed.ok) return cragLicenseDeniedResult(licensed)
-  return remapVia(await streamGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
+  return remapVia(await streamGoWorker({ ...opts, onSendState, exec: withRustKernelExec(opts.exec) }))
 }
 
 export async function postRustKernelTelemetryEvent(exec, event, options = {}) {

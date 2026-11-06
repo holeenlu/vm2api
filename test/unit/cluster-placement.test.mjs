@@ -123,7 +123,7 @@ function fakeNode(files = new Map()) {
       })
     },
   }
-  const host = { uid: 1000, gid: 1000, home: '/home/ubuntu', root: '/home/ubuntu/.vm2api', sudo: true }
+  const host = { uid: 1000, gid: 1000, home: '/home/ubuntu', root: '/home/ubuntu/.tapmodels', sudo: true }
   return {
     files,
     modes,
@@ -235,7 +235,7 @@ for (const identical of [false, true]) {
     assert.equal(stored.schedule_disabled_reason, null)
     assert.equal(JSON.stringify(stored).includes('node-access'), false)
     assert.equal(JSON.stringify(stored).includes('node-refresh'), false)
-    assert.equal(listVms(root)[0].has_token, true)
+    assert.equal((await listVms(root))[0].has_token, true)
     assert.equal(node.files.get(node.remoteCred).toString(), credential)
 
     const pool = new PoolScheduler({ projectRoot: root })
@@ -328,20 +328,20 @@ test('a guest-planted symlink at the credential path is refused, not followed', 
   assert.equal(node.files.get(node.remoteCred).toString(), '{"rt":"mine"}')
 })
 
-test('node paths keep ~/.claude in the host-owned mount, everything else in place', () => {
+test('node paths keep ~/.claude in the host-owned mount, everything else in place', async () => {
   assert.equal(remoteSlotPath('cli-home/.claude/settings.json'), 'claude/settings.json')
   assert.equal(remoteSlotPath('cli-home/.claude/telemetry/egress.json'), 'claude/telemetry/egress.json')
   assert.equal(remoteSlotPath('run/kernel.json'), 'run/kernel.json')
   assert.equal(remoteSlotPath('machine-id'), 'machine-id')
 })
 
-test('remote slot runs as the SSH user unless that user is root', () => {
+test('remote slot runs as the SSH user unless that user is root', async () => {
   assert.deepEqual(remoteSlotOwner({ uid: 1000, gid: 1001 }, { id: 'vm-03' }), { uid: 1000, gid: 1001 })
   const rootOwner = remoteSlotOwner({ uid: 0, gid: 0 }, { id: 'vm-03' })
   assert.equal(rootOwner.uid, 10003)
 })
 
-test('remote iptables script mirrors applyIptables semantics', () => {
+test('remote iptables script mirrors applyIptables semantics', async () => {
   const plan = iptablesPlan({
     chain: 'KEGabc',
     bridge: 'kegabc',
@@ -378,7 +378,7 @@ test('remote iptables script mirrors applyIptables semantics', () => {
   assert.doesNotMatch(remoteIptablesScript(plan, { sudo: false }), /sudo/)
 })
 
-test('a node SOCKS exit is named after its slot; kernel names stay collision-free', () => {
+test('a node SOCKS exit is named after its slot; kernel names stay collision-free', async () => {
   const a = slotEgressNames('vm-02')
   assert.equal(a.slot, 'kin-02')
   assert.equal(a.egress, 'kin-02-egress')
@@ -400,7 +400,7 @@ function fakeElf(file, fill) {
   fs.writeFileSync(file, buf, { mode: 0o755 })
 }
 
-test('slot image tag follows payload bytes only; a VERSION bump keeps the image', (t) => {
+test('slot image tag follows payload bytes only; a VERSION bump keeps the image', async (t) => {
   const root = tmpDir('kin-slot-image-')
   fs.writeFileSync(path.join(root, 'VERSION'), '9.9.9\n')
   for (const f of [
@@ -447,9 +447,9 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
   assert.ok(entry, 'the remote Claude command must name a file baked into its slot image')
   assert.equal(entry.mode, 0o755)
   assert.match(entry.body.toString(), /^#!\/bin\/sh/)
-  assert.match(a.ref, /^vm2api\/kin-slot-ubuntu-24\.04:[0-9a-f]{12}$/)
+  assert.match(a.ref, /^tapmodels\/kin-slot-ubuntu-24\.04:[0-9a-f]{12}$/)
   const kvm = slotImageSpec(root, 'ubuntu-24.04', { runtime: 'kvm' })
-  assert.match(kvm.ref, /^vm2api\/kin-slot-kvm-ubuntu-24\.04:[0-9a-f]{12}$/)
+  assert.match(kvm.ref, /^tapmodels\/kin-slot-kvm-ubuntu-24\.04:[0-9a-f]{12}$/)
   assert.notEqual(kvm.ref, a.ref)
   fs.writeFileSync(path.join(root, 'VERSION'), '9.9.10\n')
   assert.equal(
@@ -575,7 +575,7 @@ test('node payload refresh leaves a running slot already on the current image up
   assert.deepEqual(report.kernel, { ok: true, skipped: true, reason: 'unchanged' })
 })
 
-test('amd64 node payload stays separate from native ARM control helpers', (t) => {
+test('amd64 node payload stays separate from native ARM control helpers', async (t) => {
   const root = tmpDir('kin-arm-cluster-payload-')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   for (const file of [
@@ -731,7 +731,7 @@ test('a node with placed VMs cannot be removed', async () => {
   await assert.rejects(manager.remove('n1'), { code: 'node_has_vms' })
 })
 
-test('a node pulls a missing cloud OS and does not upload an image it already has', () => {
+test('a node pulls a missing cloud OS and does not upload an image it already has', async () => {
   assert.equal(slotImageAction({ slotPresent: true, basePresent: true }), 'skip')
   assert.equal(slotImageAction({ slotPresent: true, basePresent: false }), 'skip')
   assert.equal(slotImageAction({ slotPresent: false, basePresent: false }), 'pull-base')
@@ -799,7 +799,7 @@ test('startSlotImageBuild returns a job awaitSlotImageBuild can finish', async (
   assert.equal(job.status, 'running')
   assert.equal(nodeImageBuildRunning('n1'), true)
   assert.equal(nodeImageBuildRunning('n10'), false)
-  assert.match(job.ref, /^vm2api\/kin-slot-ubuntu-24\.04:/)
+  assert.match(job.ref, /^tapmodels\/kin-slot-ubuntu-24\.04:/)
   const done = await awaitSlotImageBuild(job)
   assert.equal(done, job)
   assert.equal(done.status, 'done')

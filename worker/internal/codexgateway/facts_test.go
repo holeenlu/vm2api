@@ -1,0 +1,390 @@
+package codexgateway
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// Gateway 事实直读（设计第 19 节）：跨语言解密、读取契约视图、增量读取与合并进账号表。
+
+type factsFixture struct {
+	DBSecret    string          `json:"db_secret"`
+	SecretJSON  string          `json:"secret_json"`
+	SecretPlain map[string]any  `json:"secret_plain"`
+	Keyring     json.RawMessage `json:"keyring"`
+	Credentials []struct {
+		Account     string `json:"account_resource_id"`
+		Grant       string `json:"grant_kind"`
+		Revision    int64  `json:"revision"`
+		MasterKeyID string `json:"master_key_id"`
+		Wrapped     string `json:"wrapped_key"`
+		Ciphertext  string `json:"ciphertext"`
+		Fingerprint string `json:"token_fingerprint"`
+	} `json:"credentials"`
+	Plain map[string]vaultSecrets `json:"plain"`
+}
+
+func loadFactsFixture(t *testing.T) (factsFixture, string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "test", "fixtures", "executor-contract", "facts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture factsFixture
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "credential-master-keys.json")
+	if err := os.WriteFile(keyFile, fixture.Keyring, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return fixture, keyFile
+}
+
+func TestFactsCryptoOpensControlPlaneCiphertexts(t *testing.T) {
+	fixture, keyFile := loadFactsFixture(t)
+	plain, err := decryptDBField(fixture.SecretJSON, fixture.DBSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secret map[string]any
+	_ = json.Unmarshal([]byte(plain), &secret)
+	if secret["proxy_url"] != fixture.SecretPlain["proxy_url"] {
+		t.Fatalf("secret_json = %v", secret)
+	}
+	if _, err := decryptDBField(fixture.SecretJSON, "wrong"); err == nil {
+		t.Fatal("a wrong database secret must fail")
+	}
+	if _, err := decryptDBField(fixture.SecretJSON, ""); err == nil {
+		t.Fatal("an encrypted field without a secret must fail")
+	}
+	if value, _ := decryptDBField(`{"proxy_url":"x"}`, ""); value != `{"proxy_url":"x"}` {
+		t.Fatal("plain fields pass through")
+	}
+	keyring := newFactsKeyring(keyFile)
+	for _, record := range fixture.Credentials {
+		got, err := openVaultRecord(keyring, record.Account, record.Grant, record.Revision, record.MasterKeyID, record.Wrapped, record.Ciphertext)
+		if err != nil {
+			t.Fatalf("%s: %v", record.Grant, err)
+		}
+		if got != fixture.Plain[record.Grant] {
+			t.Fatalf("%s secrets = %+v", record.Grant, got)
+		}
+		// 附加认证数据绑定账号与代次：挪到别的账号或改代次都解不开
+		if _, err := openVaultRecord(keyring, "gw-other", record.Grant, record.Revision, record.MasterKeyID, record.Wrapped, record.Ciphertext); err == nil {
+			t.Fatal("record moved to another account must fail")
+		}
+		if _, err := openVaultRecord(keyring, record.Account, record.Grant, record.Revision+1, record.MasterKeyID, record.Wrapped, record.Ciphertext); err == nil {
+			t.Fatal("record with another revision must fail")
+		}
+	}
+	if _, err := openVaultRecord(newFactsKeyring(filepath.Join(t.TempDir(), "missing.json")), "gw-01", "native", 7, "mk", "", ""); err == nil {
+		t.Fatal("a missing master key file fails closed")
+	}
+}
+
+// 控制面库的最小结构 + 真实迁移 124（视图与触发器）
+func openFactsTestDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kin.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	base := `
+CREATE TABLE vendor_resources (id TEXT PRIMARY KEY, vendor_id TEXT, resource_type TEXT NOT NULL, name TEXT NOT NULL,
+  external_id TEXT, status TEXT NOT NULL DEFAULT 'active', config_json TEXT NOT NULL DEFAULT '{}', secret_json TEXT,
+  created_by TEXT NOT NULL DEFAULT 't', created_at TEXT NOT NULL DEFAULT 'x', updated_at TEXT NOT NULL DEFAULT 'x',
+  archived_at TEXT, deleted_at TEXT);
+CREATE TABLE gateway_worker_account_bindings (account_resource_id TEXT, gateway_instance_id TEXT, runtime_account_id TEXT, updated_at TEXT);
+CREATE TABLE gateway_worker_instances (id TEXT PRIMARY KEY);
+CREATE TABLE executor_credentials (account_resource_id TEXT NOT NULL, grant_kind TEXT NOT NULL, revision INTEGER NOT NULL,
+  master_key_id TEXT NOT NULL, wrapped_key TEXT NOT NULL, ciphertext TEXT NOT NULL, token_fingerprint TEXT, expires_at TEXT,
+  source TEXT NOT NULL DEFAULT 't', source_instance_id TEXT, updated_at TEXT NOT NULL DEFAULT 'x',
+  PRIMARY KEY (account_resource_id, grant_kind));
+CREATE TABLE group_resources (group_id INTEGER NOT NULL, resource_kind TEXT NOT NULL, resource_id TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 50, PRIMARY KEY (group_id, resource_kind, resource_id));
+CREATE TABLE proxies (id TEXT PRIMARY KEY, latency_ms INTEGER, max_websocket_connections INTEGER NOT NULL DEFAULT 0,
+  request_location_mode TEXT NOT NULL DEFAULT 'inherit', location_country TEXT, location_region TEXT, location_city TEXT,
+  location_timezone TEXT, geo_country_code TEXT, geo_region TEXT, geo_city TEXT, geo_timezone TEXT,
+  geo_v6_country_code TEXT, geo_v6_region TEXT, geo_v6_city TEXT, geo_v6_timezone TEXT);`
+	if _, err := db.Exec(base); err != nil {
+		t.Fatal(err)
+	}
+	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "src", "lib", "db", "migrations", "124_gateway_account_facts.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatalf("migration 124: %v", err)
+	}
+	return db, path
+}
+
+func seedFacts(t *testing.T, db *sql.DB, fixture factsFixture) {
+	t.Helper()
+	config := `{"platform":"openai","execution_kind":"gateway_worker","max_concurrency":3,"weight":2,"max_rpm":60,
+	  "model_access":{"mode":"denylist","models":["gpt-x"]},"reset_credit_auto":true,"proxy_id":"px-1",
+	  "runtime_account_id":"gwacct_gw-01","installation_id":"6f1c0e1e-5b7a-4a51-9d0e-6f6f1b3c2a10",
+	  "bps":{"enabled":true,"models":["gpt-5"],"auto_move_on_403":true},"bps_grant":{"revision":1},"email":"a@example.test"}`
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{"INSERT INTO proxies(id,max_websocket_connections,request_location_mode,geo_country_code,geo_region,geo_city,geo_timezone) VALUES('px-1',4,'auto','JP','Tokyo','Tokyo','Asia/Tokyo')", nil},
+		{"INSERT INTO vendor_resources(id,resource_type,name,status,config_json,secret_json) VALUES('gw-01','account','A','active',?,?)", []any{config, fixture.SecretJSON}},
+		{"INSERT INTO group_resources(group_id,resource_kind,resource_id) VALUES(9,'gateway_worker_account','gw-01'),(3,'gateway_worker_account','gw-01')", nil},
+	}
+	for _, record := range fixture.Credentials {
+		statements = append(statements, struct {
+			query string
+			args  []any
+		}{"INSERT INTO executor_credentials(account_resource_id,grant_kind,revision,master_key_id,wrapped_key,ciphertext,token_fingerprint) VALUES(?,?,?,?,?,?,?)",
+			[]any{record.Account, record.Grant, record.Revision, record.MasterKeyID, record.Wrapped, record.Ciphertext, record.Fingerprint}})
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement.query, statement.args...); err != nil {
+			t.Fatalf("%s: %v", statement.query, err)
+		}
+	}
+}
+
+func TestFactsReaderLoadsTheContractViewAndFollowsChanges(t *testing.T) {
+	fixture, keyFile := loadFactsFixture(t)
+	writer, path := openFactsTestDB(t)
+	seedFacts(t, writer, fixture)
+	reader, err := OpenFactsReader(path, keyFile, fixture.DBSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	ctx := context.Background()
+	if err := reader.Refresh(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	facts, status := reader.Snapshot()
+	f := facts["gw-01"]
+	if status.Contract != 1 || status.Accounts != 1 || len(f.Errors) != 0 {
+		t.Fatalf("status = %+v errors = %v", status, f.Errors)
+	}
+	if f.RuntimeID != "gwacct_gw-01" || f.MaxConcurrency != 3 || f.Weight != 2 || f.MaxRPM != 60 || !f.ResetCreditAuto || !f.Schedulable() {
+		t.Fatalf("facts = %+v", f)
+	}
+	if len(f.DeniedModels) != 1 || f.DeniedModels[0] != "gpt-x" || len(f.Models) != 0 {
+		t.Fatalf("model access = %v / %v", f.Models, f.DeniedModels)
+	}
+	if len(f.Groups) != 2 || f.Groups[0] != "3" || f.Groups[1] != "9" {
+		t.Fatalf("groups = %v", f.Groups)
+	}
+	if f.ProxyURL != fixture.SecretPlain["proxy_url"] || f.ProxyMaxWS != 4 || f.RequestLocation == nil || f.RequestLocation.Timezone != "Asia/Tokyo" {
+		t.Fatalf("proxy = %q %d %+v", f.ProxyURL, f.ProxyMaxWS, f.RequestLocation)
+	}
+	if f.BPSSettings == nil || !f.BPSSettings.Enabled || f.BPSSettings.RecoveryIntervalMinutes != 1 || f.BPSSettings.RateLimitCooldownSeconds != 5 {
+		t.Fatalf("bps settings = %+v", f.BPSSettings)
+	}
+	if f.Native == nil || f.Native.Revision != 7 || f.Native.RefreshToken != "rt-native" || f.BPS == nil || f.BPS.RefreshToken != "rt-bps" {
+		t.Fatalf("credentials = %+v %+v", f.Native, f.BPS)
+	}
+	// 没有变化时不读视图
+	seq := status.Seq
+	if err := reader.Refresh(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	// 只推进 Worker 读取的字段；备注等不推进
+	if _, err := writer.Exec("UPDATE vendor_resources SET config_json=json_set(config_json,'$.notes','x') WHERE id='gw-01'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec("UPDATE vendor_resources SET status='paused',config_json=json_set(config_json,'$.max_concurrency',8) WHERE id='gw-01'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec("DELETE FROM group_resources WHERE group_id=9"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Refresh(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	facts, status = reader.Snapshot()
+	f = facts["gw-01"]
+	if status.Seq <= seq || f.MaxConcurrency != 8 || f.Schedulable() || len(f.Groups) != 1 || f.Groups[0] != "3" {
+		t.Fatalf("after change: seq %d→%d facts %+v", seq, status.Seq, f)
+	}
+	// 读事务已结束：控制面的 checkpoint 能截断 WAL
+	var busy, logFrames, checkpointed int
+	if err := writer.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil || busy != 0 {
+		t.Fatalf("checkpoint busy=%d err=%v", busy, err)
+	}
+	// 契约版本超出支持区间：拒绝加载，保留上一份快照
+	if _, err := writer.Exec("UPDATE gateway_fact_contract SET version=2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Refresh(ctx, true); err == nil {
+		t.Fatal("an unsupported contract version must be refused")
+	}
+	facts, status = reader.Snapshot()
+	if len(facts) != 1 || status.LastError == "" {
+		t.Fatalf("snapshot kept = %d last_error %q", len(facts), status.LastError)
+	}
+	// 主密钥缺失：该账号标出错误，不带凭据
+	if _, err := writer.Exec("UPDATE gateway_fact_contract SET version=1"); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(keyFile)
+	reader2, _ := OpenFactsReader(path, keyFile, fixture.DBSecret)
+	defer reader2.Close()
+	if err := reader2.Refresh(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	facts, _ = reader2.Snapshot()
+	if facts["gw-01"].Native != nil || len(facts["gw-01"].Errors) == 0 {
+		t.Fatalf("missing master key = %+v", facts["gw-01"])
+	}
+}
+
+func TestApplyFactsTakesConfigFromFactsAndCredentialsOnlyForward(t *testing.T) {
+	store, err := OpenSealedStore(filepath.Join(t.TempDir(), "accounts.json"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetDefaultConcurrency(4)
+	fact := AccountFacts{ResourceID: "gw-01", RuntimeID: "rt", Status: "active", MaxConcurrency: 3, Weight: 2, Groups: []string{"7"},
+		Models: []string{"gpt-5"}, ProxyURL: "socks5h://p:1", InstallationID: "6f1c0e1e-5b7a-4a51-9d0e-6f6f1b3c2a10",
+		Native: &FactCredential{Revision: 3, AccessToken: "at3", RefreshToken: "rt3"}}
+	facts := map[string]AccountFacts{"gw-01": fact, "gw-02": {ResourceID: "gw-02", RuntimeID: "rt2", Status: "active"}}
+	if changed, err := store.ApplyFacts(facts); err != nil || changed != 1 {
+		t.Fatalf("changed=%d err=%v", changed, err)
+	}
+	account, ok := store.Get("rt")
+	if !ok || !account.Enabled || account.Paused || account.MaxConcurrency != 3 || account.Weight != 2 || account.RefreshToken != "rt3" ||
+		account.CredentialRevision != 3 || account.ProxyURL != "socks5h://p:1" || account.InstallationID != fact.InstallationID || len(account.Groups) != 1 {
+		t.Fatalf("account = %+v", account)
+	}
+	if _, ok := store.Get("rt2"); ok {
+		t.Fatal("an account without credentials is not created")
+	}
+	// 运行态保留；没有变化时不写
+	account.CooldownUntil, account.Quota = time.Now().Add(time.Hour), map[string]any{"plan_type": "pro"}
+	if _, err := store.Upsert(account); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _ := store.ApplyFacts(facts); changed != 0 {
+		t.Fatalf("unchanged facts rewrote %d accounts", changed)
+	}
+	// 本实例刚刷新（本地代次更高）：保留本地令牌，配置照样以事实为准
+	local, _ := store.Get("rt")
+	local.CredentialRevision, local.RefreshToken = 4, "rt4"
+	local.CredentialState = "expired"
+	if _, err := store.Upsert(local); err != nil {
+		t.Fatal(err)
+	}
+	fact.MaxConcurrency, fact.Status = 9, "paused"
+	if _, err := store.ApplyFacts(map[string]AccountFacts{"gw-01": fact}); err != nil {
+		t.Fatal(err)
+	}
+	account, _ = store.Get("rt")
+	if account.RefreshToken != "rt4" || account.CredentialRevision != 4 || account.MaxConcurrency != 9 || account.Enabled || !account.Paused || len(account.Groups) != 0 || account.CooldownUntil.IsZero() || account.Quota == nil {
+		t.Fatalf("after pause = %+v", account)
+	}
+	// 重新授权（事实代次更高）：换入新令牌并清掉旧凭据的终态
+	fact.Status, fact.Native = "active", &FactCredential{Revision: 10, AccessToken: "at10", RefreshToken: "rt10"}
+	fact.BPS, fact.BPSGrantRevision = &FactCredential{Revision: 3, RefreshToken: "brt"}, 1
+	if _, err := store.ApplyFacts(map[string]AccountFacts{"gw-01": fact}); err != nil {
+		t.Fatal(err)
+	}
+	account, _ = store.Get("rt")
+	if account.RefreshToken != "rt10" || account.CredentialRevision != 10 || account.CredentialState != "" || account.BPS == nil || account.BPS.TokenGeneration != 2 || account.BPS.RefreshToken != "brt" {
+		t.Fatalf("after reauthorization = %+v bps=%+v", account, account.BPS)
+	}
+	// 本地 BPS 刷新过（令牌代次更高）：保留；撤销 BPS 后删除
+	bps := *account.BPS
+	bps.TokenGeneration, bps.RefreshToken, bps.State = 5, "brt5", "active"
+	account.BPS = &bps
+	if _, err := store.Upsert(account); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyFacts(map[string]AccountFacts{"gw-01": fact}); err != nil {
+		t.Fatal(err)
+	}
+	if account, _ = store.Get("rt"); account.BPS.RefreshToken != "brt5" {
+		t.Fatalf("local newer bps = %+v", account.BPS)
+	}
+	fact.BPS, fact.BPSGrantRevision = nil, 0
+	if _, err := store.ApplyFacts(map[string]AccountFacts{"gw-01": fact}); err != nil {
+		t.Fatal(err)
+	}
+	if account, _ = store.Get("rt"); account.BPS != nil {
+		t.Fatal("revoked bps grant must be removed")
+	}
+	// 读取出错：保留上一份；事实里没有：停止接单；墓碑：删除
+	broken := fact
+	broken.MaxConcurrency, broken.Errors = 1, []string{"secret_unreadable"}
+	if _, err := store.ApplyFacts(map[string]AccountFacts{"gw-01": broken}); err != nil {
+		t.Fatal(err)
+	}
+	if account, _ = store.Get("rt"); account.MaxConcurrency != 9 || !account.Enabled {
+		t.Fatalf("errored facts must not change the account: %+v", account)
+	}
+	if _, err := store.ApplyFacts(map[string]AccountFacts{}); err != nil {
+		t.Fatal(err)
+	}
+	if account, _ = store.Get("rt"); account.Enabled || !account.Paused || len(account.Groups) != 0 {
+		t.Fatalf("accounts missing from facts stop scheduling: %+v", account)
+	}
+	tomb := fact
+	tomb.Deleted, tomb.Status = true, "archived"
+	if _, err := store.ApplyFacts(map[string]AccountFacts{"gw-01": tomb}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Get("rt"); ok {
+		t.Fatal("tombstoned accounts are deleted")
+	}
+}
+
+func TestFactsPrimaryModeAppliesDatabaseChangesToTheStore(t *testing.T) {
+	fixture, keyFile := loadFactsFixture(t)
+	writer, path := openFactsTestDB(t)
+	seedFacts(t, writer, fixture)
+	reader, err := OpenFactsReader(path, keyFile, fixture.DBSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	store, err := OpenSealedStore(filepath.Join(t.TempDir(), "accounts.json"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: store, facts: &factsState{reader: reader}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.startFacts(ctx)
+	waitFor := func(label string, check func(Account) bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if account, ok := store.Get("gwacct_gw-01"); ok && check(account) {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		account, _ := store.Get("gwacct_gw-01")
+		t.Fatalf("%s: %+v", label, account)
+	}
+	waitFor("initial load", func(a Account) bool {
+		return a.Enabled && a.MaxConcurrency == 3 && a.RefreshToken == "rt-native" && a.CredentialRevision == 7 && a.BPS != nil && a.BPS.RefreshToken == "rt-bps"
+	})
+	// 复制分组之类的成员变化：下一次轮询即生效，不需要投影
+	if _, err := writer.Exec("INSERT INTO group_resources(group_id,resource_kind,resource_id) VALUES(11,'gateway_worker_account','gw-01')"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("group added", func(a Account) bool { return len(a.Groups) == 3 })
+	if _, err := writer.Exec("UPDATE vendor_resources SET status='paused' WHERE id='gw-01'"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("paused", func(a Account) bool { return !a.Enabled && a.Paused && len(a.Groups) == 0 })
+}

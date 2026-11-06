@@ -17,7 +17,7 @@ import { syncWorkerTelemetry } from '../src/lib/vm/vm-runtime.mjs'
 
 const root = process.argv[2] || '/opt/kin-gateway'
 const enable = !/^off|false|0|disable/i.test(String(process.argv[3] || 'on'))
-const ids = listVms(root).map((vm) => vm.id)
+const ids = (await listVms(root)).map((vm) => vm.id)
 const missing = []
 let wrote = 0
 let unchanged = 0

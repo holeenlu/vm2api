@@ -14,7 +14,8 @@ export const SEAT_STREAM_PING_MS = 15_000
  * @param {() => import('../pool/pool-scheduler.mjs').PoolScheduler | null} opts.getScheduler
  *   Read on every ping: initPoolRuntime() may swap the scheduler instance.
  * @param {import('../vm/proxy-pool.mjs').ProxyPool | null} [opts.proxyPool]
- * @param {(() => Set<string>) | null} [opts.visibleVmIds] Null = every VM (admin / super).
+ * @param {(() => Set<string> | Promise<Set<string>>) | null} [opts.visibleVmIds] Null = every VM (admin / super).
+ *   May read the database (VM summaries, R6 B7c): frames are built after it resolves.
  */
 export function servePoolSeatStream({
   req,
@@ -32,37 +33,43 @@ export function servePoolSeatStream({
   let proxyTimer = null
   let closed = false
 
-  const scope = (byVm) => {
-    const visible = visibleVmIds ? visibleVmIds() : null
+  const scope = async (byVm) => {
+    const visible = visibleVmIds ? await visibleVmIds() : null
     return visible ? Object.fromEntries(Object.entries(byVm).filter(([id]) => visible.has(id))) : byVm
   }
 
-  const sendSeats = () => {
+  const sendSeats = async () => {
     seatTimer = null
     if (closed) return
     const snap = scheduler?.seatSnapshot?.() || {}
     const frame = {
-      seats: scope(snap.seats || {}),
+      seats: await scope(snap.seats || {}),
       global_queue_depth: Number(snap.global_queue_depth) || 0,
       queue_max: Number(snap.queue_max) || 0,
       ts: Date.now(),
     }
+    if (closed) return
     res.write(`event: seats\ndata: ${JSON.stringify(frame)}\n\n`)
   }
-  const sendProxies = () => {
+  const sendProxies = async () => {
     proxyTimer = null
     if (closed || !proxyPool) return
-    const frame = { proxies: scope(proxyPool.liveStatusByVm?.() || {}), ts: Date.now() }
+    const frame = { proxies: await scope(proxyPool.liveStatusByVm?.() || {}), ts: Date.now() }
+    if (closed) return
     res.write(`event: proxy\ndata: ${JSON.stringify(frame)}\n\n`)
+  }
+  // Timer callbacks cannot await: a failed frame (visibility read) is only logged.
+  const settle = (frame) => {
+    frame().catch((error) => console.warn('[pool-seat-stream] frame failed', error?.message || error))
   }
   // Both run inside acquire/release and probe paths: only arm a timer, never throw.
   const onSeatChange = () => {
     if (seatTimer || closed) return
-    seatTimer = setTimeout(sendSeats, throttleMs)
+    seatTimer = setTimeout(() => settle(sendSeats), throttleMs)
   }
   const onProxyChange = () => {
     if (proxyTimer || closed) return
-    proxyTimer = setTimeout(sendProxies, throttleMs)
+    proxyTimer = setTimeout(() => settle(sendProxies), throttleMs)
   }
   const bind = () => {
     const next = getScheduler() || null
@@ -75,8 +82,8 @@ export function servePoolSeatStream({
 
   bind()
   proxyPool?.on?.('change', onProxyChange)
-  sendSeats()
-  sendProxies()
+  settle(sendSeats)
+  settle(sendProxies)
   const ping = setInterval(() => {
     if (closed) return
     if (bind()) onSeatChange()

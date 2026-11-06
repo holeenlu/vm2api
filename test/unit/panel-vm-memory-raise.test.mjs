@@ -31,7 +31,7 @@ function handler(project, body, extra = {}) {
     routingConfig: { vm: { memory: '512m' } },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {

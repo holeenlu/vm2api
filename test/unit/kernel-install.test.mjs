@@ -148,7 +148,7 @@ test('native switch stops before real replacement, writes candidate config and c
     persisted.kernel_installation.version,
     describeKernelCatalog(root).find((item) => item.id === 'crag').version,
   )
-  assert.deepEqual(summarizeVm(persisted, root).kernel_installation, persisted.kernel_installation)
+  assert.deepEqual((await summarizeVm(persisted, root)).kernel_installation, persisted.kernel_installation)
 })
 
 test('free switch removes native selection without admitting paid license or requiring cc-node', async (t) => {
@@ -532,7 +532,7 @@ for (const recoveredOk of [true, false]) {
       },
       requireAuth(req) {
         req.panelUser = 'fixture'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, body) {

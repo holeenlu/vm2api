@@ -14,7 +14,7 @@ export async function syncIpv6ProxyEgress(projectRoot, proxyPool, { nodeId, vms 
       results.push({ proxy_id: proxy.id, ok: result.ok, error: result.error || null })
     }
   }
-  for (const summary of vms || listVms(projectRoot)) {
+  for (const summary of vms || (await listVms(projectRoot))) {
     if (nodeId !== undefined && summary.node_id !== nodeId) continue
     const vm = vms ? summary : getVm(projectRoot, summary.id)
     if (!vm || socksProxyFamily(vm.proxy) !== 6) continue
