@@ -54,7 +54,10 @@ test('data survives a full gateway restart on the same data dir', async () => {
     const entry = (logs.json.items || []).find((l) => l.api_key_id === created.id)
     assert.ok(entry, 'request log row must survive restart')
     assert.equal(entry.status, 200)
-    assert.equal(typeof logs.json.total, 'number')
+    // 键集游标分页（技术债 M5）：不返回总数，返回下一页游标
+    assert.equal(logs.json.total, undefined)
+    assert.equal(typeof logs.json.has_more, 'boolean')
+    assert.ok('next_cursor' in logs.json)
 
     // stats endpoint aggregates from the DB
     const stats = await api(gw, 'GET', '/api/panel/request-logs/stats?bucket=day')
@@ -167,7 +170,7 @@ test('legacy JSON files are imported once at first boot', async () => {
     assert.equal(m.status, 200, m.text)
 
     const logs = await api(gw, 'GET', '/api/panel/request-logs?q=rid-oldjson')
-    assert.equal(logs.json.total, 1, 'legacy request log imported')
+    assert.equal(logs.json.items.length, 1, 'legacy request log imported')
 
     // import flag recorded; original files untouched
     const db = openDb(gw)

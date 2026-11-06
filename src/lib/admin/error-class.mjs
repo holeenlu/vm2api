@@ -29,10 +29,12 @@ const CODE_MAP = {
   api_key_disabled: 'auth',
   api_key_expired: 'auth',
   key_group_mismatch: 'request',
-  vm_pool_unavailable: 'request',
+  image_generation_disabled: 'request',
+  group_unavailable: 'request',
   claude_code_only: 'request',
   invalid_json: 'request',
   body_too_large: 'request',
+  request_timeout: 'timeout',
   empty_body: 'request',
   missing_field: 'request',
   invalid_field: 'request',
@@ -67,9 +69,14 @@ const CODE_MAP = {
   pool_unavailable: 'unavailable',
   server_overloaded: 'overloaded',
   upstream_overloaded: 'overloaded',
+  // Removed 2026-11-03; read-time classification of usage_logs rows written before
+  // then. Drop once those rows are past log retention (default 8 days, 2026-11-11).
+  codex_session_overloaded: 'overloaded',
   slot_busy: 'overloaded',
   // Kernel restarting / slot restore: platform side, not provider overload.
   kernel_unavailable: 'other',
+  // #689: slot kernel job sink overflowed because the gateway stopped draining it.
+  kernel_stream_overflow: 'other',
   restore_in_progress: 'other',
   wrap_connection_error: 'other',
   upstream_timeout: 'timeout',
@@ -127,7 +134,7 @@ export const SLA_OK_ERROR_CODES = new Set([
   'content_filter_refusal',
   'policy_blocked',
   'key_group_mismatch',
-  'vm_pool_unavailable',
+  'group_unavailable',
   'claude_code_only',
   // Pool queue full / timeout moved from 429 to 529; SLA keeps counting them as it did at 429.
   'pool_overloaded',
@@ -234,9 +241,11 @@ export function classifyRequestError(row = {}) {
   const code = String(row.error_code || '').trim()
   const text = hay(row)
   let id = CODE_MAP[code] || null
+  // Rows written before #689 carry the kernel's own kernel_error / 502 label.
+  if (/job stream overflow/.test(text)) id = 'other'
 
   if (/signature|thinking block|skip_thought_signature|must contain thinking/.test(text)) id = 'signature'
-  else if ((id === 'upstream' || (!id && status === 503)) && /overload|负载过高/.test(text)) id = 'overloaded'
+  else if ((id === 'upstream' || (!id && status === 503)) && /overload|过载|负载过高/.test(text)) id = 'overloaded'
   else if (!id && /no eligible|无可用账号|没有可用账号/.test(text)) id = 'unavailable'
   // Kernel labels an AUP refusal HTTP 400 upstream_invalid_request. The audit
   // feed only reads the refusal class, so the sentence wins over that code.
@@ -261,7 +270,7 @@ export function classifyRequestError(row = {}) {
     } else if (status === 401 || status === 403 || /oauth|reimport|revoked/.test(text)) {
       id = isOauthCredentialFailure(row, text, code) ? 'credential' : 'auth'
     } else if (status === 429) id = 'rate_limit'
-    else if (status === 529 || /overload|负载过高/.test(text)) id = 'overloaded'
+    else if (status === 529 || /overload|过载|负载过高/.test(text)) id = 'overloaded'
     else if (status === 503 || /no eligible/.test(text)) id = 'unavailable'
     else if (status === 400 || status === 422) id = 'request'
     else if (status >= 500) id = 'upstream'

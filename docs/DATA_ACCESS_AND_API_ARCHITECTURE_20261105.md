@@ -1,0 +1,476 @@
+# 数据库访问与后台接口架构：对照 sub2api、CPR 的设计
+
+状态：设计与路线。R1（定制 SQL 收进领域仓储）、R2（声明式路由表）、R3（管理写操作的审计与事务）、R4（大列表 keyset 分页）、R5（统计页读汇总表）已实施（2026-11-05，见 4.2–4.5 的实施结果）；R6（全量异步化）用户 2026-11-05 决定实施，B0–B8 已于 2026-11-06 全部交付：主线程不再同步访问数据库，详见 `docs/data-access/R6_PLAN.md` 与 `R6_PROGRESS.md`。R1、R2、R4、R5 的遗留项与第 3 节的 D 类超时并发、观测写入有界队列已由技术债批次 M5 收尾（2026-11-06，见 4.6）。日期：2026-11-05。
+
+对照快照：
+
+| 系统 | 快照 | 本机路径 |
+| --- | --- | --- |
+| vm2api | `main` `4b980732`（上游 `6a8f9c7f` + 累计定制提交） | 本仓库 |
+| sub2api（定制 NewAPI，Go） | `54f179cde`（2026-11-04） | `~/Git/sub2api`，只读 |
+| CPR（codex-proxy-rs，Rust） | `21d84af2`（2026-11-05） | `~/Git/codex-proxy-rs`，只读 |
+
+本文回答三个问题：两套参考系统的数据库是怎么设计的；它们的后台有多少接口读写数据库；vm2api 应该怎样划分接口、分层和组织数据访问。
+
+和已有文档的分工：
+
+- [ARCHITECTURE_TARGET_20261102.md](ARCHITECTURE_TARGET_20261102.md)：PostgreSQL + Redis 终态下的数据归属、请求生命周期、统计投影和配置发布。本文不重复。
+- [POSTGRESQL_MIGRATION_PLAN_20261103.md](POSTGRESQL_MIGRATION_PLAN_20261103.md)：换存储引擎的方案，包括类型映射、方言、`rowid` 水位和同步改异步。本文第 6 节的 R6 引用它的阶段 1。
+- [ARCHITECTURE_CONTROL_PLANE_EXECUTORS_20261105.md](ARCHITECTURE_CONTROL_PLANE_EXECUTORS_20261105.md)：D8“数据库跟随上游”。本文所有建议都在 D8 之内：不迁上游表，不改上游 SQL；需要越过 D8 的，单独列为待决定事项。
+
+本文不授权代码改造、数据迁移、生产部署或数据处置。
+
+## 0. 结论
+
+1. **三套系统都把“推理热路径”和“管理后台”分开处理。** 热路径同步时只读内存快照（Key、配置、账号），每个请求只写一条事实；用量、日志、统计都异步写。后台写入是一个操作一个事务，事务里同时写审计。
+2. **真正给数据库带来压力的只有两类接口：推理热路径，以及统计与用量查询。** 管理 CRUD 数量多，但都是低频、小事务。CPR 给观测查询单独分了连接预算；sub2api 的看板全部查汇总表。
+3. **vm2api 的主要问题是数据访问分散，不是表结构。** `src` 中共 646 处 `.prepare(`，`src/lib/db` 里 252 处，其余 394 处分散在 42 个业务文件中。这 394 处里：
+   - 354 处在纯定制文件中（vendor、gateway-worker、executor、admin 中的定制模块）；
+   - 35 处是定制往上游文件里加的（`panel-routes.mjs` 30 处）；
+   - 只有 5 处来自上游原文件。
+   因此把 SQL 收进各领域的仓储，基本不碰上游，不增加同步成本。
+4. **建议按六类接口分别规定读写规则**（第 3 节），并在定制范围内补三样基础设施：
+   - 领域仓储加 lint 守卫；
+   - 声明式路由表加覆盖测试；
+   - 管理写操作的事务模板（校验 → 写入 → revision → 审计）。
+5. **不照搬两套参考系统的规模。** sub2api 约 140 张表、850 个服务文件；CPR 自研了投影状态机。对单进程 SQLite 控制面来说都太重。
+
+## 1. 数据库设计对照
+
+### 1.1 总表
+
+| 维度 | sub2api | CPR | vm2api |
+| --- | --- | --- | --- |
+| 语言与访问层 | Go；Ent（44 个 schema）加大量手写 SQL（`lib/pq`） | Rust；sqlx 运行时查询，约 337 处 `query`、78 处 `QueryBuilder`；Core 声明“数据库中立”的端口，实现只有 PostgreSQL | Node；`node:sqlite` `DatabaseSync` 同步调用 |
+| 数据库 | 只用 PostgreSQL | 只用 PostgreSQL | SQLite（WAL），与控制面同进程；另有 4 个只读 worker 连接和 1 个统计线程 |
+| 表数量 | 约 140 张（Ent 只描述了其中一部分） | 36 张表加 1 个视图 | 81 张 |
+| 迁移 | 379 个 SQL（其中 17 个 `_notx` 用于 `CONCURRENTLY`），带 checksum，advisory lock 保证单实例执行（`internal/repository/migrations_runner.go`） | 38 个，启动时 `sqlx::migrate!`；已合入的按字节冻结，用 `.frozen-sha256` 校验 | 112 个，带 SHA-256 校验，逐个事务执行 |
+| 连接与超时 | 连接池 | 默认 20 连接；每个连接 `statement_timeout` 30s、`lock_timeout` 5s；观测查询另有连接预算 | 单写连接；面板日志扫描走只读 worker |
+| 请求事实 | `usage_logs` 带快照列、约 20 个索引，批量异步写 | `model_requests` 一请求一行，大字段放受校验的 JSON，再用视图投影出类型化字段；运行中租约单独放一张窄表 | `usage_logs` + `request_attempts`（write-behind，每批 32 条）；Gateway 另有 `gateway_worker_receipts` |
+| 计费账本 | 计费事件 → 一个事务内完成去重认领、条件扣余额、写 `usage_logs`；`FOR UPDATE SKIP LOCKED` 恢复中断的记账（`usage_billing_events.go`） | 费用写入 `on conflict(request_id) do nothing` 幂等；预算窗口用 `for update` 行锁 | `RelayBilling.authorize` 只读准入；`settle` 在一个 `DbClient` 事务内先按 `request_id` 抢占 `billing_charges` 再扣款（R6 B7）；回执、尝试记录按 `request_id` 幂等 |
+| 统计 | 后台任务每 60s 按水位线汇总到小时、天，需要抢 leader 锁；明细保留 90/180/730 天（`dashboard_aggregation_repo.go`） | 触发器在源事务里把请求 ID 写进待处理表（库内 outbox），Worker 每 5s 增量投影到 15 分钟、1 小时、1 天桶；查询时合并已投影的桶和边界明细 | `usage_cost_hourly`（迁移 093，定制）：触发器同步维护，整小时读汇总、边界小时读明细；只覆盖账号成本类查询。面板使用记录统计仍扫 `usage_logs`（放在只读线程中） |
+| 配置一致性 | 认证信息两级缓存（进程内 ristretto + Redis），pub/sub 通知失效 | 业务写入、`config_revision` 加 1、审计在同一事务；请求开始时冻结一份内存快照；pub/sub 加 5s 对账 | 执行设置已有 `config_revisions`（控制面 P4）；其余配置是文件（`routing.json`）加 `fs.watch` |
+| Redis | 用途很广：限流、并发槽、调度快照、计费在途、会话、锁、队列 | 只存可丢失、可重建的协调状态（准入、租约、冷却、亲和、会话）；队列和事实都放 PostgreSQL | 只给 Gateway Worker 的共享运行态用（P5），控制面不用 |
+| 金额 | 库里是 decimal，Go 代码里是 `float64` | `numeric(20,10)` | 混用：`*_micros`、`*_nano_usd*` 是整数；`total_cost`、`balance`、`multiplier` 等是 `REAL` |
+| 凭据与 Key | 明文保存 | 明文保存 Client Key，常量时间比较 | Key 存哈希；执行凭据信封加密（控制面 P3） |
+
+### 1.2 可以借鉴的做法
+
+- **一请求一行事实，尝试和费用以 `request_id` 幂等**（三套都有，vm2api 已具备）。
+- **观测写入和计费写入分开处理**：观测写入用有界队列，写不进去时放行请求（CPR 满了就丢弃并计数）；计费写入写不进去时拒绝请求。
+- **统计只查汇总表**：sub2api 用水位线定时汇总，CPR 用库内 outbox 增量投影。vm2api 的 `usage_cost_hourly` 用触发器同步维护，在 SQLite 单写者下最简单，应作为扩展的基础。
+- **配置写入与审计、revision 同事务**，请求开始时冻结快照（CPR）。
+- **迁移冻结并校验**（CPR 按字节冻结；vm2api 已有 SHA-256 校验）。
+- **权限路由表加覆盖测试**：sub2api 的 `internal/authz/routes.go` 把每个路由登记为只读或修改，`policy_test.go` 保证没有遗漏。
+- **分页不对大表全量 `COUNT`**：sub2api 用游标（`usage_log_cursor.go`）；CPR 的用量深页先按 15 分钟计数定位。
+
+### 1.3 不照搬的做法
+
+- sub2api 的金额用浮点运算、明文保存 Key 与凭据、把 Redis 当队列和锁的主力，以及整体规模。
+- CPR 每次选号都同步读数据库（Node 单线程下应读内存快照）；依赖 PostgreSQL 特性的 plpgsql 触发器、RR 快照、GIN 索引；约 4 万行 Store 代码的投影状态机。
+- 两套系统都用 Go/Rust 的强类型 DTO 三层分离（wire / model / row）。vm2api 是 JS，三层 DTO 收益有限，只保留“路由层负责入参校验与出参裁剪、仓储返回普通对象”这一条边界。
+
+## 2. 后台接口规模与读写
+
+统计口径：
+
+- sub2api 按 `internal/authz/routes.go` 的登记统计；
+- CPR 统计 `crates/gateway-api/src` 中的 `.route(` 注册，按 HTTP 方法拆开计数；
+- vm2api 用 `src` 中的路径字面量去重统计，方法分支数是 `method === 'X'` 的出现次数（包括少量非路由判断，作为近似值）。
+
+| 系统 | 接口总数 | 管理后台 | 后台读 / 写 | 其他 |
+| --- | --- | --- | --- | --- |
+| sub2api | 约 783 | 约 464 | 只读 199 / 修改 267 | 对外约 126、用户侧约 193 |
+| CPR | 164 | 123 | 读约 45 / 写约 52 / 不访问数据库约 26 | 对外推理 28；健康、登录、Key 用量 11 |
+| vm2api | 方法分支约 342（GET 129、POST 154、PUT 23、PATCH 15、DELETE 21） | `/api/panel/` 108 个路径、`/api/admin/` 11 个、`/api/vendor` 8 个 | GET 129 / 修改类 213（含推理 POST） | `/internal/v1/` 34 个（执行器契约）、`/v1/` 25 个 |
+
+CPR 管理后台各组的分布：
+
+- 账号 29（读约 9 / 写 12 / 调上游 8）；
+- 插件 29；
+- 设置 14（其中 5 个是预览和探测）；
+- 观测 12，全部是重查询；
+- Client Key 8、代理 8、备份 8、系统 8（全部不访问数据库）、账号分组 7。
+
+这个分布说明：
+
+- 管理后台的写接口多，但都是低频小事务，不是瓶颈；
+- 有相当一部分接口根本不访问数据库（调上游、探测、读进程状态），不应占用数据库连接或事务；
+- 观测和统计接口数量不多，但每个都是重查询，必须单独限制。
+
+## 3. 接口分类与读写规则
+
+vm2api 的每个接口都应归入下面六类之一，并在路由表中登记（见 4.4）。
+
+| 类别 | 范围 | 读 | 写 | 失败策略 |
+| --- | --- | --- | --- | --- |
+| A. 推理热路径 | `/v1/*`、`/v1/messages` 等客户端入口 | 只读内存快照：Key、分组、价格、账号、路由配置。请求中不查列表，不做全表扫描 | 预检与结算（`authorize` / `settle`）是一次短事务；`usage_logs`、`request_attempts` 走 write-behind 批量写；回执与事件按 `request_id` 幂等 | 计费写不进去时拒绝请求；观测写不进去时放行，只计数和告警 |
+| B. 管理写操作 | 面板中的创建、修改、删除、批量操作 | 校验所需的当前值 | 一个操作一个事务：校验 → 业务写入 → revision 加 1（会影响路由或计费的配置）→ 审计。提交后发布快照或让缓存失效 | 整体回滚；事务中不调上游、不做网络请求 |
+| C. 管理读列表与详情 | 账号、Key、用户、供应商资源、使用记录列表 | 走仓储的列表方法：固定排序、keyset 或游标分页；大表（`usage_logs`、`request_attempts`、`billing_charges`）不做全量 `COUNT` | 无 | 超时返回部分结果或提示缩小范围 |
+| D. 统计与看板 | 使用记录统计、排行、成本、预测 | 只查汇总表（`usage_cost_hourly` 及后续扩展），边界上的少量明细从索引补齐；在只读线程或连接上执行 | 无（汇总由触发器或后台任务维护） | 单独的超时与并发上限；结果按汇总的版本缓存 |
+| E. 内部执行器契约 | `/internal/v1/*` | 投影、租约、设置描述 | 事件收件箱、回执、尝试补齐，以（实例, 序号）或 `request_id` 幂等 | 已在控制面重构中实现（执行契约 v1），保持现状 |
+| F. 不访问数据库的操作 | 连接测试、上游探测、VM 命令、读进程状态 | 不读库，或只在开始时读一次配置 | 只在结束时写一条结果或审计 | 不持有事务，不占用写连接 |
+
+补充规则：
+
+- **跨类别的接口要拆开。** 例如“测试连接并保存结果”应先做 F 类操作（事务外），再做 B 类写入（短事务），不能在事务里等上游响应。
+- **重查询不放进 B 类的同一个请求。** 写操作的响应只返回被写的对象，列表刷新交给 C 类接口。
+- **A 类只读快照。** 快照因 B 类写入失效时，可以按 revision 重建，也可以靠定时对账收敛，但请求路径上不回退到实时查询。
+
+实施状态（M5，2026-11-06，详见 4.6）：D 类的并发上限与超时已按路由表类别统一套用（`src/lib/admin/route-budget.mjs`）；A 类的写回队列已加上限，观测写入写不进去时丢弃并计数，计费写入改为直接落库，不丢弃（`src/lib/db/write-behind.mjs`）。D 类“结果按汇总的版本缓存”仍未做。
+
+## 4. 分层架构
+
+### 4.1 分层与职责
+
+```text
+路由（route table）
+  解析参数、入参校验、权限（按路由表）、出参裁剪
+    ↓
+用例 / 服务（use case）
+  业务规则、事务边界、审计、revision、提交后发布快照
+    ↓
+仓储（repository）
+  唯一写 SQL 的地方；按领域分文件；返回普通对象
+    ↓
+SQLite（DatabaseSync；主线程经异步 DbClient 访问，见 R6）
+
+后台任务：汇总维护、保留期清理、对账、快照发布
+```
+
+约束：
+
+- 路由层不写 SQL，也不开事务。
+- 服务层通过仓储访问数据，事务用现有的 `withTransaction` 包住一个用例。
+- 仓储不调网络，不读快照，不感知 HTTP。
+- 后台任务和接口共用同一套仓储，不另写一份 SQL。
+
+### 4.2 SQL 归属
+
+| 代码归属 | 仓储位置 | 说明 |
+| --- | --- | --- |
+| 上游文件（`src/lib/db/repos/*` 等） | 保持原样 | 按 D8 与“上游优先”，不搬家，不改写 |
+| 定制往上游文件中加的 SQL（35 处，主要是 `panel-routes.mjs` 30 处） | 移到对应定制领域的仓储，上游文件只保留一行调用 | 同时减少对上游文件的改动行数（计入 `scripts/upstream-touch-budget.mjs`） |
+| 纯定制模块（354 处） | 各领域自己的仓储文件，例如 `src/lib/vendor/repos/`、`src/lib/gateway-worker/gateway-repo.mjs`（已是仓储形态，61 处）、`src/lib/executor/` 下的存储文件 | 按领域放，不塞进上游的 `src/lib/db/repos/` |
+
+当前分散最多的定制文件：
+
+| 文件 | `.prepare(` 数 |
+| --- | ---: |
+| `src/lib/vendor/vendor-platform.mjs` | 46 |
+| `src/lib/gateway-worker/account-management.mjs` | 31 |
+| `src/lib/admin/panel-routes.mjs`（定制部分） | 30 |
+| `src/lib/vendor/vendor-admin.mjs` | 28 |
+| `src/lib/admin/relay-billing.mjs` | 26 |
+| `src/lib/executor/event-ingest.mjs` | 19 |
+| `src/lib/vendor/vendor-settlements.mjs` | 18 |
+
+守卫：加一条检查脚本（或 lint 规则），禁止在仓储目录以外新增 `.prepare(`。现存调用记为基线清单，只允许减少。每完成一批迁移就收缩基线。上游原有的调用点列为豁免。
+
+#### R1 实施结果（2026-11-05）
+
+- **守卫**：`scripts/sql-boundary.mjs` 统计仓储以外的 SQL 调用点，与 `scripts/sql-boundary-baseline.json` 逐文件比较，单测 `test/unit/sql-boundary.test.mjs` 随单测运行。
+  - 仓储位置：`src/lib/db/` 下、任何 `repos/` 目录中，或文件名以 `-repo.mjs` 结尾的文件。
+  - 调用点的口径：`.prepare(` 后跟字符串或变量，以及数据库对象上的 `.exec(`。`handle-protocol.mjs` 中的 `toolPruneCache.prepare({…})` 不是 SQL，不计入（设计初稿把它算进了“上游原有 5 处”）。
+  - 新增调用点直接失败；减少后必须同步改小基线；基线只允许有原因的豁免。
+- **结果**：仓储以外从 342 处降到 25 处，剩下的都是豁免：
+
+  | 文件 | 处数 | 豁免原因 |
+  | --- | ---: | --- |
+  | `src/lib/pool/thinking-owner.mjs` | 6 | 上游原有代码，按上游优先不改 |
+  | `src/lib/admin/usage-stats-thread.mjs` | 5 | 统计线程的连接设置（PRAGMA）与只读事务边界，业务查询走 `UsageLogsRepo` |
+  | `src/lib/admin/usage-stats-worker.mjs` | 3 | 统计线程的变更检测（`PRAGMA data_version`、`total_changes()`） |
+  | `src/lib/admin/relay-migration.mjs` | 11 | 启动时执行一次的数据转换，属于迁移代码 |
+
+- **新仓储**：
+  - `src/lib/vendor/repos/`：resources、vendors、members、audit、account-groups、gateway-bindings、admin-settlements、runtime-accounts、settlements、pricing、usage、account-usage、portal、runtime-policy；
+  - `src/lib/admin/repos/`：panel-users、relay-billing、relay、vm-bulk-edit、group-metrics；
+  - `src/lib/gateway-worker/repos/`：accounts、oauth-sessions、receipts、execution-policies、event-health、account-ids；
+  - `src/lib/executor/repos/`：event-inbox、refresh-lease、vault、settings、finalized-attempts（R6 B3 起经 `DbClient` 异步访问，语句缓存由 `DbClient` 负责，`statement-cache` 已删除）；
+  - `src/lib/usage/repos/`：quota-observations。
+- **约定**：
+  - SQL 文本、参数顺序与 `.get/.all/.run/.iterate` 和原调用处一致；
+  - 数据库对象由调用方传入（第一个参数，或仓储工厂的参数），不改变调用方用的是哪个连接；
+  - 事务和保存点的边界留在调用方；原来只预编译一次的语句，搬过去后同样只预编译一次。
+- **跨领域去重**：同一条 SQL 只保留一个归属。`vendor_resources`、`vendors` 的通用读写归 vendor 仓储，gateway-worker 改为引用；`operation_audit` 的写入统一用 `admin/repos/relay-repo.mjs` 的 `insertOperationAudit`。
+- **上游文件**：`panel-routes.mjs`、`panel-api.mjs`、`panel-users.mjs`、`request-log.mjs`、`proxy-pool.mjs` 中定制加的 35 处 SQL 都移到了定制仓储，原处只留一行调用。这 5 个文件相对上游的差异行数共减少 76 行。
+- **同步上游时**：如果上游新代码在仓储以外加了 SQL，守卫单测会失败。按上游优先不搬，在基线登记为 `exempt`，原因写“上游原有”。
+- **遗留**（M5 复核，2026-11-06）：
+  - ~~`vendor/repos/usage-repo.mjs` 与 `gateway-worker/gateway-repo.mjs` 仍各有一份相同的两条 SQL（查询 Gateway 账号归属、写 `vendor_usage_facts`）~~。**已合并**：R6（B4、B8）把它们改成 async 时已收成一处，`gateway-repo.mjs` 引用 `vendor/repos/usage-repo.mjs` 的 `gatewayAccountResource` 与 `insertUsageFact`；M5 核实 `src` 中这两条 SQL 各只出现一次（`GATEWAY_ACCOUNT_RESOURCE_SQL`、`INSERT_USAGE_FACT_SQL`），无需再改；
+  - 仓储写法有两种，**不统一**：按位置透传参数（`fn(db, a, b)`，多数由 R1 原样搬迁的 SQL，参数顺序与 SQL 占位符一致）与按字段名传对象（`fn(db, { a, b })`，参数多或可选的查询）。两种写法都只在仓储内部决定 SQL 参数顺序，调用方不拼 SQL；统一要改全部调用点而没有行为收益。新写的仓储函数：参数不超过 3 个且都必填时按位置，否则按对象；
+  - ~~语句缓存目前只在 executor 仓储中使用~~。R6 起由 `DbClient` 按 SQL 文本统一缓存预编译语句（最近使用的 512 条），各仓储不再自建缓存。
+
+### 4.3 管理写操作模板
+
+```text
+withTransaction(() => {
+  当前值 = repo.get(id)               // 校验 revision 或存在性
+  校验(输入, 当前值)
+  repo.update(id, 变更)
+  if (影响路由或计费) revisions.bump(域)
+  audit.write(操作者, 动作, 目标, 变更字段)
+})
+提交后：发布快照 / 让缓存失效
+```
+
+- 执行设置（`executor_settings` + `config_revisions`）已经按这个顺序实现，可作为样板。
+- 审计只记变更字段名和必要的前后值，不记凭据和密钥。
+- 批量操作在一个事务内完成，或按条目逐个事务处理并返回每条的结果；不能部分成功却不报告。
+
+#### R3 实施结果（2026-11-05）
+
+- **盘点**：路由表中会写库或写配置文件的路由共 231 条。其中 105 条由处理器写审计（`operation_audit` 60 条、`vendor_audit_events` 45 条），其余没有审计；没有发现事务内的网络调用。
+- **路由级审计**：
+  - 路由表每条增加审计方式：`handler`（处理器写完整审计，99 条）、`route`（由面板按路由写，107 条）、`none`（读、观测类操作与不落盘的路由，225 条）；
+  - `route` 的路由在响应成功后，由 `src/lib/admin/route-audit.mjs` 写一条 `operation_audit`：操作者、`route:<方法> <路径模式>`、实际路径，以及请求体的顶层字段名；
+  - 不记字段值（请求体里可能有凭据、密码、代理密码），也不记失败的请求；
+  - 只部分审计的处理器（例如用户的创建与修改只审计分组变化）也标为 `route`，因此会多一条按路由的记录；
+  - 单测要求每条写路由都标了 `handler` 或 `route`。不落盘的 6 条写路由（固定返回错误，或只改进程内状态）列明了原因。
+- **事务与一致性修复**：
+  - `PUT /api/panel/onboarding` 选用量方案、`POST /api/panel/dataplane` 全局切换时，恢复上游的 `await`。原来路由写入失败会被吞掉并先回成功，参数错误也不回 400；
+  - BPS 撤销的凭据与租约删除，并入配置写入与审计的事务；
+  - 托管公钥替换与审计并入同一事务。
+- **静态守卫**：单测禁止把 async 函数传给 `withTransaction`，因为回调同步执行，`await` 之后的写入不在事务里。
+- **按 revision 推进**：只在有读取方的地方推进。执行设置已经这样做；分组、价格、账号目前没有按 revision 失效的快照，加 revision 只会多出无人读取的字段，因此本轮不加。
+- **未处理，有依据**：
+  - 路由配置写文件后再按 CAS 推进 revision，冲突时只恢复内存（`routing-runtime.mjs`，上游代码）。检查与推进之间没有 `await`，单进程部署下不会冲突，按上游优先不改；
+  - 历史成本重算每 2000 行提交一次（`usage-logs-repo.mjs`，上游代码）；
+  - 代理池保存分两步提交（`proxy-pool.mjs`，上游代码）；
+  - 设置类接口把审计包在 `try/catch` 里，审计失败只是没有记录，不影响设置本身；
+  - 供应商账号归档先改文件、等待停机，再进事务：涉及 VM 进程，无法与数据库同一事务；
+  - 路由表中有几条类别与实际行为不完全一致（例如 `DELETE /api/panel/vms/:id` 记为 action，实际也写库）。审计方式按实际行为判定，类别留到需要按类别取默认值时再调整。
+
+### 4.4 声明式路由表
+
+现状：`src/lib/admin/capability-policy.mjs` 用集合和正则维护“角色 × 方法 × 路径”的授权矩阵，有单测，但没有登记接口的读写类别，也不能保证每个已注册的路由都被覆盖。
+
+建议：
+
+- 每个路由登记方法、路径、允许的角色、类别（第 3 节的 A–F）和是否写审计；
+- 授权、限流、超时按类别取默认值；
+- 加覆盖测试：遍历全部已注册路由，没有登记的直接失败（参照 sub2api `internal/authz/policy_test.go`）。
+
+`capability-policy.mjs` 是定制文件，这项改动不碰上游。
+
+#### R2 实施结果（2026-11-05）
+
+- **路由表**：`src/lib/admin/route-table.mjs`，实施时 431 条；之后新增的路由按同样规则登记，条数以导出的 `ROUTES` 为准（2026-11-06 为 441 条）。
+  - 覆盖 `panel-routes.mjs` 处理的 `/api/panel/*`、`/api/vendor/*`、`/api/admin/vendors/*`、`/admin/*`，以及它转交的子处理器（VM、用户、Key、端点、分组与计费、集群、备份、Gateway Worker 面板路由）；
+  - 每条登记方法、路径模式、鉴权方式（`panel`、`panel_pre_gate`、`public`、`vendor`、`vendor_admin`、`super_admin`）、类别（`read`、`write`、`stats`、`action`、`auth`），以及非超管可进入角色门的角色；
+  - 不含 `/v1`（推理入口）、`/internal/v1`（执行器契约，内部令牌鉴权）、站点图标与 WebSocket 升级。
+- **类别与第 3 节的对应**：`read` 对应 C，`write` 对应 B，`stats` 对应 D，`action` 对应 F，`auth` 是登录与会话。各条的类别按处理代码的实际内容判定，混合型路由取主要部分。
+- **来源**：两路逐文件阅读路由代码列出全部路由（`panel-routes.mjs` 252 条，子处理器 207 条）。去掉 `/internal/v1`、站点图标与 WebSocket 升级后得到 431 条。另外临时记录全量单测与 e2e 实际请求过的 316 个管理路由，逐个核对都已登记（未登记的 12 个都是测试故意请求的已删除路由、不支持的方法或越权请求）。
+- **角色门改为查表**：`authorizePanelRoute` 只查表，原来的集合与正则全部删除。每条的角色按原函数对该条样例路径的判定生成。新旧函数在全部样例路径、实测路径与五种角色上逐一比对，只有一处不同：`GET /api/panel/api-keys/:id`。这条路由没有处理器，原来管理员靠前缀放行后得到 404，现在角色门直接返回 403。对应的跨租户 e2e 断言改为“403 或 404，且不泄露对方 Key”。
+- **覆盖**：
+  - 单测 `test/unit/route-table.test.mjs` 检查：每条格式正确且不重复；字面段优先于参数段；角色门与表一致；路由源码中出现的完整路径字面量都已登记（只做前缀、字符串替换或交回外层路由的 4 个字面量列明了原因）；
+  - `panel-routes.mjs` 在鉴权与角色门之后调用 `routeTableGuard`：e2e 测试服务器设置 `KIN_ROUTE_TABLE_STRICT=1`，未登记的路由按原来的 404 格式返回；生产只按“方法 + 路径”每 10 分钟告警一次，不改变行为。
+- **未做**：按类别给授权、限流、超时取默认值。当前没有按路由的限流与超时机制，加上会改变行为，留到需要时再做。各类别的写入审计仍由处理器负责，表里不登记。
+  - M5（2026-11-06）：`stats` 类别已按类别统一挂上并发上限与超时（见 4.6）；其他类别仍没有按类别的限流与超时。
+
+### 4.5 读模型
+
+- **快照**：A 类需要的数据（Key、分组、价格、账号、路由配置）在进程内维护快照，按 revision 或变更事件更新，并定时对账。
+- **汇总**：沿用 `usage_cost_hourly` 的触发器同步维护方式。新的统计需求先判断能否用已有维度回答；不能时再增加维度或新的汇总表，不回到扫明细。
+- **分页**：大表用 keyset 或游标（按 `(created_at, id)` 之类的稳定排序）；需要总数时返回汇总表给出的估计值，或者只返回“是否还有下一页”。
+
+#### R4 实施结果（2026-11-05）
+
+- **现状**：控制台的使用记录页（`/api/panel/usage-logs`）和钱包流水已经是 keyset 游标分页，不做全量 `COUNT`。
+- **问题**：游标条件写成 `created_at < ? OR (created_at = ? AND id < ?)`，SQLite 无法据此确定索引扫描的起点。带筛选条件（例如按模型）翻页时，每页都要从最新一条重新扫起，越往后越慢。本机 108 万行实测：第 100 页 19 毫秒，第 1000 页 194 毫秒。
+- **改法**：改成等价的 `created_at <= ? AND (created_at < ? OR id < ?)`，先给出范围上界，查询计划从全表扫描变为范围查找。修改了两处：
+  - `usage-logs-view.mjs`：使用记录页；
+  - `relay-billing.mjs`：钱包流水。
+- **效果**：同样按模型筛选，第 1000 页降到 1.1 毫秒，与第 1 页相同。
+- **守卫**：单测检查游标查询的执行计划必须是 `SEARCH … (created_at<?)`；改回旧写法时测试失败。
+- **未改，有依据**：
+  - ~~`/request-logs` 普通模式的 OFFSET 分页加全量 `COUNT`~~：M5 已改为 keyset 游标，不再整表 `COUNT`（见 4.6）；
+  - 导出时的一次 `COUNT`：用于告诉用户被截断了多少，只在导出时执行，且在只读线程池里运行。
+
+#### R5 实施结果（2026-11-05）
+
+- **范围**：统计页（`/api/panel/statistics` 的时间序列、合计与环比，`/api/panel/statistics/leaderboard` 排行）。这两个接口在主线程同步执行，是长时间窗聚合阻塞网关的来源。
+- **汇总表**：迁移 115 `usage_stats_hourly`。
+  - 按小时汇总，维度是统计页可分组的列（用户、Key、模型、槽位、计费分组、入口），加上谓词读取的列（`status`、`error_code`）；
+  - 平均耗时、首字耗时存和与个数，便于跨段合并；
+  - 由 `usage_logs` 的插入、更新、删除触发器同步维护（与 093 `usage_cost_hourly` 相同的方式），迁移时按现有数据回填；
+  - NULL 存为 `''` 或 `-1`，读取时 NULLIF 还原。
+- **读取**（`src/lib/db/repos/usage-stats-rollup.mjs`）：
+  - 时间窗拆成起点、终点所在的不完整小时（读 `usage_logs`）与中间的整小时（读汇总表），投影成同一形状后合并；
+  - 归属谓词（`ownerPred`）与成败谓词（`SUCCESS_PRED` / `ERROR_PRED`）原样套在合并结果上，因为它们只读 `user_id`、`api_key_id`、`status`、`error_code`；
+  - 时间序列按 15 分钟槽分桶，桶边界不在整点时（非整小时时区）整段改用原查询。系统时区固定为 `Asia/Shanghai`，实际都走汇总表。
+- **上游文件**：`statistics-repo.mjs`（上游）只把三段取数拆成可覆盖的方法（`_seriesRows`、`_totalsRow`、`_leaderboardRows`），SQL 不变；汇总实现是定制子类 `RollupStatisticsRepo`，`panel-routes.mjs` 改用它。上游以后改统计页的展示逻辑，仍能直接合并。
+- **一致性**：单测按 4 种时间范围 × 6 种归属 × 6 个维度，比较时间序列与排行，在插入后以及更新、改时间、删除后都与直接扫明细逐项相同。费用是浮点和，求和顺序不同可能有 1e-9 量级的差异；两个系列费用恰好相等时，这种差异可能让排名先后互换。
+- **耗时**（本机，按生产的相关性构造 30 天、108 万行，汇总表 33 万行）：
+  - 统计页 30 天：2.1 秒降到 0.26–0.32 秒；排行：1.2 秒降到 0.24 秒；
+  - 管理员范围 30 天：1.18 秒降到 0.08 秒；单个用户：0.15 秒降到 0.06 秒；
+  - 写入开销每行约 7 微秒（维度完全打散时约 20 微秒）。
+  - 生产最近 6 小时实测压缩约 18 倍（3.3 万次请求对应 1820 个汇总行），比本机样本更集中，预期更快。
+- **未做，有依据**（M5 已处理，见 4.6）：
+  - ~~使用记录页的汇总（`summary`）~~：汇总表能回答的筛选改读 `usage_stats_hourly`，其余回落逐行扫描；
+  - ~~使用记录排行（`ranking`）~~：改为当前筛选下的精确合计（不再按最新 5000 行抽样），只有按行判定错误类别时仍抽样；
+  - ~~概览（`overview`）~~：今日与昨日同期读汇总表；会话数只取最近 5 分钟，仍读明细（窗口小，走时间索引）。
+
+### 4.6 M5：数据访问遗留项（2026-11-06）
+
+技术债批次 M5 收尾 R1、R2、R4、R5 的遗留项，并落实第 3 节的 D 类超时与并发、A 类观测写入有界队列。
+
+#### `/request-logs` 普通模式改 keyset 分页
+
+- **改法**：`UsageLogsRepo.query`（`src/lib/db/repos/usage-logs-repo.mjs`）去掉整表 `COUNT`，按 `(created_at DESC, id DESC)` 取 `limit + 1` 行。游标谓词与使用记录页相同：`created_at <= ? AND (created_at < ? OR id < ?)`。
+- **响应**：保留 `items`、`limit`、`offset`、`config`；新增 `next_cursor`（`{ created_at, id }`，没有下一页时为 null）与 `has_more`；不再返回 `total`。请求参数新增 `cursor_created_at`、`cursor_id`。
+- **按行判定错误类别**：指定 `error_class`，或屏蔽 `auth` 以外的类别时，分块（每块 500 行）扫描并在扫描中过滤，页面尽量填满。一次调用最多读 5000 行；读满仍不够一页时，游标指向最后读到的行，`has_more` 为 true。原来是先分页再在 JS 中删掉屏蔽行，一页常常不满。
+- **兼容**：`offset` 只为旧调用方保留：没有游标时生效，最多跳过 10000 行。
+- **调用方核实**：控制台不调用这个列表，只用 `/request-logs/:id`、`/:id/attempts`、`/stats`、`/export`；`web/src/types/panel-logs.ts` 的 `RequestLogsResponse` 已同步改为游标字段，前端没有分页交互和文案需要改。依赖 `total` 的只有测试：单测 `request-log.test.mjs` 与 e2e `persistence.e2e.test.mjs` 已改为断言条数与游标。已删除只剩测试使用的 `RequestLogStore.exportRows`；面板导出走 `UsageLogsView.exportRows`，不受影响。
+- **执行计划**：首页为 `SCAN usage_logs USING INDEX idx_reqlog_cost_ts`，读到 `LIMIT` 为止；游标页为 `SEARCH usage_logs USING INDEX idx_reqlog_cost_ts (created_at<?)`。两者都不整表 `COUNT`。单测 `request-log.test.mjs` 检查游标页的执行计划。
+
+#### 使用记录页 summary / ranking / overview 读汇总表
+
+- **迁移 123** `usage_stats_hourly_log_summary`：给 115 的汇总表加 `cache_creation_5m_tokens`、`cache_creation_1h_tokens`（summary 的缓存写入分档）与 `cost_n`（`actual_cost` 非空的行数，排行中没有计价行时金额仍为 null）。迁移时重建三个触发器，并在同一事务内按全部列重新回填。本机 50 万行回填耗时 2.8 秒；新旧触发器的单行写入开销没有可测差异。
+- **数据源**：`src/lib/db/repos/usage-log-rollup.mjs` 的 `rollupSource` 由统计页与使用记录页共用：
+  - 整小时读汇总表，起止所在的不完整小时读明细；
+  - 某一端不限时，那一端全读汇总表（汇总表由触发器维护，含当前小时）；
+  - 筛选谓词套在合并结果外层，SQLite 会把它下推到明细部分，命中 `user_id`、`created_at` 等索引。
+  `usage-stats-rollup.mjs`（统计页）改为引用它。
+- **汇总表能回答的筛选**：归属（`ownerPred`）、用户、Key、槽位、状态码、排除 2xx、只看错误、开始与结束时间、只屏蔽 `auth` 类（SQL 可表达，默认设置就是这样）。由 `buildFilter` 逐条标记，全部满足才走汇总表。
+- **回落到逐行扫描的筛选**（写在 `buildFilter` 注释中）：
+  - 分组：要读 `group_id` 回退列，汇总表只有 `billing_group_id`；
+  - 会话；
+  - 账号；
+  - 模型：同时匹配 `requested_model`；
+  - 平台；
+  - 模型不一致；
+  - 最少尝试次数；
+  - 全文搜索；
+  - 指定错误类别；
+  - 屏蔽 `auth` 以外的错误类别。
+  
+  其中前八种是 SQL 可表达的筛选，summary 与 ranking 走 `usage_logs` 上的一条聚合 SQL，结果是精确值。后两种要按行在 JS 中判定，仍按最新 5000 行抽样，`ranking` 的 `capped` 会说明。
+- **语义变化**：
+  - 排行由“最新 5000 行抽样”改为当前筛选下的精确合计，`capped` 为 false，`sampled` 为合计请求数；
+  - Key 名称取 `api_keys` 当前名称，不再取日志行里记录的名称；
+  - Key 的所属用户取该组最大的 `user_id`，原来取最新一行的用户；
+  - 排序为金额降序（按 1e-9 取整比较）、请求数降序、ID 升序。浮点求和顺序不同不会让排名互换。
+- **一致性测试**：`test/unit/usage-logs-rollup.test.mjs`。同一份数据，`useRollup: false` 的同一个视图（逐行扫描）作对照：
+  - 6 种归属 × 7 种时间窗（不限、两端不在整点、两端在整点、只有开始、只有结束、同一小时内、起点晚于终点）× 10 组汇总表筛选 + 6 组回落筛选；
+  - summary 与两种排行逐项相同（数值按 1e-6 比较，排行顺序完全相同），插入后，以及改金额、改时间、改归属、删除之后都检查；
+  - overview 在 4 个时刻（含今日第一个小时内）× 6 种归属下相同；
+  - 只改汇总表时，走汇总表的筛选结果随之变化，回落筛选不变，证明两条路径确实分开；
+  - 构造金额相等、浮点和相差 1 ulp 的两个 Key，两条路径都按请求数、ID 排序。
+- **修正**：汇总读取的平均耗时改为 `SUM(…) * 1.0 / SUM(n)`。窗口全落在不完整小时内时，两列都是整数和，原写法会被 SQLite 截断（统计页在今日第一个小时内也受影响），有单测覆盖。
+
+#### D 类（stats）接口的超时与并发上限
+
+- **位置**：`src/lib/admin/route-budget.mjs`。`panel-routes.mjs` 的分发入口按 `matchRoute` 查路由表，类别为 `stats` 的请求统一套用，没有逐个修改路由。路由表中 `stats` 类共 24 条（2026-11-06），包括使用记录 summary / ranking / overview / active-sessions、请求日志 stats / export、统计页、看板、分组、供应商用量与结算预览等。
+- **并发**：每条 stats 路由（方法 + 路径模式）同时最多 4 个，全部 stats 路由合计最多 16 个。超出时直接返回 503 `stats_busy`，带 `Retry-After: 2`，不排队。“每类 N 个”这里按每条路由各 N 个，再加一个类别合计上限：页面一次加载就会并发 summary、ranking、overview、stats 四个统计接口，如果整个类别只给 4 个名额，两个用户同时打开页面就会互相拒绝。
+- **超时**：15 秒内处理器还没有开始写响应时，返回 503 `stats_timeout`，提示“缩小时间范围或减少筛选条件”。
+  - 底层查询无法取消，会继续跑完：只读线程池中的查询在线程里跑完；主连接上的语句同步执行，计时器只能在两条语句之间触发。名额在处理器真正结束时才释放，所以上限约束的是实际在跑的查询数；
+  - 超时后处理器再写响应会被丢弃；
+  - 已经开始写响应的处理器（导出）不打断。
+- **参数**：routing 配置 `panel_stats.{route_concurrency, concurrency, timeout_ms}` 优先，其次是环境变量 `KIN_STATS_ROUTE_CONCURRENCY` / `KIN_STATS_CONCURRENCY` / `KIN_STATS_TIMEOUT_MS`，最后是默认值；0 表示不限。每次请求读取，改 routing 配置后立即生效。
+- **可见性**：`GET /api/panel/database/metrics` 的 `route_budget` 返回放行、繁忙拒绝、超时次数，当前在跑的查询数（总数与按路由），以及生效参数。控制台数据库页新增“数据访问保护”面板，四种语言的文案已补。
+- **测试**：`test/unit/route-budget.test.mjs`，覆盖单路由上限、类别合计上限、超时提示与迟到响应丢弃、名额到查询结束才释放、已开始写响应时不打断、参数优先级，以及 `createPanelHandler` 按路由表类别挂载（read 类不受影响）。
+
+#### 观测写入有界队列
+
+- **现状核实**：`write-behind.mjs` 原来没有上限。队列承载两类闭包：
+  - `RequestLogStore.finish` 的使用记录落库：`usage_logs`、调试原文，以及经 `insertSummaryIfAbsent` 写的供应商用量事实；
+  - `RequestAttemptsRepo` 的请求尝试台账：`request_attempts` 的开始与完成。
+- **分类依据**：
+  - 使用记录是计费与对账的事实来源：成本重算、供应商结算、汇总表都从它来，归为 **billing**；
+  - 请求尝试只用于诊断与决策链展示，丢一条只影响该请求的尝试明细，归为 **observation**；
+  - 未标类别的写入按 billing 处理。
+- **行为**：队列最多 10000 个闭包（环境变量 `KIN_WRITE_BEHIND_MAX_QUEUE`）。满了以后：
+  - observation 丢弃并计数，每分钟最多告警一次，请求照常完成；
+  - billing 不入队，`enqueueWrite` 返回 false，`finish` 改为直接 await 落库（与写回队列未启用时相同）。这一条请求承担背压，数据不丢。
+- **可见性**：`/api/panel/database/metrics` 的 `write_behind` 返回队列深度、上限、峰值、入队数、`dropped_observation`、`billing_direct`，数据库页的“数据访问保护”面板显示。
+- **测试**：`test/unit/write-behind.test.mjs`。队列满时，观测写入（含 `RequestAttemptsRepo.begin`）丢弃且计数，计费写入在 `finish` 返回时已落库，有空位后观测写入恢复入队。
+
+#### 合并重复 SQL
+
+见 4.2 R1 的遗留：已在 R6 合并，M5 只做核实并更新本文；两种参数写法按约定保留。
+
+#### 本机耗时（50 万行，10 天，Key 与模型、槽位相关；汇总表 18 万行，压缩约 2.8 倍，生产实测约 18 倍）
+
+| 查询 | 改前 | 改后 |
+| --- | ---: | ---: |
+| `/request-logs` 首页（无筛选 / 按模型 / 按 Key） | 84 / 59 / 11 ms | 1.1 / 1.2 / 1.0 ms |
+| `/request-logs` 第 5000 行处（改前 OFFSET，改后游标） | 82 ms | 1.1 ms |
+| summary 全部 / 7 天 / 24 小时 | 150 / 532 / 90 ms | 60 / 54 / 10 ms |
+| summary 7 天、单个用户 | 14 ms | 19 ms |
+| summary 7 天、按模型（回落） | 475 ms | 453 ms |
+| ranking（Key）全部 / 7 天 / 24 小时 | 198 / 610 / 183 ms（抽样 5000 行） | 123 / 120 / 19 ms（精确） |
+| overview | 91 ms | 8 ms |
+
+单个用户的 7 天 summary 略慢：明细按 `(user_id, created_at)` 索引只读该用户的行，汇总表则按小时范围读出全部汇总行后再过滤。试加 `usage_stats_hourly(user_id, hour)` 索引没有改善，所以没有加。
+
+#### 仍未做
+
+- D 类“结果按汇总的版本缓存”；
+- C 类“超时返回部分结果”：列表接口没有挂超时；
+- 统计页、使用记录页之外的 stats 接口（看板、供应商用量等）仍读明细或各自的汇总，只受上面的并发与超时约束。
+
+## 5. 数据设计约定
+
+| 项 | 约定 | 现状与说明 |
+| --- | --- | --- |
+| 主键 | 带前缀的文本 ID（如 `gw-01`、`req_…`）或自增整数，表内统一 | 已有多种格式；新表按此约定，旧表不改 |
+| 时间 | 新表统一一种格式：ISO 文本（与 `usage_logs` 一致）或毫秒整数，同表不混用 | 现有 105 列 ISO 文本、16 列整数（见迁移方案 3.3） |
+| 金额 | 新表一律用整数（`*_micros` 或 `*_nano_usd`），不用 `REAL` | 上游表中的 `REAL` 金额列不改（D8）；整数化见待决定事项 |
+| JSON 列 | 只存诊断和扩展字段；需要过滤、排序或关联的字段提成普通列并建索引 | 例：`usage_json` 已裁掉上游 attribution |
+| 幂等 | 外部可能重放的写入都要有唯一键（`request_id`、（实例, 序号）、幂等键） | 回执、事件、尝试已具备 |
+| 保留期 | 每张明细表都写明保留天数和清理任务；清理与汇总表一起维护 | `request_attempts` 7 天、事件收件箱 7 天已有；`gateway_worker_receipts` 没有清理（发布说明已记录约 1.5 GB 待处置） |
+| 迁移 | 编号顺延，已合入的不改；破坏性变更分两步（先兼容写，再删旧） | 已有 SHA-256 校验 |
+
+## 6. 落地路线
+
+每一项都能独立交付、独立回滚，都不改上游表结构。
+
+| 编号 | 内容 | 范围 | 验收 |
+| --- | --- | --- | --- |
+| R1（已完成） | 定制模块的 SQL 收进领域仓储，加守卫脚本与基线清单 | vendor、gateway-worker、executor、admin 中的定制模块；`panel-routes.mjs` 中的 30 处 | 守卫脚本通过且基线减到 0（上游豁免除外）；相关单测和 e2e 通过；`upstream-touch-budget` 显示上游文件改动行数减少 |
+| R2（已完成） | 声明式路由表与覆盖测试 | `capability-policy.mjs` 及路由注册处 | 每个已注册路由都有登记；新增路由不登记时测试失败；授权行为与现有测试一致 |
+| R3（已完成） | 管理写操作套用 4.3 模板 | 影响路由或计费的配置写入（供应商、分组、价格、账号） | 每次写入都有审计记录；需要的地方推进 revision；事务内无网络调用（用测试或静态检查确认） |
+| R4（已完成；`/request-logs` 由 M5 收尾） | 大表列表改 keyset 分页，去掉全量 `COUNT` | 使用记录、尝试记录、计费明细、回执 | 深页查询耗时与页号无关；前端分页交互不变或同步调整 |
+| R5（已完成：统计页；使用记录页由 M5 收尾） | 统计只查汇总表 | 面板使用记录统计、排行、概览 | 与直接扫明细的结果逐项一致（参照 `usage-cost-rollup` 的对照测试）；在生产规模数据上耗时有界 |
+| R6 | 异步数据访问接口（`DbClient`） | 即迁移方案阶段 1 | 已完成（2026-11-06，B0–B8；守卫测试 `sync-data-access.test.mjs`） |
+
+建议顺序：R1 → R2 → R3，三项都只动定制代码，收益最大；R4、R5 按页面性能的实际问题启动；R6 不主动启动。
+
+## 7. 待决定事项
+
+| 编号 | 事项 | 说明 |
+| --- | --- | --- |
+| Q1 | 上游表中的 `REAL` 金额是否整数化 | 涉及上游表与上游计费代码，违反 D8；建议在上游自行调整或用户明确接受分叉成本后再做 |
+| Q2 | `gateway_worker_receipts` 的保留期与历史数据清理 | 属于数据处置，需要单独授权；清理后需低峰执行 `VACUUM` |
+| Q3 | R6 范围 | R1–R5 已完成。用户 2026-11-05 选择 R6 全量异步化（含上游数据层与推理热路径），按 `docs/data-access/R6_PLAN.md` 分阶段推进 |
+
+## 8. 证据索引
+
+vm2api：
+
+- SQL 分布：在 `4b980732` 上统计 `src` 中 `.prepare(` 的出现位置，并与 `6a8f9c7f` 的同名文件对比，区分上游原有和定制新增。
+- 汇总表：`src/lib/db/migrations/093_usage_cost_rollup.sql`、`src/lib/db/repos/usage-cost-rollup.mjs`。
+- 授权矩阵：`src/lib/admin/capability-policy.mjs`、`test/unit/capability-policy.test.mjs`。
+- 写入缓冲：`src/lib/db/write-behind.mjs`（M5 起有界，观测写入满时丢弃并计数）。
+- 汇总表与使用记录页汇总：`src/lib/db/migrations/115_usage_stats_hourly.sql`、`123_usage_stats_hourly_log_summary.sql`、`src/lib/db/repos/usage-log-rollup.mjs`、`test/unit/usage-logs-rollup.test.mjs`。
+- stats 接口并发与超时：`src/lib/admin/route-budget.mjs`、`test/unit/route-budget.test.mjs`。
+- 设置与 revision：`src/lib/executor/settings-store.mjs`。
+
+sub2api（`~/Git/sub2api/backend`）：
+
+- 迁移：`migrations/`（379 个）、`internal/repository/migrations_runner.go`。
+- 计费事件：`internal/repository/usage_billing_events.go`。
+- 汇总：`internal/repository/dashboard_aggregation_repo.go`。
+- 游标分页：`internal/repository/usage_log_cursor.go`。
+- 权限路由表：`internal/authz/routes.go`、`internal/authz/policy_test.go`。
+- 分层规模：`internal/service`（851 个非测试文件）、`internal/repository`（183 个）。
+
+CPR（`~/Git/codex-proxy-rs`，以下路径除 `docs/` 外都在 `backend/` 下）：
+
+- 迁移：`migrations/`（38 个，`.frozen-sha256`）。
+- 连接与超时：`crates/gateway-store/src/config.rs`、`crates/gateway-store/src/postgres/connection.rs`。
+- 观测写入缓冲：`crates/gateway-store/src/postgres/execution_buffer.rs`。
+- 投影：`migrations/0032_usage_and_scheduling.sql`、`crates/gateway-store/src/postgres/observability/analytics/worker.rs`、`query.rs`。
+- 费用幂等：`crates/gateway-store/src/postgres/client_budgets.rs`。
+- 配置快照：`gateway-core/src/runtime/publisher.rs`。
+- 分层说明：仓库根目录 `docs/architecture.md`。

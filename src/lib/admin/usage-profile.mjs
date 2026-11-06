@@ -99,13 +99,13 @@ export async function applyUsageProfile({ mode, persistRouting, settings, distil
   const risk = riskPatchForProfile(profile)
   const distill = saveDistillRules(distillFile, risk.distill)
   if (typeof setDistill === 'function') setDistill(distill)
-  const jev = applyJevPatch(settings, risk.jev)
+  const jev = await applyJevPatch(settings, risk.jev)
   if (!jev.ok) {
     const err = new Error(jev.problems.join('；'))
     err.code = 'invalid_profile'
     throw err
   }
-  const refusal = applyRefusalGuardPatch(settings, risk.refusal)
+  const refusal = await applyRefusalGuardPatch(settings, risk.refusal)
   if (!refusal.ok) {
     const err = new Error(refusal.problems.join('；'))
     err.code = 'invalid_profile'

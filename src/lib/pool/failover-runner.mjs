@@ -1,3 +1,4 @@
+import { refreshKeyScope, keyAllowsModel, keyAllowsVm } from '../admin/key-scope.mjs'
 import {
   classifyUpstreamResult,
   isFableModel,
@@ -22,6 +23,7 @@ import { kernelFaults } from '../transport/rust-kernel-client.mjs'
 import { resolveOfficialCcInference } from '../vm/slot-engine.mjs'
 import { AttemptCoordinator } from './unit-decision.mjs'
 import { SOFT_COOLDOWN_REASONS } from './pool-scheduler.mjs'
+import { errorFactsFromResult, recordProtectionFailure, recordProtectionSuccess } from './account-error-protection.mjs'
 
 // Seat wait for the one-shot repair hop when the rejected hop already spent the deadline.
 const REPAIR_HOP_WAIT_MS = 30_000
@@ -137,6 +139,7 @@ const CAPACITY_SELECTION_REASONS = new Set([
   'pool_wait_queue_full',
   'pool_queue_timeout',
   'pool_overload_cooldown',
+  'pool_wait_estimate_exceeded',
 ])
 
 /**
@@ -230,19 +233,20 @@ function signatureRepairEnabled(config) {
   return config.signature_repair === true
 }
 
-function selectedUsage(selected, accountQuota = null) {
-  const account = selected?.account || accountQuota?.repo?.get?.(selected?.accountId)
+async function selectedUsage(selected, accountQuota = null) {
+  const account = selected?.account || (await accountQuota?.repo?.get?.(selected?.accountId))
   const unified = account?.unified
   if (!unified) return null
   return listQuotaFromHeaders(unified)
 }
 
-function classifyAttempt(
+async function classifyAttempt(
   result,
   selected,
   { model, repaired, oauth401CooldownMs, signatureRepair },
   accountQuota = null,
 ) {
+  const usage = await selectedUsage(selected, accountQuota)
   return classifyUpstreamResult(result, {
     model,
     repaired,
@@ -251,7 +255,7 @@ function classifyAttempt(
     credentialGeneration: credentialStamp(selected),
     priorAuth401Generation: priorAuth401Stamp(selected),
     signatureRepair,
-    usage: selectedUsage(selected, accountQuota),
+    usage,
   })
 }
 
@@ -413,6 +417,7 @@ function selectionFailure(selected, { excluded, lastPolicy, lastResult, hops }) 
     wait_ms: selected?.waitMs ?? selected?.wait_ms ?? 0,
     soonest_available_ms: selected?.soonest_available_ms ?? null,
     retry_after_ms: selected?.retry_after_ms ?? null,
+    estimated_wait_ms: selected?.estimated_wait_ms ?? null,
     wait_reasons: selected?.wait_reasons || [],
     eligible: selected?.eligible ?? 0,
     available: selected?.available ?? 0,
@@ -431,14 +436,14 @@ function selectionFailure(selected, { excluded, lastPolicy, lastResult, hops }) 
   return failed
 }
 
-function applyCooldown(scheduler, selected, policy, model, { diagnosticPin = false } = {}) {
+async function applyCooldown(scheduler, selected, policy, model, { diagnosticPin = false } = {}) {
   if (policy?.action !== 'continue-and-cooldown' && policy?.action !== 'disable' && policy?.action !== 'pause') return
   // VM / master pin is a diagnostic. A 401 from the wrong inbound class
   // must not forever-park a Setup Token that has no refresh by design.
   if (diagnosticPin && (policy.reason === 'oauth_no_refresh' || policy.reason === 'oauth_revoked')) {
     return
   }
-  scheduler.markCooldown(selected, {
+  await scheduler.markCooldown(selected, {
     until:
       policy.action === 'disable' || policy.reason === 'oauth_no_refresh' || policy.reason === 'oauth_revoked'
         ? Number.MAX_SAFE_INTEGER
@@ -454,7 +459,7 @@ function applyCooldown(scheduler, selected, policy, model, { diagnosticPin = fal
   // conversation pin: other seats absorb this turn. Quota and auth move
   // every conversation off the unit, windows included (#163).
   if (policy.scope === 'account' && policy.action !== 'pause' && !SOFT_COOLDOWN_REASONS.has(policy.reason)) {
-    scheduler.releaseAccountSessions?.({ accountId: selected?.accountId, vmId: selected?.vmId })
+    await scheduler.releaseAccountSessions?.({ accountId: selected?.accountId, vmId: selected?.vmId })
   }
 }
 
@@ -463,6 +468,8 @@ export class FailoverRunner {
     scheduler,
     stickyRouter = null,
     attemptsRepo = null,
+    accountRuntimeRepo = null,
+    accountErrorProtection = null,
     rateLimitService = null,
     config = {},
     onProxyFailure = null,
@@ -474,6 +481,8 @@ export class FailoverRunner {
     this.scheduler = scheduler
     this.stickyRouter = stickyRouter
     this.attemptsRepo = attemptsRepo
+    this.accountRuntimeRepo = accountRuntimeRepo
+    this.accountErrorProtection = accountErrorProtection
     this.rateLimitService = rateLimitService
     this.config = { ...DEFAULTS, ...(config || {}) }
     this.onProxyFailure = onProxyFailure
@@ -489,11 +498,93 @@ export class FailoverRunner {
     this.config = { ...DEFAULTS, ...(config || {}) }
   }
 
-  noteUnitHealth(selected, policy, result) {
+  reloadAccountProtection(compiled) {
+    this.accountErrorProtection = compiled || null
+  }
+
+  async accountProtection(selected, result, policy) {
+    const compiled = this.accountErrorProtection
+    const runtimeRepo = this.accountRuntimeRepo
+    if (!compiled || !runtimeRepo || !selected?.accountId || !result || result.committed) return policy
+    // Provider and request failures have their own circuit/replay semantics.
+    // Account protection only counts a classified account/credential failure.
+    if (policy?.scope !== 'account' && policy?.scope !== 'credential') return policy
+    let snapshot = await runtimeRepo.getProtectionState?.(selected.accountId)
+    if (!snapshot) {
+      try {
+        await runtimeRepo.upsert?.({
+          account_id: selected.accountId,
+          vm_id: selected.vmId,
+          status: selected.state?.status || 'unknown',
+          credential_generation: selected.state?.credential_generation ?? 0,
+        })
+        snapshot = await runtimeRepo.getProtectionState?.(selected.accountId)
+      } catch {}
+    }
+    if (!snapshot) return policy
+    const facts = errorFactsFromResult(result, {
+      provider: selected.provider || selected.platform || selected.family || 'claude',
+    })
+    const credentialGeneration =
+      selected.state?.credential_generation ??
+      snapshot?.state?.credentialGeneration ??
+      snapshot?.state?.credential_generation ??
+      0
+    let current = snapshot
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const outcome = recordProtectionFailure(compiled, current.state, facts, { credentialGeneration })
+      const stateChanged = JSON.stringify(outcome.state) !== JSON.stringify(current.state || null)
+      if (stateChanged) {
+        const nextGeneration = await runtimeRepo.compareAndSwapProtectionState?.(selected.accountId, {
+          expectedGeneration: current.generation,
+          state: outcome.state,
+        })
+        if (nextGeneration == null) {
+          current = await runtimeRepo.getProtectionState?.(selected.accountId)
+          if (!current) return policy
+          continue
+        }
+        current = { state: outcome.state, generation: nextGeneration }
+      }
+      if (!outcome.frozen) return policy
+      return {
+        ...policy,
+        scope: 'account',
+        action: 'continue-and-cooldown',
+        reason: 'account_error_protected',
+        cooldownUntil: outcome.state.frozenUntil,
+        retrySameAccount: false,
+        circuit: false,
+        detail: {
+          ...(policy.detail || {}),
+          protection_fingerprint: compiled.fingerprint,
+          protection_rules: outcome.rules,
+          protection_generation: outcome.state.generation,
+        },
+      }
+    }
+    return policy
+  }
+
+  async accountProtectionSuccess(selected, result) {
+    const runtimeRepo = this.accountRuntimeRepo
+    const compiled = this.accountErrorProtection
+    if (!compiled || !runtimeRepo || !selected?.accountId || !result) return
+    const current = await runtimeRepo.getProtectionState?.(selected.accountId)
+    if (!current || !current.state) return
+    const next = recordProtectionSuccess(current.state)
+    if (JSON.stringify(next) === JSON.stringify(current.state)) return
+    await runtimeRepo.compareAndSwapProtectionState?.(selected.accountId, {
+      expectedGeneration: current.generation,
+      state: next,
+    })
+  }
+
+  async noteUnitHealth(selected, policy, result) {
     const circuit = this.scheduler?.unitCircuit
     if (circuit && selected?.accountId) {
-      if (policy?.circuit) circuit.recordFailure(selected.accountId)
-      else if (verifiedSuccess(result)) circuit.recordSuccess(selected.accountId)
+      if (policy?.circuit) await circuit.recordFailure(selected.accountId)
+      else if (verifiedSuccess(result)) await circuit.recordSuccess(selected.accountId)
       else circuit.releaseProbe?.(selected.accountId)
     }
 
@@ -526,12 +617,12 @@ export class FailoverRunner {
    * Client cancellation only ends its job; kernel cancel_ack fences slot reuse.
    * Planner seat indexes are not kernel native slots.
    */
-  retireOutboundSession(selected, bindKeys) {
+  async retireOutboundSession(selected, bindKeys) {
     if (!selected?.vmId) return
     for (const key of bindKeys || []) {
-      const bound = this.stickyRouter?.resolve?.(key)
+      const bound = await this.stickyRouter?.resolve?.(key)
       if (bound?.accountId !== selected.accountId) continue
-      this.stickyRouter?.bind?.(
+      await this.stickyRouter?.bind?.(
         key,
         { accountId: selected.accountId, vmId: selected.vmId },
         { countHit: false, replaceSession: true, clearSlot: true },
@@ -568,25 +659,25 @@ export class FailoverRunner {
     }
   }
 
-  forgetCredential(selected, policy, { familyKey = null, sessionKeys = [] } = {}) {
+  async forgetCredential(selected, policy, { familyKey = null, sessionKeys = [] } = {}) {
     if (familyKey) {
-      this.scheduler.releaseSticky?.(selected, null, sessionKeys)
+      await this.scheduler.releaseSticky?.(selected, null, sessionKeys)
     } else {
-      this.scheduler.releaseAccountSessions?.({ accountId: selected?.accountId, vmId: selected?.vmId })
+      await this.scheduler.releaseAccountSessions?.({ accountId: selected?.accountId, vmId: selected?.vmId })
     }
     if (typeof this.onCredentialFailure === 'function') {
       try {
-        this.onCredentialFailure({ selected, policy })
+        await this.onCredentialFailure({ selected, policy })
       } catch {}
     }
   }
 
   /** Upstream refused this seat outright: move its conversations off and park it for the operator. */
-  pauseUnit(selected, policy, result) {
-    this.scheduler.releaseAccountSessions?.({ accountId: selected?.accountId, vmId: selected?.vmId })
+  async pauseUnit(selected, policy, result) {
+    await this.scheduler.releaseAccountSessions?.({ accountId: selected?.accountId, vmId: selected?.vmId })
     if (typeof this.onSchedulePause === 'function') {
       try {
-        this.onSchedulePause({ selected, policy, result })
+        await this.onSchedulePause({ selected, policy, result })
       } catch {}
     }
   }
@@ -669,13 +760,13 @@ export class FailoverRunner {
     // Pins as this request last saw them. A pin moved by someone else since
     // (quota migration, credential death) is never written back by a late hop.
     const pinBaseline = new Map()
-    const snapshotPins = () => {
-      for (const key of pinKeys) pinBaseline.set(key, this.stickyRouter?.resolve?.(key) || null)
+    const snapshotPins = async () => {
+      for (const key of pinKeys) pinBaseline.set(key, (await this.stickyRouter?.resolve?.(key)) || null)
     }
-    const pinMoved = (key) => {
+    const pinMoved = async (key) => {
       const base = pinBaseline.get(key)
       if (!base) return false
-      const now = this.stickyRouter?.resolve?.(key)
+      const now = await this.stickyRouter?.resolve?.(key)
       return !now || now.accountId !== base.accountId || (now.generation || 0) !== (base.generation || 0)
     }
     let freshSlot = false
@@ -691,7 +782,7 @@ export class FailoverRunner {
       vmId: lastSelected?.vmId,
       attemptCount: budget.hops,
     })
-    const bindAll = (account, opts) => {
+    const bindAll = async (account, opts) => {
       if (!this.stickyRouter || !account) return
       const sessionId = account.sessionId || (account.accountId === outboundSessionAccountId ? outboundSessionId : '')
       const payload = { accountId: account.accountId, vmId: account.vmId }
@@ -701,8 +792,8 @@ export class FailoverRunner {
       if (stickyDeviceId) payload.deviceId = stickyDeviceId
       if (this.stickyRouter.bind) {
         for (const key of bindKeys) {
-          if (pinMoved(key)) continue
-          const prev = this.stickyRouter.resolve?.(key)
+          if (await pinMoved(key)) continue
+          const prev = await this.stickyRouter.resolve?.(key)
           // A granted seat follows the scheduler's device home even when the
           // previous account is still eligible. Capacity spills keep its pin.
           const ownMove =
@@ -715,13 +806,17 @@ export class FailoverRunner {
           if (prev) guard = { ...opts, ifGeneration: prev.generation || 0 }
           if (freshSlot || opts?.replaceSession) guard = { ...guard, replaceSession: true }
           if (ownMove) guard = { ...guard, allowMove: true }
-          this.stickyRouter.bind(key, payload, guard)
-          pinBaseline.set(key, this.stickyRouter.resolve?.(key) || null)
+          await this.stickyRouter.bind(key, payload, guard)
+          pinBaseline.set(key, (await this.stickyRouter.resolve?.(key)) || null)
         }
       }
-      if (familyKey && account.vmId && !pinMoved(familyKey)) {
-        this.stickyRouter.bind?.(familyKey, { accountId: account.accountId, vmId: account.vmId }, { countHit: false })
-        pinBaseline.set(familyKey, this.stickyRouter.resolve?.(familyKey) || null)
+      if (familyKey && account.vmId && !(await pinMoved(familyKey))) {
+        await this.stickyRouter.bind?.(
+          familyKey,
+          { accountId: account.accountId, vmId: account.vmId },
+          { countHit: false },
+        )
+        pinBaseline.set(familyKey, (await this.stickyRouter.resolve?.(familyKey)) || null)
       }
       if (
         deviceKey &&
@@ -730,22 +825,22 @@ export class FailoverRunner {
       ) {
         const devicePayload = { accountId: account.accountId, vmId: account.vmId }
         if (this.stickyRouter.bindDeviceAffinity) {
-          this.stickyRouter.bindDeviceAffinity(deviceKey, devicePayload, { countHit: false })
+          await this.stickyRouter.bindDeviceAffinity(deviceKey, devicePayload, { countHit: false })
         } else {
-          this.stickyRouter.bind?.(deviceKey, devicePayload, { countHit: false })
+          await this.stickyRouter.bind?.(deviceKey, devicePayload, { countHit: false })
         }
       }
     }
     // The dialog ended. Drop the persisted slot index so a restart does not
     // put this session back into session_slots. VM / account memory and its
     // original sticky expiry stay.
-    const releaseStickySlots = () => {
+    const releaseStickySlots = async () => {
       if (!this.stickyRouter?.bind) return
       for (const key of bindKeys) {
-        if (pinMoved(key)) continue
-        const prev = this.stickyRouter.resolve?.(key)
+        if (await pinMoved(key)) continue
+        const prev = await this.stickyRouter.resolve?.(key)
         if (!prev?.vmId || prev.slotIndex == null) continue
-        this.stickyRouter.bind(
+        await this.stickyRouter.bind(
           key,
           {
             accountId: prev.accountId,
@@ -754,7 +849,7 @@ export class FailoverRunner {
           },
           { countHit: false, ifGeneration: prev.generation || 0, clearSlot: true, keepExpiry: true },
         )
-        pinBaseline.set(key, this.stickyRouter.resolve?.(key) || null)
+        pinBaseline.set(key, (await this.stickyRouter.resolve?.(key)) || null)
       }
     }
     let lastResult = null
@@ -795,7 +890,7 @@ export class FailoverRunner {
       }
       let selected = null
       try {
-        currentDeviceVmId = deviceKey ? this.stickyRouter?.resolve?.(deviceKey)?.vmId || null : null
+        currentDeviceVmId = deviceKey ? (await this.stickyRouter?.resolve?.(deviceKey))?.vmId || null : null
         const selectArgs = {
           model,
           stickyKey,
@@ -846,10 +941,10 @@ export class FailoverRunner {
       if (selected?.familyGated && familyKey && familyVmId) {
         // The family home left the pool (quota, credential): the family moves
         // with the next bind. An exclusion this request made itself is not proof.
-        const home = this.stickyRouter?.resolve?.(familyKey)
+        const home = await this.stickyRouter?.resolve?.(familyKey)
         const ownExclusion =
           !!home && (budget.tried.has(home.accountId) || budget.tried.has(home.vmId) || spilled.has(home.accountId))
-        if (!ownExclusion) this.stickyRouter?.unbind?.(familyKey)
+        if (!ownExclusion) await this.stickyRouter?.unbind?.(familyKey)
         familyVmId = null
       }
       if (!selected?.ok && selected?.reason === 'fable_requires_max') {
@@ -868,17 +963,17 @@ export class FailoverRunner {
         return preferLastResult(lastResult, lastPolicy, exhausted, attribution())
       }
       repairPending = false
-      snapshotPins()
+      await snapshotPins()
       const attemptStickyBound = pinBaseline.get(stickyKey) || null
       lastSelected = selected
       pinnedSlot = selected.slotIndex ?? null
       if (selected.seatMoved) seatMovedTo = selected.vmId
-      bindAll(
+      await bindAll(
         { accountId: selected.accountId, vmId: selected.vmId, slotIndex: pinnedSlot },
         { countHit: false, borrowed: lastPolicy?.reason === 'slot_busy' },
       )
       const attemptStarted = Date.now()
-      this.attemptsRepo?.begin?.({
+      await this.attemptsRepo?.begin?.({
         requestId,
         attemptNo,
         vmId: selected.vmId,
@@ -931,7 +1026,7 @@ export class FailoverRunner {
         if (attemptMeta?.sessionId) {
           outboundSessionId = String(attemptMeta.sessionId)
           outboundSessionAccountId = selected.accountId
-          bindAll(
+          await bindAll(
             { accountId: selected.accountId, vmId: selected.vmId, sessionId: outboundSessionId },
             {
               countHit: false,
@@ -939,6 +1034,21 @@ export class FailoverRunner {
               replaceSession: !!attemptStickyBound?.vmId && attemptStickyBound.vmId !== selected.vmId,
             },
           )
+        }
+        const liveScope = await refreshKeyScope(keyScope)
+        if (!keyAllowsModel(liveScope, model) || !keyAllowsVm(liveScope, selected.vm || { id: selected.vmId })) {
+          await this.attemptsRepo?.complete?.(requestId, attemptNo, {
+            action: 'stop',
+            errorScope: 'request',
+            terminalState: 'rejected',
+          })
+          return {
+            ok: false,
+            status: 403,
+            attempt_count: budget.hops,
+            terminalState: 'rejected',
+            body: { error: { type: 'permission_error', code: 'group_unavailable', message: '当前授权已失效' } },
+          }
         }
         result = await callAttempt({
           candidate: selected,
@@ -955,7 +1065,7 @@ export class FailoverRunner {
         noteHop(result)
         if (result) result.committed = result.committed || committed
         if (signal?.aborted || isClientCancelledResult(result)) {
-          this.attemptsRepo?.complete?.(requestId, attemptNo, {
+          await this.attemptsRepo?.complete?.(requestId, attemptNo, {
             upstreamStatus: result?.status ?? null,
             errorScope: 'request',
             action: 'stop',
@@ -963,10 +1073,10 @@ export class FailoverRunner {
             terminalState: 'cancelled',
             latencyMs: Date.now() - attemptStarted,
           })
-          releaseStickySlots()
+          await releaseStickySlots()
           return { ...clientCancelledResult(result), via: result?.via || 'pool-failover', ...attribution() }
         }
-        policy = classifyAttempt(
+        policy = await classifyAttempt(
           result,
           selected,
           {
@@ -982,15 +1092,16 @@ export class FailoverRunner {
           this.searchRepairs.delete(repairKey)
           policy = { ...policy, action: 'stop' }
         }
+        policy = await this.accountProtection(selected, result, policy)
         // One writer for rate_limit_reset_at / overload_until (sub2api HandleUpstreamError).
         const hardBlock =
           !result?.committed && !pinVmId
-            ? this.rateLimitService?.handleUpstreamError?.({
+            ? (await this.rateLimitService?.handleUpstreamError?.({
                 accountId: selected.accountId,
                 vmId: selected.vmId,
                 result,
                 policy,
-              }) || null
+              })) || null
             : null
         if (hardBlock?.until && policy.action === 'continue-and-cooldown' && policy.scope === 'account') {
           policy = { ...policy, cooldownUntil: hardBlock.until }
@@ -998,9 +1109,9 @@ export class FailoverRunner {
 
         lastResult = result
         lastPolicy = policy
-        this.noteUnitHealth(selected, policy, result)
+        await this.noteUnitHealth(selected, policy, result)
         if (attemptMeta?.sessionId) {
-          bindAll(
+          await bindAll(
             { accountId: selected.accountId, vmId: selected.vmId, sessionId: outboundSessionId },
             {
               countHit: false,
@@ -1013,11 +1124,11 @@ export class FailoverRunner {
         notifyProxyFailure(this.onProxyFailure, selected, policy)
         if (policy.reason === 'fable_plan_denied' && typeof this.onFablePlanDenied === 'function') {
           try {
-            this.onFablePlanDenied({ selected, policy })
+            await this.onFablePlanDenied({ selected, policy })
           } catch {}
         }
         const terminalState = result?.terminalState || (result?.ok ? 'unknown' : 'error')
-        this.attemptsRepo?.complete?.(requestId, attemptNo, {
+        await this.attemptsRepo?.complete?.(requestId, attemptNo, {
           upstreamStatus: result?.status ?? null,
           errorScope: policy.scope,
           action: policy.action,
@@ -1036,9 +1147,9 @@ export class FailoverRunner {
           policy.reason === 'usage_policy_refusal' ||
           policy.reason === 'content_policy_refusal'
         ) {
-          this.scheduler.markSuccess(selected, { workerStatus: result.workerStatus || null, countUsage })
-          bindAll({ accountId: selected.accountId, vmId: selected.vmId })
-          releaseStickySlots()
+          await this.scheduler.markSuccess(selected, { workerStatus: result.workerStatus || null, countUsage })
+          await bindAll({ accountId: selected.accountId, vmId: selected.vmId })
+          await releaseStickySlots()
           return {
             ...result,
             ...attribution(),
@@ -1047,6 +1158,7 @@ export class FailoverRunner {
           }
         }
         if (verifiedSuccess(result)) {
+          await this.accountProtectionSuccess(selected, result)
           if (repairKey && (knownSearchRepair || searchRepair?.key === repairKey)) {
             this.searchRepairs.delete(repairKey)
             while (this.searchRepairs.size >= SEARCH_REPAIR_LIMIT) {
@@ -1057,14 +1169,14 @@ export class FailoverRunner {
               expiresAt: Date.now() + SEARCH_REPAIR_IDLE_MS,
             })
           }
-          this.scheduler.markSuccess(selected, { workerStatus: result.workerStatus || null, countUsage })
+          await this.scheduler.markSuccess(selected, { workerStatus: result.workerStatus || null, countUsage })
           if (isFableModel(model) && typeof this.onFableSuccess === 'function') {
             try {
-              this.onFableSuccess({ selected, model })
+              await this.onFableSuccess({ selected, model })
             } catch {}
           }
-          bindAll({ accountId: selected.accountId, vmId: selected.vmId })
-          releaseStickySlots()
+          await bindAll({ accountId: selected.accountId, vmId: selected.vmId })
+          await releaseStickySlots()
           return { ...result, ...attribution(), finalState: 'verified' }
         }
         if (policy.action === 'repair-and-retry' && !repaired && !result?.committed) {
@@ -1077,24 +1189,24 @@ export class FailoverRunner {
           requestBody = repairAnthropicRequest(requestBody, policy)
           continue
         }
-        applyCooldown(this.scheduler, selected, policy, model, { diagnosticPin: !!pinVmId })
-        if (policy.pauseSchedule) this.pauseUnit(selected, policy, result)
+        await applyCooldown(this.scheduler, selected, policy, model, { diagnosticPin: !!pinVmId })
+        if (policy.pauseSchedule) await this.pauseUnit(selected, policy, result)
         if (!pinVmId && isCredentialDeath(policy)) {
-          this.forgetCredential(selected, policy, { familyKey, sessionKeys: bindKeys })
+          await this.forgetCredential(selected, policy, { familyKey, sessionKeys: bindKeys })
           if (familyKey) {
-            releaseStickySlots()
+            await releaseStickySlots()
             return { ...result, ...attribution(), finalState: result?.terminalState || 'rejected', policy }
           }
         }
         if (!shouldContinue(policy)) {
-          releaseStickySlots()
+          await releaseStickySlots()
           return { ...result, ...attribution(), finalState: result?.terminalState || 'rejected', policy }
         }
         policy = await this.recoverCredential(selected, policy)
         const hopMs = Date.now() - attemptStarted
         if (isRetryableEmptyHop(policy)) {
           if (!emptyHopReleased(result) || pinVmId) return incompleteHopResult(result, policy, attribution())
-          this.retireOutboundSession(selected, bindKeys)
+          await this.retireOutboundSession(selected, bindKeys)
           freshSlot = true
         }
         if (budget.allowSameUnit(selected.accountId, policy, hopMs, this.config.same_account_retry_max_hop_ms)) {
@@ -1107,7 +1219,7 @@ export class FailoverRunner {
         const invalidCache = error?.status === 400 && error.body?.error?.code === 'invalid_cache_control'
         noteHop(invalidCache ? { upstreamExecutions: 0 } : null)
         if (error?.code === 'response_sent') {
-          this.attemptsRepo?.complete?.(requestId, attemptNo, {
+          await this.attemptsRepo?.complete?.(requestId, attemptNo, {
             upstreamStatus: 403,
             errorScope: 'request',
             action: 'stop',
@@ -1115,7 +1227,7 @@ export class FailoverRunner {
             terminalState: 'policy_block',
             latencyMs: Date.now() - attemptStarted,
           })
-          releaseStickySlots()
+          await releaseStickySlots()
           return {
             ok: false,
             responseSent: true,
@@ -1128,7 +1240,7 @@ export class FailoverRunner {
           }
         }
         if (invalidCache) {
-          this.attemptsRepo?.complete?.(requestId, attemptNo, {
+          await this.attemptsRepo?.complete?.(requestId, attemptNo, {
             upstreamStatus: 0,
             errorScope: 'request',
             action: 'stop',
@@ -1136,7 +1248,7 @@ export class FailoverRunner {
             terminalState: 'invalid_request',
             latencyMs: Date.now() - attemptStarted,
           })
-          releaseStickySlots()
+          await releaseStickySlots()
           return {
             ok: false,
             status: 400,
@@ -1147,7 +1259,7 @@ export class FailoverRunner {
           }
         }
         if (signal?.aborted || error?.code === 'selection_cancelled' || error?.code === 'request_cancelled') {
-          this.attemptsRepo?.complete?.(requestId, attemptNo, {
+          await this.attemptsRepo?.complete?.(requestId, attemptNo, {
             upstreamStatus: 0,
             errorScope: 'request',
             action: 'stop',
@@ -1155,7 +1267,7 @@ export class FailoverRunner {
             terminalState: 'cancelled',
             latencyMs: Date.now() - attemptStarted,
           })
-          releaseStickySlots()
+          await releaseStickySlots()
           return { ...clientCancelledResult({ committed }), via: 'pool-failover', ...attribution() }
         }
         result = {
@@ -1173,7 +1285,7 @@ export class FailoverRunner {
             },
           },
         }
-        policy = classifyAttempt(
+        policy = await classifyAttempt(
           result,
           selected,
           {
@@ -1184,11 +1296,12 @@ export class FailoverRunner {
           },
           this.scheduler?.accountQuota,
         )
+        policy = await this.accountProtection(selected, result, policy)
         lastResult = result
         lastPolicy = policy
-        this.noteUnitHealth(selected, policy, result)
+        await this.noteUnitHealth(selected, policy, result)
         notifyProxyFailure(this.onProxyFailure, selected, policy)
-        this.attemptsRepo?.complete?.(requestId, attemptNo, {
+        await this.attemptsRepo?.complete?.(requestId, attemptNo, {
           upstreamStatus: 0,
           errorScope: policy.scope,
           action: policy.action,
@@ -1198,14 +1311,14 @@ export class FailoverRunner {
           latencyMs: Date.now() - attemptStarted,
         })
         if (committed || !shouldContinue(policy)) {
-          releaseStickySlots()
+          await releaseStickySlots()
           return { ...result, ...attribution(), finalState: result.terminalState, policy }
         }
-        applyCooldown(this.scheduler, selected, policy, model, { diagnosticPin: !!pinVmId })
+        await applyCooldown(this.scheduler, selected, policy, model, { diagnosticPin: !!pinVmId })
         if (!pinVmId && isCredentialDeath(policy)) {
-          this.forgetCredential(selected, policy, { familyKey, sessionKeys: bindKeys })
+          await this.forgetCredential(selected, policy, { familyKey, sessionKeys: bindKeys })
           if (familyKey) {
-            releaseStickySlots()
+            await releaseStickySlots()
             return { ...result, ...attribution(), finalState: result.terminalState, policy }
           }
         }

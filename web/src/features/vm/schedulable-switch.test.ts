@@ -1,11 +1,16 @@
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { vmSchedulableProps } from './schedulable-switch'
+
+beforeEach(() => {
+  void i18n.changeLanguage('zh-CN')
+})
 
 const vm = (over: Partial<Vm>): Vm => ({ id: 'vm-01', ...over })
 
 describe('vmSchedulableProps', () => {
-  it('受限 (incl. a maintenance hold) still reads as 调度开', () => {
+  it('自动受限 (incl. a maintenance hold) still reads as 调度开', () => {
     const props = vmSchedulableProps(
       vm({
         schedule_state: 'restricted',
@@ -15,6 +20,19 @@ describe('vmSchedulableProps', () => {
     )
     expect(props.schedulable).toBe(true)
     expect(props.scheduleState).toBe('restricted')
+  })
+
+  it('供应商暂停 reads as 调度关 and locks the operator switch', () => {
+    const props = vmSchedulableProps(
+      vm({
+        schedule_state: 'restricted',
+        schedulable: false,
+        schedule_disabled_reason: 'vendor_paused',
+        restriction_reason: 'vendor_paused',
+      })
+    )
+    expect(props.schedulable).toBe(false)
+    expect(props.vendorControlledOff).toBe(true)
   })
 
   it('不可调度 and 调度关 read as off', () => {

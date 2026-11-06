@@ -12,10 +12,10 @@ function seed(root, vm) {
   fs.writeFileSync(path.join(dir, `${vm.id}.json`), JSON.stringify({ status: 'stopped', policy: {}, ...vm }))
 }
 
-function setup(t) {
+async function setup(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-exit-probe-'))
   const lookups = []
-  const pool = new ProxyPool({
+  const pool = await ProxyPool.create({
     dataDir: path.join(root, 'data'),
     vmNodeOf: (vmId) => JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vmId}.json`), 'utf8')).node_id || null,
     localExitUrl: (nodeId) => `socks5h://${nodeId}@127.0.0.1:1080`,
@@ -35,7 +35,7 @@ function setup(t) {
     cfg: { paths: { project: root }, vm: { id: null } },
     requireAuth(req) {
       req.apiKeyKind = 'master'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, payload) {
@@ -52,7 +52,7 @@ function setup(t) {
 }
 
 test('an unbound slot has no exit to probe', async (t) => {
-  const { root, probe, lookups } = setup(t)
+  const { root, probe, lookups } = await setup(t)
   seed(root, { id: 'vm-free', proxy: null })
   const res = await probe('vm-free')
   assert.equal(res.status, 502)
@@ -61,10 +61,10 @@ test('an unbound slot has no exit to probe', async (t) => {
 })
 
 test('a node slot on local egress probes its own node row and refreshes it', async (t) => {
-  const { root, pool, probe, lookups } = setup(t)
+  const { root, pool, probe, lookups } = await setup(t)
   seed(root, { id: 'vm-tokyo', node_id: 'node-a', proxy: { id: 'px-local', host: 'local', scheme: 'local' } })
   pool.ensureLocal()
-  assert.equal(pool.bind('px-local', 'vm-tokyo').proxy.id, 'px-local-node-a')
+  assert.equal((await pool.bind('px-local', 'vm-tokyo')).proxy.id, 'px-local-node-a')
   const res = await probe('vm-tokyo')
   assert.equal(res.status, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.via, 'node')
@@ -76,7 +76,7 @@ test('a node slot on local egress probes its own node row and refreshes it', asy
 })
 
 test('a control-plane Codex slot is probed through the deployment proxy', async (t) => {
-  const { root, pool, probe, lookups } = setup(t)
+  const { root, pool, probe, lookups } = await setup(t)
   const saved = process.env.HTTPS_PROXY
   process.env.HTTPS_PROXY = 'socks5://deploy.example:1080'
   t.after(() => {
@@ -90,7 +90,7 @@ test('a control-plane Codex slot is probed through the deployment proxy', async 
     proxy: { id: 'px-local', host: 'local', scheme: 'local' },
   })
   pool.ensureLocal()
-  pool.bind('px-local', 'vm-gpt')
+  await pool.bind('px-local', 'vm-gpt')
   const res = await probe('vm-gpt')
   assert.equal(res.status, 200, JSON.stringify(res.body))
   assert.equal(res.body.data.via, 'deploy_proxy')

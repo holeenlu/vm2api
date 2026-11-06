@@ -53,16 +53,16 @@ function boundSlot(extra = {}) {
   }
 }
 
-test('bindVmProxy turns proxy_cli_enabled on, unbind turns it off', () => {
+test('bindVmProxy turns proxy_cli_enabled on, unbind turns it off', async () => {
   const root = tmpRoot()
   try {
     writeVm(root, boundSlot({ proxy: null, proxy_cli_enabled: false }))
-    bindVmProxy(root, 'vm-01', SOCKS)
+    await bindVmProxy(root, 'vm-01', SOCKS)
     const bound = getVm(root, 'vm-01')
     assert.equal(bound.proxy_cli_enabled, true)
     assert.equal(bound.proxy.id, 'px-1')
     assert.equal(slotHasBoundProxy(bound), true)
-    bindVmProxy(root, 'vm-01', null)
+    await bindVmProxy(root, 'vm-01', null)
     const unbound = getVm(root, 'vm-01')
     assert.equal(unbound.proxy_cli_enabled, false)
     assert.equal(unbound.proxy, null)
@@ -72,11 +72,11 @@ test('bindVmProxy turns proxy_cli_enabled on, unbind turns it off', () => {
   }
 })
 
-test('rebind of the same exit heals a stale false flag', () => {
+test('rebind of the same exit heals a stale false flag', async () => {
   const root = tmpRoot()
   try {
     writeVm(root, boundSlot())
-    bindVmProxy(root, 'vm-01', SOCKS)
+    await bindVmProxy(root, 'vm-01', SOCKS)
     const vm = getVm(root, 'vm-01')
     assert.equal(vm.proxy_cli_enabled, true)
     assert.equal(slotHasBoundProxy(vm), true)
@@ -85,12 +85,12 @@ test('rebind of the same exit heals a stale false flag', () => {
   }
 })
 
-test('patchVmRecord after bind keeps proxy_cli_enabled', () => {
+test('patchVmRecord after bind keeps proxy_cli_enabled', async () => {
   const root = tmpRoot()
   try {
     writeVm(root, boundSlot({ proxy: null }))
     const snapshot = getVm(root, 'vm-01')
-    bindVmProxy(root, 'vm-01', SOCKS)
+    await bindVmProxy(root, 'vm-01', SOCKS)
     snapshot.status = 'running'
     const written = patchVmRecord(root, 'vm-01', { status: 'running' })
     assert.equal(written.proxy_cli_enabled, true)
@@ -103,7 +103,7 @@ test('patchVmRecord after bind keeps proxy_cli_enabled', () => {
   }
 })
 
-test('repair heals bound-but-false and unbound-but-true slots', () => {
+test('repair heals bound-but-false and unbound-but-true slots', async () => {
   const root = tmpRoot()
   try {
     writeVm(root, boundSlot({ id: 'vm-01' }))
@@ -179,7 +179,7 @@ test('OAuth commit reuses native readiness without legacy worker.sock or changin
     assert.equal(saved.proxy_cli_enabled, true)
     assert.equal(saved.proxy.id, 'px-1')
     assert.equal(slotHasBoundProxy(saved), true)
-    assert.equal(evaluateSlotGate(saved).ok, true)
+    assert.equal((await evaluateSlotGate(saved)).ok, true)
     assert.equal(healthReads, 1)
     assert.equal(fs.existsSync(path.join(runDir, 'worker.sock')), false)
     assert.equal(saved.runtime.kernel_socket, kernelSocket)
@@ -200,7 +200,7 @@ test('package import with a proxy keeps proxy_cli_enabled even if the spec says 
   const root = tmpRoot()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const db = createDatabase({ dbPath: ':memory:' })
-  const pool = new ProxyPool({ db })
+  const pool = await ProxyPool.create({ db })
   t.after(() => {
     pool.stopScheduler()
     db.close()
@@ -231,7 +231,7 @@ test('package import with a proxy keeps proxy_cli_enabled even if the spec says 
     parsed,
     mode: 'create',
     proxyPool: pool,
-    owner: { role: 'admin', userId: null },
+    owner: { role: 'super_admin', userId: null },
   })
   assert.equal(result.ok, true, result.error?.message)
   const saved = getVm(root, 'vm-pkg')

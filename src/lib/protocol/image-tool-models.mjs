@@ -48,6 +48,9 @@ for (const model of IMAGE_TOOL_MODELS) {
 }
 
 /** Canonical id for a known image model or one of its snapshots; null otherwise. */
+/** 调用方未指定模型时上游实际使用的图片模型；授权与报价按它判断（tapmodels）。 */
+export const DEFAULT_IMAGE_TOOL_MODEL = IMAGE_TOOL_MODELS.find((model) => model.upstream_default).id
+
 export function canonicalImageToolModel(id) {
   const raw = String(id || '').trim()
   if (!raw) return null

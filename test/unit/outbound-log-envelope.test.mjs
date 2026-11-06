@@ -1,3 +1,4 @@
+import { createDatabase } from '../../src/lib/db/database.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -119,6 +120,7 @@ function fakeResponse() {
 
 unixTest('debug log uses final CLI headers, hides internal events and never substitutes envelope headers', async () => {
   const kernel = await fakeKernel()
+  const logDb = createDatabase({ dbPath: path.join(kernel.root, 'protocol.db') })
   const finished = []
   const handler = createHandleProtocol({
     json: (res, status) => {
@@ -143,7 +145,13 @@ unixTest('debug log uses final CLI headers, hides internal events and never subs
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: {
+      db: logDb,
+      canAccept: (record) => ({ ok: true, record }),
+      recordUsage() {},
+      acquire: () => ({ ok: true }),
+      release() {},
+    },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -191,6 +199,7 @@ unixTest('debug log uses final CLI headers, hides internal events and never subs
         '/v1/messages',
       )
       res.finish()
+      await new Promise((resolve) => setImmediate(resolve))
       assert.equal(res.writes.join('').includes('kin_outbound_headers'), false)
       assert.equal(res.writes.join('').includes('must-not-be-logged'), false)
     }
@@ -205,7 +214,9 @@ unixTest('debug log uses final CLI headers, hides internal events and never subs
       assert.deepEqual(JSON.parse(JSON.stringify(extra.outbound_body)), sent.body)
       // cli-hop 在传输层才补的字段：betas 与 cch 占位；billing 由 cli-hop 末段补上。
       assert.ok(Array.isArray(extra.outbound_body.betas))
-      assert.match(extra.outbound_body.system[0].text, /^x-anthropic-billing-header: .*\bcch=00000;/)
+      assert.ok(
+        extra.outbound_body.system.some((block) => /^x-anthropic-billing-header: .*\bcch=00000;/.test(block.text)),
+      )
       assert.deepEqual(extra.worker_envelope_headers, sent.headers)
       if (i < 2) {
         assert.deepEqual(extra.outbound_headers, {
@@ -223,6 +234,7 @@ unixTest('debug log uses final CLI headers, hides internal events and never subs
   } finally {
     if (prevKernelBin === undefined) delete process.env.KIN_KERNEL_BIN
     else process.env.KIN_KERNEL_BIN = prevKernelBin
+    logDb.close()
     await kernel.close()
   }
 })

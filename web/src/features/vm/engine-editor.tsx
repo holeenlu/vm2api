@@ -1,7 +1,8 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import type { Vm, VmKernelSnapshot } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { toast } from 'sonner'
 import { activateVmCragLicense, isApiError, patchVm } from '@/lib/api'
 import { isCodexVm } from '@/lib/vm-kind'
@@ -14,7 +15,7 @@ import {
   cragLicenseErrorMessage,
 } from '@/features/vm/crag-license-editor'
 import {
-  DATAPLANE_HINT,
+  dataplaneHint,
   HOP_TRANSPORT_LABEL,
 } from '@/features/vm/dataplane-contract'
 import {
@@ -23,7 +24,7 @@ import {
   inferenceEnginePatchValue,
   normalizeInferenceEngine,
 } from '@/features/vm/engine-contract'
-import { isRemoteVm, REMOTE_UNSUPPORTED_TEXT } from '@/features/vm/placement'
+import { isRemoteVm, remoteUnsupportedText } from '@/features/vm/placement'
 import {
   vmCragLicenseQueryOptions,
   vmQueryOptions,
@@ -39,6 +40,8 @@ export function VmEngineEditor({
   vm: Vm
   kernel?: VmKernelSnapshot | null
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const configured = normalizeInferenceEngine(
     kernel?.configured_engine ?? vm.inference_engine,
@@ -53,51 +56,67 @@ export function VmEngineEditor({
     resolved
   )
   const inherits = configured === 'auto'
-  const canEdit = useVmPerms().admin
+  const canEdit = useVmPerms().edit
   const remote = isRemoteVm(vm)
-  const status = useMemo(
-    () => ({
-      configured: inferenceEngineLabel(configured),
-      resolved: inferenceEngineLabel(resolved),
-      active: inferenceEngineLabel(active),
-    }),
-    [active, configured, resolved]
-  )
+  const status = {
+    configured: inferenceEngineLabel(configured),
+    resolved: inferenceEngineLabel(resolved),
+    active: inferenceEngineLabel(active),
+  }
   const inherit = useMutation({
     mutationFn: () =>
       patchVm(id, { inference_engine: inferenceEnginePatchValue('auto') }),
     onSuccess: async () => {
-      toast.success('推理内核已改为跟随全局')
+      toast.success(
+        tVm('vm:engineEditor.inferenceKernelNowFollowsGlobalSettings')
+      )
       await Promise.all([
         qc.invalidateQueries({ queryKey: vmQueryOptions(id).queryKey }),
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
       ])
     },
     onError: (error: Error) =>
-      toast.error(`恢复跟随全局失败：${error.message}`),
+      toast.error(
+        tVm('vm:engineEditor.failedToRestoreGlobalSettings', {
+          message: error.message,
+        })
+      ),
   })
 
   return (
-    <CardSection title='推理内核'>
+    <CardSection title={tVm('vm:engineEditor.inferenceKernel')}>
       <div className='grid gap-2 text-sm sm:grid-cols-3'>
-        <EngineValue label='已配置' value={status.configured} />
-        <EngineValue label='解析后' value={status.resolved} />
-        <EngineValue label='当前运行' value={status.active} />
+        <EngineValue
+          label={tVm('vm:codexKernelHealthCard.configured')}
+          value={status.configured}
+        />
+        <EngineValue
+          label={tVm('vm:engineEditor.resolved')}
+          value={status.resolved}
+        />
+        <EngineValue
+          label={tVm('vm:engineEditor.currentlyRunning')}
+          value={status.active}
+        />
       </div>
       <div className='mt-3 grid gap-2 text-sm sm:grid-cols-2'>
         <EngineValue
-          label='数据面'
+          label={tVm('vm:engineEditor.dataPlane')}
           value={isCodexVm(vm) ? '—' : kernelLabel(vm)}
         />
       </div>
       <p className='mt-3 text-xs leading-relaxed text-muted-foreground'>
-        运输固定 {HOP_TRANSPORT_LABEL}。{DATAPLANE_HINT} 本槽可在 cli-node 与
-        CRAG v2 之间切换，不改其他槽、不改凭证、不删容器。舰队级 cc / crag
-        legacy 仍在{' '}
-        <Link to='/wrap' className='underline underline-offset-4'>
-          内核页
-        </Link>
-        。Go HTTP 转发不再启用。
+        <Trans
+          ns='vm'
+          i18nKey='engineEditor.kernelHint'
+          values={{
+            HOP_TRANSPORT_LABEL: HOP_TRANSPORT_LABEL,
+            DATAPLANE_HINT: dataplaneHint(),
+          }}
+          components={{
+            part0: <Link to='/wrap' className='underline underline-offset-4' />,
+          }}
+        />
       </p>
       {canEdit && !isCodexVm(vm) ? (
         <SlotKernelSwitch key={id} id={id} vm={vm} remote={remote} />
@@ -109,12 +128,18 @@ export function VmEngineEditor({
           disabled={inherit.isPending || remote}
           onClick={() => inherit.mutate()}
         >
-          {inherit.isPending ? '恢复中…' : '恢复跟随全局'}
+          {inherit.isPending
+            ? tVm('vm:engineEditor.restoring')
+            : tVm('vm:engineEditor.followGlobalSettings')}
         </Button>
       )}
       {remote && canEdit ? (
         <p className='mt-2 text-xs text-muted-foreground'>
-          切换推理内核：{REMOTE_UNSUPPORTED_TEXT}
+          <Trans
+            ns='vm'
+            i18nKey='engineEditor.switchInferenceKernel'
+            values={{ REMOTE_UNSUPPORTED_TEXT: remoteUnsupportedText() }}
+          />
         </p>
       ) : null}
     </CardSection>
@@ -141,6 +166,7 @@ function SlotKernelSwitch({
   vm: Vm
   remote: boolean
 }) {
+  const { t: tVm } = useTranslation('vm')
   const qc = useQueryClient()
   const [pending, setPending] = useState<'wrap' | 'v2' | null>(null)
   const [licenseOpen, setLicenseOpen] = useState(false)
@@ -164,10 +190,10 @@ function SlotKernelSwitch({
       qc.setQueryData(vmCragLicenseQueryOptions(id).queryKey, data)
       setRegistrationCode('')
       if (!data.license.valid || data.license.status !== 'valid') {
-        toast.error('授权未生效，请检查下方状态并联系授权方。')
+        toast.error(tVm('vm:engineEditor.licenseNotActive'))
         return
       }
-      toast.success('CRAG 授权已激活')
+      toast.success(tVm('vm:engineEditor.licenseActivated'))
       if (switchAfterActivation && !onV2) setPending('v2')
       await Promise.all([
         qc.invalidateQueries({ queryKey: vmQueryOptions(id).queryKey }),
@@ -202,7 +228,9 @@ function SlotKernelSwitch({
       ),
     onSuccess: async (_data, next) => {
       toast.success(
-        next === 'v2' ? '本槽已切到 CRAG v2' : '本槽已切回 cli-node'
+        next === 'v2'
+          ? tVm('vm:engineEditor.switchedToV2')
+          : tVm('vm:engineEditor.switchedToCli')
       )
       setPending(null)
       await Promise.all([
@@ -234,14 +262,16 @@ function SlotKernelSwitch({
           disabled={blocked || busy || onCli}
           onClick={() => setPending('wrap')}
         >
-          本槽切回 cli-node
+          {tVm('vm:engineEditor.switchToCli')}
         </Button>
         <Button
           variant='outline'
           disabled={blocked || busy || onV2}
           onClick={() => void requestV2()}
         >
-          {checkingLicense ? '正在检查授权…' : '本槽切到 CRAG v2'}
+          {checkingLicense
+            ? tVm('vm:engineEditor.checkingLicense')
+            : tVm('vm:engineEditor.switchToV2')}
         </Button>
         {!blocked ? (
           <Button
@@ -256,19 +286,20 @@ function SlotKernelSwitch({
               activateLicense.reset()
             }}
           >
-            CRAG 授权 / 续期
+            {tVm('vm:engineEditor.licenseRenew')}
           </Button>
         ) : null}
       </div>
       <p className='text-xs text-muted-foreground'>
-        当前 {kernelLabel(vm)}。只改这一槽。cli-node 留在盘上。没有 CRAG v2
-        包时拒绝切换，原内核不动。
+        {tVm('vm:engineEditor.slotKernelNote', { kernel: kernelLabel(vm) })}
       </p>
       {blocked ? (
         <p className='text-xs text-muted-foreground'>
           {remote
-            ? `CRAG v2：${REMOTE_UNSUPPORTED_TEXT}`
-            : 'KVM 槽不运行 CRAG v2'}
+            ? tVm('vm:engineEditor.v2RemoteUnsupported', {
+                REMOTE_UNSUPPORTED_TEXT: remoteUnsupportedText(),
+              })
+            : tVm('vm:engineEditor.kvmNoV2')}
         </p>
       ) : null}
       {!blocked ? (
@@ -298,14 +329,15 @@ function SlotKernelSwitch({
             />
           ) : licenseQuery.isError ? (
             <p role='alert' className='text-sm text-destructive'>
-              {cragLicenseErrorMessage(licenseQuery.error)} 打开“CRAG 授权 /
-              续期”可重试。
+              {tVm('vm:engineEditor.licenseLoadRetry', {
+                message: cragLicenseErrorMessage(licenseQuery.error),
+              })}
             </p>
           ) : licenseQuery.data ? (
             <CragLicenseSummary license={licenseQuery.data.license} />
           ) : (
             <p role='status' className='text-sm text-muted-foreground'>
-              正在读取 CRAG 授权状态…
+              {tVm('vm:engineEditor.loadingLicense')}
             </p>
           )}
         </div>
@@ -315,14 +347,18 @@ function SlotKernelSwitch({
         onOpenChange={(open) => {
           if (!open && !switchKernel.isPending) setPending(null)
         }}
-        title={pending === 'v2' ? '本槽切到 CRAG v2？' : '本槽切回 cli-node？'}
+        title={
+          pending === 'v2'
+            ? tVm('vm:engineEditor.confirmV2Title')
+            : tVm('vm:engineEditor.confirmCliTitle')
+        }
         desc={
           pending === 'v2'
-            ? '重启本槽内核。不 docker rm，不改凭证，不影响其他槽。cli-node 保留，可再切回。'
-            : '铺回 wrap kernel 和 cli-node，并重启本槽内核。CRAG v2 文件留在盘上但不再 exec。'
+            ? tVm('vm:engineEditor.confirmV2Desc')
+            : tVm('vm:engineEditor.confirmCliDesc')
         }
-        cancelBtnText='取消'
-        confirmText='切换'
+        cancelBtnText={tVm('common:cancel')}
+        confirmText={tVm('vm:engineEditor.confirmSwitch')}
         isLoading={switchKernel.isPending}
         handleConfirm={() => {
           if (pending) switchKernel.mutate(pending)
@@ -339,6 +375,8 @@ function CardSection({
   title: string
   children: ReactNode
 }) {
+  useTranslation('vm')
+
   return (
     <section className='rounded-md border p-4'>
       <h3 className='mb-3 text-sm font-medium'>{title}</h3>
@@ -348,6 +386,8 @@ function CardSection({
 }
 
 function EngineValue({ label, value }: { label: string; value: string }) {
+  useTranslation('vm')
+
   return (
     <div>
       <div className='text-xs text-muted-foreground'>{label}</div>

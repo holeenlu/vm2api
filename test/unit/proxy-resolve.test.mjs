@@ -12,13 +12,13 @@ function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kin-resolve-'))
 }
 
-test('prefers pool credentials over host-only vm.proxy', () => {
-  const pool = new ProxyPool({ dataDir: tmpDir() })
+test('prefers pool credentials over host-only vm.proxy', async () => {
+  const pool = await ProxyPool.create({ dataDir: tmpDir() })
   pool.importLines('socks5://user:s3cret@10.0.0.5:1080')
   const id = pool.snapshot().proxies[0].id
-  pool.bind(id, 'vm-02')
+  await pool.bind(id, 'vm-02')
   pool.stopScheduler()
-  const resolved = resolveImportProxy({
+  const resolved = await resolveImportProxy({
     vm: { id: 'vm-02', proxy: { id, host: '10.0.0.5', port: 1080 } },
     proxyPool: pool,
   })
@@ -26,14 +26,14 @@ test('prefers pool credentials over host-only vm.proxy', () => {
   assert.equal(resolved.proxyUrl, 'socks5h://user:s3cret@10.0.0.5:1080')
 })
 
-test('blocks import when bound proxy is fail or dead', () => {
-  const pool = new ProxyPool({ dataDir: tmpDir() })
+test('blocks import when bound proxy is fail or dead', async () => {
+  const pool = await ProxyPool.create({ dataDir: tmpDir() })
   pool.importLines('10.0.0.6:1080')
   const id = pool.snapshot().proxies[0].id
-  pool.bind(id, 'vm-03')
+  await pool.bind(id, 'vm-03')
   pool.setEnabled(id, false)
   pool.stopScheduler()
-  const resolved = resolveImportProxy({
+  const resolved = await resolveImportProxy({
     vm: { id: 'vm-03', proxy: { id, host: '10.0.0.6', port: 1080, url: 'socks5h://10.0.0.6:1080' } },
     proxyPool: pool,
     overrideUrl: 'socks5h://evil.example:1080',
@@ -44,8 +44,8 @@ test('blocks import when bound proxy is fail or dead', () => {
   assert.equal(resolved.proxyUrl, null)
 })
 
-test('falls back to vm.proxy.url when pool has no row', () => {
-  const resolved = resolveImportProxy({
+test('falls back to vm.proxy.url when pool has no row', async () => {
+  const resolved = await resolveImportProxy({
     vm: { id: 'vm-sim-01', proxy: { url: 'socks5h://127.0.0.1:19080', host: '127.0.0.1', port: 19080 } },
     proxyPool: { snapshot: () => ({ proxies: [] }), getProxyForVm: () => null },
   })
@@ -53,8 +53,8 @@ test('falls back to vm.proxy.url when pool has no row', () => {
   assert.equal(resolved.proxyUrl, 'socks5h://127.0.0.1:19080')
 })
 
-test('reports proxy_required when nothing is bound', () => {
-  const resolved = resolveImportProxy({
+test('reports proxy_required when nothing is bound', async () => {
+  const resolved = await resolveImportProxy({
     vm: { id: 'vm-empty', proxy: null },
     proxyPool: { snapshot: () => ({ proxies: [] }), getProxyForVm: () => null },
   })
@@ -62,8 +62,8 @@ test('reports proxy_required when nothing is bound', () => {
   assert.equal(resolved.reason, 'proxy_required')
 })
 
-test('local egress is a bound exit without a SOCKS URL', () => {
-  const resolved = resolveImportProxy({
+test('local egress is a bound exit without a SOCKS URL', async () => {
+  const resolved = await resolveImportProxy({
     vm: {
       id: 'vm-01',
       proxy: { id: 'px-local', host: 'local', port: 0, scheme: 'local', url: null },
@@ -80,7 +80,7 @@ test('local egress is a bound exit without a SOCKS URL', () => {
   assert.equal(resolved.proxyUrl, '')
 })
 
-test('local Codex import carries the deployment proxy; local Claude stays direct', (t) => {
+test('local Codex import carries the deployment proxy; local Claude stays direct', async (t) => {
   const saved = process.env.HTTPS_PROXY
   process.env.HTTPS_PROXY = 'http://proxy.test:8443'
   t.after(() => {
@@ -89,23 +89,26 @@ test('local Codex import carries the deployment proxy; local Claude stays direct
   })
   const proxy = { id: 'px-local', host: 'local', port: 0, scheme: 'local', url: null }
   const proxyPool = { snapshot: () => ({ proxies: [] }), getProxyForVm: () => null }
-  const gpt = resolveImportProxy({ vm: { id: 'vm-gpt', platform: 'openai', proxy }, proxyPool })
+  const gpt = await resolveImportProxy({ vm: { id: 'vm-gpt', platform: 'openai', proxy }, proxyPool })
   assert.equal(gpt.proxyUrl, 'http://proxy.test:8443')
   assert.equal(gpt.direct, true)
-  assert.equal(resolveImportProxy({ vm: { id: 'vm-cc', platform: 'anthropic', proxy }, proxyPool }).proxyUrl, '')
+  assert.equal(
+    (await resolveImportProxy({ vm: { id: 'vm-cc', platform: 'anthropic', proxy }, proxyPool })).proxyUrl,
+    '',
+  )
 })
 
 test('node slot on local egress leaves through that node, never the control plane route', async (t) => {
   const proxy = { id: 'px-local', host: 'local', port: 0, scheme: 'local', url: null }
   const proxyPool = { snapshot: () => ({ proxies: [] }), getProxyForVm: () => null }
   const vm = { id: 'vm-n1', platform: 'anthropic', node_id: 'node-a', proxy }
-  const missing = resolveImportProxy({ vm, proxyPool })
+  const missing = await resolveImportProxy({ vm, proxyPool })
   assert.equal(missing.ok, false)
   assert.equal(missing.reason, 'proxy_unavailable')
 
   await startNodeEgressSocks({ clientFor: () => assert.fail('no CONNECT expected') })
   t.after(stopNodeEgressSocks)
-  const resolved = resolveImportProxy({ vm, proxyPool })
+  const resolved = await resolveImportProxy({ vm, proxyPool })
   assert.equal(resolved.ok, true)
   const url = new URL(resolved.proxyUrl)
   assert.equal(url.protocol, 'socks5h:')
@@ -113,11 +116,11 @@ test('node slot on local egress leaves through that node, never the control plan
   assert.equal(url.username, 'node-a')
   assert.equal(hostProxyUrlForVm(vm), resolved.proxyUrl)
   // Same node, same pool row, a control-plane slot still goes direct.
-  assert.equal(resolveImportProxy({ vm: { ...vm, node_id: null }, proxyPool }).proxyUrl, '')
+  assert.equal((await resolveImportProxy({ vm: { ...vm, node_id: null }, proxyPool })).proxyUrl, '')
 })
 
-test('stale local egress failure is still a direct exit', () => {
-  const resolved = resolveImportProxy({
+test('stale local egress failure is still a direct exit', async () => {
+  const resolved = await resolveImportProxy({
     vm: {
       id: 'vm-01',
       proxy: { id: 'px-local', host: 'local', port: 0, scheme: 'local', url: null },
@@ -134,8 +137,8 @@ test('stale local egress failure is still a direct exit', () => {
   assert.equal(resolved.proxyUrl, '')
 })
 
-test('operator-disabled local egress stays blocked', () => {
-  const resolved = resolveImportProxy({
+test('operator-disabled local egress stays blocked', async () => {
+  const resolved = await resolveImportProxy({
     vm: {
       id: 'vm-01',
       proxy: { id: 'px-local', host: 'local', port: 0, scheme: 'local' },

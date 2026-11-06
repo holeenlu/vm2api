@@ -98,8 +98,8 @@ export async function applyNativeTelemetry({
       result.wrote = result.seed.wrote === true
       const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
       if (!written.supported || !written.wrote) return { ...result, code: written.error || 'telemetry_config_failed' }
-      const geo = readVmProxyGeo(record)
-      const egress = writeVmProxyTelemetryEgress(projectRoot, record, geo)
+      const geo = await readVmProxyGeo(record)
+      const egress = await writeVmProxyTelemetryEgress(projectRoot, record, geo)
       if (geo && !egress.wrote && egress.reason !== 'proxy_geo_unavailable') {
         return { ...result, code: egress.reason || 'telemetry_egress_write_failed', published: false, applied: false }
       }
@@ -186,9 +186,9 @@ async function mapPool(items, concurrency, fn) {
   return out
 }
 
-export function selectFleetTargets(projectRoot, ids = null) {
+export async function selectFleetTargets(projectRoot, ids = null) {
   const wanted = Array.isArray(ids) && ids.length ? new Set(ids.map((id) => String(id))) : null
-  return listVms(projectRoot)
+  return (await listVms(projectRoot))
     .filter((vm) => !wanted || wanted.has(vm.id))
     .map((vm) => getVm(projectRoot, vm.id) || vm)
 }
@@ -230,6 +230,9 @@ export async function updateOneSlot(
       }
     }
     if (action === 'telemetry') {
+      if (normalizeVmKind(vm).kind === 'codex' || slotHost(vm).native) {
+        return { ...result, ok: true, skipped: true, skip_reason: 'telemetry_unsupported' }
+      }
       const enabled =
         telemetryEnabled === undefined ? vm.seed_policy?.telemetry_disabled === false : telemetryEnabled === true
       const vmRef = getVm(projectRoot, id) || vm
@@ -283,7 +286,7 @@ export async function runFleetUpdate(
 ) {
   const nextAction = ACTIONS.has(action) ? action : 'roll'
   const conc = Math.max(1, Math.min(8, Number(concurrency) || 4))
-  const targets = selectFleetTargets(projectRoot, ids)
+  const targets = await selectFleetTargets(projectRoot, ids)
   const items = await mapPool(targets, conc, (vm) =>
     updateOneSlot(projectRoot, vm, {
       action: nextAction,
@@ -309,8 +312,8 @@ export async function runFleetUpdate(
   }
 }
 
-export function fleetStatus(projectRoot) {
-  return listVms(projectRoot).map((vm) => {
+export async function fleetStatus(projectRoot) {
+  return (await listVms(projectRoot)).map((vm) => {
     const fp = vm.fingerprint || {}
     return {
       id: vm.id,

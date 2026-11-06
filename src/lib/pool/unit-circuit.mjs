@@ -7,6 +7,10 @@
  *
  * State is process-local and mirrored onto account runtime `model_states.__circuit`
  * when a repo is attached. Operator `schedulable` is never toggled.
+ *
+ * R6 B7b：持久化经 async 仓储。读取先 `await load()`（`inspect` / 记录失败与成功 / 面板视图都会先加载）；
+ * `admit()` 在 `PoolScheduler.reserve()` 的同步段里调用，只读写内存（调用方已在资格计算时经 `inspect` 加载），
+ * 状态变化在后台落盘。落盘只改 `model_states.__circuit` 这一个键（json_set，竞态 R11），不读改写整个 model_states。
  */
 
 const CIRCUIT_KEY = '__circuit'
@@ -29,16 +33,24 @@ export class UnitCircuit {
     if (openMs != null) this.openMs = Math.max(1000, Number(openMs) || 30_000)
   }
 
-  snapshot(accountId) {
-    return this.units.get(accountId) || this._load(accountId)
+  async snapshot(accountId) {
+    return this.units.get(accountId) || (await this._load(accountId))
+  }
+
+  /** 内存里还没有这个单元时从运行态读取（之后都读内存）。 */
+  async load(accountId) {
+    if (!accountId || this.units.has(accountId)) return
+    const unit = await this._load(accountId)
+    if (!this.units.has(accountId)) this.units.set(accountId, unit)
   }
 
   /**
    * Read the gate without taking the half-open probe. Eligibility scans every
    * VM; only reserve() may call admit().
    */
-  inspect(accountId, now = this.now()) {
+  async inspect(accountId, now = this.now()) {
     if (!accountId) return { ok: true, state: 'closed' }
+    await this.load(accountId)
     const unit = this._ensure(accountId, now)
     if (unit.state === 'closed') return { ok: true, state: 'closed' }
     if (unit.state === 'open') {
@@ -63,18 +75,19 @@ export class UnitCircuit {
       }
       unit.state = 'half_open'
       unit.probeHeld = false
-      this._save(accountId, unit)
+      this._saveInBackground(accountId, unit)
     }
     if (unit.probeHeld) {
       return { ok: false, reason: 'circuit_probe', until: now + this.openMs, state: 'half_open' }
     }
     unit.probeHeld = true
-    this._save(accountId, unit)
+    this._saveInBackground(accountId, unit)
     return { ok: true, state: 'half_open', probe: true }
   }
 
-  recordFailure(accountId, now = this.now()) {
+  async recordFailure(accountId, now = this.now()) {
     if (!accountId) return null
+    await this.load(accountId)
     const unit = this._ensure(accountId, now)
     if (unit.state === 'open' && now < unit.openUntil) return unit
     unit.failures += 1
@@ -84,7 +97,7 @@ export class UnitCircuit {
       unit.openUntil = now + this.openMs
       unit.failures = this.failureThreshold
     }
-    this._save(accountId, unit)
+    await this._save(accountId, unit)
     return { ...unit }
   }
 
@@ -95,26 +108,28 @@ export class UnitCircuit {
     this.units.set(accountId, unit)
   }
 
-  recordSuccess(accountId) {
+  async recordSuccess(accountId) {
     if (!accountId) return null
+    await this.load(accountId)
     const unit = this._ensure(accountId, this.now())
     if (unit.state === 'half_open' || unit.probeHeld) {
       unit.state = 'closed'
       unit.failures = 0
       unit.openUntil = 0
       unit.probeHeld = false
-      this._save(accountId, unit)
+      await this._save(accountId, unit)
       return { ...unit }
     }
     if (unit.failures) {
       unit.failures = 0
-      this._save(accountId, unit)
+      await this._save(accountId, unit)
     }
     return { ...unit }
   }
 
   /** Panel view. Reads without taking the probe; open past its window reads as half_open. */
-  view(accountId, now = this.now()) {
+  async view(accountId, now = this.now()) {
+    if (accountId) await this.load(accountId)
     const unit = accountId ? this._ensure(accountId, now) : { state: 'closed', failures: 0, openUntil: 0 }
     return {
       state: unit.state,
@@ -126,16 +141,17 @@ export class UnitCircuit {
   }
 
   /** Operator reset: close the unit and clear the failure streak. */
-  reset(accountId) {
+  async reset(accountId) {
     if (!accountId) return null
     const unit = { state: 'closed', failures: 0, openUntil: 0, probeHeld: false }
-    this._save(accountId, unit)
+    await this._save(accountId, unit)
     return { ...unit }
   }
 
+  /** 同步：内存里的单元（还没加载时按 closed 处理，调用方应先 `await load()`）。 */
   _ensure(accountId, now) {
     let unit = this.units.get(accountId)
-    if (!unit) unit = this._load(accountId)
+    if (!unit) unit = { state: 'closed', failures: 0, openUntil: 0, probeHeld: false }
     if (unit.state === 'open' && unit.openUntil && now >= unit.openUntil) {
       unit.state = 'half_open'
       unit.probeHeld = false
@@ -144,10 +160,10 @@ export class UnitCircuit {
     return unit
   }
 
-  _load(accountId) {
+  async _load(accountId) {
     const blank = { state: 'closed', failures: 0, openUntil: 0, probeHeld: false }
     try {
-      const row = this.repo?.get?.(accountId)
+      const row = await this.repo?.get?.(accountId)
       const saved = row?.model_states?.[CIRCUIT_KEY]
       if (!saved || typeof saved !== 'object') return { ...blank }
       return {
@@ -161,23 +177,29 @@ export class UnitCircuit {
     }
   }
 
-  _save(accountId, unit) {
+  /** 同步调用方（admit）的落盘：不等待；内存已经生效，失败不影响本进程的门控。 */
+  _saveInBackground(accountId, unit) {
+    this._save(accountId, unit).catch(() => {})
+  }
+
+  async _save(accountId, unit) {
     this.units.set(accountId, unit)
-    if (!this.repo?.get || !this.repo?.upsert) return
+    if (!this.repo?.get || !this.repo?.setModelState) return
     try {
-      const row = this.repo.get(accountId)
+      const row = await this.repo.get(accountId)
       if (!row?.vm_id) return
-      const model_states = { ...(row.model_states || {}) }
-      model_states[CIRCUIT_KEY] = {
-        state: unit.state,
-        failures: unit.failures,
-        openUntil: unit.openUntil || 0,
-      }
-      this.repo.upsert({
-        account_id: accountId,
-        vm_id: row.vm_id,
-        model_states,
-        status: unit.state === 'open' ? 'cooldown' : row.status || 'ready',
+      // 写入时取单元的当前值：后台落盘晚于后续变化完成时也写最新状态
+      const current = this.units.get(accountId) || unit
+      await this.repo.setModelState(accountId, {
+        vmId: row.vm_id,
+        key: CIRCUIT_KEY,
+        value: {
+          state: current.state,
+          failures: current.failures,
+          openUntil: current.openUntil || 0,
+        },
+        // open → cooldown；其余保持运行态原状态（原来写回读到的 status）
+        status: current.state === 'open' ? 'cooldown' : null,
       })
     } catch {
       /* runtime row may not exist yet; memory still gates this process */

@@ -41,8 +41,8 @@ beforeEach(() => {
   )
 })
 
-afterEach(() => {
-  closeDatabase()
+afterEach(async () => {
+  await closeDatabase()
   loadGptModelPolicy({ force: true })
   fs.rmSync(root, { recursive: true, force: true })
 })
@@ -57,7 +57,7 @@ async function run(
   const res = { headersSent: false, statusCode: 0, body: null, write() {}, end() {} }
   const logBag = {}
   await handleCodexProtocol({
-    req: { headers: {}, apiKeyKind: 'user' },
+    req: { headers: {}, apiKeyKind: 'master' },
     res,
     protocol: 'openai.responses',
     ctx: { body, path: '/v1/responses' },
@@ -91,7 +91,7 @@ const tool = (model) => ({ type: 'image_generation', ...(model ? { model } : {})
 const request = (model) => ({ model: 'gpt-6-luna', input: 'draw a cat', stream: false, tools: [tool(model)] })
 
 test('a disabled image model is rejected locally with no upstream hop', async () => {
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
   for (const model of ['gpt-image-2.5-sunburst', 'gpt-image-2.5-sunburst-2026-09-08']) {
     const { res, logBag, hops } = await run(request(model))
     assert.equal(res.statusCode, 400)
@@ -103,7 +103,7 @@ test('a disabled image model is rejected locally with no upstream hop', async ()
 })
 
 test('disabling GPT Image 2 also rejects a Responses image tool snapshot', async () => {
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2': { enabled: false } } })
   const { res, hops } = await run(request('gpt-image-2-2026-04-21'))
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'model_disabled')
@@ -111,7 +111,7 @@ test('disabling GPT Image 2 also rejects a Responses image tool snapshot', async
 })
 
 test('an enabled, omitted or unknown image model reaches the upstream unchanged', async () => {
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
   for (const model of ['gpt-image-2.5-flare', null, 'gpt-image-9']) {
     const { res, hops } = await run(request(model))
     assert.equal(res.statusCode, 200, String(model))
