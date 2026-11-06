@@ -64,12 +64,17 @@ test('non-stream and stream logs persist cache usage, upstream model and stop_re
     for (const rid of [ridA, ridB]) {
       const hit = logs.json.items.find((x) => x.request_id === rid)
       assert.ok(hit, `log row for ${rid}`)
-      assert.equal(hit.input_tokens, 12)
+      // 主 token 列是客户计费口径（119）：mock 上游的 20 个提示 token 都在网关注入估算以内，
+      // 客户没写 cache_control，缓存读写按普通 input 计，所以计费口径为 0；上游原始值在 upstream_*
+      assert.equal(hit.input_tokens, 0)
       assert.equal(hit.output_tokens, 4)
-      assert.equal(hit.cache_read_tokens, 3)
-      assert.equal(hit.cache_creation_tokens, 5)
-      assert.equal(hit.cache_creation_5m_tokens, 5)
-      assert.equal(hit.cache_creation_1h_tokens, 0)
+      assert.equal(hit.cache_read_tokens, 0)
+      assert.equal(hit.cache_creation_tokens, 0)
+      assert.equal(hit.upstream_input_tokens, 12)
+      assert.equal(hit.upstream_cache_read_tokens, 3)
+      assert.equal(hit.upstream_cache_creation_tokens, 5)
+      assert.equal(hit.upstream_cache_creation_5m_tokens, 5)
+      assert.equal(hit.upstream_cache_creation_1h_tokens, 0)
       assert.equal(hit.requested_model, MODEL)
       assert.equal(hit.upstream_model, MODEL)
       assert.equal(hit.model_mismatch, 0)

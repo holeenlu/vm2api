@@ -1,3 +1,4 @@
+import { i18n, t } from '@/i18n'
 import type { ApiKeyItem } from '@/types/panel-keys'
 import type { StatusTone } from '@/types/status'
 import { fmtNum, fmtUsd } from '@/lib/format'
@@ -17,8 +18,8 @@ export function maskApiKeyItem(k: ApiKeyItem): string {
 
 export function keyIsExpired(k: ApiKeyItem): boolean {
   if (!k.expires_at) return false
-  const t = Date.parse(k.expires_at)
-  return Number.isFinite(t) && t <= Date.now()
+  const timestamp = Date.parse(k.expires_at)
+  return Number.isFinite(timestamp) && timestamp <= Date.now()
 }
 
 /**
@@ -39,35 +40,65 @@ export function keyIsDead(k: ApiKeyItem): boolean {
 
 export function keyStatusTone(k: ApiKeyItem): StatusTone {
   if (k.status === 'disabled') {
-    return { key: 'off', text: '停用', cls: 'off', label: '停用' }
+    return {
+      key: 'off',
+      text: t('keys:disabled'),
+      cls: 'off',
+      label: t('keys:disabled'),
+    }
   }
   if (keyIsExpired(k)) {
-    return { key: 'bad', text: '已过期', cls: 'bad', label: '已过期' }
+    return {
+      key: 'bad',
+      text: t('keys:expired'),
+      cls: 'bad',
+      label: t('keys:expired'),
+    }
   }
   if (keyQuotaExhausted(k)) {
-    return { key: 'bad', text: '额度用完', cls: 'bad', label: '额度用完' }
+    return {
+      key: 'bad',
+      text: t('keys:quotaExhausted'),
+      cls: 'bad',
+      label: t('keys:quotaExhausted'),
+    }
   }
-  return { key: 'ok', text: '启用', cls: 'ok', label: '启用' }
+  return {
+    key: 'ok',
+    text: t('keys:enabled'),
+    cls: 'ok',
+    label: t('keys:enabled'),
+  }
 }
 
 function relMs(ms: number): string {
   const s = Math.round(Math.abs(ms) / 1000)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.round(s / 60)}m`
-  if (s < 86400) return `${Math.round(s / 3600)}h`
-  return `${Math.round(s / 86400)}d`
+  const [value, unit] =
+    s < 60
+      ? ([s, 'second'] as const)
+      : s < 3600
+        ? ([Math.round(s / 60), 'minute'] as const)
+        : s < 86400
+          ? ([Math.round(s / 3600), 'hour'] as const)
+          : ([Math.round(s / 86400), 'day'] as const)
+  return new Intl.NumberFormat(i18n.language, {
+    style: 'unit',
+    unit,
+    unitDisplay: 'short',
+  }).format(value)
 }
 
 export function keyExpiryText(k: ApiKeyItem): {
   text: string
   expired: boolean
 } {
-  if (!k.expires_at) return { text: '永久', expired: false }
-  const t = Date.parse(k.expires_at)
-  if (!Number.isFinite(t)) return { text: String(k.expires_at), expired: false }
-  const d = t - Date.now()
-  if (d <= 0) return { text: '已过期', expired: true }
-  return { text: `${relMs(d)} 后`, expired: false }
+  if (!k.expires_at) return { text: t('keys:permanent'), expired: false }
+  const timestamp = Date.parse(k.expires_at)
+  if (!Number.isFinite(timestamp))
+    return { text: String(k.expires_at), expired: false }
+  const d = timestamp - Date.now()
+  if (d <= 0) return { text: t('keys:expired'), expired: true }
+  return { text: t('keys:expiresIn', { duration: relMs(d) }), expired: false }
 }
 
 /** 次数额度和 USD 额度各自显示；两项都没设才算「不限」。 */
@@ -77,10 +108,15 @@ export function keyQuotaLabel(k: ApiKeyItem): string {
   const usd = Number(k.quota_usd || 0)
   const usdUsed = Number(k.quota_usd_used || 0)
   const parts: string[] = []
-  if (q) parts.push(`${fmtNum(u)} / ${fmtNum(q)} 次`)
+  if (q)
+    parts.push(
+      t('keys:requestQuota', { used: fmtNum(u), limit: fmtNum(q), count: q })
+    )
   if (usd) parts.push(`${fmtUsd(usdUsed)} / ${fmtUsd(usd)}`)
   if (parts.length) return parts.join(' · ')
-  return `不限 · 已用 ${fmtNum(u)}${usdUsed ? ` · ${fmtUsd(usdUsed)}` : ''}`
+  return usdUsed
+    ? t('keys:unlimitedUsageCost', { used: fmtNum(u), cost: fmtUsd(usdUsed) })
+    : t('keys:unlimitedUsage', { used: fmtNum(u) })
 }
 
 /** 进度条取两种额度里用得更多的那个。 */

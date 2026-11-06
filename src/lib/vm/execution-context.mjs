@@ -8,7 +8,7 @@
  */
 import path from 'node:path'
 import { boundProxyUrl, hasBoundExit, isLocalEgressProxy } from './egress.mjs'
-import { getVm, listVms, getActiveVmId, isVmScheduleReady } from './vm-registry.mjs'
+import { getVm, listVmIds, getActiveVmId, isVmScheduleReady } from './vm-registry.mjs'
 import { proxyBlockedReason } from './proxy-policy.mjs'
 
 export const GATEWAY_CAPABILITIES = {
@@ -27,6 +27,29 @@ export const GATEWAY_CAPABILITIES = {
   stream_delivery_optional: 'verified',
 }
 
+/** Build the immutable per-attempt execution context used by transport code. */
+export function createExecutionContext({ projectRoot, vm, accountId = null, credential = null } = {}) {
+  const homeDir = vmCliHomePath(projectRoot, vm?.id)
+  const slot = credential || {}
+  return Object.freeze({
+    vmId: vm?.id || null,
+    accountId: accountId || null,
+    vm,
+    vmPath: vm?.id ? vmJsonPath(projectRoot, vm.id) : null,
+    homeDir,
+    oauth: Object.freeze({
+      email: slot.email || vm?.claude?.email || null,
+      account_uuid: slot.account_uuid || accountId || vm?.claude?.account_uuid || null,
+      org_uuid: slot.org_uuid || vm?.claude?.org_uuid || null,
+      expires_at: slot.expires_at || vm?.claude?.expires_at || null,
+    }),
+    proxyUrl: vm?.proxy?.url || null,
+    timezone: vm?.timezone || 'UTC',
+    locale: vm?.locale || 'en_US.UTF-8',
+    kernel: vm?.kernel || null,
+  })
+}
+
 export function vmJsonPath(projectRoot, vmId) {
   return path.join(projectRoot, 'vms', `${vmId}.json`)
 }
@@ -43,7 +66,7 @@ export function resolveVmProxyUrl(vm) {
   return boundProxyUrl(p) || null
 }
 
-export function pickSchedulableVmId(projectRoot, preferredId = null) {
+export async function pickSchedulableVmId(projectRoot, preferredId = null) {
   const seen = new Set()
   const order = []
   const push = (id) => {
@@ -53,11 +76,11 @@ export function pickSchedulableVmId(projectRoot, preferredId = null) {
   }
   push(preferredId)
   push(getActiveVmId(projectRoot))
-  for (const s of listVms(projectRoot)) push(s.id)
+  for (const id of listVmIds(projectRoot)) push(id)
   for (const id of order) {
     const vm = getVm(projectRoot, id)
     if (!vm) continue
-    if (!isVmScheduleReady(vm)) continue
+    if (!(await isVmScheduleReady(vm))) continue
     if (!vm.proxy_cli_enabled || !hasBoundExit(vm.proxy)) continue
     if (proxyBlockedReason(vm.proxy)) continue
     return id

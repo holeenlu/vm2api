@@ -22,14 +22,14 @@ const geo = {
   checked_at: '2020-01-01T00:00:00.000Z',
 }
 
-test('proxy geo overwrites a failed telemetry egress stub', () => {
+test('proxy geo overwrites a failed telemetry egress stub', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-telemetry-egress-'))
   const file = path.join(root, 'vms', vm.id, 'cli-home', '.claude', 'telemetry', 'egress.json')
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify({ vm_id: vm.id, binding: 'old', error: 'telemetry_geo_failed', checked_at: 0 }))
   try {
     const now = 1_700_000_000_000
-    const written = writeVmProxyTelemetryEgress(root, vm, geo, now)
+    const written = await writeVmProxyTelemetryEgress(root, vm, geo, now)
     assert.equal(written.wrote, true)
     assert.equal(written.overwritten, true)
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -44,7 +44,7 @@ test('proxy geo overwrites a failed telemetry egress stub', () => {
     assert.equal(saved.error, null)
     assert.equal(saved.checked_at, now)
     assert.equal(telemetryEgressSnapshot(vm, { ...geo, error: 'geo_lookup_failed' }, now), null)
-    assert.equal(writeVmProxyTelemetryEgress(root, vm, null, now).reason, 'proxy_geo_unavailable')
+    assert.equal((await writeVmProxyTelemetryEgress(root, vm, null, now)).reason, 'proxy_geo_unavailable')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

@@ -316,7 +316,9 @@ export function createKernelWatchdog({
     if (inTick || !config.enabled) return
     inTick = true
     try {
-      const vms = (typeof listTargets === 'function' ? listTargets() || [] : []).filter((vm) => !held.has(vm?.id))
+      const vms = (typeof listTargets === 'function' ? (await listTargets()) || [] : []).filter(
+        (vm) => !held.has(vm?.id),
+      )
       // Bridges (kin-egress, cluster relays) are cheap host helpers, not containers: outside the restart budget.
       healBridgesOffPath(vms)
       // Panel can change routing.inference.engine without restarting this process.

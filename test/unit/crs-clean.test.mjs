@@ -9,12 +9,9 @@ import {
   fromClaudeToResponses,
 } from '../../src/lib/protocol/convert.mjs'
 import { applyCrsIdentityReplace, uuidFromSeed } from '../../src/lib/identity/identity-rewrite.mjs'
-import {
-  applyCrsUnofficialPersona,
-  CRS_OFFICIAL_CLI_SYSTEM,
-  CRS_OFFICIAL_SYSTEM,
-} from '../../src/lib/identity/crs-persona.mjs'
-import { hidePersonaUsage, personaHideInputTokens } from '../../src/lib/identity/crs-persona-usage.mjs'
+import { applyCrsUnofficialPersona, CRS_OFFICIAL_CLI_SYSTEM } from '../../src/lib/identity/crs-persona.mjs'
+import { gatewayInjectedBreakdown, gatewayInjectedTokens } from '../../src/lib/identity/crs-persona-usage.mjs'
+import { customerUsage } from '../../src/lib/protocol/customer-usage.mjs'
 import {
   TEST14_FEATURES,
   TEST14_OPENAI_INBOUND,
@@ -212,14 +209,7 @@ test('normalizeAnthropicMessages is idempotent for legal turns', () => {
   ])
 })
 
-// e358143c: caller system no longer joins top-level system; it is wrapped in <system-reminder>
-// at the front of the first user turn, and Environment rides as a role=system message.
-function assertOfficialHead(out) {
-  assert.match(out.system[0].text, /^x-anthropic-billing-header: /)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-}
-
-test('OpenAI chat unofficial rewrite keeps the official head and moves caller --system into the first user turn', () => {
+test('OpenAI chat unofficial rewrite is 303 blocks with the caller prompt in the user reminder', () => {
   const { claude } = toClaudeMessages('openai.chat', {
     model: 'claude-haiku-4-5-20251001',
     messages: [
@@ -231,17 +221,17 @@ test('OpenAI chat unofficial rewrite keeps the official head and moves caller --
   })
   assert.deepEqual(claude.stop_sequences, ['END'])
   const cleaned = applyCrsUnofficialPersona(claude, { officialClient: false })
-  assertOfficialHead(cleaned)
-  assert.equal(JSON.stringify(cleaned.system).includes('you are a linter'), false)
-  const first = JSON.stringify(cleaned.messages[0].content)
-  assert.match(first, /MANDATORY constraints for this turn/)
-  assert.ok(first.includes('<system-reminder>\\nyou are a linter\\n</system-reminder>'))
-  assert.ok(first.includes('hi'))
+  assert.ok(cleaned.system.length >= 4)
+  assert.equal(cleaned.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.ok(JSON.stringify(cleaned.messages[0].content).includes('you are a linter'))
+  assert.match(JSON.stringify(cleaned.messages[0].content), /MANDATORY constraints for this turn/)
+  assert.ok(JSON.stringify(cleaned.messages[0].content).includes('hi'))
 })
 
-test('empty unofficial system without tools still writes the official head and no messages', () => {
+test('empty unofficial system without tools still writes official 4 blocks', () => {
   const out = applyCrsUnofficialPersona({ messages: [] }, { officialClient: false })
-  assertOfficialHead(out)
+  assert.ok(out.system.length >= 4)
+  assert.equal(out.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
   assert.equal(out.messages.length, 0)
 })
 
@@ -252,26 +242,18 @@ test('official Claude Code system is not replaced or appended', () => {
   assert.equal(out.system.length, 1)
 })
 
-test('Xcode unofficial system is moved into the first user turn after the official head', () => {
-  // A mid-conversation-system model keeps Environment as a role=system turn (069ed942).
+test('Xcode caller instructions move into the first user reminder', () => {
   const body = {
-    model: 'claude-opus-5-5',
     system: 'You are currently in Xcode. Help with Swift.',
     messages: [{ role: 'user', content: 'hi' }],
   }
   const out = applyCrsUnofficialPersona(body, { officialClient: false })
-  assertOfficialHead(out)
-  assert.equal(JSON.stringify(out.system).includes('Xcode'), false)
-  const first = String(out.messages[0].content)
-  assert.equal(out.messages[0].role, 'user')
-  assert.match(first, /MANDATORY constraints for this turn/)
-  assert.ok(first.includes('<system-reminder>\nYou are currently in Xcode. Help with Swift.\n</system-reminder>'))
-  assert.ok(first.endsWith('hi'))
-  assert.deepEqual(
-    out.messages.slice(1).map((message) => message.role),
-    ['system'],
-  )
-  assert.match(JSON.stringify(out.messages[1].content), /# Environment/)
+  assert.ok(out.system.length >= 4)
+  assert.equal(out.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.ok(JSON.stringify(out.messages[0].content).includes('You are currently in Xcode. Help with Swift.'))
+  assert.match(String(out.messages[0].content), /MANDATORY constraints for this turn/)
+  assert.ok(String(out.messages[0].content).includes('hi'))
+  assert.equal(out.messages.filter((message) => message.role === 'user').length, 1)
 })
 
 test('legacy user_id: device becomes VM, unofficial session is minted, account from OAuth', () => {
@@ -434,7 +416,8 @@ test('officialMessagesBody keeps a caller max_tokens and fills a missing one fro
   const sonnet = officialMessagesBody({ model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'hi' }] })
   assert.equal(sonnet.max_tokens, 64000)
   const haiku = officialMessagesBody({ model: 'claude-haiku-5-5', messages: [{ role: 'user', content: 'hi' }] })
-  assert.equal(haiku.max_tokens, 100000)
+  // tapmodels 模型目录按 2026-10-20 官方矩阵：Haiku 5.5 为 1M 上下文、128K 输出（上游目录为 100000）
+  assert.equal(haiku.max_tokens, 128000)
 })
 
 test('test14 OpenAI tools on /v1/messages convert to Anthropic get_weather', () => {
@@ -462,25 +445,28 @@ test('test14 OpenAI chat records features and converts to official 4-block', () 
   assert.deepEqual(after.tools, claude.tools)
   assert.deepEqual(after.tool_choice, claude.tool_choice)
   assert.ok(String(extractCaseFeatures(after).user_text).includes(TEST14_FEATURES.inbound.user_text))
-  const hide = personaHideInputTokens(claude, after)
-  assert.equal(hide.wipeCache, false)
+  const hide = gatewayInjectedBreakdown(claude, after)
   assert.ok(!String(after.system[3]?.text || '').includes('# auto memory'))
   assert.ok(hide.official > 80)
   assert.ok(hide.official < 500)
   assert.ok(hide.overlay > 0)
   assert.equal(hide.tools, 0)
+  const injected = gatewayInjectedTokens(claude, after)
+  assert.equal(injected, hide.official + hide.overlay)
   const userKeep = 80
-  const hidden = hidePersonaUsage(
+  // 注入内容位于提示词前缀：先从缓存写入里扣，客户只看到自己的部分
+  const hidden = customerUsage(
     {
-      input_tokens: hide.uncached + hide.overlay + userKeep,
-      cache_creation_input_tokens: 9078,
+      input_tokens: userKeep,
+      cache_creation_input_tokens: injected + 9078,
       output_tokens: 24,
-      total_tokens: hide.uncached + hide.overlay + userKeep + 9078 + 24,
+      total_tokens: injected + userKeep + 9078 + 24,
     },
-    hide,
+    { injectedTokens: injected, cacheIntent: '1h' },
   )
   assert.equal(hidden.input_tokens, userKeep)
   assert.equal(hidden.cache_creation_input_tokens, 9078)
+  assert.equal(hidden.total_tokens, userKeep + 9078 + 24)
   const back = fromClaudeToOpenAIChat(
     {
       content: [

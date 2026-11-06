@@ -326,7 +326,7 @@ test('local egress stays schedulable when the worker proxy url is empty', () => 
   assert.equal(evaluateProxySync({ vm: v, workerProxyEndpoint: '' }).ok, true)
 })
 
-test('paused slot without SOCKS is proxy_required even if pin would skip unschedulable', () => {
+test('paused slot without SOCKS is proxy_required even if pin would skip unschedulable', async () => {
   const paused = {
     id: 'vm-01',
     status: 'paused',
@@ -336,7 +336,7 @@ test('paused slot without SOCKS is proxy_required even if pin would skip unsched
     proxy: {},
     claude: { has_access: true, has_refresh: true },
   }
-  const gate = evaluateSlotGate(paused)
+  const gate = await evaluateSlotGate(paused)
   assert.equal(gate.ok, false)
   assert.equal(gate.reason, 'vm_unschedulable')
   assert.equal(slotHasBoundProxy(paused), false)

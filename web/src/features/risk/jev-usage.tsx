@@ -1,4 +1,5 @@
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Fold } from './blocks'
@@ -40,15 +41,6 @@ type KeyUsage = {
   last_request_at: string | null
   last_http_status: number | null
 }
-const keyStatus: Record<string, string> = {
-  normal: '正常请求',
-  insufficient_balance: '余额不足',
-  auth_error: '鉴权失败',
-  rate_limited: '请求限流',
-  request_error: '请求异常',
-  unrequested: '未请求',
-  paused: '已暂停',
-}
 type UsagePage = {
   keys: KeyUsage[]
   started_at: string | null
@@ -60,8 +52,8 @@ type UsagePage = {
   next_cursor: Cursor | null
   storage_errors_since_start: number
 }
-const tokens = (value: number | null) =>
-  value === null ? '未返回' : value.toLocaleString('zh-CN')
+const tokens = (value: number | null, unknown: string) =>
+  value === null ? unknown : value.toLocaleString('zh-CN')
 const time = (value: string) =>
   new Date(value).toLocaleString('zh-CN', {
     timeZone: 'Asia/Shanghai',
@@ -73,6 +65,7 @@ export function JevUsagePanel({
   defaultOpen = false,
 }: { defaultOpen?: boolean } = {}) {
   const client = useQueryClient()
+  const { t: translate } = useTranslation('risk')
   const query = useInfiniteQuery({
     queryKey: QUERY_KEY,
     initialPageParam: null as Cursor | null,
@@ -90,6 +83,16 @@ export function JevUsagePanel({
     refetchOnWindowFocus: false,
     staleTime: 30_000,
   })
+  const keyStatus: Record<string, string> = {
+    normal: translate('risk:jevStatusNormal'),
+    insufficient_balance: translate('risk:jevStatusInsufficientBalance'),
+    auth_error: translate('risk:jevStatusAuthError'),
+    rate_limited: translate('risk:jevStatusRateLimited'),
+    request_error: translate('risk:jevStatusRequestError'),
+    unrequested: translate('risk:jevStatusUnrequested'),
+    paused: translate('risk:jevStatusPaused'),
+  }
+  const unknownValue = translate('risk:jevUnknownValue')
   const summary = query.data?.pages[0]
   const keyLabels = new Map(
     summary?.keys.map((key) => [key.key_fingerprint, key.masked_key])
@@ -104,21 +107,30 @@ export function JevUsagePanel({
   ]
   return (
     <Fold
-      title='JEV 使用记录'
+      title={translate('risk:jevTitle')}
       defaultOpen={defaultOpen}
       meta={
         summary
-          ? `今日 ${tokens(summary.today.requests)} 次 · 累计 ${usageMoney(summary.total.estimated_cost_nano_usd)}`
+          ? translate('risk:jevMeta', {
+              today: tokens(
+                summary.today.requests,
+                translate('risk:jevUnknownValue')
+              ),
+              cost: usageMoney(
+                summary.total.estimated_cost_nano_usd,
+                translate('risk:jevUnknownValue')
+              ),
+            })
           : undefined
       }
     >
       <div className='space-y-4'>
         <div className='flex flex-wrap items-center justify-between gap-2'>
           <p className='text-xs text-muted-foreground'>
-            实际调用返回或失败后记录；缓存命中不算新调用。这里只记录本系统用量，不是账户余额或官方账单。
+            {translate('risk:jevDescription')}
             {summary?.started_at
-              ? `从 ${time(summary.started_at)} 起记录；此前未保存的历史用量无法补回。`
-              : '仅从用量记录功能启用后统计。'}
+              ? translate('risk:jevStarted', { time: time(summary.started_at) })
+              : translate('risk:jevEnabledFrom')}
           </p>
           <Button
             size='sm'
@@ -126,74 +138,91 @@ export function JevUsagePanel({
             disabled={query.isFetching}
             onClick={() => void client.resetQueries({ queryKey: QUERY_KEY })}
           >
-            刷新用量
+            {translate('risk:jevRefresh')}
           </Button>
         </div>
         {query.isPending && (
-          <p className='text-sm text-muted-foreground'>读取用量记录…</p>
+          <p className='text-sm text-muted-foreground'>
+            {translate('risk:jevLoading')}
+          </p>
         )}
         {query.isError && (
           <p role='alert' className='text-sm text-destructive'>
-            用量读取失败，不能据此显示为零用量。
+            {translate('risk:jevReadError')}
           </p>
         )}
         {summary && (
           <>
             <section
               className='space-y-3 rounded-md border p-4'
-              aria-label='当前 Key 用量'
+              aria-label={translate('risk:jevKeysLabel')}
             >
-              <h3 className='text-sm font-medium'>当前 Key · 已消耗估算费用</h3>
+              <h3 className='text-sm font-medium'>
+                {translate('risk:jevKeysTitle')}
+              </h3>
               <p className='text-xs text-muted-foreground'>
-                按当前已保存明细统计（30 天保留策略），金额为
-                USD，不是剩余余额。余额暂不可查询；未返回费用的请求不计入估算。状态依据最近请求，不能代表实时余额。
+                {translate('risk:jevKeysDescription')}
               </p>
               <div className='overflow-x-auto'>
                 <table className='w-full min-w-[680px] text-left text-xs'>
                   <thead>
                     <tr className='border-b'>
-                      <th className='p-2'>Key / 脱敏标识</th>
-                      <th className='p-2'>已消耗估算 · USD</th>
-                      <th className='p-2'>请求状态</th>
-                      <th className='p-2'>调用 / 成功</th>
-                      <th className='p-2'>费用未知</th>
-                      <th className='p-2'>最近请求 · 北京</th>
+                      <th className='p-2'>{translate('risk:jevKeyColumn')}</th>
+                      <th className='p-2'>{translate('risk:jevKeyCost')}</th>
+                      <th className='p-2'>{translate('risk:jevKeyStatus')}</th>
+                      <th className='p-2'>{translate('risk:jevKeyCalls')}</th>
+                      <th className='p-2'>
+                        {translate('risk:jevKeyUnknownCost')}
+                      </th>
+                      <th className='p-2'>
+                        {translate('risk:jevKeyLastRequest')}
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {summary.keys.map((key) => (
                       <tr key={key.number} className='border-b'>
                         <td className='p-2'>
-                          Key {key.number}
+                          {translate('risk:jevKeyNumber', {
+                            number: key.number,
+                          })}
                           <br />
                           <span className='font-mono'>{key.masked_key}</span>
                         </td>
                         <td className='p-2'>
                           {key.requests === 0
-                            ? '暂无记录'
+                            ? translate('risk:jevNoRecord')
                             : usageMoney(
                                 key.unknown_cost_requests === key.requests
                                   ? null
-                                  : key.estimated_cost_nano_usd
+                                  : key.estimated_cost_nano_usd,
+                                translate('risk:jevCostUnknown')
                               )}
                         </td>
                         <td className='p-2'>
-                          {keyStatus[key.status] ?? '未知状态'}
+                          {keyStatus[key.status] ??
+                            translate('risk:jevStatusUnknown')}
                           {key.last_http_status
                             ? ` · ${key.last_http_status}`
                             : ''}
-                          {key.retired ? '（已暂停轮询）' : ''}
+                          {key.retired ? translate('risk:jevKeyRetired') : ''}
                         </td>
                         <td className='p-2'>
-                          {tokens(key.requests)} / {tokens(key.successful)}
+                          {tokens(key.requests, unknownValue)} /{' '}
+                          {tokens(key.successful, unknownValue)}
                         </td>
                         <td className='p-2'>
-                          {tokens(key.unknown_cost_requests)} 次
+                          {translate('risk:jevKeyTimes', {
+                            value: tokens(
+                              key.unknown_cost_requests,
+                              unknownValue
+                            ),
+                          })}
                         </td>
                         <td className='p-2'>
                           {key.last_request_at
                             ? time(key.last_request_at)
-                            : '暂无记录'}
+                            : translate('risk:jevNoRecord')}
                         </td>
                       </tr>
                     ))}
@@ -202,62 +231,95 @@ export function JevUsagePanel({
               </div>
               {summary.keys.length === 0 && (
                 <p className='text-xs text-muted-foreground'>
-                  当前未配置 Key。
+                  {translate('risk:jevNoKeys')}
                 </p>
               )}
             </section>
             <div className='grid grid-cols-2 gap-3 text-sm lg:grid-cols-4'>
               <div>
-                <div className='text-muted-foreground'>今日调用 · 北京时间</div>
-                <strong>{tokens(summary.today.requests)}</strong>
-              </div>
-              <div>
-                <div className='text-muted-foreground'>累计实际调用 / 成功</div>
+                <div className='text-muted-foreground'>
+                  {translate('risk:jevToday')}
+                </div>
                 <strong>
-                  {tokens(summary.total.requests)} /{' '}
-                  {tokens(summary.total.successful)}
+                  {tokens(
+                    summary.today.requests,
+                    translate('risk:jevUnknownValue')
+                  )}
                 </strong>
               </div>
               <div>
                 <div className='text-muted-foreground'>
-                  累计已报告输入 / 输出 tokens
+                  {translate('risk:jevTotalSuccess')}
                 </div>
                 <strong>
-                  {tokens(summary.total.input_tokens)} /{' '}
-                  {tokens(summary.total.output_tokens)}
+                  {tokens(
+                    summary.total.requests,
+                    translate('risk:jevUnknownValue')
+                  )}{' '}
+                  /{' '}
+                  {tokens(
+                    summary.total.successful,
+                    translate('risk:jevUnknownValue')
+                  )}
                 </strong>
               </div>
               <div>
                 <div className='text-muted-foreground'>
-                  已知用量费用估算 · USD
+                  {translate('risk:jevTokens')}
                 </div>
                 <strong>
-                  {usageMoney(summary.total.estimated_cost_nano_usd)}
+                  {tokens(
+                    summary.total.input_tokens,
+                    translate('risk:jevUnknownValue')
+                  )}{' '}
+                  /{' '}
+                  {tokens(
+                    summary.total.output_tokens,
+                    translate('risk:jevUnknownValue')
+                  )}
+                </strong>
+              </div>
+              <div>
+                <div className='text-muted-foreground'>
+                  {translate('risk:jevCost')}
+                </div>
+                <strong>
+                  {usageMoney(
+                    summary.total.estimated_cost_nano_usd,
+                    translate('risk:jevUnknownValue')
+                  )}
                 </strong>
               </div>
             </div>
             <p className='text-xs text-muted-foreground'>
-              {tokens(summary.total.unknown_usage_requests)} 次未完整返回用量，
-              {tokens(summary.total.unknown_cost_requests)}{' '}
-              次费用未知。未知不等于免费；估算使用本版本内置的 2026-10-25
-              公开单价，不含其他系统或组织的用量。
+              {translate('risk:jevUnknown', {
+                usage: tokens(
+                  summary.total.unknown_usage_requests,
+                  translate('risk:jevUnknownValue')
+                ),
+                cost: tokens(
+                  summary.total.unknown_cost_requests,
+                  translate('risk:jevUnknownValue')
+                ),
+              })}
             </p>
             {summary.storage_errors_since_start > 0 && (
               <p role='alert' className='text-sm text-destructive'>
-                本进程发生 {summary.storage_errors_since_start}{' '}
-                次记录存储异常，统计可能不完整。
+                {translate('risk:jevStorageError', {
+                  count: summary.storage_errors_since_start,
+                })}
               </p>
             )}
             <div className='max-h-96 overflow-auto'>
               <table className='w-full min-w-[680px] text-left text-xs'>
                 <thead>
                   <tr className='border-b'>
-                    <th className='p-2'>时间 · 北京</th>
-                    <th className='p-2'>Key 脱敏标识</th>
-                    <th className='p-2'>模型</th>
-                    <th className='p-2'>结果</th>
-                    <th className='p-2'>输入 / 输出</th>
-                    <th className='p-2'>估算 USD</th>
+                    <th className='p-2'>{translate('risk:jevTime')}</th>
+                    <th className='p-2'>{translate('risk:jevMaskedKey')}</th>
+                    <th className='p-2'>{translate('risk:jevModel')}</th>
+                    <th className='p-2'>{translate('risk:jevOutcome')}</th>
+                    <th className='p-2'>{translate('risk:jevInputOutput')}</th>
+                    <th className='p-2'>{translate('risk:jevEstimatedUsd')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -266,7 +328,9 @@ export function JevUsagePanel({
                       key={row.id}
                       className='border-b'
                       title={
-                        row.request_id ? `请求 ${row.request_id}` : undefined
+                        row.request_id
+                          ? translate('risk:jevRequest', { id: row.request_id })
+                          : undefined
                       }
                     >
                       <td className='p-2 whitespace-nowrap'>
@@ -274,23 +338,38 @@ export function JevUsagePanel({
                       </td>
                       <td className='p-2 font-mono'>
                         {row.key_fingerprint
-                          ? keyLabels.has(row.key_fingerprint)
-                            ? keyLabels.get(row.key_fingerprint)
-                            : '已移除的 Key'
-                          : '无密钥'}
+                          ? (keyLabels.get(row.key_fingerprint) ??
+                            translate('risk:jevRemovedKey'))
+                          : translate('risk:jevNoKey')}
                       </td>
-                      <td className='p-2'>{row.model || '未返回'}</td>
                       <td className='p-2'>
-                        {row.http_status ?? '网络失败'} ·{' '}
-                        {row.outcome === 'success' ? '完成' : '未完成'}
+                        {row.model || translate('risk:jevUnknownValue')}
+                      </td>
+                      <td className='p-2'>
+                        {row.http_status ?? translate('risk:jevNetworkFailure')}{' '}
+                        ·{' '}
+                        {row.outcome === 'success'
+                          ? translate('risk:jevComplete')
+                          : translate('risk:jevIncomplete')}
                         <br />
                         {row.duration_ms} ms
                       </td>
                       <td className='p-2 whitespace-nowrap'>
-                        {tokens(row.input_tokens)} / {tokens(row.output_tokens)}
+                        {tokens(
+                          row.input_tokens,
+                          translate('risk:jevUnknownValue')
+                        )}{' '}
+                        /{' '}
+                        {tokens(
+                          row.output_tokens,
+                          translate('risk:jevUnknownValue')
+                        )}
                       </td>
                       <td className='p-2'>
-                        {usageMoney(row.estimated_cost_nano_usd)}
+                        {usageMoney(
+                          row.estimated_cost_nano_usd,
+                          translate('risk:jevUnknownValue')
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -298,13 +377,12 @@ export function JevUsagePanel({
               </table>
               {!rows.length && (
                 <p className='py-5 text-sm text-muted-foreground'>
-                  目前没有已保存的实际调用记录；这不代表启用前没有使用。
+                  {translate('risk:jevEmpty')}
                 </p>
               )}
             </div>
             <p className='text-xs text-muted-foreground'>
-              明细按 30 天保留策略有界清理，累计汇总保留。只保存 Key
-              指纹，不保存密钥、客户正文或模型响应正文；进程结束前尚未完成或未落盘的调用无法恢复。
+              {translate('risk:jevRetention')}
             </p>
             {query.hasNextPage && (
               <Button
@@ -313,7 +391,7 @@ export function JevUsagePanel({
                 disabled={query.isFetchingNextPage}
                 onClick={() => void query.fetchNextPage()}
               >
-                加载更早用量
+                {translate('risk:jevLoadEarlier')}
               </Button>
             )}
           </>

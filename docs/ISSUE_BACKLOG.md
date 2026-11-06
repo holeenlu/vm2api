@@ -39,5 +39,5 @@
 | #672 账号列表显示订阅到期 | 列表接口已下发 `chatgpt_subscription_active_until`，仅详情页「账号」Tab 显示 | M |
 | #464 按会话分流 | 1.4.x 席位键已优先 `sessionId`，但 `pool-scheduler.mjs` 新会话仍先命中设备亲和 VM | M |
 | #648 Kubernetes / 多副本 | 单进程 SQLite + 进程内并发 / RPM / 席位状态，需整体改造 | L |
-| #647 PostgreSQL | 21 个 repo 绑定同步 `node:sqlite` 与 SQLite 方言 | L |
+| #647 PostgreSQL | 数据访问已改为异步 `DbClient`（定制 R6），底层仍是单连接 `node:sqlite` 与 SQLite 方言 | L |
 | #376 控制面主备 | 无租约 / 摘流，SIGTERM 不排空在途连接 | L |

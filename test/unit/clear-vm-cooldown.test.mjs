@@ -19,14 +19,14 @@ function seedVm(project, id = 'vm-11') {
   return rec
 }
 
-test('clearVmCooldown 404s unknown slots', () => {
+test('clearVmCooldown 404s unknown slots', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cool-'))
-  const out = clearVmCooldown({ cfg: { paths: { project } }, id: 'vm-missing' })
+  const out = await clearVmCooldown({ cfg: { paths: { project } }, id: 'vm-missing' })
   assert.equal(out.status, 404)
   assert.equal(out.body.ok, false)
 })
 
-test('clearVmCooldown drops runtime leftover and usage 429 flag', () => {
+test('clearVmCooldown drops runtime leftover and usage 429 flag', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cool-'))
   seedVm(project)
   const runtime = new Map()
@@ -49,7 +49,7 @@ test('clearVmCooldown drops runtime leftover and usage 429 flag', () => {
   })
   const unbound = []
   let woken = 0
-  const out = clearVmCooldown({
+  const out = await clearVmCooldown({
     cfg: { paths: { project } },
     id: 'vm-11',
     accountQuota: {
@@ -63,8 +63,8 @@ test('clearVmCooldown drops runtime leftover and usage 429 flag', () => {
       },
       runtimeRepo: {
         get: (id) => runtime.get(id) || null,
-        clearAccountCooldown(id, { vmId } = {}) {
-          const cur = runtime.get(id)
+        async clearAccountCooldown(id, { vmId } = {}) {
+          const cur = await runtime.get(id)
           if (!cur) return false
           runtime.set(id, {
             ...cur,
@@ -90,15 +90,15 @@ test('clearVmCooldown drops runtime leftover and usage 429 flag', () => {
   assert.equal(out.ok, true)
   assert.equal(out.data.cleared, true)
   assert.equal(out.data.cooldown_until, null)
-  assert.equal(runtime.get('acct-11').cooldown_reason, null)
-  assert.equal(runtime.get('acct-11').cooldown_until, null)
-  assert.equal(accounts.get('acct-11').unified.usage_rate_limited_until, undefined)
-  assert.equal(accounts.get('acct-11').unified.last_probe.rate_limited, false)
+  assert.equal((await runtime.get('acct-11')).cooldown_reason, null)
+  assert.equal((await runtime.get('acct-11')).cooldown_until, null)
+  assert.equal((await accounts.get('acct-11')).unified.usage_rate_limited_until, undefined)
+  assert.equal((await accounts.get('acct-11')).unified.last_probe.rate_limited, false)
   assert.ok(unbound.some((item) => item.accountId === 'acct-11' && item.vmId === 'vm-11'))
   assert.equal(woken, 1)
 })
 
-test('clearVmCooldown drops the on-disk park and refreshes a rejected 5h window', () => {
+test('clearVmCooldown drops the on-disk park and refreshes a rejected 5h window', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cool-'))
   const rec = seedVm(project)
   rec.claude.temp_unschedulable_until = Date.now() + 60_000
@@ -116,7 +116,7 @@ test('clearVmCooldown drops the on-disk park and refreshes a rejected 5h window'
       },
     },
   })
-  const out = clearVmCooldown({
+  const out = await clearVmCooldown({
     cfg: { paths: { project } },
     id: 'vm-11',
     accountQuota: {
@@ -135,6 +135,42 @@ test('clearVmCooldown drops the on-disk park and refreshes a rejected 5h window'
   assert.equal(out.data.headers_refreshed, 1)
   assert.equal(out.data.temp_unschedulable_reason, null)
   assert.equal(saved.claude.temp_unschedulable_reason, undefined)
-  assert.equal(accounts.get('acct-11').unified.headers['5h'].status, 'allowed')
-  assert.equal(accounts.get('acct-11').unified.headers['5h'].stale_reason, 'operator_clear')
+  assert.equal((await accounts.get('acct-11')).unified.headers['5h'].status, 'allowed')
+  assert.equal((await accounts.get('acct-11')).unified.headers['5h'].stale_reason, 'operator_clear')
+})
+
+test('clearVmCooldown also repairs a legacy proxy cooldown saved as schedule_off', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cool-'))
+  const rec = seedVm(project)
+  rec.schedulable = false
+  rec.schedule_off = true
+  rec.schedule_manual = true
+  rec.schedule_off_reason = 'proxy_cooldown'
+  fs.writeFileSync(path.join(project, 'vms', 'vm-11.json'), JSON.stringify(rec))
+
+  const out = await clearVmCooldown({ cfg: { paths: { project } }, id: 'vm-11' })
+  const saved = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-11.json'), 'utf8'))
+  assert.equal(out.ok, true)
+  assert.equal(out.data.legacy_proxy_schedule_off_cleared, true)
+  assert.equal(saved.schedule_off, undefined)
+  assert.equal(saved.schedule_off_reason, undefined)
+  assert.equal(saved.schedulable, true)
+})
+
+test('clearVmCooldown repairs legacy proxy cooldown when only schedule_disabled_reason survived', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cool-'))
+  const rec = seedVm(project)
+  rec.schedulable = false
+  rec.schedule_off = true
+  rec.schedule_manual = true
+  rec.schedule_disabled_reason = 'proxy_cooldown'
+  fs.writeFileSync(path.join(project, 'vms', 'vm-11.json'), JSON.stringify(rec))
+
+  const out = await clearVmCooldown({ cfg: { paths: { project } }, id: 'vm-11' })
+  const saved = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-11.json'), 'utf8'))
+  assert.equal(out.ok, true)
+  assert.equal(out.data.legacy_proxy_schedule_off_cleared, true)
+  assert.equal(saved.schedule_off, undefined)
+  assert.equal(saved.schedulable, true)
+  assert.equal(saved.schedule_manual, false)
 })

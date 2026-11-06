@@ -18,7 +18,7 @@ import { runBackupJob } from './backup-core.mjs'
 
 try {
   openDatabase({ dataDir: workerData.dataDir })
-  const rec = runBackupJob(workerData.ctx, workerData.job)
+  const rec = await runBackupJob(workerData.ctx, workerData.job)
   parentPort.postMessage({ ok: true, rec })
 } catch (e) {
   parentPort.postMessage({
@@ -27,6 +27,6 @@ try {
   })
 } finally {
   try {
-    closeDatabase()
+    await closeDatabase()
   } catch {}
 }

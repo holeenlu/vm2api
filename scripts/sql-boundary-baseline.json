@@ -1,0 +1,15 @@
+{
+  "note": "仓储以外的 SQL 调用点基线，只减不增；只允许有依据的豁免（kind=exempt），其余 SQL 必须写在仓储里。见 scripts/sql-boundary.mjs。R6 B8：主线程同步数据访问另由 test/unit/sync-data-access.test.mjs 守卫。",
+  "files": {
+    "src/lib/admin/usage-stats-thread.mjs": {
+      "count": 5,
+      "kind": "exempt",
+      "reason": "统计 Worker 线程（不在主线程）自己的只读连接基础设施：PRAGMA 设置、data_version 与延迟 BEGIN/COMMIT 读事务边界；业务查询走 UsageLogsRepo（DbClient）"
+    },
+    "src/lib/admin/usage-stats-worker.mjs": {
+      "count": 3,
+      "kind": "exempt",
+      "reason": "统计线程的主线程侧调度：PRAGMA database_list（构造时取库文件路径）与 PRAGMA data_version / total_changes() 连接元数据（不读表），同步判定统计快照能否合并"
+    }
+  }
+}

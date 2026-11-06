@@ -5,6 +5,7 @@
  */
 import { extractOpenaiUsage, isOpenaiWireUsage } from '../protocol/openai-usage.mjs'
 import { resolvePrice } from './price-catalog.mjs'
+import { mediaCharge } from './media-pricing.mjs'
 
 export const PRICING_CURRENCY = 'USD'
 export const UNPRICED_MODEL = 'unpriced'
@@ -182,10 +183,10 @@ function selectBand(price, mode, prompt) {
  * Official standard cost for one request's usage object.
  * After normalizeUsage, input_tokens is the uncached bucket for every vendor.
  */
-export function calculateCost(usage = {}, model = null) {
+function calculateTextCost(usage = {}, model = null, { resolvedPrice = null } = {}) {
   const u = normalizeUsage(usage)
   const mid = model || u.model || u.upstream_model || u.requested_model || ''
-  const resolved = resolvePrice(mid)
+  const resolved = resolvedPrice || resolvePrice(mid)
   const outputTokens = n(u.output_tokens)
   const cacheRead = n(u.cache_read_tokens)
   const { cache5m, cache1h } = cacheSplit(u)
@@ -281,6 +282,50 @@ export function calculateCost(usage = {}, model = null) {
 }
 
 /** Raw billing band inputs, persisted so a later backfill re-prices with the same band. */
+// Commercial settlement carries image evidence in the same persisted usage object.
+export function calculateCost(usage = {}, model = null, options = {}) {
+  const media = mediaCharge(usage, options.media)
+  if (media) return mediaCost(usage, model, media)
+  const image = usage?.image_generation
+  if (!image) return calculateTextCost(usage, model, options)
+  const text = calculateTextCost(image.only ? {} : usage, model, options)
+  const img = imageCostFromUsage(image.usage, image.model, {
+    resolvedPrice: image.only ? options.resolvedPrice : options.resolvedPrice?.image_price,
+  })
+  const known = (image.only || text.known) && img.known
+  return {
+    ...text,
+    known,
+    pricing_key: image.only ? img.pricing_key : text.pricing_key,
+    price_source: image.only ? img.price_source : text.price_source,
+    price_version: image.only ? img.price_version : text.price_version,
+    image_cost: img.image_cost,
+    total_cost: known ? round8((image.only ? 0 : text.total_cost) + img.image_cost) : null,
+  }
+}
+
+// 分组媒体计费（按张生图、按次网页搜索）：费用与 token 无关，rate_multiplier 非空时覆盖分组倍率
+function mediaCost(usage, model, media) {
+  const isImage = media.kind === 'image'
+  return {
+    model: model || null,
+    pricing_key: isImage ? `image_count:${media.tier}` : 'web_search_per_call',
+    price_source: 'group',
+    price_version: null,
+    currency: PRICING_CURRENCY,
+    known: true,
+    media,
+    rate_multiplier: media.rate_multiplier,
+    input_cost: 0,
+    output_cost: 0,
+    cache_read_cost: 0,
+    cache_creation_cost: 0,
+    web_search_cost: isImage ? 0 : media.total_cost,
+    image_cost: isImage ? media.total_cost : 0,
+    total_cost: media.total_cost,
+  }
+}
+
 export function billingBandFromUsage(usage = {}) {
   const tier = String(usage?.service_tier ?? '')
     .trim()
@@ -303,7 +348,7 @@ function tokenCount(v) {
  * codex-proxy-rs `image_calculated_cost`: text input at the base rates, image input and output
  * at `price.image`. A split that does not add up stays unpriced; nothing is guessed.
  */
-export function imageCostFromUsage(usage, imageModel = null) {
+export function imageCostFromUsage(usage, imageModel = null, { resolvedPrice = null } = {}) {
   const unknown = {
     known: false,
     image_cost: null,
@@ -314,7 +359,7 @@ export function imageCostFromUsage(usage, imageModel = null) {
     price_version: null,
   }
   if (!usage || typeof usage !== 'object') return unknown
-  const resolved = resolvePrice(imageModel || IMAGE_DEFAULT_PRICE_ID)
+  const resolved = resolvedPrice || resolvePrice(imageModel || IMAGE_DEFAULT_PRICE_ID)
   const rates = resolved?.price
   if (!rates?.image) return unknown
   const input = tokenCount(usage.input_tokens)
@@ -361,8 +406,32 @@ export function imageCostFromUsage(usage, imageModel = null) {
  * `image` = `{ usage, model, only }`: image generation usage on the same row. `only` marks an
  * Images endpoint row, which has no text-model usage. Either part unpriced → the whole row is.
  */
-export function costColumnsFromUsage(usage, model, image = null) {
-  const img = image ? imageCostFromUsage(image.usage, image.model) : null
+export function costColumnsFromUsage(usage, model, image = null, options = {}) {
+  const media = mediaCharge(usage, options.media)
+  if (media) {
+    const c = mediaCost(usage, model, media)
+    return {
+      input_cost: 0,
+      output_cost: 0,
+      cache_read_cost: 0,
+      cache_creation_cost: 0,
+      web_search_cost: c.web_search_cost,
+      image_cost: c.image_cost,
+      total_cost: c.total_cost,
+      pricing_model: c.pricing_key,
+      price_source: c.price_source,
+      price_version: null,
+      service_tier: null,
+      speed: null,
+      long_context: 0,
+    }
+  }
+  image = image || usage?.image_generation
+  const img = image
+    ? imageCostFromUsage(image.usage, image.model, {
+        resolvedPrice: image.only ? options.resolvedPrice : options.resolvedPrice?.image_price,
+      })
+    : null
   const band = billingBandFromUsage(normalizeUsage(usage))
   if (image?.only) {
     const known = img.known
@@ -381,7 +450,7 @@ export function costColumnsFromUsage(usage, model, image = null) {
       long_context: known ? 0 : null,
     }
   }
-  const c = calculateCost(usage, model)
+  const c = calculateTextCost(usage, model, options)
   const known = c.known && (!img || img.known)
   return {
     input_cost: known ? c.input_cost : null,
