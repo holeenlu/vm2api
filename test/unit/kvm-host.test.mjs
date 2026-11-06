@@ -63,13 +63,13 @@ test('in-container device probe uses the self image', async () => {
     sockPath: '/tmp',
     docker: async () => ({}),
     async resolveImage() {
-      return 'ghcr.io/example/vm2api:test'
+      return 'ghcr.io/example/tapmodels:test'
     },
     async probeContainer(_docker, image) {
       seen.push(image)
       return true
     },
   })
-  assert.deepEqual(seen, ['ghcr.io/example/vm2api:test'])
+  assert.deepEqual(seen, ['ghcr.io/example/tapmodels:test'])
   assert.equal(out.accel, 'kvm')
 })

@@ -7,14 +7,19 @@ import { RequestLogStore } from '../../src/lib/admin/request-log.mjs'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { armWriteBehind, flushWrites, pendingWrites, writeBehindArmed } from '../../src/lib/db/write-behind.mjs'
 
-test('finish returns before the usage row is written, and flush commits it', () => {
+test('finish returns before the usage row is written, and flush commits it', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-write-behind-'))
   const db = createDatabase({ dataDir: dir })
   const store = new RequestLogStore({ dataDir: dir, db, mode: 'normal' })
   armWriteBehind(db)
   try {
     const ctx = store.start({ headers: {}, socket: {} }, { protocol: 'anthropic.messages', pathName: '/v1/messages' })
-    const summary = store.finish(ctx, { status: 200, model: 'claude-haiku-4-5', input_tokens: 3, output_tokens: 1 })
+    const summary = await store.finish(ctx, {
+      status: 200,
+      model: 'claude-haiku-4-5',
+      input_tokens: 3,
+      output_tokens: 1,
+    })
     assert.equal(pendingWrites() > 0, true)
     assert.equal(store.repo.getByRequestId(summary.request_id), null)
     flushWrites()

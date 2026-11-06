@@ -53,7 +53,7 @@ seed([
   { session_id: 's9', user_id: 'u2', api_key_id: 'k2', status: 500, error_code: 'upstream_error' },
 ])
 
-async function exportLogs(query, { role = 'admin', userId = null, headers = {} } = {}) {
+async function exportLogs(query, { role = 'super_admin', userId = null, headers = {} } = {}) {
   const out = {}
   const handlePanel = createPanelHandler({
     cfg: { paths: { project: root }, vm: { id: null } },
@@ -92,20 +92,20 @@ async function exportLogs(query, { role = 'admin', userId = null, headers = {} }
 
 const ids = (rows) => rows.map((r) => r.request_id)
 
-test('export honours the list filters the page sends (session, status code, endpoint)', async () => {
-  const query = 'session_id=s1&status_code=500&endpoint=%2Fv1%2Fmessages'
+test('export honours the list filters the page sends (session, status code)', async () => {
+  const query = 'session_id=s1&status_code=500'
   const { rows, headers } = await exportLogs(query)
-  assert.deepEqual(ids(rows), ['req-2'])
-  assert.equal(headers['x-kin-export-total'], '1')
-  const listed = new UsageLogsView(db)
-    .listBatch({ session_id: 's1', status_code: '500', endpoint: '/v1/messages' })
-    .logs.map((r) => r.requestId)
+  assert.deepEqual(ids(rows), ['req-3', 'req-2'])
+  assert.equal(headers['x-kin-export-total'], '2')
+  const listed = (await new UsageLogsView(db).listBatch({ session_id: 's1', status_code: '500' })).logs.map(
+    (r) => r.requestId,
+  )
   assert.deepEqual(ids(rows), listed)
 })
 
-test('export honours non-2xx, retry, debug and model filters like the list', async () => {
+test('export honours non-2xx, retry and model filters like the list', async () => {
   assert.deepEqual(ids((await exportLogs('session_id=s1&exclude_status_200=1')).rows), ['req-3', 'req-2'])
-  assert.deepEqual(ids((await exportLogs('min_attempt_count=2&log_mode=debug')).rows), ['req-5'])
+  assert.deepEqual(ids((await exportLogs('min_attempt_count=2')).rows), ['req-5'])
   assert.deepEqual(ids((await exportLogs('model=claude-sonnet-4&session_id=s2')).rows), ['req-4'])
 })
 

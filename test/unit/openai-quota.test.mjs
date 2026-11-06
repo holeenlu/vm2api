@@ -13,15 +13,18 @@ import {
   CHATGPT_USAGE_URL,
   CHATGPT_RESET_CREDITS_URL,
   CHATGPT_RESET_CONSUME_URL,
+  CHATGPT_ACCOUNTS_CHECK_URL,
+  parseChatgptSubscription,
 } from '../../src/lib/oauth/openai-quota.mjs'
-import { persistCodexQuotaSnapshot } from '../../src/lib/vm/codex-slot.mjs'
+import { persistCodexQuotaSnapshot, summarizeCodexSlot } from '../../src/lib/vm/codex-slot.mjs'
+import { getVm, summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
 import {
   evaluateOpenAIQuotaGate,
   effectiveOpenAIPolicy,
   mergeOpenAIQuotaPolicy,
 } from '../../src/lib/pool/openai-quota-policy.mjs'
 
-test('OpenAI local quota gate blocks equality without inventing a reset and recovers after reset', () => {
+test('OpenAI local quota gate blocks equality without inventing a reset and recovers after reset', async () => {
   const now = Date.parse('2026-10-06T00:00:00.000Z')
   const reset = new Date(now + 60_000).toISOString()
   const vm = {
@@ -53,7 +56,7 @@ test('OpenAI local quota gate blocks equality without inventing a reset and reco
   )
 })
 
-test('OpenAI policy pins and null-reset inheritance remain platform-local', () => {
+test('OpenAI policy pins and null-reset inheritance remain platform-local', async () => {
   const global = mergeOpenAIQuotaPolicy({}, { max_concurrency: 8, max_rpm: 120, max_sessions: 4 })
   assert.deepEqual(effectiveOpenAIPolicy({ policy: { maxConcurrency: 3, concurrencyOverride: true } }, global), {
     max_concurrency: 3,
@@ -67,7 +70,7 @@ test('OpenAI policy pins and null-reset inheritance remain platform-local', () =
   assert.equal(effectiveOpenAIPolicy({ policy: { maxSessions: 6, sessionsOverride: true } }, global).max_sessions, 6)
 })
 
-test('extraFromRateLimit maps shorter window to 5h', () => {
+test('extraFromRateLimit maps shorter window to 5h', async () => {
   const extra = extraFromRateLimit({
     primary_window: {
       used_percent: 6,
@@ -88,7 +91,48 @@ test('extraFromRateLimit maps shorter window to 5h', () => {
   assert.equal(extra.codex_7d_window_minutes, 10080)
 })
 
-test('parseResetCreditDetails accepts array and object containers', () => {
+test('complete WHAM snapshots remove a missing window instead of resurrecting cached headers', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wham-missing-window-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptSlot(root)
+  await persistCodexQuotaSnapshot(root, 'vm-codex-01', {
+    extra: {
+      codex_secondary_used_percent: 0,
+      codex_secondary_window_minutes: 0,
+      codex_secondary_reset_at: '2026-10-29T10:42:48.791Z',
+      codex_secondary_reset_after_seconds: 0,
+      codex_5h_used_percent: 90,
+      codex_5h_reset_at: '2026-10-29T10:42:48.791Z',
+    },
+  })
+  const result = await queryOpenaiQuota({
+    projectRoot: root,
+    vmId: 'vm-codex-01',
+    fetchImpl: async (url) => ({
+      status: 200,
+      json: async () =>
+        String(url).startsWith(CHATGPT_USAGE_URL)
+          ? {
+              rate_limit: {
+                primary_window: { used_percent: 17, limit_window_seconds: 604800, reset_at: 1_800_100_000 },
+                secondary_window: null,
+              },
+              rate_limit_reset_credits: { available_count: 0 },
+            }
+          : { available_count: 0 },
+    }),
+  })
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json')))
+  const quota = summarizeCodexSlot(root, saved).usage.quota
+  assert.equal(result.ok, true)
+  assert.equal(quota.utilization_5h, null)
+  assert.equal(quota.reset_5h, null)
+  assert.equal(quota.utilization_7d, 0.17)
+  assert.equal(saved.codex.extra.codex_secondary_reset_at, null)
+  assert.equal(saved.codex.extra.codex_secondary_window_minutes, null)
+})
+
+test('parseResetCreditDetails accepts array and object containers', async () => {
   const listed = parseResetCreditDetails([
     { expiresAt: '2026-07-04T04:05:06Z', reset_type: 'codex_rate_limits', status: 'available' },
     { expires_at: '2026-07-05T00:00:00Z', resetType: 'other' },
@@ -104,7 +148,7 @@ test('parseResetCreditDetails accepts array and object containers', () => {
   assert.equal(boxed.credits.length, 1)
 })
 
-test('mergeResetCredits prefers detail count and expiration list', () => {
+test('mergeResetCredits prefers detail count and expiration list', async () => {
   const merged = mergeResetCredits(
     { available_count: 1, credits: [] },
     {
@@ -117,7 +161,7 @@ test('mergeResetCredits prefers detail count and expiration list', () => {
   assert.equal(merged.credits.length, 2)
 })
 
-test('quota headers carry Codex originator and account id', () => {
+test('quota headers carry Codex originator and account id', async () => {
   const headers = buildOpenaiQuotaHeaders({ accessToken: 'tok', accountId: 'acc-1' })
   assert.equal(headers.authorization, 'Bearer tok')
   assert.equal(headers['chatgpt-account-id'], 'acc-1')
@@ -125,7 +169,7 @@ test('quota headers carry Codex originator and account id', () => {
   assert.equal(headers['openai-beta'], 'codex-1')
 })
 
-test('quota headers use the access token account when imported metadata has no account id', () => {
+test('quota headers use the access token account when imported metadata has no account id', async () => {
   const payload = Buffer.from(
     JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-from-token' } }),
   ).toString('base64url')
@@ -275,10 +319,40 @@ test('queryOpenaiQuota rejects Claude slots', async () => {
   assert.equal(result.error, 'not_gpt_slot')
 })
 
-test('persistCodexQuotaSnapshot keeps expiration list', () => {
+for (const outcome of ['refresh-failed', 'consume-failed', 'no-windows-reset']) {
+  test(`Codex billing reset boundary: ${outcome}`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-reset-boundary-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    writeGptSlot(root)
+    const old = '2026-01-01T00:00:00.000Z'
+    await persistCodexQuotaSnapshot(root, 'vm-codex-01', { clearedWindows: { '5h': old, '7d': old } })
+    const result = await resetOpenaiQuota({
+      projectRoot: root,
+      vmId: 'vm-codex-01',
+      fetchImpl: async (url) =>
+        String(url) === CHATGPT_RESET_CONSUME_URL
+          ? {
+              status: outcome === 'consume-failed' ? 409 : 200,
+              json: async () => ({ code: 'ok', windows_reset: outcome === 'no-windows-reset' ? 0 : 2 }),
+            }
+          : { status: 503, json: async () => ({}) },
+    })
+    const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+    assert.equal(result.ok, outcome !== 'consume-failed')
+    if (outcome === 'refresh-failed') {
+      assert.equal(result.warning, 'reset_credit_cache_refresh_failed')
+      assert.ok(Date.parse(vm.codex.cleared_windows['5h']) > Date.parse(old))
+      assert.equal(vm.codex.cleared_windows['5h'], vm.codex.cleared_windows['7d'])
+    } else {
+      assert.deepEqual(vm.codex.cleared_windows, { '5h': old, '7d': old })
+    }
+  })
+}
+
+test('persistCodexQuotaSnapshot keeps expiration list', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-snap-'))
   writeGptSlot(root)
-  persistCodexQuotaSnapshot(root, 'vm-codex-01', {
+  await persistCodexQuotaSnapshot(root, 'vm-codex-01', {
     extra: { codex_5h_used_percent: 8, codex_7d_used_percent: 20 },
     resetCredits: { available_count: 1, credits: [{ expires_at: '2026-07-04T04:05:06Z' }] },
   })
@@ -312,7 +386,7 @@ test('persisted GPT quota survives summarizeVm and exposes plan_type', async () 
   })
   assert.equal(result.ok, true)
   assert.equal(result.plan_type, 'team')
-  const s = summarizeVm(getVm(root, 'vm-codex-01'), root)
+  const s = await summarizeVm(getVm(root, 'vm-codex-01'), root)
   assert.equal(s.utilization_5h, 1)
   assert.equal(s.utilization_7d, 0.16)
   assert.equal(s.reset_5h, new Date(1_790_449_975_000).toISOString())
@@ -328,7 +402,7 @@ test('persisted GPT quota survives summarizeVm and exposes plan_type', async () 
   assert.equal(s.plan_type, 'team')
 })
 
-test('raw primary/secondary quota and normalized views agree at local boundaries', () => {
+test('raw primary/secondary quota and normalized views agree at local boundaries', async () => {
   const now = Date.parse('2026-10-07T00:00:00Z')
   const vm = {
     codex: {
@@ -347,4 +421,108 @@ test('raw primary/secondary quota and normalized views agree at local boundaries
   assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 0.5, limit_7d: 0.6 }, now).reason, 'quota_7d_local')
   assert.equal(evaluateOpenAIQuotaGate({ utilization_5h: 1.2 }, { limit_5h: 1 }, now).reason, 'quota_5h_local')
   assert.equal(evaluateOpenAIQuotaGate({ utilization_5h: null }, { limit_5h: 0.3 }, now).limited, false)
+})
+
+const ACCOUNT_CHECK = {
+  accounts: {
+    'acc-1': {
+      account: { plan_type: 'pro', is_trial: false, is_deactivated: false, account_user_id: 'secret-user' },
+      entitlement: {
+        subscription_id: 'sub-secret',
+        has_active_subscription: true,
+        subscription_plan: 'chatgptpro',
+        expires_at: '2026-11-26T09:59:40+00:00',
+        renews_at: '2026-11-26T03:59:40+00:00',
+        cancels_at: null,
+        billing_currency: 'USD',
+        is_delinquent: false,
+      },
+      last_active_subscription: {
+        subscription_id: 'sub-secret',
+        purchase_origin_platform: 'chatgpt_mobile_ios',
+        will_renew: true,
+      },
+      features: ['canvas'],
+    },
+  },
+  account_ordering: ['acc-1'],
+}
+
+test('parseChatgptSubscription keeps subscription facts and drops ids', async () => {
+  const sub = parseChatgptSubscription(ACCOUNT_CHECK, 'acc-1')
+  assert.deepEqual(sub, {
+    plan_type: 'pro',
+    subscription_plan: 'chatgptpro',
+    has_active_subscription: true,
+    expires_at: '2026-11-26T09:59:40+00:00',
+    renews_at: '2026-11-26T03:59:40+00:00',
+    cancels_at: null,
+    will_renew: true,
+    purchase_origin_platform: 'chatgpt_mobile_ios',
+    billing_currency: 'USD',
+    billing_period: null,
+    is_delinquent: false,
+    is_trial: false,
+    is_deactivated: false,
+  })
+  assert.equal(parseChatgptSubscription({}), null)
+})
+
+test('queryOpenaiQuota writes email, plan, subscription dates and channel onto the slot', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-subscription-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptSlot(root)
+  const result = await queryOpenaiQuota({
+    projectRoot: root,
+    vmId: 'vm-codex-01',
+    fetchImpl: async (url) => ({
+      status: 200,
+      json: async () =>
+        String(url).startsWith(CHATGPT_USAGE_URL)
+          ? {
+              email: 'owner@example.com',
+              plan_type: 'pro',
+              rate_limit: {},
+              rate_limit_reset_credits: { available_count: 0 },
+            }
+          : String(url) === CHATGPT_ACCOUNTS_CHECK_URL
+            ? ACCOUNT_CHECK
+            : { available_count: 0 },
+    }),
+  })
+  assert.equal(result.ok, true)
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+  assert.equal(saved.codex.email, 'owner@example.com')
+  assert.equal(saved.codex.plan_type, 'pro')
+  assert.equal(saved.codex.subscription.renews_at, '2026-11-26T03:59:40+00:00')
+  assert.ok(saved.codex.subscription.fetched_at)
+  assert.doesNotMatch(JSON.stringify(saved.codex.subscription), /sub-secret|secret-user/)
+  const vm = getVm(root, 'vm-codex-01')
+  const summary = await summarizeVm(vm, root)
+  assert.equal(summary.chatgpt_subscription_active_until, '2026-11-26T03:59:40+00:00')
+  assert.equal(summary.subscription_type, 'chatgptpro')
+  assert.equal(summary.billing_type, 'apple_subscription')
+  assert.equal(summary.subscription_updated_at, saved.codex.subscription.fetched_at)
+  assert.equal(summary.email, 'owner@example.com')
+})
+
+test('a failed account check keeps the last subscription snapshot', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-subscription-keep-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptSlot(root)
+  const run = (check) =>
+    queryOpenaiQuota({
+      projectRoot: root,
+      vmId: 'vm-codex-01',
+      fetchImpl: async (url) =>
+        String(url) === CHATGPT_ACCOUNTS_CHECK_URL
+          ? check
+          : { status: 200, json: async () => (String(url).startsWith(CHATGPT_USAGE_URL) ? { rate_limit: {} } : {}) },
+    })
+  await run({ status: 200, json: async () => ACCOUNT_CHECK })
+  const before = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8')).codex.subscription
+  const second = await run({ status: 403, json: async () => ({}) })
+  assert.equal(second.ok, true)
+  const after = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8')).codex.subscription
+  assert.deepEqual(after, before)
 })

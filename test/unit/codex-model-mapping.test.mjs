@@ -16,8 +16,8 @@ import {
   syncGptIdsIntoPolicy,
 } from '../../src/lib/protocol/gpt-model-policy.mjs'
 
-test('default map rewrites codex-auto-review before platform detect', () => {
-  resetGptModelPolicy()
+test('default map rewrites codex-auto-review before platform detect', async () => {
+  await resetGptModelPolicy()
   const rewrite = applyCodexInboundModelRewrite({ model: 'codex-auto-review' }, {})
   assert.equal(rewrite.ok, true)
   assert.equal(rewrite.mapped, true)
@@ -33,18 +33,18 @@ test('literal detectInboundPlatform still fail-closes codex-auto-review', () => 
   assert.equal(detectInboundPlatform('codex-auto-review').ok, false)
 })
 
-test('custom routing.model_mappings overrides default target', () => {
-  resetGptModelPolicy()
+test('custom routing.model_mappings overrides default target', async () => {
+  await resetGptModelPolicy()
   const routing = { codex: { model_mappings: { 'codex-auto-review': 'gpt-6-sol' } } }
   const rewrite = applyCodexInboundModelRewrite({ model: 'codex-auto-review' }, routing)
   assert.equal(rewrite.upstreamModel, 'gpt-6-sol')
   assert.equal(detectInboundPlatform(rewrite.body.model).platform, 'openai')
 })
 
-test('Fast aliases rewrite to the base model and force priority', () => {
-  resetGptModelPolicy()
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] } }])
-  saveGptModelPolicy({
+test('Fast aliases rewrite to the base model and force priority', async () => {
+  await resetGptModelPolicy()
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] } }])
+  await saveGptModelPolicy({
     models: {
       'gpt-6-luna': {
         enabled: true,
@@ -65,8 +65,8 @@ test('Fast aliases rewrite to the base model and force priority', () => {
   })
 })
 
-test('unavailable Fast aliases fail locally and mapping keys take precedence', () => {
-  resetGptModelPolicy()
+test('unavailable Fast aliases fail locally and mapping keys take precedence', async () => {
+  await resetGptModelPolicy()
   const unavailable = applyCodexInboundModelRewrite({ model: 'gpt-6-luna-fast' }, {})
   assert.equal(unavailable.ok, false)
   assert.equal(unavailable.code, 'model_fast_unavailable')
@@ -78,16 +78,16 @@ test('unavailable Fast aliases fail locally and mapping keys take precedence', (
   assert.equal(mapped.body.model, 'gpt-6-sol')
 })
 
-test('actual GPT catalog ids cannot be mapping aliases', () => {
-  resetGptModelPolicy()
+test('actual GPT catalog ids cannot be mapping aliases', async () => {
+  await resetGptModelPolicy()
   assert.throws(
     () => validateCodexModelMappingsPatch({ 'gpt-6-luna': 'gpt-6-sol' }),
     (error) => error.code === 'invalid_codex_model_mappings',
   )
 })
 
-test('empty configured target for codex-auto-review uses fallback sol model', () => {
-  resetGptModelPolicy()
+test('empty configured target for codex-auto-review uses fallback sol model', async () => {
+  await resetGptModelPolicy()
   const mappings = normalizeCodexModelMappings({ 'codex-auto-review': '' })
   assert.equal(mappings['codex-auto-review'], DEFAULT_CODEX_MODEL_MAPPING_FALLBACK)
   const rewrite = applyCodexInboundModelRewrite(
@@ -97,8 +97,8 @@ test('empty configured target for codex-auto-review uses fallback sol model', ()
   assert.equal(rewrite.upstreamModel, DEFAULT_CODEX_MODEL_MAPPING_FALLBACK)
 })
 
-test('invalid non-GPT mapping target returns codex_model_mapping_invalid', () => {
-  resetGptModelPolicy()
+test('invalid non-GPT mapping target returns codex_model_mapping_invalid', async () => {
+  await resetGptModelPolicy()
   const rewrite = applyCodexInboundModelRewrite(
     { model: 'codex-auto-review' },
     { codex: { model_mappings: { 'codex-auto-review': 'claude-sonnet-4-6' } } },
@@ -107,9 +107,9 @@ test('invalid non-GPT mapping target returns codex_model_mapping_invalid', () =>
   assert.equal(rewrite.code, 'codex_model_mapping_invalid')
 })
 
-test('disabled GPT mapping target returns model_disabled', () => {
-  resetGptModelPolicy()
-  saveGptModelPolicy({
+test('disabled GPT mapping target returns model_disabled', async () => {
+  await resetGptModelPolicy()
+  await saveGptModelPolicy({
     models: {
       'gpt-6-luna': { id: 'gpt-6-luna', enabled: false },
     },
@@ -127,8 +127,8 @@ test('normalizeCodexRouting hot-loads model_mappings defaults', () => {
   assert.equal(codex.model_mappings['codex-auto-review'], 'gpt-6-luna')
 })
 
-test('mapping patch rejects aliases that would hijack Claude or image requests', () => {
-  resetGptModelPolicy()
+test('mapping patch rejects aliases that would hijack Claude or image requests', async () => {
+  await resetGptModelPolicy()
   for (const alias of [
     'claude-opus-5-5',
     'anthropic.claude-sonnet-5',
@@ -146,8 +146,8 @@ test('mapping patch rejects aliases that would hijack Claude or image requests',
   }
 })
 
-test('mapping patch accepts plain aliases and codex-auto-review', () => {
-  resetGptModelPolicy()
+test('mapping patch accepts plain aliases and codex-auto-review', async () => {
+  await resetGptModelPolicy()
   assert.doesNotThrow(() =>
     validateCodexModelMappingsPatch({
       'codex-auto-review': 'gpt-6-sol',
@@ -163,12 +163,12 @@ test('stored invalid aliases are kept on normalize; only new writes are rejected
   assert.equal(merged['claude-x'], 'gpt-6-luna')
 })
 
-test('mapping patch rejects a disabled GPT target with model_disabled', () => {
-  resetGptModelPolicy()
-  saveGptModelPolicy({ models: { 'gpt-6-sol': { id: 'gpt-6-sol', enabled: false } } })
+test('mapping patch rejects a disabled GPT target with model_disabled', async () => {
+  await resetGptModelPolicy()
+  await saveGptModelPolicy({ models: { 'gpt-6-sol': { id: 'gpt-6-sol', enabled: false } } })
   assert.throws(
     () => validateCodexModelMappingsPatch({ 'codex-auto-review': 'gpt-6-sol' }),
     (error) => error.code === 'model_disabled',
   )
-  resetGptModelPolicy()
+  await resetGptModelPolicy()
 })

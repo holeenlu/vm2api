@@ -5,8 +5,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
+import { toUsageLogRow } from '../../src/lib/db/repos/usage-logs-view.mjs'
 import { codexBodyToAnthropicMessage } from '../../src/lib/protocol/codex-convert.mjs'
-import { estimateWindow } from '../../src/lib/admin/window-estimate.mjs'
+import { recordQuotaObservations } from '../../src/lib/usage/quota-observations.mjs'
+import { vmWindowForecast } from '../../src/lib/usage/vm-quota-forecast.mjs'
 
 let seq = 0
 
@@ -51,7 +53,7 @@ function assertHit(stats, prompt, read, label) {
   assert.equal(stats.cache_hit_rate, prompt > 0 ? read / prompt : null, `${label} cache_hit_rate`)
 }
 
-test('debugBytes counts stored JSON bytes for empty, ASCII, and UTF-8 records', () => {
+test('debugBytes counts stored JSON bytes for empty, ASCII, and UTF-8 records', async () => {
   const { dir, db, repo } = freshDb()
   try {
     assert.equal(storedDebugBytes(db), 0)
@@ -71,7 +73,7 @@ test('debugBytes counts stored JSON bytes for empty, ASCII, and UTF-8 records', 
   }
 })
 
-test('trimDebugToMaxBytes removes oldest UTF-8 records until actual bytes fit', () => {
+test('trimDebugToMaxBytes removes oldest UTF-8 records until actual bytes fit', async () => {
   const { dir, db, repo } = freshDb()
   try {
     const record = { body: '中'.repeat(10) }
@@ -106,7 +108,7 @@ test('trimDebugToMaxBytes removes oldest UTF-8 records until actual bytes fit', 
   }
 })
 
-test('mixed Claude/Codex usage keeps a row-wise prompt denominator on totals and windows', () => {
+test('mixed Claude/Codex usage keeps a row-wise prompt denominator on totals and windows', async () => {
   const { db, repo } = freshDb()
   try {
     seed(repo, [
@@ -136,7 +138,7 @@ test('mixed Claude/Codex usage keeps a row-wise prompt denominator on totals and
       },
     ])
     assertHit(repo.totals(), 300, 240, 'totals')
-    assertHit(repo.billingStats().total, 300, 240, 'billing.total')
+    assertHit((await repo.billingStats()).total, 300, 240, 'billing.total')
     const since = new Date(Date.now() - 60_000).toISOString()
     assertHit(repo.windowStats({ since }), 300, 240, 'window')
     assertHit(repo.windowStats({ since, owner_user_id: 'u1' }), 200, 190, 'owner window')
@@ -146,11 +148,11 @@ test('mixed Claude/Codex usage keeps a row-wise prompt denominator on totals and
   }
 })
 
-test('empty usage windows keep a null cache hit rate', () => {
+test('empty usage windows keep a null cache hit rate', async () => {
   const { db, repo } = freshDb()
   try {
     assertHit(repo.totals(), 0, 0, 'empty totals')
-    assertHit(repo.billingStats().total, 0, 0, 'empty billing')
+    assertHit((await repo.billingStats()).total, 0, 0, 'empty billing')
     const empty = repo.windowStats({ since: '2099-01-01T00:00:00.000Z' })
     assert.equal(empty.requests, 0)
     assertHit(empty, 0, 0, 'empty window')
@@ -159,7 +161,7 @@ test('empty usage windows keep a null cache hit rate', () => {
   }
 })
 
-test('billingStats reuses identical panel snapshots but separates account windows', () => {
+test('billingStats reuses identical panel snapshots but separates account windows', async () => {
   const { db, repo } = freshDb()
   try {
     let computes = 0
@@ -173,22 +175,60 @@ test('billingStats reuses identical panel snapshots but separates account window
     const winAReordered = [{ vm_id: 'vm-a', reset_5h: '2026-10-19T05:00:00.000Z', account_id: 'acc-1' }]
     const winB = [{ account_id: 'acc-1', vm_id: 'vm-a', reset_5h: '2026-10-19T06:00:00.000Z' }]
 
-    assert.equal(repo.billingStats({ accountWindows: winA }), repo.billingStats({ accountWindows: winAReordered }))
+    assert.equal(
+      await repo.billingStats({ accountWindows: winA }),
+      await repo.billingStats({ accountWindows: winAReordered }),
+    )
     assert.equal(computes, 1)
-    repo.billingStats({ accountWindows: winB })
+    await repo.billingStats({ accountWindows: winB })
     assert.equal(computes, 2)
 
     // Explicit historical snapshots are deterministic test/report calls and must
     // not be served from the live panel cache.
-    repo.billingStats({ accountWindows: winA, now: Date.parse('2026-10-19T00:00:00.000Z') })
-    repo.billingStats({ accountWindows: winA, now: Date.parse('2026-10-19T00:00:00.000Z') })
+    await repo.billingStats({ accountWindows: winA, now: Date.parse('2026-10-19T00:00:00.000Z') })
+    await repo.billingStats({ accountWindows: winA, now: Date.parse('2026-10-19T00:00:00.000Z') })
     assert.equal(computes, 4)
   } finally {
     db.close()
   }
 })
 
-test('billingStats TTL starts after a slow aggregation finishes', () => {
+test('confirmed quota reset excludes previous spend immediately and preserves lifetime totals', async () => {
+  const { db, repo, dir } = freshDb()
+  try {
+    const now = Date.now()
+    const cleared = new Date(now - 30000).toISOString()
+    seed(repo, [
+      {
+        account_id: 'acc-1',
+        vm_id: 'vm-a',
+        created_at: new Date(now - 60000).toISOString(),
+        total_cost: 8,
+        input_tokens: 800,
+      },
+      {
+        account_id: 'acc-1',
+        vm_id: 'vm-a',
+        created_at: new Date(now - 1000).toISOString(),
+        total_cost: 2,
+        input_tokens: 200,
+      },
+    ])
+    const window = { account_id: 'acc-1', vm_id: 'vm-a', reset_7d: new Date(now + 86400000).toISOString() }
+    assert.equal((await repo.billingStats({ accountWindows: [window] })).accounts[0].window_7d_cost, 0.003)
+    window.cleared_windows = { '7d': cleared }
+    const after = (await repo.billingStats({ accountWindows: [window] })).accounts[0]
+    assert.equal(after.window_7d_cost, 0.0006)
+    assert.equal(after.window_7d_tokens, 200)
+    assert.equal(after.window_7d_start, cleared)
+    assert.ok(Math.abs(after.total_cost - 0.003) < 1e-12)
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('billingStats TTL starts after a slow aggregation finishes', async () => {
   const { db, repo } = freshDb()
   const realNow = Date.now
   try {
@@ -201,11 +241,11 @@ test('billingStats TTL starts after a slow aggregation finishes', () => {
       clock += 20_000 // Simulate a scan slower than the 10-second cache TTL.
       return compute(opts)
     }
-    const first = repo.billingStats()
-    assert.equal(repo.billingStats(), first)
+    const first = await repo.billingStats()
+    assert.equal(await repo.billingStats(), first)
     assert.equal(computes, 1)
     clock += 10_001
-    repo.billingStats()
+    await repo.billingStats()
     assert.equal(computes, 2)
   } finally {
     Date.now = realNow
@@ -213,7 +253,7 @@ test('billingStats TTL starts after a slow aggregation finishes', () => {
   }
 })
 
-test('billingStats rate-limits maintenance backfill independently of cache keys', () => {
+test('billingStats rate-limits maintenance backfill independently of cache keys', async () => {
   const { db, repo } = freshDb()
   try {
     let backfills = 0
@@ -221,16 +261,16 @@ test('billingStats rate-limits maintenance backfill independently of cache keys'
       backfills++
       return 0
     }
-    repo.billingStats()
-    repo.billingStats({ accountWindows: [{ account_id: 'acc-1', vm_id: 'vm-a' }] })
-    repo.billingStats({ accountWindows: [{ account_id: 'acc-2', vm_id: 'vm-a' }] })
+    await repo.billingStats()
+    await repo.billingStats({ accountWindows: [{ account_id: 'acc-1', vm_id: 'vm-a' }] })
+    await repo.billingStats({ accountWindows: [{ account_id: 'acc-2', vm_id: 'vm-a' }] })
     assert.equal(backfills, 1)
   } finally {
     db.close()
   }
 })
 
-test('billingStats derives global totals from account aggregates without duplicate full scans', () => {
+test('billingStats derives global totals from account aggregates without duplicate full scans', async () => {
   const { db, repo } = freshDb()
   try {
     seed(repo, [
@@ -243,7 +283,7 @@ test('billingStats derives global totals from account aggregates without duplica
       if (!cond) fullScans++
       return costSelect(cond, params)
     }
-    const bill = repo.billingStats({ now: Date.now() })
+    const bill = await repo.billingStats({ now: Date.now() })
     assert.equal(fullScans, 0)
     assert.equal(bill.total.requests, 2)
     assert.equal(bill.total.input_tokens, 60)
@@ -259,7 +299,7 @@ test('billingStats derives global totals from account aggregates without duplica
   }
 })
 
-test('aligned account windows re-sum per-row prompt tokens instead of mixed Anthropic formula', () => {
+test('aligned account windows re-sum per-row prompt tokens instead of mixed Anthropic formula', async () => {
   const { db, repo } = freshDb()
   try {
     const now = Date.parse('2026-09-26T12:00:00.000Z')
@@ -289,21 +329,21 @@ test('aligned account windows re-sum per-row prompt tokens instead of mixed Anth
         cache_read_tokens: 95,
       },
     ])
-    const aligned = repo.billingStats({
+    const aligned = await repo.billingStats({
       now,
       accountWindows: [{ account_id: 'acc-1', vm_id: 'vm-a', reset_5h: '2026-09-26T16:00:00.000Z' }],
     })
     assertHit(aligned.window_5h, 200, 190, 'aligned 5h')
     assert.equal(Number(aligned.accounts[0].window_5h.prompt_tokens), 200)
     assert.equal(Number(aligned.accounts[0].window_5h.cache_read_tokens), 190)
-    const rolling = repo.billingStats({ now })
+    const rolling = await repo.billingStats({ now })
     assertHit(rolling.window_5h, 10_205, 190, 'rolling 5h')
   } finally {
     db.close()
   }
 })
 
-test('converted non-streaming Anthropic API usage stays disjoint in UsageLogsRepo totals', () => {
+test('converted non-streaming Anthropic API usage stays disjoint in UsageLogsRepo totals', async () => {
   const { db, repo } = freshDb()
   try {
     const upstream = {
@@ -346,7 +386,7 @@ test('converted non-streaming Anthropic API usage stays disjoint in UsageLogsRep
   }
 })
 
-test('billingStats window tokens are total including cache', () => {
+test('billingStats window tokens are total including cache', async () => {
   const { db, repo } = freshDb()
   try {
     const now = Date.parse('2026-09-26T12:00:00.000Z')
@@ -360,7 +400,7 @@ test('billingStats window tokens are total including cache', () => {
         cache_read_tokens: 80,
       },
     ])
-    const bill = repo.billingStats({ now })
+    const bill = await repo.billingStats({ now })
     assert.equal(bill.accounts[0].window_5h_tokens, 102)
     const window = repo.windowStats({ since: '2026-09-26T00:00:00.000Z', until: '2026-09-26T12:00:00.000Z' })
     assert.equal(window.input_tokens + window.output_tokens + window.cache_read_tokens, 102)
@@ -369,7 +409,7 @@ test('billingStats window tokens are total including cache', () => {
   }
 })
 
-test('log coverage follows recorded prunes, not the oldest row or the current retention', () => {
+test('log coverage follows recorded prunes, not the oldest row or the current retention', async () => {
   const { db, repo } = freshDb()
   try {
     const now = Date.now()
@@ -380,7 +420,7 @@ test('log coverage follows recorded prunes, not the oldest row or the current re
       { created_at: iso(3600_000), vm_id: 'vm-a', account_id: 'acc-1', input_tokens: 1 },
     ])
     // Never pruned: a quiet stretch before the oldest row is still complete history.
-    assert.equal(repo.billingStats().log_coverage_start, iso(30 * 86400_000))
+    assert.equal((await repo.billingStats()).log_coverage_start, iso(30 * 86400_000))
 
     assert.equal(repo.cleanup({ retainDays: 1 }).usage_logs, 1)
     const afterPrune = Date.parse(repo.logCoverageStart())
@@ -389,20 +429,22 @@ test('log coverage follows recorded prunes, not the oldest row or the current re
     // Raising retention later does not bring the deleted day back.
     assert.equal(repo.cleanup({ retainDays: 7 }).usage_logs, 0)
     assert.equal(Date.parse(repo.logCoverageStart()), afterPrune)
-    const week = estimateWindow({
-      spentUsd: 5,
-      usedRatio: 0.5,
-      reset: iso(-86400_000),
-      windowStart: iso(6 * 86400_000),
-      coveredSince: repo.logCoverageStart(),
+    // A window that began before the prune boundary has no complete cumulative sample.
+    await recordQuotaObservations('vm-a', { '7d': { utilization: 0.5, reset: iso(-86400_000) } }, { db, now })
+    const week = await vmWindowForecast(db, {
+      vmId: 'vm-a',
+      window: '7d',
+      coveredSince: Date.parse(repo.logCoverageStart()),
+      now,
     })
     assert.equal(week.status, 'log_gap')
+    assert.equal(week.capacity_usd, null)
   } finally {
     db.close()
   }
 })
 
-test('window_fable only counts fable rows since reset_7d_oi', () => {
+test('window_fable only counts fable rows since reset_7d_oi', async () => {
   const { db, repo } = freshDb()
   try {
     const now = Date.parse('2026-09-26T12:00:00.000Z')
@@ -439,7 +481,7 @@ test('window_fable only counts fable rows since reset_7d_oi', () => {
         total_cost: 8,
       },
     ])
-    const bill = repo.billingStats({
+    const bill = await repo.billingStats({
       now,
       accountWindows: [
         {
@@ -455,7 +497,7 @@ test('window_fable only counts fable rows since reset_7d_oi', () => {
     assert.equal(fable.cost, 3)
     assert.equal(fable.tokens, 22)
     assert.equal(bill.accounts[0].window_fable, fable)
-    const none = repo.billingStats({
+    const none = await repo.billingStats({
       now,
       accountWindows: [{ account_id: 'acc-1', vm_id: 'vm-a' }],
     })
@@ -465,7 +507,7 @@ test('window_fable only counts fable rows since reset_7d_oi', () => {
   }
 })
 
-test('unpricedModels lists unpriced rows', () => {
+test('unpricedModels lists unpriced rows', async () => {
   const { db, repo } = freshDb()
   try {
     seed(repo, [
@@ -477,6 +519,48 @@ test('unpricedModels lists unpriced rows', () => {
     assert.equal(rows.length, 1)
     assert.equal(rows[0].model, 'mystery')
     assert.equal(rows[0].requests, 2)
+  } finally {
+    db.close()
+  }
+})
+
+test('inbound device persists independently of rewritten session and is exposed in log detail', async () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    seed(repo, [
+      {
+        id: 'device-log',
+        user_id: 'u1',
+        api_key_id: 'k1',
+        inbound_device_id: 'caller-device',
+        session_id: 'caller-session',
+        outbound_session_id: 'rewritten-session',
+      },
+    ])
+    const names = { users: new Map(), keys: new Map(), accounts: new Map(), vms: new Map() }
+    const row = db.prepare("SELECT * FROM usage_logs WHERE id = 'device-log'").get()
+    assert.equal(row.inbound_device_id, 'caller-device')
+    assert.equal(row.outbound_session_id, 'rewritten-session')
+    assert.equal(toUsageLogRow(row, names).inboundDeviceId, 'caller-device')
+    seed(repo, [{ id: 'device-absent', user_id: 'u2', api_key_id: 'k2' }])
+    const absent = db.prepare("SELECT * FROM usage_logs WHERE id = 'device-absent'").get()
+    assert.equal(toUsageLogRow(absent, names).inboundDeviceId, null)
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('new request costs invalidate live billing snapshots before the TTL expires', async () => {
+  const { db, repo } = freshDb()
+  try {
+    const first = await repo.billingStats()
+    seed(repo, [{ account_id: 'acc-1', vm_id: 'vm-a', input_tokens: 100, output_tokens: 10, total_cost: 0.5 }])
+    const next = await repo.billingStats()
+    assert.notEqual(next, first)
+    assert.equal(next.total.requests, 1)
+    assert.ok(next.total.total_cost > 0)
+    assert.equal(await repo.billingStats(), next, 'unchanged data still reuses the aggregation')
   } finally {
     db.close()
   }

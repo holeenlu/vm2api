@@ -9,6 +9,7 @@ import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
 import { BackupService, tarAvailable } from '../../src/lib/admin/backup-service.mjs'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { RequestLogStore } from '../../src/lib/admin/request-log.mjs'
 import { stopVmWatch, initVmDbSync } from '../../src/lib/vm/vm-db-sync.mjs'
 import { setVmWriteHook } from '../../src/lib/vm/vm-file.mjs'
 
@@ -60,8 +61,8 @@ test('tar is available in this environment', () => {
 
 test('createBackup produces tar.gz with manifest + db + vms + config, records ok', async () => {
   seedVm()
-  initVmDbSync(root, { watch: false })
-  new SettingsRepo(getDb()).set('marker', 'before-backup')
+  await initVmDbSync(root, { watch: false })
+  await new SettingsRepo(getDb()).set('marker', 'before-backup')
 
   const rec = await svc.createBackup({ kind: 'manual' })
   assert.equal(rec.status, 'ok')
@@ -88,7 +89,7 @@ test('createBackup produces tar.gz with manifest + db + vms + config, records ok
 
 test('createBackup does not block the main thread (gateway keeps ticking)', async () => {
   seedVm()
-  initVmDbSync(root, { watch: false })
+  await initVmDbSync(root, { watch: false })
   let ticks = 0
   const timer = setInterval(() => {
     ticks += 1
@@ -104,31 +105,43 @@ test('createBackup does not block the main thread (gateway keeps ticking)', asyn
   assert.ok(ticks > 0, `event loop should tick during backup, got ${ticks}`)
 })
 
-test('restoreBackup rolls data back and creates pre_restore record', async () => {
+test('restoreBackup rolls data back and creates pre_restore record', async (t) => {
   seedVm()
-  initVmDbSync(root, { watch: false })
+  await initVmDbSync(root, { watch: false })
   const keys = new ApiKeyStore({ db: getDb() })
-  const kept = keys.create({ name: 'kept-key' })
+  const logs = new RequestLogStore({ db: getDb() })
+  t.after(() => logs.pauseStatistics())
+  await logs.billingStats()
+  let paused = false
+  svc.onBeforeRestore(async () => {
+    await logs.pauseStatistics()
+    paused = true
+    return () => logs.resumeStatistics()
+  })
+  const kept = await keys.create({ name: 'kept-key' })
 
   const rec = await svc.createBackup({ kind: 'manual' })
 
   // mutate after the backup
-  const lost = keys.create({ name: 'lost-key' })
-  new SettingsRepo(getDb()).set('marker', 'after-backup')
+  const lost = await keys.create({ name: 'lost-key' })
+  await new SettingsRepo(getDb()).set('marker', 'after-backup')
   // wire the rebind like the server does
   let reboundDb = null
   svc.onRestored((db) => {
+    assert.equal(paused, true, 'old statistics connection closed before DB replacement')
     reboundDb = db
     keys.rebind(db)
+    logs.rebind(db)
   })
 
   const out = await svc.restoreBackup(rec.id)
   assert.equal(out.ok, true)
   assert.ok(reboundDb, 'rebind callback should fire')
+  assert.equal((await logs.billingStats()).total.requests, 0)
 
   // state rolled back
-  assert.ok(keys.getById(kept.id), 'pre-backup key survives')
-  assert.equal(keys.getById(lost.id), null, 'post-backup key rolled back')
+  assert.ok(await keys.getById(kept.id), 'pre-backup key survives')
+  assert.equal(await keys.getById(lost.id), null, 'post-backup key rolled back')
   assert.equal(new SettingsRepo(getDb()).get('marker'), null)
 
   // old db file kept on disk as safety net
@@ -137,7 +150,7 @@ test('restoreBackup rolls data back and creates pre_restore record', async () =>
   const preFiles = fs.readdirSync(path.join(dataDir, 'backups'))
   assert.ok(preFiles.length >= 2, 'manual + pre_restore archives on disk')
   // ledger re-registered after restore: pre_restore (and restored manual) visible
-  const ledger = svc.list()
+  const ledger = await svc.list()
   assert.ok(
     ledger.some((r) => r.id === out.pre_restore && r.kind === 'pre_restore'),
     'pre_restore record re-registered in restored DB',
@@ -166,7 +179,7 @@ test('restore fails when stores cannot rebind to the reopened database', async (
 
 test('restore rebuilds vm files from DB mirror for db-only path', async () => {
   seedVm('vm-b2')
-  initVmDbSync(root, { watch: false })
+  await initVmDbSync(root, { watch: false })
   const rec = await svc.createBackup({ kind: 'manual' })
 
   // delete vm file + its row is still in backup db; also delete local file post-backup
@@ -176,7 +189,7 @@ test('restore rebuilds vm files from DB mirror for db-only path', async () => {
   const back = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-b2.json'), 'utf8'))
   // tar snapshot still has the on-disk file from backup time; DB is metadata only.
   assert.equal(back.claude.access_token, 'sk-ant-oat01-BAK')
-  const row = new VmsRepo(getDb()).get('vm-b2')
+  const row = await new VmsRepo(getDb()).get('vm-b2')
   assert.equal(row.access_token, null)
   assert.equal(row.vm.claude.has_access, true)
   assert.equal(row.vm.claude.access_token, undefined)
@@ -194,7 +207,7 @@ test('retention prunes old backups', async () => {
   seedVm()
   const recs = []
   for (let i = 0; i < 4; i++) recs.push(await svc.createBackup({ kind: 'manual' }))
-  const remaining = svc.list().filter((r) => r.kind === 'manual')
+  const remaining = (await svc.list()).filter((r) => r.kind === 'manual')
   assert.equal(remaining.length, 2)
   // newest two kept
   assert.ok(remaining.some((r) => r.id === recs[3].id))
@@ -204,16 +217,16 @@ test('retention prunes old backups', async () => {
   assert.equal(fs.existsSync(recs[1].file_path), false)
 })
 
-test('schedule config defaults on, env override off, updateSchedule persists', () => {
+test('schedule config defaults on, env override off, updateSchedule persists', async () => {
   const cfg = svc.getSchedule()
   assert.equal(cfg.enabled, true)
   assert.equal(cfg.interval_hours, 24)
   assert.equal(cfg.retention, 7)
 
-  svc.updateSchedule({ interval_hours: 6, retention: 3 })
+  await svc.updateSchedule({ interval_hours: 6, retention: 3 })
   assert.equal(svc.getSchedule().interval_hours, 6)
   assert.equal(svc.getSchedule().retention, 3)
-  assert.throws(() => svc.updateSchedule({ interval_hours: 0 }), /interval_hours/)
+  await assert.rejects(() => svc.updateSchedule({ interval_hours: 0 }), /interval_hours/)
 
   process.env.KIN_BACKUP_DISABLED = '1'
   assert.equal(svc.getSchedule().enabled, false)
@@ -221,17 +234,17 @@ test('schedule config defaults on, env override off, updateSchedule persists', (
 
 test('shouldRunScheduled: true when never run, false right after a backup', async () => {
   seedVm()
-  assert.equal(svc.shouldRunScheduled(), true)
+  assert.equal(await svc.shouldRunScheduled(), true)
   await svc.createBackup({ kind: 'scheduled' })
-  assert.equal(svc.shouldRunScheduled(), false)
+  assert.equal(await svc.shouldRunScheduled(), false)
   // pretend 25h elapsed
-  assert.equal(svc.shouldRunScheduled(Date.now() + 25 * 3600_000), true)
+  assert.equal(await svc.shouldRunScheduled(Date.now() + 25 * 3600_000), true)
 })
 
 test('remove deletes record + file', async () => {
   seedVm()
   const rec = await svc.createBackup({ kind: 'manual' })
-  assert.equal(svc.remove(rec.id), true)
+  assert.equal(await svc.remove(rec.id), true)
   assert.equal(fs.existsSync(rec.file_path), false)
-  assert.equal(svc.get(rec.id), null)
+  assert.equal(await svc.get(rec.id), null)
 })

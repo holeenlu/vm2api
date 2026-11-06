@@ -40,12 +40,12 @@ function history() {
   }
 }
 
-test('a signature stays with the account that first returned it', () => {
+test('a signature stays with the account that first returned it', async () => {
   const owners = store()
   const response = { content: [{ type: 'thinking', thinking: 'own chain', signature: OWN }] }
-  assert.equal(recordThinkingOwners(response, 'account-a', owners), 1)
-  recordThinkingOwners(response, 'account-b', owners)
-  const out = filterThinkingForAccount(history(), 'account-a', owners)
+  assert.equal(await recordThinkingOwners(response, 'account-a', owners), 1)
+  await recordThinkingOwners(response, 'account-b', owners)
+  const out = await filterThinkingForAccount(history(), 'account-a', owners)
   const blocks = out.body.messages[1].content
   assert.equal(blocks[0].type, 'thinking')
   assert.equal(blocks[0].signature, OWN)
@@ -62,15 +62,15 @@ test('a signature stays with the account that first returned it', () => {
   )
 })
 
-test('the same foreign signature converts to the same text on a later hop', () => {
+test('the same foreign signature converts to the same text on a later hop', async () => {
   const owners = store()
-  recordThinkingOwners(
+  await recordThinkingOwners(
     { content: [{ type: 'thinking', thinking: 'foreign chain', signature: FOREIGN }] },
     'account-b',
     owners,
   )
-  const first = filterThinkingForAccount(history(), 'account-a', owners)
-  const second = filterThinkingForAccount(history(), 'account-a', owners)
+  const first = await filterThinkingForAccount(history(), 'account-a', owners)
+  const second = await filterThinkingForAccount(history(), 'account-a', owners)
   assert.deepEqual(first.body.messages[1].content[1], second.body.messages[1].content[1])
   assert.equal(
     thinkingSignatureKey({ type: 'thinking', signature: FOREIGN }),
@@ -78,16 +78,16 @@ test('the same foreign signature converts to the same text on a later hop', () =
   )
 })
 
-test('an unreachable database leaves the history untouched', () => {
+test('an unreachable database leaves the history untouched', async () => {
   const body = history()
   const closed = new DatabaseSync(':memory:')
   closed.close()
   const owners = new ThinkingOwnerStore({ db: closed })
-  const out = filterThinkingForAccount(body, 'account-a', owners)
+  const out = await filterThinkingForAccount(body, 'account-a', owners)
   assert.equal(out.body, body)
   assert.equal(out.kept, 4)
   assert.equal(out.converted, 0)
-  assert.equal(recordThinkingOwners(body.messages[1], 'account-a', owners), 4)
+  assert.equal(await recordThinkingOwners(body.messages[1], 'account-a', owners), 4)
 })
 
 const SERVED = 'sig-served-by-account-a-0123456789'
@@ -103,6 +103,7 @@ test('a handler records the served signature and the next account replays it as 
       seen.length
         ? {
             model: 'claude-haiku-4-5',
+            max_tokens: 64,
             messages: [
               { role: 'user', content: 'before' },
               {
@@ -115,7 +116,7 @@ test('a handler records the served signature and the next account replays it as 
               { role: 'user', content: 'after' },
             ],
           }
-        : { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] },
+        : { model: 'claude-haiku-4-5', max_tokens: 64, messages: [{ role: 'user', content: 'hello' }] },
     requireAuth: () => true,
     cfg: {
       rewrite: { enabled: false },
@@ -127,7 +128,7 @@ test('a handler records the served signature and the next account replays it as 
     requestLog: { start: () => ({ request_id: 'thinking-owner', mode: 'normal' }), finish() {} },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
-    apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+    apiKeyStore: { canAccept: (record) => ({ ok: true, record }), acquire: () => ({ ok: true }), release() {} },
     apiScheduler: {},
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
@@ -182,10 +183,10 @@ test('a handler records the served signature and the next account replays it as 
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
-test('dropping the only signed block merges the neighbouring turns', () => {
+test('dropping the only signed block merges the neighbouring turns', async () => {
   const owners = store()
-  recordThinkingOwners({ content: [{ type: 'thinking', thinking: '', signature: FOREIGN }] }, 'account-b', owners)
-  const out = filterThinkingForAccount(
+  await recordThinkingOwners({ content: [{ type: 'thinking', thinking: '', signature: FOREIGN }] }, 'account-b', owners)
+  const out = await filterThinkingForAccount(
     {
       messages: [
         { role: 'user', content: 'before' },

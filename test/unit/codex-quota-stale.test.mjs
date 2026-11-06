@@ -76,16 +76,16 @@ async function hop(root, { headers = {}, code = 'usage_limit_reached', status = 
   return result
 }
 
-function values(root) {
+async function values(root) {
   const vm = getVm(root, 'vm-a')
-  const summary = listVms(root).find((v) => v.id === 'vm-a')
+  const summary = (await listVms(root)).find((v) => v.id === 'vm-a')
   return { vm, summary, windows: summary.codex_usage.windows.map((w) => w.used_percent) }
 }
 
 test('quota error without headers invalidates cached below-cap percentages in the actual protocol path', async (t) => {
   const root = fixture(t)
   await hop(root)
-  const { vm, summary, windows } = values(root)
+  const { vm, summary, windows } = await values(root)
   assert.deepEqual(windows, [null, null])
   assert.equal(summary.utilization_5h, null)
   assert.equal(summary.utilization_7d, null)
@@ -95,7 +95,7 @@ test('quota error without headers invalidates cached below-cap percentages in th
   assert.ok(until > Date.now())
   assert.equal(codexQuotaPark(vm.codex.extra, until - 1).limited, true)
   assert.equal(codexQuotaPark(vm.codex.extra, until + 1).limited, false)
-  assert.deepEqual(values(root).windows, [null, null], 'park expiry cannot resurrect stale percentages')
+  assert.deepEqual((await values(root)).windows, [null, null], 'park expiry cannot resurrect stale percentages')
 })
 
 test('quota error keeps fresh partial headers but does not revive an old alias for the missing window', async (t) => {
@@ -107,7 +107,7 @@ test('quota error keeps fresh partial headers but does not revive an old alias f
       'x-codex-primary-reset-after-seconds': '120',
     },
   })
-  const { vm, windows } = values(root)
+  const { vm, windows } = await values(root)
   assert.deepEqual(windows, [100, null])
   assert.equal(vm.codex.usage.quota.utilization_5h, 1)
   assert.ok(Date.parse(vm.codex.extra.codex_limited_until) > Date.now() + CODEX_DEFAULT_PARK_MS)
@@ -123,7 +123,7 @@ test('quota error preserves both authoritative window percentages, including a b
       'x-codex-secondary-window-minutes': '10080',
     },
   })
-  assert.deepEqual(values(root).windows, [100, 31])
+  assert.deepEqual((await values(root)).windows, [100, 31])
 })
 
 test('reset-only quota headers must not restore cached utilization through normalized aliases', async (t) => {
@@ -134,19 +134,19 @@ test('reset-only quota headers must not restore cached utilization through norma
       'x-codex-primary-window-minutes': '300',
     },
   })
-  assert.deepEqual(values(root).windows, [null, null])
+  assert.deepEqual((await values(root)).windows, [null, null])
 })
 
 test('generic rate limit is not proof that quota percentages are stale', async (t) => {
   const root = fixture(t)
   await hop(root, { code: 'rate_limit_exceeded' })
-  assert.deepEqual(values(root).windows, [20, 30])
+  assert.deepEqual((await values(root)).windows, [20, 30])
 })
 
 test('success without quota headers keeps the last measured percentages', async (t) => {
   const root = fixture(t)
   await hop(root, { status: 200 })
-  assert.deepEqual(values(root).windows, [20, 30])
+  assert.deepEqual((await values(root)).windows, [20, 30])
 })
 
 test('a known capped window is not erased or released by a headerless quota error', async (t) => {
@@ -158,27 +158,27 @@ test('a known capped window is not erased or released by a headerless quota erro
     codex_7d_reset_at: reset,
   })
   // A concurrent hop can finish after another request recorded a capped window.
-  persistCodexUsage(root, 'vm-a', { quotaExceeded: true, limitedUntil: Date.now() + CODEX_DEFAULT_PARK_MS })
-  const { vm, windows } = values(root)
+  await persistCodexUsage(root, 'vm-a', { quotaExceeded: true, limitedUntil: Date.now() + CODEX_DEFAULT_PARK_MS })
+  const { vm, windows } = await values(root)
   assert.deepEqual(windows, [null, 100])
   assert.equal(codexQuotaPark(vm.codex.extra, Date.now() + 120_000).limited, true)
 })
 
-test('normal header ingestion still merges a missing window instead of discarding it', (t) => {
+test('normal header ingestion still merges a missing window instead of discarding it', async (t) => {
   const root = fixture(t)
-  persistCodexUsage(root, 'vm-a', {
+  await persistCodexUsage(root, 'vm-a', {
     headers: {
       'x-codex-primary-used-percent': '25',
       'x-codex-primary-window-minutes': '300',
     },
   })
-  assert.deepEqual(values(root).windows, [25, 30])
+  assert.deepEqual((await values(root)).windows, [25, 30])
 })
 
 test('a later real header sample restores values without a sticky invalidation flag', async (t) => {
   const root = fixture(t)
   await hop(root)
-  persistCodexUsage(root, 'vm-a', {
+  await persistCodexUsage(root, 'vm-a', {
     headers: {
       'x-codex-primary-used-percent': '2',
       'x-codex-primary-window-minutes': '300',
@@ -186,14 +186,14 @@ test('a later real header sample restores values without a sticky invalidation f
       'x-codex-secondary-window-minutes': '10080',
     },
   })
-  assert.deepEqual(values(root).windows, [2, 32])
+  assert.deepEqual((await values(root)).windows, [2, 32])
   assert.equal(getVm(root, 'vm-a').codex.extra.codex_limited_until, undefined)
 })
 
 test('manual quota query restores normalized aliases after a headerless quota error', async (t) => {
   const root = fixture(t)
   await hop(root)
-  persistCodexQuotaSnapshot(root, 'vm-a', {
+  await persistCodexQuotaSnapshot(root, 'vm-a', {
     extra: {
       codex_primary_used_percent: 100,
       codex_primary_window_minutes: 300,
@@ -203,10 +203,10 @@ test('manual quota query restores normalized aliases after a headerless quota er
       codex_7d_used_percent: 35,
     },
   })
-  assert.deepEqual(values(root).windows, [100, 35])
+  assert.deepEqual((await values(root)).windows, [100, 35])
 })
 
-test('legacy normalized-only usage keeps a known cap without creating role fields', (t) => {
+test('legacy normalized-only usage keeps a known cap without creating role fields', async (t) => {
   const reset = new Date(Date.now() + 3_600_000).toISOString()
   const root = fixture(t, {
     codex_primary_used_percent: undefined,
@@ -216,8 +216,8 @@ test('legacy normalized-only usage keeps a known cap without creating role field
     codex_7d_used_percent: 100,
     codex_7d_reset_at: reset,
   })
-  persistCodexUsage(root, 'vm-a', { quotaExceeded: true, limitedUntil: Date.now() + CODEX_DEFAULT_PARK_MS })
-  assert.deepEqual(values(root).windows, [null, 100])
+  await persistCodexUsage(root, 'vm-a', { quotaExceeded: true, limitedUntil: Date.now() + CODEX_DEFAULT_PARK_MS })
+  assert.deepEqual((await values(root)).windows, [null, 100])
 })
 
 test('fresh zero percent is a measurement, not a missing reading', async (t) => {
@@ -228,13 +228,13 @@ test('fresh zero percent is a measurement, not a missing reading', async (t) => 
       'x-codex-primary-window-minutes': '300',
     },
   })
-  assert.deepEqual(values(root).windows, [0, null])
+  assert.deepEqual((await values(root)).windows, [0, null])
 })
 
-test('manual quota refresh drops a stale codex_limited_until when windows are below cap', (t) => {
+test('manual quota refresh drops a stale codex_limited_until when windows are below cap', async (t) => {
   const parkedUntil = new Date(Date.now() + 5 * 86_400_000).toISOString()
   const root = fixture(t, { codex_limited_until: parkedUntil })
-  persistCodexQuotaSnapshot(root, 'vm-a', {
+  await persistCodexQuotaSnapshot(root, 'vm-a', {
     extra: {
       codex_primary_used_percent: 0,
       codex_primary_window_minutes: 10080,

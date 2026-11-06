@@ -47,15 +47,19 @@ class RuntimeRepo {
   constructor(accounts = null) {
     this.accounts = accounts
   }
-  schedulingSnapshot(ids) {
+  async schedulingSnapshot(ids) {
     return new Map(
-      ids.map((id) => [
-        id,
-        {
-          state: this.get(id),
-          account: this.accounts?.get(id) ? { status: 'active', schedulable: true, ...this.accounts.get(id) } : null,
-        },
-      ]),
+      await Promise.all(
+        ids.map(async (id) => [
+          id,
+          {
+            state: this.get(id),
+            account: (await this.accounts?.get(id))
+              ? { status: 'active', schedulable: true, ...(await this.accounts.get(id)) }
+              : null,
+          },
+        ]),
+      ),
     )
   }
   writeHeartbeat(input) {
@@ -394,7 +398,7 @@ test('two first sessions of one machine claim the same VM before sticky affinity
   assert.equal(a.vmId, b.vmId)
   assert.equal(pool.planner.openCount(a.vmId), 0)
   assert.equal(pool.planner.openCount(a.vmId === 'vm-01' ? 'vm-02' : 'vm-01'), 0)
-  assert.equal(sticky.resolve(deviceKey)?.vmId, a.vmId)
+  assert.equal((await sticky.resolve(deviceKey))?.vmId, a.vmId)
 })
 
 test('an expired or unbound machine affinity does not send the next session back to the old VM', async (t) => {
@@ -407,12 +411,12 @@ test('an expired or unbound machine affinity does not send the next session back
   const pool = scheduler(root, { seat_grace_ms: 0 })
   pool.stickyRouter = sticky
   const deviceKey = sticky.canonicalDeviceKey('machine-1')
-  sticky.bindDeviceAffinity(deviceKey, { accountId: 'account-1', vmId: 'vm-01' }, { countHit: false })
-  sticky.repo.upsert(deviceKey, {
-    ...sticky.repo.get(deviceKey),
+  await sticky.bindDeviceAffinity(deviceKey, { accountId: 'account-1', vmId: 'vm-01' }, { countHit: false })
+  await sticky.repo.upsert(deviceKey, {
+    ...(await sticky.repo.get(deviceKey)),
     expires_at: Date.now() - 1,
   })
-  assert.equal(pool.machineHome(deviceKey), '')
+  assert.equal(await pool.machineHome(deviceKey), '')
   const next = await pool.selectAndReserve({
     model: MODEL,
     seatKey: 'seat:sess:after-expiry',
@@ -423,9 +427,9 @@ test('an expired or unbound machine affinity does not send the next session back
   assert.notEqual(next.selectionReason, 'device-affinity')
   next.release()
   pool.planner.free(pool.planner.seatOf(planned('after-expiry')))
-  sticky.bindDeviceAffinity(deviceKey, { accountId: 'account-2', vmId: 'vm-02' }, { countHit: false })
-  sticky.unbind(deviceKey)
-  assert.equal(pool.machineHome(deviceKey), '')
+  await sticky.bindDeviceAffinity(deviceKey, { accountId: 'account-2', vmId: 'vm-02' }, { countHit: false })
+  await sticky.unbind(deviceKey)
+  assert.equal(await pool.machineHome(deviceKey), '')
   const moved = await pool.selectAndReserve({
     model: MODEL,
     seatKey: 'seat:sess:after-unbind',
@@ -434,7 +438,7 @@ test('an expired or unbound machine affinity does not send the next session back
   })
   assert.equal(moved.ok, true)
   assert.notEqual(moved.selectionReason, 'device-affinity')
-  assert.equal(sticky.resolve(deviceKey)?.vmId, moved.vmId)
+  assert.equal((await sticky.resolve(deviceKey))?.vmId, moved.vmId)
   moved.release()
   pool.planner.free(pool.planner.seatOf(planned('after-unbind')))
 })
@@ -508,6 +512,35 @@ test('queue timeout is pool_queue_timeout', async (t) => {
   assert.ok(Date.now() - started >= 70)
   assert.equal(pool.planner.pending(), 0)
   held.release()
+})
+
+test('a wait the queue cannot drain in time answers at once with the estimate as Retry-After', async (t) => {
+  const pool = setup(t, [{ id: 'vm-01', policy: { sessionSlots: 1, maxConcurrency: 1 } }], { fallback: 2000 })
+  for (let i = 0; i < 5; i++) pool.holdTimes.note('vm-01', 60_000)
+  const held = await seat(pool, 'd1')
+  const started = Date.now()
+  const late = await seat(pool, 'd2')
+  assert.ok(Date.now() - started < 500)
+  assert.equal(late.ok, false)
+  assert.equal(late.reason, 'pool_wait_estimate_exceeded')
+  assert.equal(late.estimated_wait_ms, 60_000)
+  assert.equal(late.retry_after_ms, 60_000)
+  assert.equal(pool.planner.pending(), 0)
+  held.release()
+})
+
+test('a wait that fits the budget still queues and is served', async (t) => {
+  const pool = setup(t, [{ id: 'vm-01', policy: { sessionSlots: 1, maxConcurrency: 1 } }], { fallback: 2000 })
+  for (let i = 0; i < 5; i++) pool.holdTimes.note('vm-01', 100)
+  const held = await seat(pool, 'd1')
+  const next = seat(pool, 'd2')
+  await waitFor(() => pool.planner.globalQueue.length === 1)
+  held.release()
+  pool.planner.free(pool.planner.seatOf(planned('d1')))
+  const got = await next
+  assert.equal(got.ok, true)
+  got.release()
+  pool.planner.free(pool.planner.seatOf(planned('d2')))
 })
 
 test('queue_max=2: the 3rd waiter is refused at once; a freed place admits the next', async (t) => {
@@ -674,7 +707,7 @@ test('a sticky seat wait leaves a home VM that stopped being eligible', async (t
   assert.equal(heldB.vmId, 'vm-02')
   const waiting = seat(pool, 'c', { deviceVmId: 'vm-01' })
   await waitFor(() => (pool.planner.vmQueues.get('vm-01') || []).some((ticket) => ticket.seatKey === planned('c')))
-  pool.runtimeRepo.upsert({ account_id: 'account-1', rate_limit_reset_at: Date.now() + 60_000 })
+  await pool.runtimeRepo.upsert({ account_id: 'account-1', rate_limit_reset_at: Date.now() + 60_000 })
   await waitFor(() => pool.planner.globalQueue.some((ticket) => ticket.seatKey === planned('c')), 4500)
   assert.equal(
     (pool.planner.vmQueues.get('vm-01') || []).some((ticket) => ticket.seatKey === planned('c')),
@@ -729,11 +762,11 @@ function gatedQuota(root) {
   })
 }
 
-function gatedSetup(t, specs) {
+async function gatedSetup(t, specs) {
   const root = project(specs)
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const quota = gatedQuota(root)
-  specs.forEach((vm, index) => quota.ensure({ account_id: `account-${index + 1}`, vm_id: vm.id }))
+  for (const [index, vm] of specs.entries()) await quota.ensure({ account_id: `account-${index + 1}`, vm_id: vm.id })
   const pool = new PoolScheduler({
     projectRoot: root,
     runtimeRepo: new RuntimeRepo(quota.repo),
@@ -746,22 +779,22 @@ function gatedSetup(t, specs) {
   return { pool, quota }
 }
 
-function setUtil5h(quota, accountId, value) {
-  quota.ingestHeaders(accountId, {
+async function setUtil5h(quota, accountId, value) {
+  await quota.ingestHeaders(accountId, {
     'anthropic-ratelimit-unified-5h-utilization': String(value),
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
 }
 
 test('near the gate a seated device waits on its home, one call at a time, and never moves', async (t) => {
-  const { pool, quota } = gatedSetup(t, [
+  const { pool, quota } = await gatedSetup(t, [
     { id: 'vm-01', policy: { sessionSlots: 4 } },
     { id: 'vm-02', policy: { sessionSlots: 4 } },
   ])
   const first = await seat(pool, 'dev', { deviceVmId: 'vm-01' })
   assert.equal(first.vmId, 'vm-01')
   // 76% of an 80% line: inside the 5-point band, below the line.
-  setUtil5h(quota, first.accountId, 0.76)
+  await setUtil5h(quota, first.accountId, 0.76)
   const second = seat(pool, 'dev')
   await waitFor(() => (pool.planner.vmQueues.get('vm-01') || []).some((ticket) => ticket.seatKey === planned('dev')))
   assert.equal(quota.inflight.get(first.accountId), 1, 'the second call does not run beside the first')
@@ -773,7 +806,7 @@ test('near the gate a seated device waits on its home, one call at a time, and n
   assert.equal(pool.planner.openCount('vm-01'), 0)
   // The dialog ended, so the next turn opens a seat again. Inside the overshoot
   // the old home is draining and an open VM is preferred.
-  setUtil5h(quota, first.accountId, 0.83)
+  await setUtil5h(quota, first.accountId, 0.83)
   const third = await seat(pool, 'dev', { deviceVmId: 'vm-01', allowWait: false })
   assert.equal(third.vmId, 'vm-02')
   assert.equal(third.seatMoved, false)
@@ -782,13 +815,13 @@ test('near the gate a seated device waits on its home, one call at a time, and n
 })
 
 test('at line plus overshoot a seated device leaves and its old seat frees at once', async (t) => {
-  const { pool, quota } = gatedSetup(t, [
+  const { pool, quota } = await gatedSetup(t, [
     { id: 'vm-01', policy: { sessionSlots: 4 } },
     { id: 'vm-02', policy: { sessionSlots: 4 } },
   ])
   const first = await seat(pool, 'dev', { deviceVmId: 'vm-01' })
   first.release()
-  setUtil5h(quota, first.accountId, 0.85)
+  await setUtil5h(quota, first.accountId, 0.85)
   const moved = await seat(pool, 'dev', { allowWait: false })
   assert.equal(moved.ok, true)
   assert.equal(moved.vmId, 'vm-02')
@@ -799,11 +832,11 @@ test('at line plus overshoot a seated device leaves and its old seat frees at on
 })
 
 test('a new device takes an open VM before a draining one, and a draining one when nothing else is open', async (t) => {
-  const { pool, quota } = gatedSetup(t, [
+  const { pool, quota } = await gatedSetup(t, [
     { id: 'vm-01', policy: { sessionSlots: 1 } },
     { id: 'vm-02', policy: { sessionSlots: 1 } },
   ])
-  setUtil5h(quota, 'account-1', 0.78)
+  await setUtil5h(quota, 'account-1', 0.78)
   const fresh = await seat(pool, 'new', { deviceVmId: 'vm-01', allowWait: false })
   assert.equal(fresh.vmId, 'vm-02', 'sticky home in the band does not beat an open VM')
   const last = await seat(pool, 'other', { allowWait: false })

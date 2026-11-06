@@ -16,7 +16,7 @@ function usageCache(probe) {
   }
 }
 
-function fixture(t, { mode = 'setup-token', headers = true, failed = false } = {}) {
+async function fixture(t, { mode = 'setup-token', headers = true, failed = false } = {}) {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-card-'))
   fs.mkdirSync(path.join(project, 'vms'))
   fs.writeFileSync(
@@ -31,7 +31,7 @@ function fixture(t, { mode = 'setup-token', headers = true, failed = false } = {
   const dataDir = path.join(project, 'data')
   let db = createDatabase({ dataDir })
   let quota = new AccountQuota({ db })
-  const acc = quota.ensure({ account_id: 'account-test', vm_id: 'vm-02', max_concurrency: 20 })
+  const acc = await quota.ensure({ account_id: 'account-test', vm_id: 'vm-02', max_concurrency: 20 })
   acc.unified.headers = headers
     ? { '5h': { utilization: 0.15, status: 'allowed' }, sampled_at: '2026-09-20T00:00:00Z' }
     : {}
@@ -44,7 +44,7 @@ function fixture(t, { mode = 'setup-token', headers = true, failed = false } = {
     }
     acc.unified.usage_rate_limited_until = '2099-01-01T00:00:00Z'
   }
-  quota.repo.save(acc)
+  await quota.repo.save(acc)
   t.after(() => {
     db.close()
     fs.rmSync(project, { recursive: true, force: true })
@@ -66,7 +66,7 @@ function fixture(t, { mode = 'setup-token', headers = true, failed = false } = {
 }
 
 test('Setup Token probe persists the card check time/source across DB reopen and detail reload', async (t) => {
-  const f = fixture(t)
+  const f = await fixture(t)
   const probe = {
     ok: true,
     source: 'official-cc-usage',
@@ -86,8 +86,8 @@ test('Setup Token probe persists the card check time/source across DB reopen and
 })
 
 test('cached-header check preserves active-probe failures, backoff, quota and counters', async (t) => {
-  const f = fixture(t, { failed: true })
-  const before = f.quota.repo.get('account-test')
+  const f = await fixture(t, { failed: true })
+  const before = await f.quota.repo.get('account-test')
   await buildProbeOne({
     ...f.args,
     accountQuota: f.quota,
@@ -100,7 +100,7 @@ test('cached-header check preserves active-probe failures, backoff, quota and co
       error: 'rate limited',
     }),
   })
-  const after = f.quota.repo.get('account-test')
+  const after = await f.quota.repo.get('account-test')
   assert.equal(after.unified.last_probe_check?.ok, true)
   assert.equal(after.unified.last_probe?.ok, false)
   assert.equal(after.unified.last_probe?.error, 'invalid_grant')
@@ -109,7 +109,7 @@ test('cached-header check preserves active-probe failures, backoff, quota and co
 })
 
 test('no header samples reports unavailable and persists the attempt without fake success', async (t) => {
-  const f = fixture(t, { headers: false })
+  const f = await fixture(t, { headers: false })
   const probe = {
     ok: false,
     source: 'official-cc-usage',
@@ -124,15 +124,15 @@ test('no header samples reports unavailable and persists the attempt without fak
   assert.equal(check.at, result.probed_at)
   assert.equal(check.ok, false)
   assert.equal(check.data_at, result.probed_at)
-  assert.equal(f.quota.repo.get('account-test').unified.last_probe?.ok, false)
+  assert.equal((await f.quota.repo.get('account-test')).unified.last_probe?.ok, false)
   const detail = await f.detail(f.reopen())
   assert.equal(detail.vm.account_tier, 'pro')
   assert.equal(detail.vm.usage_has_fable, null)
 })
 
 test('Setup Token Fable hop does not classify the plan without complete official usage', async (t) => {
-  const f = fixture(t)
-  f.quota.setAccountTier('account-test', 'pro')
+  const f = await fixture(t)
+  await f.quota.setAccountTier('account-test', 'pro')
   const result = (
     await buildProbeOne({
       ...f.args,
@@ -144,17 +144,17 @@ test('Setup Token Fable hop does not classify the plan without complete official
     })
   ).data
   assert.equal(result.account_tier, 'pro')
-  assert.equal(f.quota.repo.get('account-test').unified.account_tier, 'pro')
-  assert.equal(f.quota.repo.get('account-test').unified.usage_has_fable, undefined)
-  assert.equal(f.quota.repo.get('account-test').unified.fable.ok, false)
-  assert.equal(f.quota.repo.get('account-test').unified.fable.plan_denied, false)
+  assert.equal((await f.quota.repo.get('account-test')).unified.account_tier, 'pro')
+  assert.equal((await f.quota.repo.get('account-test')).unified.usage_has_fable, undefined)
+  assert.equal((await f.quota.repo.get('account-test')).unified.fable.ok, false)
+  assert.equal((await f.quota.repo.get('account-test')).unified.fable.plan_denied, false)
   const detail = await f.detail(f.reopen())
   assert.equal(detail.vm.account_tier, 'pro')
 })
 
 test('Setup Token usage scope failure reports auth scope and preserves history', async (t) => {
-  const f = fixture(t)
-  f.quota.setAccountTier('account-test', 'max', { source: 'usage' })
+  const f = await fixture(t)
+  await f.quota.setAccountTier('account-test', 'max', { source: 'usage' })
   let fableCalled = false
   const result = (
     await buildProbeOne({
@@ -181,7 +181,7 @@ test('Setup Token usage scope failure reports auth scope and preserves history',
   assert.match(result.error, /完整 OAuth|user:profile/)
   assert.equal(result.account_tier, 'max')
   assert.equal(fableCalled, false)
-  const acc = f.quota.repo.get('account-test')
+  const acc = await f.quota.repo.get('account-test')
   assert.equal(acc.unified.account_tier, 'max')
   assert.equal(acc.unified.fable, undefined)
   assert.equal(acc.unified.last_probe.ok, false)
@@ -189,7 +189,7 @@ test('Setup Token usage scope failure reports auth scope and preserves history',
 })
 
 test('official OAuth probe still ingests real usage and exposes its actual result to the card', async (t) => {
-  const f = fixture(t, { mode: 'oauth' })
+  const f = await fixture(t, { mode: 'oauth' })
   const probe = {
     ok: false,
     source: 'official-cc-usage',
@@ -227,7 +227,7 @@ test('probe errors remain text across the response, persisted checks and detail 
   ]
   for (const { expected, ...errors } of cases) {
     await t.test(JSON.stringify(errors), async (t) => {
-      const f = fixture(t, { mode: 'oauth' })
+      const f = await fixture(t, { mode: 'oauth' })
       const result = (
         await buildProbeOne({
           ...f.args,
@@ -256,7 +256,7 @@ test('probe errors remain text across the response, persisted checks and detail 
 })
 
 test('confirmed usage revoke parks the VM and reports revoked status', async (t) => {
-  const f = fixture(t, { mode: 'oauth' })
+  const f = await fixture(t, { mode: 'oauth' })
   const result = (
     await buildProbeOne({
       ...f.args,
@@ -281,12 +281,13 @@ test('confirmed usage revoke parks the VM and reports revoked status', async (t)
 })
 
 test('complete Pro usage replaces stale Max windows in persisted panel data', async (t) => {
-  const f = fixture(t, { mode: 'oauth' })
-  f.quota.ingestOAuthUsage('account-test', {
+  const f = await fixture(t, { mode: 'oauth' })
+  await f.quota.ingestOAuthUsage('account-test', {
     ok: true,
     usage_status: 200,
     limits_present: true,
     usage_has_fable: true,
+    probed_at: '2026-09-25T12:00:00Z',
     seven_day_oi: { utilization: 0.2, resets_at: '2099-01-01T00:00:00Z' },
   })
   const result = (
@@ -311,4 +312,33 @@ test('complete Pro usage replaces stale Max windows in persisted panel data', as
   assert.equal(detail.vm.account_tier, 'pro')
   assert.equal(detail.vm.usage_has_fable, false)
   assert.equal(detail.vm.utilization_7d_oi, null)
+})
+
+test('automatic usage refresh never runs a Fable entitlement inference', async (t) => {
+  const f = await fixture(t)
+  let fableCalls = 0
+  const result = await buildProbeOne({
+    ...f.args,
+    accountQuota: f.quota,
+    probeEntitlement: false,
+    usageCache: usageCache({
+      ok: true,
+      source: 'official-cc-usage',
+      limits_present: true,
+      probed_at: new Date().toISOString(),
+      five_hour: { utilization: 0.23, resets_at: '2099-01-01T00:00:00Z', status: 'allowed' },
+      seven_day: { utilization: 0.45, resets_at: '2099-01-02T00:00:00Z', status: 'allowed' },
+      seven_day_oi: { utilization: 0.67, resets_at: '2099-01-02T00:00:00Z', status: 'allowed' },
+      usage_has_fable: true,
+    }),
+    fableProbe: async () => {
+      fableCalls++
+      return {}
+    },
+  })
+  assert.equal(fableCalls, 0)
+  assert.equal(result.data.fable_probed, false)
+  assert.equal(result.data.quota.utilization_5h, 0.23)
+  assert.equal(result.data.quota.utilization_7d, 0.45)
+  assert.equal(result.data.quota.utilization_7d_oi, 0.67)
 })

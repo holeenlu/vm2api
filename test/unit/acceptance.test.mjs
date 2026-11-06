@@ -44,7 +44,7 @@ const VM_IDENTITY = {
 }
 
 // ---------- fixtures load ----------
-test('fixtures: pkt-001/002/003 exist and have inbound_body', () => {
+test('fixtures: pkt-001/002/003 exist and have inbound_body', async () => {
   for (const n of [
     'pkt-001-openai.chat.completions.json',
     'pkt-002-anthropic.messages.json',
@@ -57,7 +57,7 @@ test('fixtures: pkt-001/002/003 exist and have inbound_body', () => {
 })
 
 // ---------- protocol convert from captures ----------
-test('pkt-001 openai.chat → Claude preserves user text', () => {
+test('pkt-001 openai.chat → Claude preserves user text', async () => {
   const pkt = loadPkt('pkt-001-openai.chat.completions.json')
   const { claude } = toClaudeMessages('openai.chat', pkt.inbound_body, {})
   assert.ok(claude.messages?.length)
@@ -66,7 +66,7 @@ test('pkt-001 openai.chat → Claude preserves user text', () => {
   assert.ok(!('tools' in claude) || claude.tools === undefined || Array.isArray(claude.tools))
 })
 
-test('pkt-002 anthropic.messages passthrough preserves user text', () => {
+test('pkt-002 anthropic.messages passthrough preserves user text', async () => {
   const pkt = loadPkt('pkt-002-anthropic.messages.json')
   const { claude } = toClaudeMessages('anthropic.messages', pkt.inbound_body, {})
   const text = JSON.stringify(claude.messages)
@@ -74,7 +74,7 @@ test('pkt-002 anthropic.messages passthrough preserves user text', () => {
   assert.equal(claude.max_tokens, 32)
 })
 
-test('pkt-003 openai.responses → Claude preserves user text', () => {
+test('pkt-003 openai.responses → Claude preserves user text', async () => {
   const pkt = loadPkt('pkt-003-openai.responses.json')
   const { claude } = toClaudeMessages('openai.responses', pkt.inbound_body, {})
   const text = JSON.stringify(claude.messages)
@@ -82,14 +82,14 @@ test('pkt-003 openai.responses → Claude preserves user text', () => {
 })
 
 // ---------- identity replace / body preserve ----------
-test('identity replace covers device/account/session/settings', () => {
+test('identity replace covers device/account/session/settings', async () => {
   assert.deepEqual(
     [...IDENTITY_REPLACE],
     ['device_id', 'account_uuid', 'session_id', 'authorization', 'fingerprint', 'settings'],
   )
 })
 
-test('identity replace keeps slot device_id; unofficial session is minted; tools kept', () => {
+test('identity replace keeps slot device_id; unofficial session is minted; tools kept', async () => {
   const pkt = loadPkt('synth-tools-metadata.anthropic.json')
   const official = officialMessagesBody(pkt.inbound_body)
   official.metadata = {
@@ -105,7 +105,7 @@ test('identity replace keeps slot device_id; unofficial session is minted; tools
   assert.match(uid.session_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 })
 
-test('official Claude Code identity replace keeps caller session under passthrough', () => {
+test('official Claude Code identity replace keeps caller session under passthrough', async () => {
   const pkt = loadPkt('synth-tools-metadata.anthropic.json')
   const official = officialMessagesBody(pkt.inbound_body)
   official.metadata = {
@@ -125,7 +125,7 @@ test('official Claude Code identity replace keeps caller session under passthrou
   assert.equal(uid.session_id, 'caller-sess')
 })
 
-test('official Claude Code identity replace rebuilds caller session by default', () => {
+test('official Claude Code identity replace rebuilds caller session by default', async () => {
   const pkt = loadPkt('synth-tools-metadata.anthropic.json')
   const official = officialMessagesBody(pkt.inbound_body)
   official.metadata = {
@@ -137,7 +137,7 @@ test('official Claude Code identity replace rebuilds caller session by default',
   assert.match(uid.session_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 })
 
-test('identity replace drops client settings and machine identity', () => {
+test('identity replace drops client settings and machine identity', async () => {
   const body = {
     model: 'claude-haiku-4-5-20251001',
     messages: [{ role: 'user', content: 'hi' }],
@@ -150,7 +150,7 @@ test('identity replace drops client settings and machine identity', () => {
   assert.equal(out.metadata.machine_id, undefined)
 })
 
-test('workspace defaults to client', () => {
+test('workspace defaults to client', async () => {
   assert.equal(resolveWorkspaceMode({}, {}, ''), 'client')
   assert.equal(resolveWorkspaceMode({ headers: { 'x-kin-workspace': 'vm' } }, {}, ''), 'vm')
 })
@@ -170,11 +170,11 @@ test('streamAnthropicMessages host hop is disabled', async () => {
 })
 
 // ---------- OAuth single writer (temp vm.json, fake tokens) ----------
-test('persistOauthToVm is the writer for fake oauth fields', () => {
+test('persistOauthToVm is the writer for fake oauth fields', async () => {
   const dir = fs.mkdtempSync(path.join('/tmp', 'kin-oauth-'))
   const vmPath = path.join(dir, 'vm-test.json')
   fs.writeFileSync(vmPath, JSON.stringify({ id: 'vm-test', claude: {} }, null, 2))
-  persistOauthToVm(vmPath, {
+  await persistOauthToVm(vmPath, {
     access_token: 'sk-ant-oat01-TESTONLY',
     refresh_token: 'rt-TESTONLY',
     expires_at: Date.now() + 3600_000,
@@ -193,7 +193,7 @@ test('persistOauthToVm is the writer for fake oauth fields', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('normalizeOauth maps alternate field names', () => {
+test('normalizeOauth maps alternate field names', async () => {
   const n = normalizeOauth({
     accessToken: 'a',
     refreshToken: 'b',
@@ -207,7 +207,7 @@ test('normalizeOauth maps alternate field names', () => {
 })
 
 // ---------- official body allowlist keeps business fields ----------
-test('officialMessagesBody keeps tools/system/messages from synth', () => {
+test('officialMessagesBody keeps tools/system/messages from synth', async () => {
   const pkt = loadPkt('synth-tools-metadata.anthropic.json')
   const out = officialMessagesBody(pkt.inbound_body)
   assert.ok(out.messages)

@@ -42,7 +42,7 @@ export function poolProxyUnavailable(hit) {
   return !hit.enabled || hit.status === 'dead' || hit.status === 'fail'
 }
 
-export function resolveImportProxy({ vm, proxyPool, overrideUrl = null } = {}) {
+export async function resolveImportProxy({ vm, proxyPool, overrideUrl = null } = {}) {
   const hit = poolHitForVm(proxyPool, vm)
   const ipv6Enabled = proxyPool?.snapshot?.().config?.ipv6_enabled ?? configuredIpv6Enabled()
   const blocked = proxyBlockedReason(overrideUrl ? { url: overrideUrl } : hit || vm?.proxy, ipv6Enabled)
@@ -55,7 +55,8 @@ export function resolveImportProxy({ vm, proxyPool, overrideUrl = null } = {}) {
   if (overrideUrl) {
     return { ok: true, proxyUrl: boundProxyUrl({ url: overrideUrl }), blocked: false, reason: null }
   }
-  const allocated = vm?.id && typeof proxyPool?.getProxyForVm === 'function' ? proxyPool.getProxyForVm(vm.id) : null
+  const allocated =
+    vm?.id && typeof proxyPool?.getProxyForVm === 'function' ? await proxyPool.getProxyForVm(vm.id) : null
   if (isLocalEgressProxy(hit) || isLocalEgressProxy(allocated) || isLocalEgressProxy(vm?.proxy)) {
     let proxyUrl
     try {

@@ -22,8 +22,19 @@ import {
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { evaluateOpenAIQuotaGate } from '../../src/lib/pool/openai-quota-policy.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { setDetachedCodexSettings } from '../../src/lib/executor/settings-store.mjs'
 
-beforeEach(() => resetOpenAIAccountRuntime())
+// Codex 本地设置 credit_overage 默认关闭（控制面设置存储，P4.2；本文件不打开数据库，用未接数据库时的设置）；
+// 本文件其余用例验证开启后的点数放行，关闭时的停放单独验证。
+function setCreditOverage(enabled) {
+  setDetachedCodexSettings({ credit_overage: enabled })
+}
+process.on('exit', () => setDetachedCodexSettings(null))
+
+beforeEach(() => {
+  resetOpenAIAccountRuntime()
+  setCreditOverage(true)
+})
 
 const NOW = Date.parse('2026-10-17T12:00:00Z')
 const WEEK_RESET = new Date(NOW + 3 * 86_400_000).toISOString()
@@ -126,7 +137,7 @@ const WEEK_SPENT_HEADERS = {
   'x-codex-secondary-reset-after-seconds': '3600',
 }
 
-test('credits normalize like the Codex CLI and keep the balance as a string', () => {
+test('credits normalize like the Codex CLI and keep the balance as a string', async () => {
   const long = '123456789012345678901234.000000000000000000000001'
   assert.deepEqual(normalizeCodexCredits({ has_credits: true, unlimited: false, balance: long }, NOW), {
     has_credits: true,
@@ -147,7 +158,7 @@ test('credits normalize like the Codex CLI and keep the balance as a string', ()
   assert.equal(codexCreditsFromHeaders({ 'x-codex-credits-has-credits': 'true' }, NOW), null)
 })
 
-test('spendable means fresh and either has_credits or unlimited; a hidden balance still counts', () => {
+test('spendable means fresh and either has_credits or unlimited; a hidden balance still counts', async () => {
   assert.equal(hasSpendableCodexCredits(slot({ credits: credits({ balance: null }) }), NOW), true)
   assert.equal(hasSpendableCodexCredits(slot({ credits: credits({ has_credits: false, unlimited: true }) }), NOW), true)
   assert.equal(hasSpendableCodexCredits(slot({ credits: credits({ has_credits: false, balance: '0' }) }), NOW), false)
@@ -158,7 +169,7 @@ test('spendable means fresh and either has_credits or unlimited; a hidden balanc
   assert.equal(hasSpendableCodexCredits(slot(), NOW), false)
 })
 
-test('a spent window with fresh credits passes every local quota gate', () => {
+test('a spent window with fresh credits passes every local quota gate', async () => {
   const vm = slot({ extra: WEEK_SPENT, credits: credits() })
   for (const policy of [null, { limit_5h: 1, limit_7d: 1 }, { limit_5h: 0.9, limit_7d: 0.9 }]) {
     assert.equal(isCodexSlotParked(vm, NOW, policy), false)
@@ -170,7 +181,16 @@ test('a spent window with fresh credits passes every local quota gate', () => {
   assert.deepEqual(pickCodexSlots([vm], { now: NOW }).ready, ['vm-a'])
 })
 
-test('credits never reopen an operator-disabled or credential-less slot', () => {
+test('with credit overage disabled (the default) fresh credits do not reopen a spent window', async () => {
+  setCreditOverage(false)
+  const vm = slot({ extra: WEEK_SPENT, credits: credits() })
+  assert.equal(hasSpendableCodexCredits(vm, NOW), false)
+  assert.equal(isCodexSlotParked(vm, NOW), true)
+  assert.equal(codexQuotaWindowReason(vm, NOW), 'quota_7d_header')
+  assert.deepEqual(pickCodexSlots([vm], { now: NOW }).ready, [])
+})
+
+test('credits never reopen an operator-disabled or credential-less slot', async () => {
   const vm = slot({ extra: WEEK_SPENT, credits: credits() })
   assert.equal(codexAccountStatus({ ...vm, schedulable: false, schedule_manual: true }, NOW), 'disabled')
   assert.equal(codexAccountStatus({ ...vm, status: 'disabled' }, NOW), 'disabled')
@@ -178,7 +198,7 @@ test('credits never reopen an operator-disabled or credential-less slot', () => 
   assert.equal(pickCodexSlots([{ ...vm, has_token: false }], { now: NOW }).error, 'no_codex_vm')
 })
 
-test('a fresh reading clears a restriction that the spent window wrote earlier', () => {
+test('a fresh reading clears a restriction that the spent window wrote earlier', async () => {
   const restricted = { temp_unschedulable_reason: 'quota_7d_header', temp_unschedulable_until: Date.parse(WEEK_RESET) }
   assert.equal(evaluateCodexQuotaSchedule({ ...slot({ extra: WEEK_SPENT }), ...restricted }, NOW).action, 'restrict')
   assert.equal(
@@ -187,7 +207,7 @@ test('a fresh reading clears a restriction that the spent window wrote earlier',
   )
 })
 
-test('no credits, stale credits, or an explicit park keep the existing parking', () => {
+test('no credits, stale credits, or an explicit park keep the existing parking', async () => {
   const cases = {
     missing: slot({ extra: WEEK_SPENT }),
     exhausted: slot({ extra: WEEK_SPENT, credits: credits({ has_credits: false, unlimited: false, balance: '0' }) }),
@@ -204,8 +224,31 @@ test('no credits, stale credits, or an explicit park keep the existing parking',
   const parkedUntil = new Date(NOW + 60_000).toISOString()
   const refused = slot({ extra: { ...WEEK_SPENT, codex_limited_until: parkedUntil }, credits: credits() })
   assert.equal(isCodexSlotParked(refused, NOW), true, 'an explicit park outranks credits')
-  assert.equal(codexQuotaWindowReason(refused, NOW), 'quota_5h_header')
+  assert.equal(codexQuotaWindowReason(refused, NOW), 'rate_limited')
   assert.equal(evaluateCodexQuotaSchedule(refused, NOW).until, Date.parse(parkedUntil))
+})
+
+test('a 429 park with no window at its cap is a rate limit, not a 5h limit, and clears on expiry', async () => {
+  // Pro reading seen in production: only the 7d window is metered, the other side is 0 minutes.
+  const proWeek = {
+    codex_primary_used_percent: 64,
+    codex_primary_window_minutes: 10080,
+    codex_primary_reset_at: WEEK_RESET,
+    codex_secondary_used_percent: 0,
+    codex_secondary_window_minutes: 0,
+  }
+  const parkedUntil = NOW + 60_000
+  const parked = slot({ extra: { ...proWeek, codex_limited_until: new Date(parkedUntil).toISOString() } })
+  assert.equal(codexQuotaWindowReason(parked, NOW), 'rate_limited')
+  assert.deepEqual(evaluateCodexQuotaSchedule(parked, NOW), {
+    action: 'restrict',
+    reason: 'rate_limited',
+    until: parkedUntil,
+  })
+  const later = parkedUntil + 1
+  const restricted = { temp_unschedulable_reason: 'rate_limited', temp_unschedulable_until: parkedUntil }
+  assert.equal(codexQuotaWindowReason(parked, later), null)
+  assert.equal(evaluateCodexQuotaSchedule({ ...parked, ...restricted }, later).action, 'clear')
 })
 
 test('/wham/usage credits are persisted next to, not inside, reset credits and reach the pool summary', async (t) => {
@@ -229,7 +272,7 @@ test('/wham/usage credits are persisted next to, not inside, reset credits and r
   assert.equal(vm.codex.credits.has_credits, true)
   assert.deepEqual(vm.codex.reset_credits.credits, [])
 
-  const summary = listVms(root).find((item) => item.id === 'vm-a')
+  const summary = (await listVms(root)).find((item) => item.id === 'vm-a')
   assert.equal(summary.codex_credits.balance, long)
   assert.equal(summary.utilization_7d, 1)
   assert.deepEqual(pickCodexSlots([summary]).ready, ['vm-a'])
@@ -244,17 +287,21 @@ test('/wham/usage without credits leaves the reset-credit path unchanged', async
   })
   assert.equal(result.credits, null)
   assert.equal(getVm(root, 'vm-a').codex.credits, undefined)
-  const summary = listVms(root).find((item) => item.id === 'vm-a')
+  const summary = (await listVms(root)).find((item) => item.id === 'vm-a')
   assert.equal(summary.codex_credits, null)
   assert.deepEqual(pickCodexSlots([summary]).parked, ['vm-a'])
 })
 
-test('a spendable refresh supersedes an older park; an empty balance does not', (t) => {
+test('a spendable refresh supersedes an older park; an empty balance does not', async (t) => {
   const parkedUntil = new Date(Date.now() + 86_400_000).toISOString()
   const root = fixture(t, { extra: { ...WEEK_SPENT, codex_limited_until: parkedUntil } })
-  persistCodexQuotaSnapshot(root, 'vm-a', { credits: normalizeCodexCredits({ has_credits: false, unlimited: false }) })
+  await persistCodexQuotaSnapshot(root, 'vm-a', {
+    credits: normalizeCodexCredits({ has_credits: false, unlimited: false }),
+  })
   assert.equal(getVm(root, 'vm-a').codex.extra.codex_limited_until, parkedUntil)
-  persistCodexQuotaSnapshot(root, 'vm-a', { credits: normalizeCodexCredits({ has_credits: true, unlimited: false }) })
+  await persistCodexQuotaSnapshot(root, 'vm-a', {
+    credits: normalizeCodexCredits({ has_credits: true, unlimited: false }),
+  })
   assert.equal(getVm(root, 'vm-a').codex.extra.codex_limited_until, undefined)
 })
 
@@ -273,7 +320,7 @@ test('a successful reply past the weekly cap keeps the slot schedulable while cr
   assert.equal(vm.codex.usage.quota.utilization_7d, 1)
   assert.equal(vm.codex.extra.codex_limited_until, undefined, 'no park derived from a waived window')
   assert.equal(vm.temp_unschedulable_reason, undefined)
-  const summary = listVms(root).find((item) => item.id === 'vm-a')
+  const summary = (await listVms(root)).find((item) => item.id === 'vm-a')
   assert.deepEqual(pickCodexSlots([summary]).ready, ['vm-a'])
 })
 
@@ -287,7 +334,7 @@ test('without credit headers a successful reply past the cap still parks as befo
 
 test('an upstream 429 drops the credits reading and parks the slot', async (t) => {
   const root = fixture(t, { extra: WEEK_SPENT, credits: credits({}, Date.now()) })
-  assert.deepEqual(pickCodexSlots(listVms(root)).ready, ['vm-a'])
+  assert.deepEqual(pickCodexSlots(await listVms(root)).ready, ['vm-a'])
   await hop(root, {
     status: 429,
     headers: {
@@ -300,14 +347,14 @@ test('an upstream 429 drops the credits reading and parks the slot', async (t) =
   assert.equal(vm.codex.credits, undefined)
   assert.ok(Date.parse(vm.codex.extra.codex_limited_until) > Date.now() + 86_400_000)
   assert.equal(vm.temp_unschedulable_reason, 'quota_7d_header')
-  assert.deepEqual(pickCodexSlots(listVms(root)).parked, ['vm-a'])
+  assert.deepEqual(pickCodexSlots(await listVms(root)).parked, ['vm-a'])
 })
 
 test('credit-only reply headers refresh the reading', async (t) => {
   // A quota-exhausted slot gets no traffic; only a slot still in rotation can refresh from replies.
   const root = fixture(t)
   await hop(root, { headers: { 'x-codex-credits-has-credits': 'false', 'x-codex-credits-unlimited': 'true' } })
-  const summary = listVms(root).find((item) => item.id === 'vm-a')
+  const summary = (await listVms(root)).find((item) => item.id === 'vm-a')
   assert.equal(summary.codex_credits.unlimited, true)
   assert.equal(summary.codex_credits.has_credits, false)
 })

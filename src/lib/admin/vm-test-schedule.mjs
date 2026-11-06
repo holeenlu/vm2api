@@ -364,14 +364,15 @@ export class VmTestScheduleRunner {
     return settings
   }
 
-  _vm(vmId) {
-    return this.listVms().find((vm) => vm.id === vmId) || getVm(this.projectRoot, vmId)
+  /** VM 摘要（listVms 改 async 后逐层 await，R6 B7c），不在列表里时退回原始记录。 */
+  async _vm(vmId) {
+    return (await this.listVms()).find((vm) => vm.id === vmId) || getVm(this.projectRoot, vmId)
   }
 
-  _stored(vmId) {
+  async _stored(vmId) {
     const raw = this._settings().get(keyFor(vmId))
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
-    const vm = this._vm(vmId)
+    const vm = await this._vm(vmId)
     if (!vm) return null
     try {
       const structure = structureFromStored(raw, vm)
@@ -404,15 +405,15 @@ export class VmTestScheduleRunner {
     }
   }
 
-  saveDefaultTemplate(input) {
+  async saveDefaultTemplate(input) {
     const structure = normalizeScheduleStructure(input)
     compileStructuredSchedule(structure)
-    this._settings().set(VM_TEST_SCHEDULE_DEFAULT_KEY, structure)
+    await this._settings().set(VM_TEST_SCHEDULE_DEFAULT_KEY, structure)
     return structure
   }
 
-  clearDefaultTemplate() {
-    this._settings().remove?.(VM_TEST_SCHEDULE_DEFAULT_KEY)
+  async clearDefaultTemplate() {
+    await this._settings().remove?.(VM_TEST_SCHEDULE_DEFAULT_KEY)
     return null
   }
 
@@ -434,9 +435,9 @@ export class VmTestScheduleRunner {
     return next instanceof Date && Number.isFinite(next.getTime()) ? next.toISOString() : null
   }
 
-  _public(vmId, schedule, raw = null) {
+  async _public(vmId, schedule, raw = null) {
     if (!schedule && raw) {
-      const structure = structureFromStored(raw, this._vm(vmId))
+      const structure = structureFromStored(raw, await this._vm(vmId))
       return {
         parse_error: !!structure.parse_error,
         ...publicStructure(structure),
@@ -464,28 +465,28 @@ export class VmTestScheduleRunner {
     }
   }
 
-  get(vmId) {
+  async get(vmId) {
     const raw = this._settings().get(keyFor(vmId))
-    const schedule = this._stored(vmId)
+    const schedule = await this._stored(vmId)
     if (schedule) return this._public(vmId, schedule)
     if (raw && typeof raw === 'object') return this._public(vmId, null, raw)
     return null
   }
 
-  save(vmId, input) {
+  async save(vmId, input) {
     if (!isValidVmId(vmId)) throw new VmTestScheduleError('invalid vm id', 'invalid_vm_id')
-    const vm = this._vm(vmId)
+    const vm = await this._vm(vmId)
     if (!vm) throw new VmTestScheduleError('vm not found', 'vm_not_found', 404)
     const previous = this._settings().get(keyFor(vmId)) || {}
     const config = normalizeVmTestSchedule(input, vm)
-    this._settings().set(keyFor(vmId), { ...config, ...savedResult(previous), revision: randomUUID() })
-    if (this.started) this._syncJob(vmId, config)
+    await this._settings().set(keyFor(vmId), { ...config, ...savedResult(previous), revision: randomUUID() })
+    if (this.started) await this._syncJob(vmId, config)
     return this.get(vmId)
   }
 
-  applyScheduleStructure(vmId, structure, { preserveDialog = true } = {}) {
+  async applyScheduleStructure(vmId, structure, { preserveDialog = true } = {}) {
     if (!isValidVmId(vmId)) throw new VmTestScheduleError('invalid vm id', 'invalid_vm_id')
-    const vm = this._vm(vmId)
+    const vm = await this._vm(vmId)
     if (!vm) throw new VmTestScheduleError('vm not found', 'vm_not_found', 404)
     const normalized = normalizeScheduleStructure(structure)
     const cron = compileStructuredSchedule(normalized)
@@ -511,13 +512,13 @@ export class VmTestScheduleRunner {
       },
       vm,
     )
-    this._settings().set(keyFor(vmId), {
+    await this._settings().set(keyFor(vmId), {
       ...config,
       enabled,
       ...savedResult(previous),
       revision: randomUUID(),
     })
-    if (this.started) this._syncJob(vmId, config)
+    if (this.started) await this._syncJob(vmId, config)
     return this.get(vmId)
   }
 
@@ -526,12 +527,12 @@ export class VmTestScheduleRunner {
    * A slot of the other kind (Claude vs Codex) keeps its own dialog params, since
    * a model of one kind cannot run on the other; switch and timing still apply.
    */
-  syncSchedules({ scope, vmIds = [], schedule, test = null }) {
+  async syncSchedules({ scope, vmIds = [], schedule, test = null }) {
     const structure = normalizeScheduleStructure(schedule)
     const full = test == null ? null : normalizeSyncTest(test, structure)
     let targets = []
     if (scope === 'all') {
-      targets = this.listVms().map((vm) => vm.id)
+      targets = (await this.listVms()).map((vm) => vm.id)
     } else if (scope === 'ids') {
       targets = [...new Set(vmIds.map((id) => String(id || '').trim()).filter(Boolean))]
       if (!targets.length) throw new VmTestScheduleError('vm_ids is required when scope is ids')
@@ -542,21 +543,21 @@ export class VmTestScheduleRunner {
     const updated = []
     const missing = []
     for (const vmId of targets) {
-      if (!this._vm(vmId)) {
+      if (!(await this._vm(vmId))) {
         missing.push(vmId)
         continue
       }
       if (full) {
-        this._applyFullTest(vmId, structure, full)
+        await this._applyFullTest(vmId, structure, full)
         updated.push(vmId)
         continue
       }
       const hadPlan = !!this._settings().get(keyFor(vmId))
-      this.applyScheduleStructure(vmId, structure, { preserveDialog: hadPlan })
+      await this.applyScheduleStructure(vmId, structure, { preserveDialog: hadPlan })
       if (!hadPlan) {
         const stored = this._settings().get(keyFor(vmId))
         if (stored) {
-          this._settings().set(keyFor(vmId), { ...stored, enabled: false })
+          await this._settings().set(keyFor(vmId), { ...stored, enabled: false })
           this.jobs.get(vmId)?.stop()
           this.jobs.delete(vmId)
         }
@@ -566,8 +567,8 @@ export class VmTestScheduleRunner {
     return { updated, missing, schedule: structure }
   }
 
-  _applyFullTest(vmId, structure, full) {
-    const vm = this._vm(vmId)
+  async _applyFullTest(vmId, structure, full) {
+    const vm = await this._vm(vmId)
     const previous = this._settings().get(keyFor(vmId)) || {}
     let dialog
     if (isCodexVm(vm) === full.codex) dialog = full.dialog
@@ -580,20 +581,20 @@ export class VmTestScheduleRunner {
       }
     } else dialog = defaultDialogParams(vm)
     const config = normalizeVmTestSchedule({ enabled: full.enabled, ...structure, ...dialog }, vm)
-    this._settings().set(keyFor(vmId), { ...config, ...savedResult(previous), revision: randomUUID() })
-    if (this.started) this._syncJob(vmId, config)
+    await this._settings().set(keyFor(vmId), { ...config, ...savedResult(previous), revision: randomUUID() })
+    if (this.started) await this._syncJob(vmId, config)
   }
 
-  remove(vmId) {
+  async remove(vmId) {
     this.jobs.get(vmId)?.stop()
     this.jobs.delete(vmId)
-    this._settings().remove?.(keyFor(vmId))
+    await this._settings().remove?.(keyFor(vmId))
     return null
   }
 
-  start() {
+  async start() {
     this.started = true
-    this.reload()
+    await this.reload()
   }
 
   stop() {
@@ -602,27 +603,29 @@ export class VmTestScheduleRunner {
     this.jobs.clear()
   }
 
-  reload() {
+  async reload() {
     for (const job of this.jobs.values()) job.stop()
     this.jobs.clear()
-    const all = this._settings().all?.() || {}
+    const all = (await this._settings().all?.()) || {}
     for (const key of Object.keys(all)) {
       if (!key.startsWith(VM_TEST_SCHEDULE_PREFIX)) continue
       const vmId = key.slice(VM_TEST_SCHEDULE_PREFIX.length)
-      const vm = this._vm(vmId)
+      const vm = await this._vm(vmId)
       if (!vm) {
-        this._settings().remove?.(key)
+        await this._settings().remove?.(key)
         continue
       }
-      const schedule = this._stored(vmId)
-      if (schedule?.enabled) this._syncJob(vmId, schedule)
+      const schedule = await this._stored(vmId)
+      if (schedule?.enabled) await this._syncJob(vmId, schedule)
     }
   }
 
-  _syncJob(vmId, schedule) {
+  async _syncJob(vmId, schedule) {
+    // Read first, then replace the job in one synchronous step: concurrent syncs never leave two crons.
+    const exists = this.started && schedule.enabled ? !!(await this._vm(vmId)) : false
     this.jobs.get(vmId)?.stop()
     this.jobs.delete(vmId)
-    if (!this.started || !schedule.enabled || !this._vm(vmId)) return
+    if (!this.started || !schedule.enabled || !exists) return
     const job = new Cron(schedule.cron, { timezone: schedule.timezone, mode: '5-part', catch: true, unref: true }, () =>
       this._run(vmId),
     )
@@ -631,36 +634,42 @@ export class VmTestScheduleRunner {
 
   async _run(vmId) {
     if (!this.started || this.running.has(vmId)) return
-    if (!this._vm(vmId)) {
-      this.remove(vmId)
-      return
-    }
-    const schedule = this._stored(vmId)
-    if (!schedule?.enabled) return
+    // Claim the VM before the reads below await: an overlapping trigger returns above (R6 B7c).
     this.running.add(vmId)
-    const startedAt = this.now()
+    let schedule
+    let startedAt
     let result
     try {
-      result = await this.runTest(vmId, {
-        model: schedule.model,
-        prompt: schedule.prompt,
-        max_tokens: schedule.max_tokens,
-        reasoning_effort: schedule.reasoning_effort,
-      })
-    } catch (error) {
-      result = { ok: false, error }
+      if (!(await this._vm(vmId))) {
+        this.running.delete(vmId)
+        await this.remove(vmId)
+        return
+      }
+      schedule = await this._stored(vmId)
+      if (!schedule?.enabled) return
+      startedAt = this.now()
+      try {
+        result = await this.runTest(vmId, {
+          model: schedule.model,
+          prompt: schedule.prompt,
+          max_tokens: schedule.max_tokens,
+          reasoning_effort: schedule.reasoning_effort,
+        })
+      } catch (error) {
+        result = { ok: false, error }
+      }
     } finally {
       this.running.delete(vmId)
     }
     if (!this.started) return
 
     const current = this._settings().get(keyFor(vmId))
-    if (!current || String(current.revision || '') !== schedule.revision || !this._vm(vmId)) return
+    if (!current || String(current.revision || '') !== schedule.revision || !(await this._vm(vmId))) return
     const duration = Number(result?.duration_ms)
     const lastDuration =
       Number.isSafeInteger(duration) && duration >= 0 ? duration : Math.max(0, this.now() - startedAt)
     const lastOk = result?.ok === true
-    this._settings().set(keyFor(vmId), {
+    await this._settings().set(keyFor(vmId), {
       ...current,
       last_run_at: new Date(startedAt).toISOString(),
       last_ok: lastOk,

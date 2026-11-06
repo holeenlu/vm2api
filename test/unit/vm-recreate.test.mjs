@@ -7,7 +7,7 @@ import path from 'node:path'
 import { buildRecreatedVmRecord, recreateVmFiles } from '../../src/lib/vm/vm-recreate.mjs'
 import { destroyVmRuntime } from '../../src/lib/vm/vm-runtime.mjs'
 
-test('recreated record keeps slot identity and drops credentials', () => {
+test('recreated record keeps slot identity and drops credentials', async () => {
   const prev = {
     id: 'vm-07',
     name: '07',
@@ -68,7 +68,7 @@ test('recreated record keeps slot identity and drops credentials', () => {
   assert.equal(next.proxy_cli_enabled, true)
 })
 
-test('recreated record keeps tenant owner and origin', () => {
+test('recreated record keeps tenant owner and origin', async () => {
   const prev = { id: 'vm-09', kernel: 'debian-12', owner_user_id: 'u1', origin: 'user_created', claude: {} }
   const next = buildRecreatedVmRecord(prev)
   assert.equal(next.owner_user_id, 'u1')
@@ -78,7 +78,7 @@ test('recreated record keeps tenant owner and origin', () => {
   assert.equal(platform.origin, undefined)
 })
 
-test('recreated record enables proxy_cli when an exit is still bound', () => {
+test('recreated record enables proxy_cli when an exit is still bound', async () => {
   const next = buildRecreatedVmRecord({
     id: 'vm-08',
     proxy: { id: 'px-8', url: 'socks5h://127.0.0.1:1080', host: '127.0.0.1', port: 1080 },
@@ -87,7 +87,7 @@ test('recreated record enables proxy_cli when an exit is still bound', () => {
   assert.equal(next.proxy_cli_enabled, true)
 })
 
-test('recreated records preserve and normalize non-US timezones', () => {
+test('recreated records preserve and normalize non-US timezones', async () => {
   for (const timezone of ['Asia/Tokyo', ' asia/tokyo ']) {
     const next = buildRecreatedVmRecord({ id: 'vm-07', timezone })
     assert.equal(next.timezone, 'Asia/Tokyo')
@@ -95,7 +95,7 @@ test('recreated records preserve and normalize non-US timezones', () => {
   }
 })
 
-test('recreated records leave a missing or invalid timezone unset', () => {
+test('recreated records leave a missing or invalid timezone unset', async () => {
   for (const timezone of [undefined, 'Invalid/Zone', 'America/Not_A_Zone', '+09:00']) {
     const next = buildRecreatedVmRecord({ id: 'vm-07', timezone })
     assert.equal(next.timezone, null)
@@ -103,7 +103,7 @@ test('recreated records leave a missing or invalid timezone unset', () => {
   }
 })
 
-test('recreateVmFiles wipes home leftover and reseeds settings', () => {
+test('recreateVmFiles wipes home leftover and reseeds settings', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-recreate-'))
   const id = 'vm-03'
   const home = path.join(root, 'vms', id, 'cli-home', '.claude')
@@ -125,7 +125,7 @@ test('recreateVmFiles wipes home leftover and reseeds settings', () => {
       created_at: '2026-02-01T00:00:00.000Z',
     }),
   )
-  const { vm } = recreateVmFiles(root, JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')))
+  const { vm } = await recreateVmFiles(root, JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')))
   assert.equal(vm.id, id)
   assert.equal(vm.claude.email, undefined)
   assert.equal(fs.existsSync(path.join(home, 'credentials.json')), false)
@@ -147,7 +147,7 @@ test('recreateVmFiles wipes home leftover and reseeds settings', () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('keep rebuild retains the account, fingerprint and credential file', () => {
+test('keep rebuild retains the account, fingerprint and credential file', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-recreate-keep-'))
   const id = 'vm-11'
   const cred = path.join(root, 'vms', id, 'cli-home', '.claude', 'credentials.json')
@@ -186,7 +186,7 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
     created_at: '2026-03-01T00:00:00.000Z',
     seed_policy: { telemetry_disabled: true, claude_setting: 'KEEP=yes', theme: 'dark' },
   }
-  const { vm, mode } = recreateVmFiles(root, prev, { mode: 'keep' })
+  const { vm, mode } = await recreateVmFiles(root, prev, { mode: 'keep' })
   assert.equal(mode, 'keep')
   assert.equal(vm.claude.email, 'keep@kin.test')
   assert.equal(vm.claude.has_access, true)
@@ -215,7 +215,7 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('destroy missing container is a no-op', () => {
+test('destroy missing container is a no-op', async () => {
   const r = destroyVmRuntime({ id: 'vm-missing-slot' })
   assert.equal(r.ok, true)
   assert.equal(r.action, 'absent')

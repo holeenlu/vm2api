@@ -51,7 +51,8 @@ function fixture(t) {
   const pkg = seedEncryptedPackage(root)
   return { root, vm, pkg }
 }
-function route(root, method, suffix, body, role = 'admin') {
+// tapmodels 的运维角色是 super_admin（上游为 admin）；admin 在本地对应受限角色
+function route(root, method, suffix, body, role = 'super_admin') {
   const result = {}
   const handle = createPanelHandler({
     cfg: { paths: { project: root }, vm: { id: null } },
@@ -394,7 +395,7 @@ test('symlinked device files and DrvFS storage are refused; non-admin activation
   fs.renameSync(path.join(dir, 'device.json'), path.join(dir, 'original-device'))
   fs.symlinkSync(path.join(dir, 'original-device'), path.join(dir, 'device.json'))
   assert.equal(getCragLicense(root, vm).license.valid, false)
-  const denied = await route(root, 'GET', '/crag-license', null, 'super')
+  const denied = await route(root, 'GET', '/crag-license', null, 'admin')
   assert.equal(denied.status, 403)
   assert.equal(getCragLicense('/mnt/c/not-created', vm, { initialize: true }).license.valid, false)
 })

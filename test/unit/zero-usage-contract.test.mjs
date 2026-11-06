@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { applyCrsUnofficialPersona, CRS_OFFICIAL_SYSTEM } from '../../src/lib/identity/crs-persona.mjs'
-import { estimateClaudeInputTokens, personaHideForUnofficial } from '../../src/lib/identity/crs-persona-usage.mjs'
+import { estimateClaudeInputTokens, gatewayInjectedBreakdown } from '../../src/lib/identity/crs-persona-usage.mjs'
 import { costColumnsFromUsage } from '../../src/lib/admin/pricing.mjs'
 
 const unixTest = process.platform === 'win32' ? test.skip : test
@@ -21,7 +21,7 @@ const cacheUsage = (five, hour) => ({
   cache_creation: { ephemeral_5m_input_tokens: five, ephemeral_1h_input_tokens: hour },
 })
 
-test('usage hiding excludes retained caller blocks regardless of their order or cache state', () => {
+test('injected count excludes retained caller blocks regardless of their order or cache state', () => {
   const caller = [
     { type: 'text', text: environment },
     { type: 'text', text: CRS_OFFICIAL_SYSTEM, cache_control: { type: 'ephemeral' } },
@@ -31,20 +31,26 @@ test('usage hiding excludes retained caller blocks regardless of their order or 
   const billing = rendered.system[0]
   // Reordering and moving a caller block out of cache must not make it an injection.
   const after = { ...rendered, system: [billing, { type: 'text', text: CRS_OFFICIAL_SYSTEM }, caller[0]] }
-  const hide = personaHideForUnofficial(before, after, { mode: 'zero', hides: true })
+  const hide = gatewayInjectedBreakdown(before, after)
   assert.equal(hide.official, estimateClaudeInputTokens(billing.text))
-  assert.equal(hide.uncached, estimateClaudeInputTokens(billing.text))
   assert.equal(hide.overlay, 0)
 })
 
 const cases = [
-  { name: 'caller environment', system: environment, usage: cacheUsage(0, 0), setting: '1h' },
+  {
+    name: 'caller environment',
+    system: environment,
+    usage: cacheUsage(0, 0),
+    setting: '1h',
+    client: (hide) => ({ input: 10000 - hide, five: 0, hour: 0 }),
+  },
   {
     name: 'caller environment sharing a block with stale billing',
     system: `x-anthropic-billing-header: stale;\n${environment}`,
     expectedSystem: environment,
     usage: cacheUsage(0, 0),
     setting: '1h',
+    client: (hide) => ({ input: 10000 - hide, five: 0, hour: 0 }),
   },
   {
     name: 'caller marker without TTL takes the 1h setting',
@@ -52,6 +58,8 @@ const cases = [
     expectedSystem: [{ type: 'text', text: 'Caller policy', cache_control: { type: 'ephemeral', ttl: '1h' } }],
     usage: cacheUsage(0, 1000),
     setting: '1h',
+    // 客户没写 ttl：上游按 1h 写入，客户按 5m 写入价计；billing 头位于缓存前缀内
+    client: (hide) => ({ input: 10000, five: 1000 - hide, hour: 0 }),
   },
   {
     name: 'mixed caller TTLs',
@@ -61,6 +69,8 @@ const cases = [
     ],
     usage: cacheUsage(300, 700),
     setting: '5m',
+    // 每个标记都显式写了 ttl：按上游拆分计
+    client: (hide) => ({ input: 10000, five: 300, hour: 700 - hide }),
   },
 ]
 
@@ -144,6 +154,14 @@ for (const stream of [false, true]) {
         stickyRouter: {},
         accountQuota: {},
         apiKeyStore: {
+          canAccept: (record) => ({ ok: true, record }),
+          db: {
+            isTransaction: false,
+            exec() {},
+            prepare() {
+              return { get: () => null }
+            },
+          },
           acquire: () => ({ ok: true }),
           release() {},
           recordUsage: (_key, usage, options) => charged.push({ usage, options }),
@@ -177,6 +195,7 @@ for (const stream of [false, true]) {
         '/v1/messages',
       )
       finish?.()
+      await new Promise((resolve) => setImmediate(resolve))
       let clientUsage
       if (stream) {
         const events = writes
@@ -195,18 +214,23 @@ for (const stream of [false, true]) {
           ? [{ type: 'text', text: fixture.expectedSystem || fixture.system }]
           : fixture.expectedSystem || fixture.system,
       )
-      assert.equal(
-        clientUsage.input_tokens,
-        fixture.usage.input_tokens - estimateClaudeInputTokens(sent.system[0].text),
-      )
-      assert.deepEqual(clientUsage.cache_creation, fixture.usage.cache_creation)
+      const expected = fixture.client(estimateClaudeInputTokens(sent.system[0].text))
       assert.equal(logged.length, 1)
       assert.equal(charged.length, 1)
-      for (const usage of [logged[0].usage, charged[0].usage]) {
-        assert.equal(usage.input_tokens, fixture.usage.input_tokens)
-        assert.deepEqual(usage.cache_creation, fixture.usage.cache_creation)
+      // 客户响应与计费是同一份客户视角 usage
+      for (const usage of [clientUsage, charged[0].usage]) {
+        assert.equal(usage.input_tokens, expected.input)
+        assert.deepEqual(usage.cache_creation, {
+          ephemeral_5m_input_tokens: expected.five,
+          ephemeral_1h_input_tokens: expected.hour,
+        })
       }
-      assert.equal(charged[0].options.officialCost, costColumnsFromUsage(fixture.usage, model).total_cost)
+      // 请求日志保留上游真实消耗与上游官方成本（账号口径）
+      assert.equal(logged[0].usage.input_tokens, fixture.usage.input_tokens)
+      assert.deepEqual(logged[0].usage.cache_creation, fixture.usage.cache_creation)
+      assert.equal(logged[0].total_cost, costColumnsFromUsage(fixture.usage, model).total_cost)
+      assert.equal(charged[0].options.officialCost, costColumnsFromUsage(charged[0].usage, model).total_cost)
+      assert.ok(charged[0].options.officialCost < logged[0].total_cost)
     })
   }
 }

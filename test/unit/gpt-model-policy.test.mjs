@@ -45,9 +45,9 @@ test('seed enables image models', (t) => {
   )
 })
 
-test('save keeps only known image ids with boolean enabled', (t) => {
+test('save keeps only known image ids with boolean enabled', async (t) => {
   withDb(t)
-  saveGptModelPolicy({
+  await saveGptModelPolicy({
     image_tools: {
       'gpt-image-2.5-sunburst': { enabled: false },
       'gpt-image-2': { enabled: false },
@@ -67,42 +67,42 @@ test('save keeps only known image ids with boolean enabled', (t) => {
   assert.equal(stored.image_tools['gpt-image-future'], undefined)
 })
 
-test('save without image_tools keeps the current switches', (t) => {
+test('save without image_tools keeps the current switches', async (t) => {
   withDb(t)
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
-  saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
+  await saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true } } })
   assert.equal(getGptModelPolicy().image_tools['gpt-image-2.5-flare'].enabled, false)
 })
 
-test('reset and reload restore image switches', (t) => {
+test('reset and reload restore image switches', async (t) => {
   withDb(t)
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
   loadGptModelPolicy({ force: true })
   assert.equal(isImageToolModelEnabled('gpt-image-2.5-flare'), false)
-  resetGptModelPolicy()
+  await resetGptModelPolicy()
   assert.equal(isImageToolModelEnabled('gpt-image-2.5-flare'), true)
 })
 
-test('isImageToolModelEnabled folds snapshots and returns null for unknown ids', (t) => {
+test('isImageToolModelEnabled folds snapshots and returns null for unknown ids', async (t) => {
   withDb(t)
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
   assert.equal(isImageToolModelEnabled('gpt-image-2.5-sunburst-2026-09-08'), false)
   assert.equal(isImageToolModelEnabled('gpt-image-2.5-flare'), true)
   assert.equal(isImageToolModelEnabled('gpt-image-future'), null)
   assert.equal(isImageToolModelEnabled(''), null)
 })
 
-test('image models never enter the GPT chat catalog', (t) => {
+test('image models never enter the GPT chat catalog', async (t) => {
   withDb(t)
-  saveGptModelPolicy({ models: { 'gpt-image-2.5-flare': { enabled: true } } })
+  await saveGptModelPolicy({ models: { 'gpt-image-2.5-flare': { enabled: true } } })
   assert.equal(getGptModelPolicy().models['gpt-image-2.5-flare'], undefined)
-  const synced = syncGptIdsIntoPolicy([{ id: 'gpt-6-luna' }, { id: 'gpt-image-2.5-flare' }])
+  const synced = await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna' }, { id: 'gpt-image-2.5-flare' }])
   assert.deepEqual(synced.ids, ['gpt-6-luna'])
 })
 
-test('sync stores catalog metadata and replaces it on the next sync', (t) => {
+test('sync stores catalog metadata and replaces it on the next sync', async (t) => {
   withDb(t)
-  syncGptIdsIntoPolicy([
+  await syncGptIdsIntoPolicy([
     {
       id: 'gpt-6-luna',
       display_name: 'GPT-6 Luna',
@@ -113,43 +113,43 @@ test('sync stores catalog metadata and replaces it on the next sync', (t) => {
   assert.equal(first.context_window, 272000)
   assert.deepEqual(first.supported_reasoning_levels, ['low', 'high'])
   assert.match(first.synced_at, /^\d{4}-\d{2}-\d{2}T/)
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { max_context_window: 1000000 } }])
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { max_context_window: 1000000 } }])
   const second = getGptModelPolicy().models['gpt-6-luna'].catalog
   assert.equal(second.context_window, undefined)
   assert.equal(second.max_context_window, 1000000)
   assert.equal(listGptPolicyModels().find((m) => m.id === 'gpt-6-luna').catalog.max_context_window, 1000000)
 })
 
-test('Fast exposure defaults off, survives sync, and is persisted by panel save', (t) => {
+test('Fast exposure defaults off, survives sync, and is persisted by panel save', async (t) => {
   withDb(t)
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].expose_fast, false)
-  syncGptIdsIntoPolicy([
+  await syncGptIdsIntoPolicy([
     {
       id: 'gpt-6-luna',
       catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] },
     },
   ])
-  saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true, expose_fast: true } } })
+  await saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true, expose_fast: true } } })
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].expose_fast, true)
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), true)
   assert.equal(listGptFastAliases()[0].id, 'gpt-6-luna-fast')
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'Fast' }] } }])
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'Fast' }] } }])
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), true)
   loadGptModelPolicy({ force: true })
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].expose_fast, true)
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [] } }])
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [] } }])
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), false)
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].expose_fast, true)
   assert.deepEqual(listGptFastAliases(), [])
 })
 
-test('Fast aliases require priority and never replace actual or mapped ids', (t) => {
+test('Fast aliases require priority and never replace actual or mapped ids', async (t) => {
   withDb(t)
-  syncGptIdsIntoPolicy([
+  await syncGptIdsIntoPolicy([
     { id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'flex', name: 'flex' }] } },
     { id: 'gpt-6-luna-fast', catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] } },
   ])
-  saveGptModelPolicy({
+  await saveGptModelPolicy({
     models: {
       'gpt-6-luna': { enabled: true, expose_fast: true },
       'gpt-6-luna-fast': { enabled: true },
@@ -158,26 +158,26 @@ test('Fast aliases require priority and never replace actual or mapped ids', (t)
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), false)
   assert.deepEqual(listGptFastAliases(), [])
 
-  resetGptModelPolicy()
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] } }])
-  saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true, expose_fast: true } } })
+  await resetGptModelPolicy()
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] } }])
+  await saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true, expose_fast: true } } })
   assert.deepEqual(listGptFastAliases({ mappingKeys: ['gpt-6-luna-fast'] }), [])
 })
 
-test('sync without metadata keeps the previous catalog', (t) => {
+test('sync without metadata keeps the previous catalog', async (t) => {
   withDb(t)
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { context_window: 272000 } }])
-  syncGptIdsIntoPolicy(['gpt-6-luna'])
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { context_window: 272000 } }])
+  await syncGptIdsIntoPolicy(['gpt-6-luna'])
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].catalog.context_window, 272000)
 })
 
-test('panel save keeps the synced catalog; only a sync writes it', (t) => {
+test('panel save keeps the synced catalog; only a sync writes it', async (t) => {
   withDb(t)
-  syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { context_window: 272000 } }])
-  saveGptModelPolicy({
+  await syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { context_window: 272000 } }])
+  await saveGptModelPolicy({
     models: { 'gpt-6-luna': { enabled: true, catalog: { context_window: 1, synced_at: 'stale' } } },
   })
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].catalog.context_window, 272000)
-  saveGptModelPolicy({ models: { 'gpt-7': { enabled: true, catalog: { context_window: 9 } } } })
+  await saveGptModelPolicy({ models: { 'gpt-7': { enabled: true, catalog: { context_window: 9 } } } })
   assert.equal(getGptModelPolicy().models['gpt-7'].catalog, undefined)
 })

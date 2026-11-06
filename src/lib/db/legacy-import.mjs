@@ -18,7 +18,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { getDb, withTransaction } from './database.mjs'
+import { getDb } from './database.mjs'
+import { dbClient } from './db-client.mjs'
 import { SettingsRepo } from './repos/settings-repo.mjs'
 import { ApiKeysRepo } from './repos/api-keys-repo.mjs'
 import { AccountsRepo } from './repos/accounts-repo.mjs'
@@ -39,7 +40,7 @@ function readJson(file) {
   }
 }
 
-export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 7 } = {}) {
+export async function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 7 } = {}) {
   const d = db || getDb()
   const settings = new SettingsRepo(d)
   const existing = settings.get(IMPORT_FLAG)
@@ -57,17 +58,18 @@ export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 
     errors: 0,
   }
 
-  withTransaction(d, () => {
+  // 事务内只有数据库操作与同步文件读取（R6 B6c：代理与 VM 镜像仓储已改 async，其余仓储仍同步执行于同一事务）
+  await dbClient(d).tx(async () => {
     // --- api keys ---
     try {
       const raw = readJson(path.join(dataDir, 'api-keys.json'))
       if (raw === undefined) counts.errors += 1
       const repo = new ApiKeysRepo(d)
       for (const k of raw?.keys || []) {
-        if (!k?.id || !k?.key || repo.getById(k.id) || repo.getByKey(k.key)) continue
+        if (!k?.id || !k?.key || (await repo.getById(k.id)) || (await repo.getByKey(k.key))) continue
         // legacy `quota_used` was a request counter; the column is USD now
         const { quota_used, ...rest } = k
-        repo.insert({
+        await repo.insert({
           ...rest,
           quota_requests_used: k.quota_requests_used ?? quota_used ?? 0,
           category: String(k.category || 'oauth').toLowerCase() === 'api' ? 'api' : 'oauth',
@@ -84,11 +86,11 @@ export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 
       if (raw === undefined) counts.errors += 1
       const repo = new AccountsRepo(d)
       for (const acc of Object.values(raw?.accounts || {})) {
-        if (!acc?.account_id || repo.get(acc.account_id)) continue
-        repo.insert(acc)
+        if (!acc?.account_id || (await repo.get(acc.account_id))) continue
+        await repo.insert(acc)
         counts.accounts += 1
         for (const alloc of acc.allocations || []) {
-          repo.addAllocation(acc.account_id, alloc)
+          await repo.addAllocation(acc.account_id, alloc)
           counts.allocations += 1
         }
       }
@@ -102,8 +104,8 @@ export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 
       if (raw === undefined) counts.errors += 1
       const repo = new StickyRepo(d)
       for (const [key, ent] of Object.entries(raw?.sessions || {})) {
-        if (!key || repo.get(key)) continue
-        repo.upsert(key, ent)
+        if (!key || (await repo.get(key))) continue
+        await repo.upsert(key, ent)
         counts.sticky += 1
       }
     } catch {
@@ -117,9 +119,9 @@ export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 
       if (raw?.proxies?.length || raw?.config) {
         const repo = new ProxiesRepo(d)
         if (raw.config) repo.setConfig(raw.config)
-        const current = repo.loadAll()
+        const current = await repo.loadAll()
         if (!current.length && Array.isArray(raw.proxies)) {
-          repo.replaceAll(raw.proxies)
+          await repo.replaceAll(raw.proxies)
           counts.proxies = raw.proxies.length
         }
       }
@@ -194,9 +196,9 @@ export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 
           try {
             const file = path.join(vmsDir, f)
             const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
-            if (!vm?.id || repo.get(vm.id)) continue
+            if (!vm?.id || (await repo.get(vm.id))) continue
             const st = fs.statSync(file)
-            repo.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
+            await repo.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
             counts.vms += 1
           } catch {
             counts.errors += 1
@@ -209,7 +211,8 @@ export function runLegacyImport({ dataDir, projectRoot, db = null, retainDays = 
       counts.errors += 1
     }
 
-    settings.set(IMPORT_FLAG, { at: new Date().toISOString(), counts })
+    // R6 临时同步出口：启动期一次性导入在同步事务里写完成标记（B8 处理）
+    settings.setSync(IMPORT_FLAG, { at: new Date().toISOString(), counts })
   })
 
   return { imported: true, counts }

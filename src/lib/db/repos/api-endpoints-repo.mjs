@@ -1,4 +1,9 @@
-import { getDb, withTransaction } from '../database.mjs'
+import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
+
+/*
+ * API 端点仓储，经 DbClient 异步访问（管理面自 R6 B6b，推理热路径的调度器重载与 Key 冷却自 R6 B7a）。
+ */
 
 const EP_COLS = [
   'id',
@@ -80,48 +85,48 @@ function rowModel(row) {
   }
 }
 
+const LIST_EP_SQL = 'SELECT * FROM api_endpoints ORDER BY priority DESC, created_at, id'
+const GET_EP_SQL = 'SELECT * FROM api_endpoints WHERE id = ?'
+const INSERT_EP_SQL = `INSERT INTO api_endpoints (${EP_COLS.join(',')}) VALUES (${EP_COLS.map(() => '?').join(',')})`
+const DELETE_EP_SQL = 'DELETE FROM api_endpoints WHERE id = ?'
+const LIST_KEYS_SQL = 'SELECT * FROM api_endpoint_keys WHERE endpoint_id = ? ORDER BY created_at, id'
+const GET_KEY_SQL = 'SELECT * FROM api_endpoint_keys WHERE id = ?'
+const INSERT_KEY_SQL = `INSERT INTO api_endpoint_keys (${KEY_COLS.join(',')}) VALUES (${KEY_COLS.map(() => '?').join(',')})`
+const DELETE_KEY_SQL = 'DELETE FROM api_endpoint_keys WHERE id = ?'
+const DELETE_EP_KEYS_SQL = 'DELETE FROM api_endpoint_keys WHERE endpoint_id = ?'
+const LIST_MODELS_SQL = 'SELECT * FROM api_endpoint_models WHERE endpoint_id = ? ORDER BY sort, id'
+const INSERT_MODEL_SQL = `INSERT INTO api_endpoint_models (${MODEL_COLS.join(',')}) VALUES (${MODEL_COLS.map(() => '?').join(',')})`
+const DELETE_EP_MODELS_SQL = 'DELETE FROM api_endpoint_models WHERE endpoint_id = ?'
+const SET_COOLDOWN_SQL = 'UPDATE api_endpoint_keys SET cooldown_until = ? WHERE id = ?'
+const UPDATE_KEY_SQL =
+  'UPDATE api_endpoint_keys SET api_key = ?, proxy_url = ?, proxy_id = ?, disabled = ?, cooldown_until = ? WHERE id = ?'
+const UPDATE_EP_COLS = EP_COLS.filter((c) => c !== 'id')
+const UPDATE_EP_SQL = `UPDATE api_endpoints SET ${UPDATE_EP_COLS.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`
+
+function hydrated(ep, keys, models) {
+  if (!ep) return null
+  return { ...ep, api_key_entries: keys.map(rowKey), models: models.map(rowModel) }
+}
+
 export class ApiEndpointsRepo {
   constructor(db = getDb()) {
     this.db = db
-    this._listEp = db.prepare('SELECT * FROM api_endpoints ORDER BY priority DESC, created_at, id')
-    this._getEp = db.prepare('SELECT * FROM api_endpoints WHERE id = ?')
-    this._insEp = db.prepare(
-      `INSERT INTO api_endpoints (${EP_COLS.join(',')}) VALUES (${EP_COLS.map(() => '?').join(',')})`,
-    )
-    this._delEp = db.prepare('DELETE FROM api_endpoints WHERE id = ?')
-    this._listKeys = db.prepare('SELECT * FROM api_endpoint_keys WHERE endpoint_id = ? ORDER BY created_at, id')
-    this._getKey = db.prepare('SELECT * FROM api_endpoint_keys WHERE id = ?')
-    this._insKey = db.prepare(
-      `INSERT INTO api_endpoint_keys (${KEY_COLS.join(',')}) VALUES (${KEY_COLS.map(() => '?').join(',')})`,
-    )
-    this._delKey = db.prepare('DELETE FROM api_endpoint_keys WHERE id = ?')
-    this._delKeysEp = db.prepare('DELETE FROM api_endpoint_keys WHERE endpoint_id = ?')
-    this._listModels = db.prepare('SELECT * FROM api_endpoint_models WHERE endpoint_id = ? ORDER BY sort, id')
-    this._insModel = db.prepare(
-      `INSERT INTO api_endpoint_models (${MODEL_COLS.join(',')}) VALUES (${MODEL_COLS.map(() => '?').join(',')})`,
-    )
-    this._delModelsEp = db.prepare('DELETE FROM api_endpoint_models WHERE endpoint_id = ?')
-    this._cool = db.prepare('UPDATE api_endpoint_keys SET cooldown_until = ? WHERE id = ?')
-    this._updKey = db.prepare(
-      'UPDATE api_endpoint_keys SET api_key = ?, proxy_url = ?, proxy_id = ?, disabled = ?, cooldown_until = ? WHERE id = ?',
-    )
+    this.client = dbClient(db)
   }
 
-  listHydrated() {
-    return this._listEp.all().map((row) => this.hydrate(rowEp(row)))
+  async listHydrated() {
+    const out = []
+    for (const row of await this.client.many(LIST_EP_SQL)) out.push(await this.hydrate(rowEp(row)))
+    return out
   }
 
-  getHydrated(id) {
-    return this.hydrate(rowEp(this._getEp.get(id)))
+  async getHydrated(id) {
+    return this.hydrate(rowEp(await this.client.one(GET_EP_SQL, id)))
   }
 
-  hydrate(ep) {
+  async hydrate(ep) {
     if (!ep) return null
-    return {
-      ...ep,
-      api_key_entries: this._listKeys.all(ep.id).map(rowKey),
-      models: this._listModels.all(ep.id).map(rowModel),
-    }
+    return hydrated(ep, await this.client.many(LIST_KEYS_SQL, ep.id), await this.client.many(LIST_MODELS_SQL, ep.id))
   }
 
   _epValues(rec) {
@@ -142,31 +147,29 @@ export class ApiEndpointsRepo {
     }
   }
 
-  insertEndpoint(rec) {
+  async insertEndpoint(rec) {
     const vals = this._epValues(rec)
-    this._insEp.run(...EP_COLS.map((c) => vals[c] ?? null))
+    await this.client.run(INSERT_EP_SQL, ...EP_COLS.map((c) => vals[c] ?? null))
     return this.getHydrated(rec.id)
   }
 
-  updateEndpoint(rec) {
+  async updateEndpoint(rec) {
     const vals = this._epValues(rec)
-    const cols = EP_COLS.filter((c) => c !== 'id')
-    this.db
-      .prepare(`UPDATE api_endpoints SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`)
-      .run(...cols.map((c) => vals[c] ?? null), rec.id)
+    await this.client.run(UPDATE_EP_SQL, ...UPDATE_EP_COLS.map((c) => vals[c] ?? null), rec.id)
     return this.getHydrated(rec.id)
   }
 
-  removeEndpoint(id) {
-    return withTransaction(this.db, () => {
-      this._delKeysEp.run(id)
-      this._delModelsEp.run(id)
-      return this._delEp.run(id).changes > 0
+  async removeEndpoint(id) {
+    return this.client.tx(async (tx) => {
+      await tx.run(DELETE_EP_KEYS_SQL, id)
+      await tx.run(DELETE_EP_MODELS_SQL, id)
+      return (await tx.run(DELETE_EP_SQL, id)).changes > 0
     })
   }
 
-  insertKey(rec) {
-    this._insKey.run(
+  async insertKey(rec) {
+    await this.client.run(
+      INSERT_KEY_SQL,
       rec.id,
       rec.endpoint_id,
       rec.api_key,
@@ -176,15 +179,15 @@ export class ApiEndpointsRepo {
       rec.cooldown_until || null,
       rec.created_at,
     )
-    return rowKey(this._getKey.get(rec.id))
+    return rowKey(await this.client.one(GET_KEY_SQL, rec.id))
   }
 
-  removeKey(id) {
-    return this._delKey.run(id).changes > 0
+  async removeKey(id) {
+    return (await this.client.run(DELETE_KEY_SQL, id)).changes > 0
   }
 
-  updateKey(id, patch = {}) {
-    const rec = rowKey(this._getKey.get(id))
+  async updateKey(id, patch = {}) {
+    const rec = rowKey(await this.client.one(GET_KEY_SQL, id))
     if (!rec) return null
     if (patch.api_key != null) {
       const next = String(patch.api_key).trim()
@@ -194,7 +197,8 @@ export class ApiEndpointsRepo {
     if (patch.proxy_id != null) rec.proxy_id = String(patch.proxy_id).trim()
     if (patch.disabled != null) rec.disabled = !!patch.disabled
     if (patch.cooldown_until !== undefined) rec.cooldown_until = patch.cooldown_until || null
-    this._updKey.run(
+    await this.client.run(
+      UPDATE_KEY_SQL,
       rec.api_key,
       rec.proxy_url || '',
       rec.proxy_id || '',
@@ -204,20 +208,21 @@ export class ApiEndpointsRepo {
     )
   }
 
-  setKeyCooldown(id, untilIso) {
-    this._cool.run(untilIso, id)
+  async setKeyCooldown(id, untilIso) {
+    await this.client.run(SET_COOLDOWN_SQL, untilIso, id)
   }
 
-  replaceModels(endpointId, models = []) {
-    withTransaction(this.db, () => {
-      this._delModelsEp.run(endpointId)
-      models.forEach((m, i) => {
+  async replaceModels(endpointId, models = []) {
+    await this.client.tx(async (tx) => {
+      await tx.run(DELETE_EP_MODELS_SQL, endpointId)
+      for (const [i, m] of models.entries()) {
         const levels = Array.isArray(m.thinking?.levels)
           ? m.thinking.levels
           : Array.isArray(m.thinking_levels)
             ? m.thinking_levels
             : null
-        this._insModel.run(
+        await tx.run(
+          INSERT_MODEL_SQL,
           m.id,
           endpointId,
           Number(m.sort ?? i),
@@ -226,7 +231,7 @@ export class ApiEndpointsRepo {
           bool01(m.image),
           levels ? JSON.stringify(levels) : null,
         )
-      })
+      }
     })
     return this.getHydrated(endpointId)
   }

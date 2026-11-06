@@ -8,6 +8,8 @@ import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs
 import { createRespond } from '../../src/lib/http/respond.mjs'
 import { CODEX_IMAGE_EDITS_URL, CODEX_IMAGE_GENERATIONS_URL } from '../../src/lib/protocol/codex-models.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { ApiKeysRepo } from '../../src/lib/db/repos/api-keys-repo.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import { loadGptModelPolicy, saveGptModelPolicy } from '../../src/lib/protocol/gpt-model-policy.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 
@@ -52,7 +54,7 @@ afterEach(() => {
 })
 
 /** Real HTTP server around handleProtocol; `upstream(url, body)` answers the Codex Images call. */
-async function serve(upstream) {
+async function serve(upstream, authorize = (req) => (req.apiKeyKind = 'master'), apiKeyStore = undefined) {
   const cfg = { rewrite: { enabled: false } }
   const respond = createRespond(cfg)
   const calls = []
@@ -61,8 +63,10 @@ async function serve(upstream) {
     json: respond.json,
     writeSSEHeaders: respond.writeSSEHeaders,
     readBody: respond.readBody,
+    // A managed key needs a stored record once the database is open; the
+    // default exercises the image bridge, not commercial key admission.
     requireAuth: (req) => {
-      req.apiKeyKind = 'managed'
+      authorize(req)
       return true
     },
     cfg: {
@@ -77,6 +81,7 @@ async function serve(upstream) {
     },
     stats: { errors: 0, requests: 0, by_route: {} },
     groupsRepo: { rateMultiplier: () => 1 },
+    apiKeyStore,
     routingConfig: {},
     codexOps: {
       fetchImpl: async (url, init) => {
@@ -256,11 +261,57 @@ test('no prompt, a disabled model or an upstream rejection keeps an HTTP error s
     assert.equal(rejected.status, 400)
     assert.equal(JSON.parse(rejected.text).error.code, 'moderation_blocked')
 
-    saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
+    await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-flare': { enabled: false } } })
     const disabled = await live.post('/v1/responses', { model: 'gpt-image-2.5-flare', input: 'x' })
     assert.equal(disabled.status, 400)
     assert.equal(JSON.parse(disabled.text).error.code, 'model_disabled')
     assert.equal(live.calls.length, 1)
+  } finally {
+    await live.close()
+  }
+})
+
+test('a group without image generation cannot reach Images through a chat turn', async () => {
+  const groups = new GroupsRepo()
+  const group = await groups.update((await groups.create({ name: 'No images', platform: 'openai' })).id, {
+    allow_image_generation: false,
+  })
+  const now = new Date().toISOString()
+  const key = await new ApiKeysRepo().insert({
+    id: 'key-no-images',
+    key: 'key-no-images',
+    key_hash: 'key-no-images',
+    status: 'active',
+    category: 'api',
+    group_id: group.id,
+    created_at: now,
+    updated_at: now,
+  })
+  const seats = { acquired: 0, released: 0 }
+  const live = await serve(
+    () => [200, IMAGE],
+    (req) => {
+      req.apiKeyKind = 'managed'
+      req.apiKeyRecord = key
+    },
+    {
+      canAccept: (record) => ({ ok: true, record }),
+      acquire: () => {
+        seats.acquired++
+        return { ok: true }
+      },
+      release: () => seats.released++,
+    },
+  )
+  try {
+    const out = await live.post('/v1/chat/completions', {
+      model: 'gpt-image-2.5-flare',
+      messages: [{ role: 'user', content: 'a red fox' }],
+    })
+    assert.equal(out.status, 403)
+    assert.equal(JSON.parse(out.text).error.code, 'image_generation_disabled')
+    assert.equal(live.calls.length, 0)
+    assert.deepEqual(seats, { acquired: 0, released: 0 })
   } finally {
     await live.close()
   }
