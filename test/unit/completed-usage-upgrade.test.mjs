@@ -1,0 +1,54 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { createDatabase, applyMigrations } from '../../src/lib/db/database.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
+import { RelayBilling } from '../../src/lib/admin/relay-billing.mjs'
+
+test('upgrade preserves actual charges and old records without holding funds or replaying debits', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'completed-usage-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  for (const file of fs.readdirSync('src/lib/db/migrations'))
+    if (file.endsWith('.sql') && file < '069')
+      fs.copyFileSync(path.join('src/lib/db/migrations', file), path.join(root, file))
+  const db = createDatabase({ dbPath: ':memory:', migrationsDir: root })
+  t.after(() => db.close())
+  // 库结构停在 069 之前，当前用户仓库会写后续迁移新增的列，所以直接插入升级前的用户行。
+  const user = { id: 'customer-id' }
+  const createdAt = new Date().toISOString()
+  db.prepare(
+    `INSERT INTO users(id,email,username,password_hash,role,status,created_at,updated_at)
+     VALUES(?, 'customer@panel.local', 'customer', 'x', 'user', 'active', ?, ?)`,
+  ).run(user.id, createdAt, createdAt)
+  db.prepare('UPDATE users SET balance_micros=5000000 WHERE id=?').run(user.id)
+  const now = new Date().toISOString()
+  const insert = db.prepare(`INSERT INTO billing_reservations(request_id,user_id,api_key_id,group_id,
+    subscription_id,rate_multiplier,group_version,reserved_micros,actual_micros,status,created_at,updated_at)
+    VALUES(?,?, 'key',1,'sub',1,1,4000000,?,?,?,?)`)
+  insert.run('completed', user.id, 200000, 'settled', now, now)
+  for (const status of ['pending', 'pending_usage', 'pending_pricing', 'released'])
+    insert.run(status, user.id, null, status, now, now)
+  applyMigrations(db)
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM billing_charges').get().n, 1)
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM billing_reservations').get().n, 5)
+  const billing = new RelayBilling(db)
+  assert.equal((await billing.balance(user.id)).available, 5)
+  assert.equal((await billing.balance(user.id)).reserved, undefined)
+  const group = await new GroupsRepo(db).getById(1)
+  assert.equal((await billing.subscriptionWindows('sub', group))[0].used, 0.2)
+  assert.equal(
+    (await billing.settle({ request_id: 'completed' }, {}, 'claude-sonnet-5', () => assert.fail('replay')))
+      .actual_micros,
+    200000,
+  )
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM wallet_ledger').get().n, 0)
+  applyMigrations(db)
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM billing_charges').get().n, 1)
+  // The retired data can be archived independently: it is not an active dependency.
+  db.exec('DROP TABLE billing_reservations')
+  assert.equal((await billing.balance(user.id)).available, 5)
+  assert.equal((await billing.subscriptionWindows('sub', group))[0].used, 0.2)
+  assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
+})

@@ -26,7 +26,7 @@ const offSlot = {
   proxy_cli_enabled: true,
 }
 
-test('normalize fills defaults', () => {
+test('normalize fills defaults', async () => {
   const n = normalizeCredentialRefreshConfig({ interval_sec: 3, concurrency: 99 })
   assert.equal(n.enabled, true)
   assert.equal(n.interval_sec, 60)
@@ -34,18 +34,18 @@ test('normalize fills defaults', () => {
   assert.equal(n.run_on_start, true)
 })
 
-test('调度关 slot with refresh token is still a refresh target', () => {
+test('调度关 slot with refresh token is still a refresh target', async () => {
   assert.equal(isCredentialRefreshTarget(offSlot), true)
   assert.equal(isCredentialRefreshTarget({ ...offSlot, schedulable: true, status: 'running' }), true)
 })
 
-test('no refresh / down / no proxy are skipped', () => {
+test('no refresh / down / no proxy are skipped', async () => {
   assert.equal(isCredentialRefreshTarget({ ...offSlot, has_refresh: false }), false)
   assert.equal(isCredentialRefreshTarget({ ...offSlot, status: 'stopped' }), false)
   assert.equal(isCredentialRefreshTarget({ ...offSlot, proxy: null, proxy_cli_enabled: false }), false)
 })
 
-test('due when expired, not due after a recorded refresh_error', () => {
+test('due when expired, not due after a recorded refresh_error', async () => {
   assert.equal(needsScheduledRefresh(offSlot), true)
   assert.equal(needsScheduledRefresh({ ...offSlot, refresh_error: 'invalid_grant' }), false)
   assert.equal(
@@ -57,7 +57,7 @@ test('due when expired, not due after a recorded refresh_error', () => {
   )
 })
 
-test('revoked access with remaining TTL is an operator hint, not a scheduled force', () => {
+test('revoked access with remaining TTL is an operator hint, not a scheduled force', async () => {
   const now = Date.now()
   const revoked = {
     ...offSlot,
@@ -81,7 +81,7 @@ test('revoked access with remaining TTL is an operator hint, not a scheduled for
   )
 })
 
-test('classify reads invalid_grant from worker message', () => {
+test('classify reads invalid_grant from worker message', async () => {
   assert.equal(
     classifyCredentialRefresh({
       ok: false,
@@ -103,7 +103,7 @@ test('classify reads invalid_grant from worker message', () => {
   )
 })
 
-test('markVmRefreshError writes refresh_error and persist clears it', () => {
+test('markVmRefreshError writes refresh_error and persist clears it', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-refresh-'))
   const vmPath = path.join(dir, 'vm-09.json')
   fs.writeFileSync(
@@ -124,14 +124,14 @@ test('markVmRefreshError writes refresh_error and persist clears it', () => {
   assert.equal(failed.claude.refresh_error, 'invalid_grant')
   assert.equal(failed.schedulable, false)
   assert.equal(failed.schedule_manual, true)
-  persistOauthToVm(vmPath, { has_access: true, has_refresh: true, expires_at: Date.now() + 3600_000 })
+  await persistOauthToVm(vmPath, { has_access: true, has_refresh: true, expires_at: Date.now() + 3600_000 })
   const ok = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(ok.claude.refresh_error, null)
   assert.equal(ok.schedulable, false)
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('fatal refresh takes a non-manual slot out of the pool', () => {
+test('fatal refresh takes a non-manual slot out of the pool', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-refresh-'))
   const vmPath = path.join(dir, 'vm-11.json')
   fs.writeFileSync(
@@ -153,13 +153,13 @@ test('fatal refresh takes a non-manual slot out of the pool', () => {
   assert.equal(failed.schedule_disabled_reason, 'oauth_invalid_grant')
   assert.equal(failed.unschedulable.reason, 'oauth_invalid_grant')
   // A background refresh / mirror does not reopen 不可调度 (operator action only).
-  persistOauthToVm(vmPath, { has_access: true, has_refresh: true, expires_at: Date.now() + 3600_000 })
+  await persistOauthToVm(vmPath, { has_access: true, has_refresh: true, expires_at: Date.now() + 3600_000 })
   const mirrored = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(mirrored.claude.refresh_error, null)
   assert.equal(mirrored.schedulable, false)
   assert.equal(mirrored.unschedulable.reason, 'oauth_invalid_grant')
   // An operator import does.
-  persistOauthToVm(
+  await persistOauthToVm(
     vmPath,
     { has_access: true, has_refresh: true, expires_at: Date.now() + 3600_000 },
     { operatorImport: true },
@@ -170,7 +170,7 @@ test('fatal refresh takes a non-manual slot out of the pool', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('fatal refresh parks a schedule_manual slot that was still in the pool', () => {
+test('fatal refresh parks a schedule_manual slot that was still in the pool', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-refresh-manual-'))
   const vmPath = path.join(dir, 'vm-13.json')
   fs.writeFileSync(

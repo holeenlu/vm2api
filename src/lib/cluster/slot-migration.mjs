@@ -228,7 +228,7 @@ async function runMigration(args, job) {
     } else update({ status: 'failed', phase: 'failed', error: redactSecrets(err.message) })
   } finally {
     if (held && job.public.status !== 'needs_attention') {
-      clearScheduleHold(projectRoot, id, 'maintenance', { tag: `migration:${job.public.id}` })
+      await clearScheduleHold(projectRoot, id, 'maintenance', { tag: `migration:${job.public.id}` })
     }
     if (held) watchdog?.release?.(id)
   }

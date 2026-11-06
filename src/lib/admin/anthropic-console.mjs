@@ -68,12 +68,12 @@ function headerMap(raw) {
   return out
 }
 
-function directKeys(input = {}, store = null) {
+async function directKeys(input = {}, store = null) {
   const listed = Array.isArray(input.keys) ? input.keys : [input]
   const keys = []
   for (const [row, item] of listed.entries()) {
     const source = item && typeof item === 'object' ? item : { api_key: item }
-    const saved = source.key_id || source.keyId ? savedEndpointKey(store, source.key_id || source.keyId) : null
+    const saved = source.key_id || source.keyId ? await savedEndpointKey(store, source.key_id || source.keyId) : null
     const apiKey = String(source.api_key || source.apiKey || saved?.api_key || '').trim()
     if (!apiKey) continue
     const label = String(source.label || '')
@@ -84,6 +84,9 @@ function directKeys(input = {}, store = null) {
       label: label || `key ${keys.length + 1}`,
       api_key: apiKey,
       proxy_id: chosen(source, 'proxy_id', 'proxyId', saved?.proxy_id || ''),
+      // A saved key may only carry a typed proxy_url (no pool id); keep using it
+      // unless the caller picks a proxy explicitly.
+      saved_proxy_url: savedProxyUrl(source, saved),
       base_url: chosen(source, 'base_url', 'baseUrl', saved?.base_url || ''),
       auth_scheme: chosen(source, 'auth_scheme', 'authScheme', saved?.auth_scheme || ''),
       protocol: chosen(source, 'protocol', 'protocol', saved?.protocol || input.protocol || 'anthropic'),
@@ -98,19 +101,31 @@ function directKeys(input = {}, store = null) {
   return keys
 }
 
+function savedProxyUrl(source, saved) {
+  if (!saved || saved.proxy_id) return ''
+  const has = (name) => Object.prototype.hasOwnProperty.call(source, name)
+  if (has('proxy_id') || has('proxyId')) return ''
+  return String(saved.proxy_url || '').trim()
+}
+
 function chosen(source, snake, camel, fallback) {
   if (Object.prototype.hasOwnProperty.call(source, snake)) return String(source[snake] ?? '').trim()
   if (Object.prototype.hasOwnProperty.call(source, camel)) return String(source[camel] ?? '').trim()
   return String(fallback || '').trim()
 }
 
-export function savedEndpointKey(store, keyId) {
+export async function savedEndpointKey(store, keyId) {
   const id = String(keyId || '').trim()
   if (!id || !store?.listRaw) return null
-  for (const endpoint of store.listRaw()) {
+  for (const endpoint of await store.listRaw()) {
     const key = (endpoint.api_key_entries || []).find((item) => item.id === id)
     if (!key) continue
     return {
+      endpoint,
+      key,
+      kind: endpoint.kind,
+      protocol: endpoint.protocol,
+      headers: endpoint.headers,
       api_key: key.api_key,
       proxy_id: key.proxy_id || '',
       proxy_url: key.proxy_url || '',
@@ -177,7 +192,7 @@ export function buildAnthropicConsoleRequest(input = {}, picked = null, proxyPoo
     : input.base_url || input.baseUrl || (openai ? OPENAI_OFFICIAL_URL : ANTHROPIC_CONSOLE_URL)
   const proxyUrl = scheduled
     ? anthropicProxyUrl(picked.key?.proxy_url)
-    : resolveConsoleProxyUrl(proxyPool, input.proxy_id || input.proxyId)
+    : resolveConsoleProxyUrl(proxyPool, input.proxy_id || input.proxyId) || anthropicProxyUrl(input.saved_proxy_url)
   const extra = headerMap(scheduled ? endpoint.headers : input.headers)
   const headers = {
     'content-type': 'application/json',
@@ -275,7 +290,7 @@ export async function runAnthropicConsole({
     return forwardConsoleRequest(request, { cfg, forward })
   }
 
-  const keys = directKeys(input, store)
+  const keys = await directKeys(input, store)
   const index = Number.isInteger(Number(input?.key_index)) ? Number(input.key_index) : null
   const selected = index == null ? keys : keys.filter((key) => key.row === index)
   if (!selected.length) {
@@ -296,7 +311,7 @@ export async function runAnthropicConsole({
         status: error.status && error.status < 600 ? error.status : 502,
         text: '',
         error: String(error.message || error).slice(0, 300),
-        proxy: Boolean(key.proxy_id),
+        proxy: Boolean(key.proxy_id || key.saved_proxy_url),
         key_id: null,
       })
     }

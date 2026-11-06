@@ -192,7 +192,7 @@ export async function pullSlotCredentials(vm, slotDir, session = null) {
   let record = readJsonCached(vmPath)
   // Unchanged credentials must not clear an existing auth cooldown on every start.
   if (!same || !hasCredentialPresence(record?.claude)) {
-    record = mirrorWorkerCredentialsToVm(vmPath, path.join(slotDir, 'cli-home'))
+    record = await mirrorWorkerCredentialsToVm(vmPath, path.join(slotDir, 'cli-home'))
   }
   if (record) vm.claude = record.claude
   return same ? { pulled: false, reason: 'same' } : { pulled: true }

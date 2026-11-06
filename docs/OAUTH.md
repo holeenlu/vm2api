@@ -12,8 +12,8 @@ sessionKey（默认 Setup Token）或授权码
    │ 控制面接收完整凭证，不在 helper 返回后再次 bootstrap 或套一层代理
    ▼
 槽 ~/.claude/credentials.json   ← 活票只在这里（含 email / account_uuid / org_uuid）
-   │ host RefreshIfNeeded（推理临期 或 面板显式 refresh）
-   │ 无后台定时器；401 不强制换票
+   │ host RefreshIfNeeded（推理临期、面板显式 refresh，或后台定时扫描临期的槽）
+   │ 401 不强制换票
    ▼
 https://platform.claude.com/v1/oauth/token
    │
@@ -43,7 +43,7 @@ SSH 扩展槽同样由控制面经绑定出口换票。拿到授权后，提交�
 
 ## 刷新规则
 
-**只有 host `RefreshIfNeeded` 决定是否换票**，没有第二套定时器。Go worker 不再 Ensure。
+**只有 host `RefreshIfNeeded` 决定是否换票**。Go worker 不再 Ensure。控制面另有后台定时扫描（`credential-refresh-monitor.mjs`，routing 配置 `credential_refresh`，默认每 300 秒、启动时先跑一次、并发 3）：只对带 refresh token、进入刷新窗口且没有致命刷新错误的槽（含调度关）发起同一个 Ensure，未到期的票不强制换。
 
 1. 推理（Messages / usage）或面板「刷新凭证」调用 Ensure。
 2. access 到期前 5 分钟进入刷新窗口；未进窗口则只读现票。新票未过期，导入后不强制 refresh。

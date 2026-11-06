@@ -1,8 +1,13 @@
 import { createElement } from 'react'
+import { i18n } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { latestProbe, probeOutcome, probeSourceLabel } from './probe-status'
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
 
 describe('probe card uses persisted checks without claiming a fresh upstream probe', () => {
   it('shows a passive check when the authoritative usage probe is absent', () => {

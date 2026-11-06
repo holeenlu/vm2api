@@ -621,17 +621,13 @@ test('handleProtocol intercepts before credential hop', () => {
     src.indexOf('function isZeroInjectMode'),
   )
   assert.ok(guard.includes('isProxiedOfficialClaudeCode'))
-  const countSrc = fs.readFileSync(path.join(root, 'src/lib/protocol/user-count-tokens.mjs'), 'utf8')
-  const countGuard = countSrc.indexOf('blockCountTokensBeforeHop(req, parsed.body, deps)')
-  const countHop = countSrc.indexOf('countTokensViaWorker)(peeked.exec')
-  assert.ok(countGuard > 0 && countHop > countGuard)
 })
 
-test('assemble path does not forward onCommit to the kernel hop', () => {
+test('assemble path forwards onCommit to the kernel hop', () => {
   const src = fs.readFileSync(path.join(root, 'src/lib/protocol/handle-protocol.mjs'), 'utf8')
   const start = src.indexOf('async function streamAndAssembleClaudeMessage')
-  const end = src.indexOf('async function handleProtocol')
+  const end = src.indexOf('async function executeProtocol')
   assert.ok(start > 0 && end > start)
   const chunk = src.slice(start, end)
-  assert.equal(chunk.includes('onCommit'), false)
+  assert.equal(chunk.includes('onCommit'), true)
 })

@@ -1,7 +1,6 @@
 package oauthcmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,11 +40,6 @@ type responseEnvelope struct {
 	OK      bool              `json:"ok"`
 	Status  int               `json:"status"`
 	Body    any               `json:"body"`
-	Headers map[string]string `json:"headers"`
-}
-
-type countTokensInput struct {
-	Body    json.RawMessage   `json:"body"`
 	Headers map[string]string `json:"headers"`
 }
 
@@ -121,15 +115,6 @@ func Run(args []string, stdin io.Reader, stdout io.Writer) int {
 		response, err = client.Get(ctx, "/api/oauth/profile", headers)
 	case "models":
 		response, err = client.Get(ctx, "/v1/models?limit=1000", headers)
-	case "count-tokens":
-		var input countTokensInput
-		if err = decodeCountTokens(stdin, &input); err == nil {
-			headers = mergeHeaders(headers, input.Headers)
-			headers["user-agent"] = userAgent(cfg)
-			response, err = client.CountTokens(ctx, input.Body, headers)
-		} else {
-			return writeAndReturn(stdout, errorEnvelope(0, "invalid_arguments", "invalid count-tokens input"), 2)
-		}
 	case "reset-status":
 		// cedar_ember hides grants unless the caller is the external CLI surface.
 		// The slot telemetry UA is claude-code/<ver>, which upstream answers as ineligible_reason=surface.
@@ -183,7 +168,7 @@ func parseArgs(args []string) (string, string, bool, bool) {
 
 func validateOperation(op string) error {
 	switch op {
-	case "refresh", "usage", "profile", "models", "count-tokens", "reset-status", "reset-redeem":
+	case "refresh", "usage", "profile", "models", "reset-status", "reset-redeem":
 		return nil
 	default:
 		return fmt.Errorf("unknown oauth operation %q", op)
@@ -222,37 +207,6 @@ func claudeResetUserAgent(cfg config.Config) string {
 		version = "2.1.293"
 	}
 	return "claude-cli/" + version + " (external, cli)"
-}
-
-func mergeHeaders(base, extra map[string]string) map[string]string {
-	merged := make(map[string]string, len(base)+len(extra))
-	for key, value := range base {
-		merged[strings.ToLower(strings.TrimSpace(key))] = value
-	}
-	for key, value := range extra {
-		merged[strings.ToLower(strings.TrimSpace(key))] = value
-	}
-	return merged
-}
-
-func decodeCountTokens(reader io.Reader, input *countTokensInput) error {
-	if reader == nil {
-		return errors.New("count-tokens input is required")
-	}
-	raw, err := io.ReadAll(io.LimitReader(reader, maxBodyBytes+1))
-	if err != nil {
-		return err
-	}
-	if len(raw) > maxBodyBytes {
-		return errors.New("count-tokens input is too large")
-	}
-	if err := json.Unmarshal(raw, input); err != nil {
-		return err
-	}
-	if len(input.Body) == 0 || bytes.Equal(bytes.TrimSpace(input.Body), []byte("null")) {
-		return errors.New("count-tokens body is required")
-	}
-	return nil
 }
 
 func decodeResetRedeem(reader io.Reader, input *resetRedeemInput) error {

@@ -1,0 +1,115 @@
+{
+  "events": [
+    {
+      "event_id": "evt_fixturestream01_1",
+      "instance_id": "gw-1",
+      "occurred_at": "2026-11-05T01:00:01Z",
+      "payload": {
+        "dispatch_id": "d_1",
+        "gateway_instance_id": "gw-1",
+        "payload_hash": "abc",
+        "request_id": "r_1",
+        "runtime_account_id": "a",
+        "terminal_state": "completed",
+        "usage": {
+          "input_tokens": 7,
+          "output_tokens": 3
+        },
+        "usage_confidence": "complete"
+      },
+      "payload_sha256": "4f50883b51aff28eb37ccda1b83347165a150876dcf08f2e84198415c0af0699",
+      "seq": 1,
+      "stream_id": "fixturestream01",
+      "subject": {
+        "dispatch_id": "d_1",
+        "request_id": "r_1",
+        "runtime_account_id": "a"
+      },
+      "type": "request.finalized",
+      "version": 1
+    },
+    {
+      "event_id": "evt_fixturestream01_2",
+      "instance_id": "gw-1",
+      "occurred_at": "2026-11-05T01:00:02Z",
+      "payload": {
+        "items": [
+          {
+            "account_id": "a",
+            "bps_error": "banned",
+            "bps_state": "blocked",
+            "credential_state": "",
+            "last_error": ""
+          }
+        ]
+      },
+      "payload_sha256": "f0cec93c27c92e49c850e05a005e93ef12c1ce21b8674bb49ae3e1653373d839",
+      "seq": 2,
+      "stream_id": "fixturestream01",
+      "type": "account.state",
+      "version": 1
+    },
+    {
+      "event_id": "evt_fixturestream01_3",
+      "instance_id": "gw-1",
+      "occurred_at": "2026-11-05T01:00:03Z",
+      "payload": {
+        "items": [
+          {
+            "account_id": "a",
+            "quota": {
+              "primary_used_percent": 42
+            }
+          }
+        ]
+      },
+      "payload_sha256": "d38ebc3d9976424ecdc4a5424a7299efc2a51456bc0db6004364035c69f4ca5e",
+      "seq": 3,
+      "stream_id": "fixturestream01",
+      "type": "account.quota",
+      "version": 1
+    },
+    {
+      "event_id": "evt_fixturestream01_4",
+      "instance_id": "gw-1",
+      "occurred_at": "2026-11-05T01:00:04Z",
+      "payload": {
+        "account_id": "a",
+        "model": "gpt-5.5",
+        "ok": true,
+        "probed_at": "2026-11-05T01:00:00Z",
+        "status": 200,
+        "total_tokens": 15
+      },
+      "payload_sha256": "eb20e690d3a84bd3f78d4dd03eb7ea8f753bd0900521b13caf0cfc4080fb0bd0",
+      "seq": 4,
+      "stream_id": "fixturestream01",
+      "subject": {
+        "runtime_account_id": "a"
+      },
+      "type": "probe.recorded",
+      "version": 1
+    },
+    {
+      "event_id": "evt_fixturestream01_5",
+      "instance_id": "gw-1",
+      "occurred_at": "2026-11-05T01:00:05Z",
+      "payload": {
+        "items": [
+          {
+            "account_id": "b",
+            "bps_error": "usage policy",
+            "bps_state": "",
+            "credential_state": "expired",
+            "last_error": "line\u2028sep\u2029para 中文"
+          }
+        ]
+      },
+      "payload_sha256": "b55d06a2659c8b888797a355d481dd12e36d928779133e28d5b5401932748633",
+      "seq": 5,
+      "stream_id": "fixturestream01",
+      "type": "account.state",
+      "version": 1
+    }
+  ]
+}

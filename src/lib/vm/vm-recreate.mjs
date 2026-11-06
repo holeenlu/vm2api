@@ -193,14 +193,14 @@ export function buildRecreatedVmRecord(prev, generated, { mode = 'traits' } = {}
   return next
 }
 
-export function recreateVmFiles(projectRoot, prev, { mode = 'traits' } = {}) {
+export async function recreateVmFiles(projectRoot, prev, { mode = 'traits' } = {}) {
   if (!projectRoot || !prev?.id) throw new Error('projectRoot and vm id required')
   const keep = mode === 'keep'
   wipeSlotHome(projectRoot, prev.id, { keepData: keep })
   const generated = keep
     ? null
     : assignComputerFingerprint(projectRoot, prev, {
-        taken: takenFingerprintKeys(listVms(projectRoot), { exceptId: prev.id }),
+        taken: takenFingerprintKeys(await listVms(projectRoot), { exceptId: prev.id }),
       })
   const vm = buildRecreatedVmRecord(prev, generated, { mode: keep ? 'keep' : 'traits' })
   const vmPath = path.join(projectRoot, 'vms', `${prev.id}.json`)

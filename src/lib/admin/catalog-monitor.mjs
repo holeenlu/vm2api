@@ -32,10 +32,10 @@ export function readCatalogSync() {
   }
 }
 
-function writeCatalogSync(platform, status) {
+async function writeCatalogSync(platform, status) {
   const repo = new SettingsRepo()
   const cur = repo.get(CATALOG_SYNC_KEY, null) || { claude: null, codex: null }
-  repo.set(CATALOG_SYNC_KEY, { ...cur, [platform]: status })
+  await repo.set(CATALOG_SYNC_KEY, { ...cur, [platform]: status })
   return status
 }
 
@@ -44,8 +44,8 @@ function syncStatus(status, { added = [], error = null } = {}) {
 }
 
 // listVms strips credentials; the exec needs the raw record's OAuth block.
-function claudeCatalogTargets(projectRoot) {
-  return listVms(projectRoot)
+async function claudeCatalogTargets(projectRoot) {
+  return (await listVms(projectRoot))
     .filter((vm) => vm?.id && !isCodexVm(vm) && !HARD_DOWN.has(String(vm.status || '').toLowerCase()))
     .map((vm) => getVm(projectRoot, vm.id))
     .filter((vm) => vm && vmHasClaudeCredential(vm) && vmHasProxyPath(vm))
@@ -53,7 +53,7 @@ function claudeCatalogTargets(projectRoot) {
 
 /** Live Claude catalog → model_policy. */
 export async function syncClaudeCatalog({ projectRoot, runOauth = runSlotOauth } = {}) {
-  const targets = claudeCatalogTargets(projectRoot)
+  const targets = await claudeCatalogTargets(projectRoot)
   if (!targets.length) return writeCatalogSync('claude', syncStatus('skipped', { error: 'no_claude_slot' }))
   const ids = new Set()
   let successes = 0
@@ -71,7 +71,7 @@ export async function syncClaudeCatalog({ projectRoot, runOauth = runSlotOauth }
     for (const row of list) if (row?.id) ids.add(String(row.id))
   }
   if (!successes) return writeCatalogSync('claude', syncStatus('error', { error: lastError || 'models_failed' }))
-  const { added } = syncWorkerModelsIntoPolicy([...ids], {
+  const { added } = await syncWorkerModelsIntoPolicy([...ids], {
     displayNameOf: (id) => modelsDevMeta('anthropic', id)?.name,
   })
   seedModelCatalog()
@@ -79,21 +79,32 @@ export async function syncClaudeCatalog({ projectRoot, runOauth = runSlotOauth }
 }
 
 /** Live ChatGPT Codex catalog → gpt_model_policy. Timers never rotate OAuth; the panel button may. */
-export async function syncGptCatalog({ projectRoot, vmId = '', catalogClientVersion = 'auto', rotate = false } = {}) {
-  const result = await syncCodexCatalog({ projectRoot, vmId, rotate, catalogClientVersion })
+export async function syncGptCatalog({
+  projectRoot,
+  vmId = '',
+  catalogClientVersion = 'auto',
+  rotate = false,
+  gatewayWorker = null,
+} = {}) {
+  const result = await syncCodexCatalog({ projectRoot, vmId, rotate, catalogClientVersion, gatewayWorker })
   if (!result.ok) {
     const skipped = result.error === 'no_codex_slot' || result.error === 'proxy_required'
-    writeCatalogSync('codex', syncStatus(skipped ? 'skipped' : 'error', { error: result.error }))
+    await writeCatalogSync('codex', syncStatus(skipped ? 'skipped' : 'error', { error: result.error }))
     return result
   }
-  writeCatalogSync('codex', syncStatus('ok', { added: result.added || [] }))
+  await writeCatalogSync('codex', syncStatus('ok', { added: result.added || [] }))
   return result
 }
 
 /**
  * @param {{ projectRoot: string, codexCatalogVersion?: () => string, log?: (event: object) => void }} opts
  */
-export function createCatalogMonitor({ projectRoot, codexCatalogVersion = () => 'auto', log = () => {} } = {}) {
+export function createCatalogMonitor({
+  projectRoot,
+  codexCatalogVersion = () => 'auto',
+  getGatewayWorker = () => null,
+  log = () => {},
+} = {}) {
   const timers = []
   let running = false
   const guard = (name, fn) => async () => {
@@ -107,7 +118,11 @@ export function createCatalogMonitor({ projectRoot, codexCatalogVersion = () => 
   const modelsDev = guard('models.dev', () => syncModelsDev())
   const upstream = guard('upstream', async () => {
     const claude = await syncClaudeCatalog({ projectRoot })
-    await syncGptCatalog({ projectRoot, catalogClientVersion: codexCatalogVersion() })
+    await syncGptCatalog({
+      projectRoot,
+      catalogClientVersion: codexCatalogVersion(),
+      gatewayWorker: getGatewayWorker(),
+    })
     return claude
   })
 

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import { fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { StatusMark } from '@/components/status-mark'
@@ -68,6 +69,7 @@ function diskSub(m: Meter): string {
 }
 
 export function MachineChip({ role }: { role: ClusterMachine['role'] }) {
+  const { t } = useTranslation('cluster')
   return (
     <span
       className={cn(
@@ -77,7 +79,7 @@ export function MachineChip({ role }: { role: ClusterMachine['role'] }) {
           : 'border-border/70 text-muted-foreground'
       )}
     >
-      {role === 'local' ? '本机' : '节点'}
+      {role === 'local' ? t('local') : t('node')}
     </span>
   )
 }
@@ -95,6 +97,7 @@ export function MachineTable({
   selectedId: string
   onSelect: (id: string) => void
 }) {
+  const { t } = useTranslation('cluster')
   return (
     <div className='overflow-x-auto [contain:inline-size]'>
       <div className={cn('grid min-w-[980px] gap-x-3', GRID)} role='table'>
@@ -103,14 +106,14 @@ export function MachineTable({
           role='row'
         >
           {[
-            '机器',
-            '连接',
-            '负载',
-            '内存',
-            '磁盘',
-            '槽位',
-            '还能放',
-            '今日',
+            t('table.machine'),
+            t('connection'),
+            t('table.load'),
+            t('memory'),
+            t('table.disk'),
+            t('slots'),
+            t('capacity.room'),
+            t('table.today'),
           ].map((h, i) => (
             <div
               key={h}
@@ -169,8 +172,15 @@ export function MachineTable({
               {m.cpu ? (
                 <MeterCell
                   pct={m.cpu.pct}
-                  sub={`${m.cpu.cores} 核 · load ${m.cpu.load[0].toFixed(2)}`}
-                  title={`load ${m.cpu.load.map((n) => (n == null ? '—' : n.toFixed(2))).join(' / ')}（1 / 5 / 15 分钟）`}
+                  sub={t('remote.cpuLoad', {
+                    value1: m.cpu.cores,
+                    value2: m.cpu.load[0].toFixed(2),
+                  })}
+                  title={t('table.loadTitle', {
+                    value1: m.cpu.load
+                      .map((n) => (n == null ? '—' : n.toFixed(2)))
+                      .join(' / '),
+                  })}
                 />
               ) : (
                 <Dash />
@@ -179,7 +189,7 @@ export function MachineTable({
                 <MeterCell
                   pct={m.mem.pct}
                   sub={memSub(m.mem)}
-                  title='实际用量（不含可回收缓存）'
+                  title={t('table.memoryTitle')}
                 />
               ) : (
                 <Dash />
@@ -188,10 +198,14 @@ export function MachineTable({
                 <MeterCell
                   pct={m.disk.pct}
                   sub={diskSub(m.disk)}
-                  title={m.role === 'local' ? '数据目录所在磁盘' : '根分区'}
+                  title={
+                    m.role === 'local'
+                      ? t('table.diskLocal')
+                      : t('table.diskRoot')
+                  }
                 />
               ) : (
-                <Dash sub={m.cpu ? '没读到' : undefined} />
+                <Dash sub={m.cpu ? t('table.notRead') : undefined} />
               )}
               <div>
                 <span className='field-metric text-[13px] font-semibold'>
@@ -211,10 +225,14 @@ export function MachineTable({
                       fit === 0 && 'text-[color:var(--status-caution)]'
                     )}
                   >
-                    {fit === 0 ? '满' : `${fit} 台`}
+                    {fit === 0
+                      ? t('capacity.full')
+                      : t('capacity.fitCount', { count: fit })}
                   </span>
                   <div className='field-metric mt-0.5 text-[11px] text-muted-foreground'>
-                    剩 {gibFloor(m.capacity?.free)}G
+                    {t('capacity.left', {
+                      value1: gibFloor(m.capacity?.free),
+                    })}
                   </div>
                 </div>
               )}

@@ -1,10 +1,11 @@
 import type { Vm } from '@/types/panel-vm'
-import { Box, Cpu } from 'lucide-react'
+import { Box, Cpu, Waypoints } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { runtimeTypeLabel, runtimeTypeOf } from '@/features/vm/machine-spec'
 
 /**
- * 槽位形态：容器 (Docker) / 虚拟机 (KVM)。旧槽没有 runtime_type 时按容器。
+ * 槽位形态：容器 (Docker) / 虚拟机 (KVM) / Gateway Worker 账号。旧槽没有 runtime_type 时按容器。
  */
 export function RuntimeChip({
   vm,
@@ -13,10 +14,12 @@ export function RuntimeChip({
   vm: Pick<Vm, 'runtime_type'>
   className?: string
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const type = runtimeTypeOf(vm)
   const kvm = type === 'kvm'
   const label = runtimeTypeLabel(type)
-  const Icon = kvm ? Cpu : Box
+  const Icon = type === 'gateway' ? Waypoints : kvm ? Cpu : Box
   return (
     <span
       className={cn(
@@ -26,7 +29,13 @@ export function RuntimeChip({
           : 'border-border/70 text-muted-foreground',
         className
       )}
-      title={kvm ? 'KVM 虚拟机' : 'Docker 容器'}
+      title={
+        type === 'gateway'
+          ? tVm('vm:runtimeChip.gatewayWorker')
+          : kvm
+            ? tVm('vm:runtimeChip.kVMVirtualMachine')
+            : tVm('vm:runtimeChip.dockerContainer')
+      }
     >
       <Icon className='size-2.5 shrink-0' aria-hidden='true' />
       <span className='truncate'>{label}</span>

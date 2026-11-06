@@ -190,9 +190,9 @@ for (const mode of ['rebuild', 'passthrough']) {
         }),
       ])
       const parentKey = h.sticky.canonicalSessionKey(h.parentSession)
-      const before = h.sticky.resolve(parentKey)
+      const before = await h.sticky.resolve(parentKey)
       const familyKey = h.sticky.canonicalFamilyKey('test-parent')
-      const familyBefore = h.sticky.resolve(familyKey)
+      const familyBefore = await h.sticky.resolve(familyKey)
       assert.ok(before?.sessionId)
       // A normal follow-up remains serialized even while a summary can run.
       followup = h.invoke('followup')
@@ -202,8 +202,8 @@ for (const mode of ['rebuild', 'passthrough']) {
         h.calls.map((call) => call.id),
         ['parent', 'summary'],
       )
-      assert.deepEqual(h.sticky.resolve(parentKey), before)
-      assert.deepEqual(h.sticky.resolve(familyKey), familyBefore)
+      assert.deepEqual(await h.sticky.resolve(parentKey), before)
+      assert.deepEqual(await h.sticky.resolve(familyKey), familyBefore)
       const main = h.calls[0]
       const side = h.calls[1]
       assert.equal(side.candidate.vmId, main.candidate.vmId)
@@ -279,7 +279,7 @@ test('cancelling a queued summary removes its ticket without releasing the paren
       }),
     ])
     const parentKey = h.sticky.canonicalSessionKey(h.parentSession)
-    const before = h.sticky.resolve(parentKey)
+    const before = await h.sticky.resolve(parentKey)
     summary = h.invoke('summary', agentBody({ summary: true }))
     await new Promise((resolve) => setTimeout(resolve, 30))
     assert.equal(h.pool.queuedTotal(), 1)
@@ -288,7 +288,7 @@ test('cancelling a queued summary removes its ticket without releasing the paren
     assert.equal(h.pool.queuedTotal(), 0)
     assert.equal(h.pool.planner.openCount('vm-01'), 1)
     assert.equal(h.pool.inflight.get('account-1'), 1)
-    assert.deepEqual(h.sticky.resolve(parentKey), before)
+    assert.deepEqual(await h.sticky.resolve(parentKey), before)
     assert.deepEqual(
       h.calls.map((call) => call.id),
       ['parent'],

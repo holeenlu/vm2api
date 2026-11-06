@@ -166,7 +166,7 @@ for (const id of ['instructions', 'caller_system']) {
     })
     const markers = listCacheMarkers(out)
     assert.equal(markers.length, 4)
-    assert.deepEqual(out.tools, [tool])
+    assert.deepEqual(out.tools, [{ ...tool, eager_input_streaming: true }])
     assert.deepEqual(
       markers.filter((marker) => marker.section !== 'tools').map((marker) => marker.ttl),
       ['1h', null, '5m'],
@@ -373,7 +373,7 @@ test('zero respects an earlier tool implicit 5m and later message markers', (t) 
     blocks: [text('Incompatible template hour', '1h'), text('Template implicit TTL')],
     input: { tools: [tool], system: [text('Caller rule', null)], messages: [message] },
   })
-  assert.deepEqual(out.tools, [tool])
+  assert.deepEqual(out.tools, [{ ...tool, eager_input_streaming: true }])
   assert.deepEqual(out.messages, [message])
   assert.deepEqual(out.system.slice(1), [
     text('Incompatible template hour', null),
@@ -411,7 +411,7 @@ test('zero counts tool, system and message markers when allocating template budg
     blocks: [text('Earlier template anchor', '1h'), text('Later template anchor', '1h')],
     input: { tools: [tool], system: [caller], messages: [message] },
   })
-  assert.deepEqual(out.tools, [tool])
+  assert.deepEqual(out.tools, [{ ...tool, eager_input_streaming: true }])
   assert.deepEqual(out.messages, [message])
   assert.deepEqual(out.system.slice(1), [
     text('Earlier template anchor', null),
@@ -432,7 +432,11 @@ for (const location of ['system', 'tools', 'messages']) {
     if (location === 'messages') input.messages = [{ role: 'user', content: [anchor] }]
     const { out } = render(t, { input })
     assert.deepEqual(out.system.slice(1), input.system)
-    if (input.tools) assert.deepEqual(out.tools, input.tools)
+    if (input.tools)
+      assert.deepEqual(
+        out.tools,
+        input.tools.map((tool) => ({ ...tool, eager_input_streaming: true })),
+      )
     if (input.messages) assert.deepEqual(out.messages, input.messages)
     const markers = listCacheMarkers(out)
     assert.equal(markers.length, 1)

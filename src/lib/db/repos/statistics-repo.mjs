@@ -1,3 +1,4 @@
+import { SYSTEM_TIMEZONE } from '../../../shared/system-time.mjs'
 /**
  * `/api/panel/statistics*` aggregates over `usage_logs`.
  *
@@ -11,14 +12,17 @@
  */
 
 import { getDb } from '../database.mjs'
-import { reportTimezone, zonedDayStartMs, zonedParts, zonedWallToMs } from '../../core/timezone.mjs'
+import { dbClient } from '../db-client.mjs'
+import { zonedDayStartMs, zonedParts, zonedWallToMs } from '../../core/timezone.mjs'
 import { ERROR_PRED, PROMPT_TOKENS_SQL, SUCCESS_PRED, TOTAL_TOKENS_SQL, ownerPred } from './usage-log-preds.mjs'
 import { lookupNames } from './usage-logs-view.mjs'
+import { fromMicros } from '../../core/money.mjs'
+import { microsSumSql } from './money-sql.mjs'
 
 export const STATS_RANGES = ['today', '7days', '30days', 'thisMonth']
-export const STATS_DIMENSIONS = ['user', 'key', 'model', 'vm']
+export const STATS_DIMENSIONS = ['user', 'key', 'model', 'vm', 'group', 'endpoint']
 /** Dimensions a tenant may group by; user/vm would expose other tenants or the pool layout. */
-export const USER_ROLE_DIMENSIONS = ['key', 'model']
+export const USER_ROLE_DIMENSIONS = ['key', 'model', 'group', 'endpoint']
 
 const MAX_SERIES = 8
 const OTHERS_ID = '__others__'
@@ -29,7 +33,14 @@ const HOUR_MS = 3_600_000
 const LEADERBOARD_DEFAULT = 20
 const LEADERBOARD_MAX = 100
 
-const DIMENSION_COLUMN = { user: 'user_id', key: 'api_key_id', model: 'model', vm: 'vm_id' }
+const DIMENSION_COLUMN = {
+  user: 'user_id',
+  key: 'api_key_id',
+  model: 'model',
+  vm: 'vm_id',
+  group: 'billing_group_id',
+  endpoint: 'path',
+}
 
 const TOKENS_SQL = TOTAL_TOKENS_SQL
 
@@ -114,14 +125,14 @@ export class StatisticsRepo {
     return { cond: `WHERE ${where.join(' AND ')}`, params }
   }
 
-  _totals(sinceMs, untilMs, ownerUserId) {
+  /** Window totals row（数据访问分层 R5：RollupStatisticsRepo 改为整小时读汇总表）. */
+  async _totalsRow(sinceMs, untilMs, ownerUserId) {
     const { cond, params } = this._scope(sinceMs, untilMs, ownerUserId)
-    const row = this.db
-      .prepare(`
+    return dbClient(this.db).one(
+      `
       SELECT COUNT(*) AS requests,
              COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END), 0) AS errors,
-             COALESCE(SUM(total_cost), 0) AS cost,
-             COALESCE(SUM(actual_cost), 0) AS actual_cost,
+             ${microsSumSql('actual_cost')} AS cost_micros,
              COALESCE(SUM(input_tokens), 0) AS input_tokens,
              COALESCE(SUM(output_tokens), 0) AS output_tokens,
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
@@ -130,8 +141,13 @@ export class StatisticsRepo {
              AVG(duration_ms) AS avg_duration_ms,
              AVG(first_token_ms) AS avg_ttft_ms
       FROM usage_logs ${cond}
-    `)
-      .get(...params)
+    `,
+      ...params,
+    )
+  }
+
+  async _totals(sinceMs, untilMs, ownerUserId) {
+    const row = await this._totalsRow(sinceMs, untilMs, ownerUserId)
     const input = num(row.input_tokens)
     const output = num(row.output_tokens)
     const cacheRead = num(row.cache_read_tokens)
@@ -140,8 +156,9 @@ export class StatisticsRepo {
     return {
       requests: num(row.requests),
       errors: num(row.errors),
-      cost: num(row.cost),
-      actualCost: num(row.actual_cost),
+      // M6：金额在 SQL 里按整数微单位求和，这里只换算成美元
+      cost: fromMicros(num(row.cost_micros)),
+      actualCost: fromMicros(num(row.cost_micros)),
       tokens: input + output + cacheRead + cacheCreation,
       inputTokens: input,
       outputTokens: output,
@@ -153,10 +170,13 @@ export class StatisticsRepo {
     }
   }
 
-  _names(dimension, ids) {
+  async _names(dimension, ids) {
     const real = ids.filter((id) => id !== NONE_ID)
+    if (dimension === 'group')
+      return new Map((await dbClient(this.db).many('SELECT id,name FROM groups')).map((r) => [String(r.id), r.name]))
+    if (dimension === 'endpoint') return new Map(real.map((id) => [id, id]))
     if (dimension === 'model') return new Map(real.map((id) => [id, id]))
-    const names = lookupNames(this.db, {
+    const names = await lookupNames(this.db, {
       userIds: dimension === 'user' ? real : [],
       keyIds: dimension === 'key' ? real : [],
       vmIds: dimension === 'vm' ? real : [],
@@ -168,31 +188,36 @@ export class StatisticsRepo {
     return id === NONE_ID ? NONE_NAME : (names.get(id) ?? id)
   }
 
-  /** Stacked-area series (top 8 by cost + others), window totals, and deltas vs the previous equal window. */
-  statistics({ range = 'today', dimension = 'model', tz = 'UTC', owner_user_id = null, now = Date.now() } = {}) {
-    const r = normalizeRange(range) || 'today'
-    const dim = normalizeDimension(dimension) || 'model'
-    const zone = reportTimezone(tz)
-    const { since, until, resolution, buckets } = resolveWindow(r, zone, now)
-    const col = DIMENSION_COLUMN[dim]
-    const { cond, params } = this._scope(since, until, owner_user_id)
-    const rows = this.db
-      .prepare(`
+  /** Per (dimension value, 15-minute UTC slot) volume; `buckets` lets an override check slot alignment. */
+  async _seriesRows(col, since, until, ownerUserId, _buckets) {
+    const { cond, params } = this._scope(since, until, ownerUserId)
+    return dbClient(this.db).many(
+      `
       SELECT ${col} AS sid, ${SLOT_SQL} AS slot,
              COUNT(*) AS requests,
-             COALESCE(SUM(total_cost), 0) AS cost,
+             ${microsSumSql('actual_cost')} AS cost_micros,
              COALESCE(SUM(${TOKENS_SQL}), 0) AS tokens
       FROM usage_logs ${cond}
       GROUP BY sid, slot
-    `)
-      .all(...params)
+    `,
+      ...params,
+    )
+  }
+
+  /** Stacked-area series (top 8 by cost + others), window totals, and deltas vs the previous equal window. */
+  async statistics({ range = 'today', dimension = 'model', owner_user_id = null, now = Date.now() } = {}) {
+    const r = normalizeRange(range) || 'today'
+    const dim = normalizeDimension(dimension) || 'model'
+    const zone = SYSTEM_TIMEZONE
+    const { since, until, resolution, buckets } = resolveWindow(r, zone, now)
+    const rows = await this._seriesRows(DIMENSION_COLUMN[dim], since, until, owner_user_id, buckets)
 
     const volume = new Map()
     for (const row of rows) {
       const id = row.sid == null || row.sid === '' ? NONE_ID : String(row.sid)
       row.id = id
       const cur = volume.get(id) || { id, cost: 0, requests: 0, tokens: 0 }
-      cur.cost += num(row.cost)
+      cur.cost += num(row.cost_micros)
       cur.requests += num(row.requests)
       cur.tokens += num(row.tokens)
       volume.set(id, cur)
@@ -201,7 +226,7 @@ export class StatisticsRepo {
       (a, b) => b.cost - a.cost || b.requests - a.requests || a.id.localeCompare(b.id),
     )
     const kept = ranked.slice(0, MAX_SERIES)
-    const names = this._names(
+    const names = await this._names(
       dim,
       kept.map((s) => s.id),
     )
@@ -210,7 +235,9 @@ export class StatisticsRepo {
     const keyOf = new Map(series.map((s) => [s.id, s.dataKey]))
     const othersKey = keyOf.get(OTHERS_ID) || null
 
+    // 金额按整数微单位累加（M6），累加完再换算成美元
     const metricNames = ['cost', 'requests', 'tokens']
+    const field = { cost: 'cost_micros', requests: 'requests', tokens: 'tokens' }
     const metrics = {}
     for (const m of metricNames) {
       metrics[m] = buckets.map((t) => {
@@ -226,14 +253,16 @@ export class StatisticsRepo {
       if (!dataKey) continue
       const idx = bucketIndex(buckets, Date.parse(`${row.slot}:00.000Z`))
       for (const m of metricNames) {
-        const v = num(row[m])
+        const v = num(row[field[m]])
         metrics[m][idx][dataKey] += v
         seriesTotals[dataKey][m] += v
       }
     }
+    for (const point of metrics.cost) for (const s of series) point[s.dataKey] = fromMicros(point[s.dataKey])
+    for (const s of series) seriesTotals[s.dataKey].cost = fromMicros(seriesTotals[s.dataKey].cost)
 
-    const totals = this._totals(since, until, owner_user_id)
-    const prev = this._totals(since - (until - since), since, owner_user_id)
+    const totals = await this._totals(since, until, owner_user_id)
+    const prev = await this._totals(since - (until - since), since, owner_user_id)
     return {
       range: r,
       resolution,
@@ -254,44 +283,21 @@ export class StatisticsRepo {
   }
 
   /** Per-entity totals over the same window, by official cost. */
-  leaderboard({
+  async leaderboard({
     range = 'today',
     scope = 'model',
     limit = LEADERBOARD_DEFAULT,
-    tz = 'UTC',
     owner_user_id = null,
     now = Date.now(),
   } = {}) {
     const r = normalizeRange(range) || 'today'
     const s = normalizeDimension(scope) || 'model'
-    const zone = reportTimezone(tz)
+    const zone = SYSTEM_TIMEZONE
     const n = Math.min(LEADERBOARD_MAX, Math.max(1, Math.trunc(Number(limit)) || LEADERBOARD_DEFAULT))
     const { since, until } = resolveWindow(r, zone, now)
-    const col = DIMENSION_COLUMN[s]
-    const { cond, params } = this._scope(since, until, owner_user_id)
-    const rows = this.db
-      .prepare(`
-      SELECT ${col} AS sid,
-             COUNT(*) AS requests,
-             COALESCE(SUM(CASE WHEN ${SUCCESS_PRED} THEN 1 ELSE 0 END), 0) AS success,
-             COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END), 0) AS errors,
-             COALESCE(SUM(input_tokens), 0) AS input_tokens,
-             COALESCE(SUM(output_tokens), 0) AS output_tokens,
-             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-             COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-             COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS cost,
-             COALESCE(SUM(actual_cost), 0) AS actual_cost,
-             AVG(duration_ms) AS avg_duration_ms,
-             AVG(first_token_ms) AS avg_ttft_ms
-      FROM usage_logs ${cond}
-      GROUP BY IFNULL(${col}, '')
-      ORDER BY cost DESC, requests DESC
-      LIMIT ?
-    `)
-      .all(...params, n)
+    const rows = await this._leaderboardRows(DIMENSION_COLUMN[s], since, until, owner_user_id, n)
     const ids = rows.map((row) => (row.sid == null || row.sid === '' ? NONE_ID : String(row.sid)))
-    const names = this._names(s, ids)
+    const names = await this._names(s, ids)
     return {
       scope: s,
       range: r,
@@ -316,12 +322,39 @@ export class StatisticsRepo {
           cacheReadTokens: cacheRead,
           cacheCreationTokens: cacheCreation,
           cacheHitRate: prompt > 0 ? Math.min(1, cacheRead / prompt) : 0,
-          totalCost: num(row.cost),
-          totalActualCost: num(row.actual_cost),
+          totalCost: fromMicros(num(row.cost_micros)),
+          totalActualCost: fromMicros(num(row.cost_micros)),
           avgDurationMs: avgOrNull(row.avg_duration_ms),
           avgTtftMs: avgOrNull(row.avg_ttft_ms),
         }
       }),
     }
+  }
+
+  /** Per-entity totals rows, by official cost, at most `limit`. */
+  async _leaderboardRows(col, since, until, ownerUserId, limit) {
+    const { cond, params } = this._scope(since, until, ownerUserId)
+    return dbClient(this.db).many(
+      `
+      SELECT ${col} AS sid,
+             COUNT(*) AS requests,
+             COALESCE(SUM(CASE WHEN ${SUCCESS_PRED} THEN 1 ELSE 0 END), 0) AS success,
+             COALESCE(SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END), 0) AS errors,
+             COALESCE(SUM(input_tokens), 0) AS input_tokens,
+             COALESCE(SUM(output_tokens), 0) AS output_tokens,
+             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+             COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+             COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
+             ${microsSumSql('actual_cost')} AS cost_micros,
+             AVG(duration_ms) AS avg_duration_ms,
+             AVG(first_token_ms) AS avg_ttft_ms
+      FROM usage_logs ${cond}
+      GROUP BY IFNULL(${col}, '')
+      ORDER BY cost_micros DESC, requests DESC
+      LIMIT ?
+    `,
+      ...params,
+      limit,
+    )
   }
 }

@@ -1,4 +1,6 @@
+import { t as tVm } from '@/i18n'
 import type { VmBillingModelRow } from '@/types/panel-vm'
+import { useTranslation, Trans } from 'react-i18next'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -18,7 +20,8 @@ function billingBandLabels(row: VmBillingModelRow): string[] {
   else if (row.service_tier === 'flex') out.push('Flex')
   else if (row.service_tier) out.push(row.service_tier)
   if (row.speed === 'fast') out.push('Fast mode')
-  if (Number(row.long_context) === 1) out.push('长上下文')
+  if (Number(row.long_context) === 1)
+    out.push(tVm('vm:detailCostByModel.longContext'))
   return out
 }
 
@@ -31,13 +34,20 @@ export function VmCostByModel({
   /** 弹窗里与其它信息卡同一内边距；详情页 Tab 保持默认。 */
   compact?: boolean
 }) {
+  useTranslation('vm')
+
   if (!rows?.length) return null
   return (
     <Card className={compact ? 'gap-3 rounded-xl py-3.5' : undefined}>
       <CardHeader className={compact ? 'px-3.5' : undefined}>
-        <CardTitle className='text-sm'>按模型费用</CardTitle>
+        <CardTitle className='text-sm'>
+          <Trans ns='vm' i18nKey='detailCostByModel.costByModel' />
+        </CardTitle>
         <p className='text-xs text-muted-foreground'>
-          官方价 · 累计 · 按计费档位拆分
+          <Trans
+            ns='vm'
+            i18nKey='detailCostByModel.officialPricingCumulativeSplitByBillingTier'
+          />
         </p>
       </CardHeader>
       <CardContent
@@ -46,12 +56,24 @@ export function VmCostByModel({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>模型</TableHead>
-              <TableHead>档位</TableHead>
-              <TableHead className='text-right'>请求</TableHead>
-              <TableHead className='text-right'>输入 / 输出</TableHead>
-              <TableHead className='text-right'>缓存 读 / 写</TableHead>
-              <TableHead className='text-right'>费用</TableHead>
+              <TableHead>
+                <Trans ns='vm' i18nKey='detailCostByModel.model' />
+              </TableHead>
+              <TableHead>
+                <Trans ns='vm' i18nKey='detailCostByModel.tier' />
+              </TableHead>
+              <TableHead className='text-right'>
+                <Trans ns='vm' i18nKey='detailAccountTab.requests' />
+              </TableHead>
+              <TableHead className='text-right'>
+                <Trans ns='vm' i18nKey='detailCostByModel.inputOutput' />
+              </TableHead>
+              <TableHead className='text-right'>
+                <Trans ns='vm' i18nKey='detailCostByModel.cacheReadWrite' />
+              </TableHead>
+              <TableHead className='text-right'>
+                <Trans ns='vm' i18nKey='detailCostByModel.cost' />
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -76,7 +98,7 @@ export function VmCostByModel({
                       </span>
                     ) : (
                       <span className='text-xs text-muted-foreground'>
-                        标准
+                        <Trans ns='vm' i18nKey='detailCostByModel.standard' />
                       </span>
                     )}
                   </TableCell>
@@ -94,7 +116,12 @@ export function VmCostByModel({
                     {fmtUsd(row.total_cost, 2)}
                     {unpriced > 0 ? (
                       <div className='text-xs text-[color:var(--status-caution)]'>
-                        {fmtNum(unpriced)} 笔未估价
+                        <Trans
+                          ns='vm'
+                          i18nKey='detailCostByModel.unpricedEntries'
+                          values={{ formattedNum: fmtNum(unpriced) }}
+                          count={unpriced}
+                        />
                       </div>
                     ) : null}
                   </TableCell>

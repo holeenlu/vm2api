@@ -13,6 +13,8 @@
  * }
  */
 
+import { redactSecretText } from './security.mjs'
+
 export const ErrorType = {
   AUTH: 'authentication_error',
   PERMISSION: 'permission_error',
@@ -35,6 +37,7 @@ export const ErrorCode = {
   // body
   INVALID_JSON: 'invalid_json',
   BODY_TOO_LARGE: 'body_too_large',
+  REQUEST_TIMEOUT: 'request_timeout',
   EMPTY_BODY: 'empty_body',
   MISSING_FIELD: 'missing_field',
   INVALID_FIELD: 'invalid_field',
@@ -55,7 +58,7 @@ export const ErrorCode = {
   API_KEY_RATE_LIMIT: 'api_key_rate_limit',
   API_KEY_CONCURRENCY_LIMIT: 'api_key_concurrency_limit',
   KEY_GROUP_MISMATCH: 'key_group_mismatch',
-  VM_POOL_UNAVAILABLE: 'vm_pool_unavailable',
+  GROUP_UNAVAILABLE: 'group_unavailable',
   API_BACKEND_FORBIDDEN: 'api_backend_forbidden',
   CLAUDE_CODE_ONLY: 'claude_code_only',
   // upstream
@@ -71,6 +74,7 @@ export const ErrorCode = {
   CLI_ERROR: 'cli_error',
   KERNEL_UNAVAILABLE: 'kernel_unavailable',
   KERNEL_ERROR: 'kernel_error',
+  KERNEL_STREAM_OVERFLOW: 'kernel_stream_overflow',
   FABLE_REQUIRES_MAX: 'fable_requires_max',
 
   INCOMPLETE_RESPONSE: 'incomplete_response',
@@ -89,7 +93,6 @@ export const ErrorCode = {
   NOT_FOUND: 'not_found',
   OAUTH_NEED_REIMPORT: 'oauth_need_reimport',
   OAUTH_REFRESH_FAILED: 'oauth_refresh_failed',
-  COUNT_TOKENS_UNSUPPORTED: 'count_tokens_unsupported',
   USAGE_UNSUPPORTED: 'usage_unsupported',
   // pool — client-facing only; internal codes stay on the log bag
   POOL_OVERLOADED: 'pool_overloaded',
@@ -108,8 +111,27 @@ export const KERNEL_FAILURE_STATUS = Object.freeze({
   [ErrorCode.UPSTREAM_EMPTY_STREAM]: 502,
   [ErrorCode.CLI_ERROR]: 502,
   [ErrorCode.KERNEL_ERROR]: 502,
+  [ErrorCode.KERNEL_STREAM_OVERFLOW]: 502,
   [ErrorCode.KERNEL_UNAVAILABLE]: 503,
 })
+
+const KERNEL_STREAM_OVERFLOW_MESSAGE = /job stream overflow/i
+
+/**
+ * #689: the slot kernel ends a job whose in-flight sink (256 frames / 2 MiB, fixed in the
+ * closed kin-kernel) filled up because nothing drained it for a few seconds. The kernel
+ * reports it as `kernel_error` / `api_error` / 502, which reads as a provider fault; it is
+ * a gateway-side stall. Accepts an error body, an `{ error }` payload or a hop result.
+ */
+export function isKernelStreamOverflow(value) {
+  const error = value?.body?.error || value?.error || value
+  if (!error || typeof error !== 'object') return false
+  if (error.code === ErrorCode.KERNEL_STREAM_OVERFLOW) return true
+  return KERNEL_STREAM_OVERFLOW_MESSAGE.test(String(error.message || ''))
+}
+
+export const KERNEL_STREAM_OVERFLOW_CLIENT_MESSAGE =
+  'Gateway slot kernel stream buffer overflowed (job stream overflow); the response was cut by the gateway, not the provider. Retry the request.'
 
 export const CLIENT_POOL_BUSY_MESSAGE = '号池负载过高，稍后再试'
 export const CLIENT_POOL_UNAVAILABLE_MESSAGE = '号池当前没有可用账号'
@@ -440,6 +462,8 @@ export function mapUpstreamError(status, body, headers = {}) {
       status: 403,
     })
   }
+  // Slot/CLI failures can echo the account's Authorization header; never forward it.
+  if (msg != null) msg = redactSecretText(msg)
   if (inboundCode === ErrorCode.FABLE_REQUIRES_MAX) {
     return makeError({
       type: ErrorType.RATE_LIMIT,
@@ -471,6 +495,18 @@ export function mapUpstreamError(status, body, headers = {}) {
       details: { upstream_status: status },
     })
   }
+  // #689: a gateway-side stall, never a provider error; checked before any status mapping.
+  if (isKernelStreamOverflow(body)) {
+    return makeError({
+      type: ErrorType.API,
+      code: ErrorCode.KERNEL_STREAM_OVERFLOW,
+      message: KERNEL_STREAM_OVERFLOW_CLIENT_MESSAGE,
+      status: 502,
+      details: { owner: 'gateway', upstream_status: status, kernel_message: 'job stream overflow' },
+      request_id: body?.error?.request_id || body?.request_id || headers['x-request-id'] || null,
+    })
+  }
+
   // Kernel slot busy on the last hop is capacity, same as a full pool queue.
   if (inboundCode === 'slot_busy' || /rust kernel has no free slot/i.test(String(msg || ''))) {
     return poolClientError('overloaded')

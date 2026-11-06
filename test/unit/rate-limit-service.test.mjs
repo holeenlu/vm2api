@@ -8,13 +8,13 @@ import { AccountRuntimeRepo } from '../../src/lib/db/repos/account-runtime-repo.
 import { AccountQuota } from '../../src/lib/pool/account-quota.mjs'
 import { RateLimitService, anthropic429Reset, hardBlockOf } from '../../src/lib/pool/rate-limit-service.mjs'
 
-function setup(config = {}) {
+async function setup(config = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-rate-limit-'))
   const db = createDatabase({ dataDir: dir })
   const runtimeRepo = new AccountRuntimeRepo(db)
   const accountQuota = new AccountQuota({ db, config: {} })
   accountQuota.attachRuntimeRepo(runtimeRepo)
-  runtimeRepo.upsert({ account_id: 'acc-1', vm_id: 'vm-01', status: 'ready' })
+  await runtimeRepo.upsert({ account_id: 'acc-1', vm_id: 'vm-01', status: 'ready' })
   const probes = []
   const service = new RateLimitService({
     runtimeRepo,
@@ -41,11 +41,11 @@ function limitResult(message) {
   }
 }
 
-test('plan limit writes rate_limit_reset_at from the text and survives a passive Extra re-read', () => {
-  const { service, runtimeRepo, accountQuota, probes, close } = setup()
+test('plan limit writes rate_limit_reset_at from the text and survives a passive Extra re-read', async () => {
+  const { service, runtimeRepo, accountQuota, probes, close } = await setup()
   try {
     const now = Date.now()
-    const block = service.handleUpstreamError({
+    const block = await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: limitResult("provider error: You've hit your limit · resets 11am (America/New_York)"),
@@ -55,24 +55,24 @@ test('plan limit writes rate_limit_reset_at from the text and survives a passive
     assert.equal(block.kind, 'rate_limited')
     assert.equal(block.fallback, false)
     assert.ok(block.until > now && block.until <= now + 24 * 3600_000)
-    const state = runtimeRepo.get('acc-1')
+    const state = await runtimeRepo.get('acc-1')
     assert.equal(state.rate_limit_reset_at, Math.floor(block.until / 1000) * 1000)
     assert.equal(state.session_window_status, 'rejected')
     assert.deepEqual(hardBlockOf(state, now), { reason: 'rate_limited', until: state.rate_limit_reset_at })
     assert.equal(probes.length, 0)
     // Passive Extra saying "under safety" must not lift the 429 block.
-    accountQuota.clearQuotaExhaustedCooldown('acc-1')
-    assert.equal(runtimeRepo.get('acc-1').rate_limit_reset_at, state.rate_limit_reset_at)
+    await accountQuota.clearQuotaExhaustedCooldown('acc-1')
+    assert.equal((await runtimeRepo.get('acc-1')).rate_limit_reset_at, state.rate_limit_reset_at)
   } finally {
     close()
   }
 })
 
-test('plan limit without any reset falls back to the configured cooldown and asks for one /usage hop', () => {
-  const { service, runtimeRepo, probes, close } = setup({ fallback_cooldown_min: 30 })
+test('plan limit without any reset falls back to the configured cooldown and asks for one /usage hop', async () => {
+  const { service, runtimeRepo, probes, close } = await setup({ fallback_cooldown_min: 30 })
   try {
     const now = Date.now()
-    const block = service.handleUpstreamError({
+    const block = await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: limitResult("You've hit your limit"),
@@ -81,51 +81,51 @@ test('plan limit without any reset falls back to the configured cooldown and ask
     })
     assert.equal(block.fallback, true)
     assert.equal(block.until, now + 30 * 60_000)
-    assert.equal(Math.abs(runtimeRepo.get('acc-1').rate_limit_reset_at - block.until) < 1000, true)
+    assert.equal(Math.abs((await runtimeRepo.get('acc-1')).rate_limit_reset_at - block.until) < 1000, true)
     assert.deepEqual(probes, [{ accountId: 'acc-1', vmId: 'vm-01' }])
   } finally {
     close()
   }
 })
 
-test('model-scoped 429 does not write an account hard block', () => {
-  const { service, runtimeRepo, close } = setup()
+test('model-scoped 429 does not write an account hard block', async () => {
+  const { service, runtimeRepo, close } = await setup()
   try {
-    const block = service.handleUpstreamError({
+    const block = await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: limitResult('rate limited'),
       policy: { scope: 'model', reason: 'opus_rate_limited' },
     })
     assert.equal(block, null)
-    assert.equal(runtimeRepo.get('acc-1').rate_limit_reset_at, null)
+    assert.equal((await runtimeRepo.get('acc-1')).rate_limit_reset_at, null)
   } finally {
     close()
   }
 })
 
-test('#163: an unknown bare 429 asks for one usage probe and fabricates no 5h block', () => {
-  const { service, runtimeRepo, probes, close } = setup()
+test('#163: an unknown bare 429 asks for one usage probe and fabricates no 5h block', async () => {
+  const { service, runtimeRepo, probes, close } = await setup()
   try {
-    const block = service.handleUpstreamError({
+    const block = await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: limitResult('Rate limited'),
       policy: { scope: 'account', reason: 'rate_limited_unknown' },
     })
     assert.equal(block, null)
-    assert.equal(runtimeRepo.get('acc-1').rate_limit_reset_at, null)
+    assert.equal((await runtimeRepo.get('acc-1')).rate_limit_reset_at, null)
     assert.deepEqual(probes, [{ accountId: 'acc-1', vmId: 'vm-01' }])
   } finally {
     close()
   }
 })
 
-test('529 writes overload_until for the configured minutes', () => {
-  const { service, runtimeRepo, close } = setup({ overload_cooldown_min: 10 })
+test('529 writes overload_until for the configured minutes', async () => {
+  const { service, runtimeRepo, close } = await setup({ overload_cooldown_min: 10 })
   try {
     const now = Date.now()
-    const block = service.handleUpstreamError({
+    const block = await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: { status: 529, body: { type: 'error', error: { type: 'overloaded_error' } } },
@@ -133,17 +133,17 @@ test('529 writes overload_until for the configured minutes', () => {
       now,
     })
     assert.equal(block.until, now + 10 * 60_000)
-    assert.equal(hardBlockOf(runtimeRepo.get('acc-1'), now).reason, 'overloaded')
+    assert.equal(hardBlockOf(await runtimeRepo.get('acc-1'), now).reason, 'overloaded')
   } finally {
     close()
   }
 })
 
-test('only a live allowed header lifts a rate limit early', () => {
-  const { service, runtimeRepo, close } = setup()
+test('only a live allowed header lifts a rate limit early', async () => {
+  const { service, runtimeRepo, close } = await setup()
   try {
     const now = Date.now()
-    service.handleUpstreamError({
+    await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: limitResult("You've hit your limit · resets 11pm (UTC)"),
@@ -151,13 +151,13 @@ test('only a live allowed header lifts a rate limit early', () => {
       now,
     })
     const reset = String(Math.floor((now + 4 * 3600_000) / 1000))
-    service.updateSessionWindow({
+    await service.updateSessionWindow({
       accountId: 'acc-1',
       headers: { 'anthropic-ratelimit-unified-5h-status': 'allowed_warning' },
       now,
     })
-    assert.ok(hardBlockOf(runtimeRepo.get('acc-1'), now))
-    const lifted = service.updateSessionWindow({
+    assert.ok(hardBlockOf(await runtimeRepo.get('acc-1'), now))
+    const lifted = await service.updateSessionWindow({
       accountId: 'acc-1',
       headers: {
         'anthropic-ratelimit-unified-5h-status': 'allowed',
@@ -166,7 +166,7 @@ test('only a live allowed header lifts a rate limit early', () => {
       now,
     })
     assert.equal(lifted, true)
-    const state = runtimeRepo.get('acc-1')
+    const state = await runtimeRepo.get('acc-1')
     assert.equal(hardBlockOf(state, now), null)
     assert.equal(state.session_window_end, Number(reset) * 1000)
   } finally {
@@ -174,11 +174,11 @@ test('only a live allowed header lifts a rate limit early', () => {
   }
 })
 
-test('an out-of-range 5h reset header is ignored for the session window', () => {
-  const { service, runtimeRepo, close } = setup()
+test('an out-of-range 5h reset header is ignored for the session window', async () => {
+  const { service, runtimeRepo, close } = await setup()
   try {
     const now = Date.now()
-    service.updateSessionWindow({
+    await service.updateSessionWindow({
       accountId: 'acc-1',
       headers: {
         'anthropic-ratelimit-unified-5h-status': 'allowed',
@@ -186,19 +186,19 @@ test('an out-of-range 5h reset header is ignored for the session window', () => 
       },
       now,
     })
-    assert.equal(runtimeRepo.get('acc-1').session_window_end, null)
+    assert.equal((await runtimeRepo.get('acc-1')).session_window_end, null)
   } finally {
     close()
   }
 })
 
-test('clearExpired drops elapsed rate limit and overload columns', () => {
-  const { runtimeRepo, close } = setup()
+test('clearExpired drops elapsed rate limit and overload columns', async () => {
+  const { runtimeRepo, close } = await setup()
   try {
     const now = Date.now()
-    runtimeRepo.updateWindow('acc-1', { rateLimitResetAt: now - 1000, overloadUntil: now - 1000 })
-    runtimeRepo.clearExpired(now)
-    const state = runtimeRepo.get('acc-1')
+    await runtimeRepo.updateWindow('acc-1', { rateLimitResetAt: now - 1000, overloadUntil: now - 1000 })
+    await runtimeRepo.clearExpired(now)
+    const state = await runtimeRepo.get('acc-1')
     assert.equal(state.rate_limit_reset_at, null)
     assert.equal(state.overload_until, null)
   } finally {
@@ -206,10 +206,10 @@ test('clearExpired drops elapsed rate limit and overload columns', () => {
   }
 })
 
-test('an incomplete hop does not write an empty_response cooldown', () => {
-  const { service, runtimeRepo, close } = setup({ empty_response_cooldown_sec: 60 })
+test('an incomplete hop does not write an empty_response cooldown', async () => {
+  const { service, runtimeRepo, close } = await setup({ empty_response_cooldown_sec: 60 })
   try {
-    const block = service.handleUpstreamError({
+    const block = await service.handleUpstreamError({
       accountId: 'acc-1',
       vmId: 'vm-01',
       result: { status: 200, committed: false, terminalState: 'incomplete' },
@@ -217,7 +217,7 @@ test('an incomplete hop does not write an empty_response cooldown', () => {
       now: 1_700_000_000_000,
     })
     assert.equal(block, null)
-    assert.equal(runtimeRepo.get('acc-1').cooldown_until, null)
+    assert.equal((await runtimeRepo.get('acc-1')).cooldown_until, null)
     assert.equal(typeof service.noteDistinctEmptyHop, 'undefined')
   } finally {
     close()
@@ -237,4 +237,41 @@ test('anthropic429Reset prefers an exhausted 7d window over 5h', () => {
   )
   assert.equal(out.window, '7d')
   assert.equal(out.resetAt, now + 86_400_000)
+})
+
+test('updateSessionWindow reads, decides and clears inside one transaction (R6 B7 review P2-2)', async () => {
+  const { service, runtimeRepo, close } = await setup({ fallback_cooldown_min: 5 })
+  try {
+    const now = Date.now()
+    await runtimeRepo.updateWindow('acc-1', { vmId: 'vm-01', rateLimitResetAt: now + 60_000 })
+    // 读到受限 → 判定清除 → 写入必须在同一事务内：事务外的其他请求（如刚收到 429 写入新重置时间）会排队到事务结束，
+    // 不会夹在读与写之间被清掉（DbClient 事务外语句排队，见 db-client 单测）
+    const seen = []
+    const get = runtimeRepo.get.bind(runtimeRepo)
+    const updateWindow = runtimeRepo.updateWindow.bind(runtimeRepo)
+    runtimeRepo.get = async (id) => {
+      seen.push(['get', runtimeRepo.client.inTransaction()])
+      return get(id)
+    }
+    runtimeRepo.updateWindow = async (...args) => {
+      seen.push(['updateWindow', runtimeRepo.client.inTransaction()])
+      return updateWindow(...args)
+    }
+    const cleared = await service.updateSessionWindow({
+      accountId: 'acc-1',
+      vmId: 'vm-01',
+      headers: { 'anthropic-ratelimit-unified-5h-status': 'allowed' },
+      now,
+    })
+    runtimeRepo.get = get
+    runtimeRepo.updateWindow = updateWindow
+    assert.equal(cleared, true)
+    assert.deepEqual(seen.slice(0, 2), [
+      ['get', true],
+      ['updateWindow', true],
+    ])
+    assert.equal((await runtimeRepo.get('acc-1')).rate_limit_reset_at, null)
+  } finally {
+    close()
+  }
 })

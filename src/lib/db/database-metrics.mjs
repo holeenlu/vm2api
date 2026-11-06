@@ -1,4 +1,6 @@
+// 数据库运行指标（面板）：经 DbClient 读取（R6 B8，不在主线程同步查库）；PRAGMA 与小查询排在打开的事务之后。
 import fs from 'node:fs'
+import { dbClient } from './db-client.mjs'
 
 function numberOrNull(value) {
   if (value == null || value === '') return null
@@ -6,9 +8,9 @@ function numberOrNull(value) {
   return Number.isFinite(num) ? num : null
 }
 
-function scalar(db, sql) {
+async function scalar(db, sql) {
   try {
-    const row = db.prepare(sql).get()
+    const row = await dbClient(db).one(sql)
     if (!row || typeof row !== 'object') return null
     return Object.values(row)[0] ?? null
   } catch {
@@ -16,10 +18,10 @@ function scalar(db, sql) {
   }
 }
 
-function probe(db, clock) {
+async function probe(db, clock) {
   try {
     const startedAt = clock()
-    db.prepare('SELECT 1 AS ok').get()
+    await dbClient(db).one('SELECT 1 AS ok')
     const elapsed = numberOrNull(clock() - startedAt)
     return {
       ok: true,
@@ -39,13 +41,13 @@ function fileSize(dbPath, suffix = '') {
   }
 }
 
-function migrationMetrics(db) {
-  const count = numberOrNull(scalar(db, 'SELECT COUNT(*) AS count FROM schema_migrations'))
+async function migrationMetrics(db) {
+  const count = numberOrNull(await scalar(db, 'SELECT COUNT(*) AS count FROM schema_migrations'))
   let latest = null
   try {
-    latest = db
-      .prepare('SELECT version, applied_at FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT 1')
-      .get()
+    latest = await dbClient(db).one(
+      'SELECT version, applied_at FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT 1',
+    )
   } catch {}
   return {
     migration_count: count,
@@ -82,19 +84,22 @@ function sampledAt(now) {
   }
 }
 
-export function snapshotDatabaseMetrics({
+export async function snapshotDatabaseMetrics({
   db,
   dbPath,
   usageCache,
   now = () => Date.now(),
   clock = () => performance.now(),
 }) {
-  const health = probe(db, clock)
-  const journalMode = scalar(db, 'PRAGMA journal_mode')
-  const foreignKeys = numberOrNull(scalar(db, 'PRAGMA foreign_keys'))
-  const pageSize = numberOrNull(scalar(db, 'PRAGMA page_size'))
-  const pageCount = numberOrNull(scalar(db, 'PRAGMA page_count'))
-  const freelistPages = numberOrNull(scalar(db, 'PRAGMA freelist_count'))
+  const health = await probe(db, clock)
+  const journalMode = await scalar(db, 'PRAGMA journal_mode')
+  const foreignKeys = numberOrNull(await scalar(db, 'PRAGMA foreign_keys'))
+  const pageSize = numberOrNull(await scalar(db, 'PRAGMA page_size'))
+  const pageCount = numberOrNull(await scalar(db, 'PRAGMA page_count'))
+  const freelistPages = numberOrNull(await scalar(db, 'PRAGMA freelist_count'))
+  const synchronous = numberOrNull(await scalar(db, 'PRAGMA synchronous'))
+  const busyTimeout = numberOrNull(await scalar(db, 'PRAGMA busy_timeout'))
+  const migrations = await migrationMetrics(db)
 
   return {
     sampled_at: sampledAt(now),
@@ -103,9 +108,9 @@ export function snapshotDatabaseMetrics({
       engine: 'sqlite',
       probe_latency_ms: health.latencyMs,
       journal_mode: journalMode == null ? null : String(journalMode).toLowerCase(),
-      synchronous: numberOrNull(scalar(db, 'PRAGMA synchronous')),
+      synchronous,
       foreign_keys: foreignKeys == null ? null : foreignKeys !== 0,
-      busy_timeout_ms: numberOrNull(scalar(db, 'PRAGMA busy_timeout')),
+      busy_timeout_ms: busyTimeout,
       file_size_bytes: fileSize(dbPath),
       wal_size_bytes: fileSize(dbPath, '-wal'),
       shm_size_bytes: fileSize(dbPath, '-shm'),
@@ -113,7 +118,7 @@ export function snapshotDatabaseMetrics({
       page_count: pageCount,
       freelist_pages: freelistPages,
       ...pageMetrics(pageSize, pageCount, freelistPages),
-      ...migrationMetrics(db),
+      ...migrations,
     },
     usage_cache: safeUsageStats(usageCache),
   }

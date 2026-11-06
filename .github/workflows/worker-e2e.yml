@@ -1,0 +1,81 @@
+# 真实 Gateway Worker 端到端演练（统一控制面重构，最终审计 U10）：编译 Go Worker，跑事件三种模式、双 Worker 刷新与
+# 数据目录重建、凭据库重建投影、Redis 共享与降级，以及控制面宕机后补交、控制面数据库写锁被占与只读（中期技术债 M3）。
+# ACCEPTANCE 第 5 条“降级”的演练证据依赖这些用例。
+# 封闭环境：Worker 关闭官方发布检查、控制面不刷新价格目录，strace 检查整个运行没有连向环回以外地址的 connect 调用（U10a）。
+# KIN_E2E_REQUIRE_GO=1 时缺 Go 直接失败；每一步用带 pipefail 的 bash 运行，并检查 TAP 汇总没有失败、跳过或超时取消的用例。
+# 共享 Redis 一步设置 KIN_E2E_REQUIRE_REDIS=1：双 Worker 用例断言两个实例都报告 Redis 可用，Worker 退回本地状态时失败。
+name: worker-e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  worker-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      KIN_E2E_REQUIRE_GO: '1'
+    # 显式 bash 才带 pipefail：node 失败不会被 tee 吞掉（复核 Q1）
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: worker/go.sum
+      - run: npm ci
+      # 封闭环境（最终审计 U10a）：先下载 Go 依赖并预编译（用例里的 go build 不再联网），装 strace 记录 connect；
+      # 正对照：一次故意的外联必须被检查脚本识别，证明检查在本机输出格式下有效
+      - name: Prepare the egress check
+        run: |
+          (cd worker && go mod download && CGO_ENABLED=0 go build ./cmd/kin-codex-gateway ./internal/testutil/miniredis-server)
+          command -v strace >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends strace; }
+          strace -f -qq --seccomp-bpf -e trace=connect -e signal=none -o "$RUNNER_TEMP/probe.trace" node -e "require('net').connect(443, '192.0.2.1').on('error', () => {}).setTimeout(200, () => process.exit(0))"
+          # 正对照：检查脚本必须失败，且明确列出这个测试地址（不能是 trace 为空等其他原因，复核 R2）
+          if test/e2e/no-external-egress.sh "$RUNNER_TEMP/probe.trace" > "$RUNNER_TEMP/probe.out"; then echo 'the egress check missed a deliberate external connection'; exit 1; fi
+          grep -q 'inet_addr("192.0.2.1")' "$RUNNER_TEMP/probe.out" || { cat "$RUNNER_TEMP/probe.out"; exit 1; }
+      - name: Real Worker, Redis fallback and control-plane outages
+        run: |
+          # strace -f 要等所有被跟踪进程退出：用 timeout 兜底，残留进程不会把步骤挂到 job 超时（复核 R1）
+          timeout -k 10s 15m strace -f -qq --seccomp-bpf -e trace=connect -e signal=none -o "$RUNNER_TEMP/worker-e2e.trace" node --test --test-reporter=tap \
+            test/e2e/gateway-worker-real.e2e.test.mjs \
+            test/e2e/gateway-worker-redis.e2e.test.mjs \
+            test/e2e/gateway-worker-outage.e2e.test.mjs | tee "$RUNNER_TEMP/worker-e2e.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/worker-e2e.tap"
+          grep -qx '# fail 0' "$RUNNER_TEMP/worker-e2e.tap"
+          grep -qx '# cancelled 0' "$RUNNER_TEMP/worker-e2e.tap"
+          test/e2e/no-external-egress.sh "$RUNNER_TEMP/worker-e2e.trace"
+      - name: Real Worker with shared Redis state
+        run: |
+          (cd worker && CGO_ENABLED=0 go build -o "$RUNNER_TEMP/kin-test-redis" ./internal/testutil/miniredis-server)
+          "$RUNNER_TEMP/kin-test-redis" -addr 127.0.0.1:16399 &
+          redis_pid=$!
+          trap 'kill $redis_pid' EXIT
+          ready=0
+          for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/16399) 2>/dev/null && ready=1 && break; sleep 0.1; done
+          [ "$ready" = 1 ] && kill -0 "$redis_pid" || { echo 'miniredis did not start'; exit 1; }
+          KIN_REDIS_URL=redis://127.0.0.1:16399/0 KIN_E2E_REQUIRE_REDIS=1 timeout -k 10s 15m strace -f -qq --seccomp-bpf -e trace=connect -e signal=none -o "$RUNNER_TEMP/worker-e2e-redis.trace" node --test --test-reporter=tap \
+            test/e2e/gateway-worker-real.e2e.test.mjs | tee "$RUNNER_TEMP/worker-e2e-redis.tap"
+          grep -qx '# skipped 0' "$RUNNER_TEMP/worker-e2e-redis.tap"
+          grep -qx '# fail 0' "$RUNNER_TEMP/worker-e2e-redis.tap"
+          grep -qx '# cancelled 0' "$RUNNER_TEMP/worker-e2e-redis.tap"
+          test/e2e/no-external-egress.sh "$RUNNER_TEMP/worker-e2e-redis.trace"

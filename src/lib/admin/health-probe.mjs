@@ -640,7 +640,7 @@ export function createHealthProbeMonitor(opts = {}) {
   }
 
   const probePlatform = async (platform, real, started) => {
-    const vms = typeof opts.listTargets === 'function' ? opts.listTargets() || [] : []
+    const vms = typeof opts.listTargets === 'function' ? (await opts.listTargets()) || [] : []
     const targets = selectHealthProbeTargets(vms, config, nowFn()).filter(
       (vm) => (String(vm.platform || '').toLowerCase() === 'openai' ? 'openai' : 'anthropic') === platform,
     )

@@ -25,7 +25,7 @@ import {
   REFRESH_SKEW_MS,
 } from '../../src/lib/oauth/oauth-credentials.mjs'
 
-test('needsRefresh: missing/expired/skew', () => {
+test('needsRefresh: missing/expired/skew', async () => {
   const now = 1_000_000_000_000
   assert.equal(needsRefresh(null, now), true)
   assert.equal(needsRefresh(now / 1000 - 10, now), true)
@@ -33,12 +33,12 @@ test('needsRefresh: missing/expired/skew', () => {
   assert.equal(needsRefresh(now / 1000 + REFRESH_SKEW_MS / 1000 + 120, now), false)
 })
 
-test('expiresAtToMs accepts seconds and ms', () => {
+test('expiresAtToMs accepts seconds and ms', async () => {
   assert.equal(expiresAtToMs(1786951995), 1786951995000)
   assert.equal(expiresAtToMs(1786951995000), 1786951995000)
 })
 
-test('normalizeOauth maps both casings and computes expires_at', () => {
+test('normalizeOauth maps both casings and computes expires_at', async () => {
   const n = normalizeOauth({
     accessToken: 'at',
     refreshToken: 'rt',
@@ -49,7 +49,7 @@ test('normalizeOauth maps both casings and computes expires_at', () => {
   assert.ok(n.expires_at > Math.floor(Date.now() / 1000) + 50)
 })
 
-test('persist + apply keep other vm fields', () => {
+test('persist + apply keep other vm fields', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-'))
   const vmPath = path.join(dir, 'vm-x.json')
   fs.writeFileSync(
@@ -60,7 +60,7 @@ test('persist + apply keep other vm fields', () => {
       claude: { email: 'a@b.c', access_token: 'old', refresh_token: 'oldrt', extra: 1, session_key: 'sk-keep' },
     }),
   )
-  persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
+  await persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(vm.policy.maxConcurrency, 2)
   assert.equal(vm.claude.email, 'a@b.c')
@@ -80,11 +80,11 @@ test('persist + apply keep other vm fields', () => {
   assert.equal(cfg.vm.expires_at, 99)
 })
 
-test('persistOauthToVm returns null for a missing vm file', () => {
-  assert.equal(persistOauthToVm('/nonexistent/vm.json', { access_token: 'x' }), null)
+test('persistOauthToVm returns null for a missing vm file', async () => {
+  assert.equal(await persistOauthToVm('/nonexistent/vm.json', { access_token: 'x' }), null)
 })
 
-test('persistOauthToVm clears leftover oauth_cleared after a live credential', () => {
+test('persistOauthToVm clears leftover oauth_cleared after a live credential', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-'))
   const vmPath = path.join(dir, 'vm-02.json')
   fs.writeFileSync(
@@ -97,7 +97,7 @@ test('persistOauthToVm clears leftover oauth_cleared after a live credential', (
       claude: {},
     }),
   )
-  persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
+  await persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(vm.status, 'running')
   assert.equal(vm.schedulable, true)
@@ -106,7 +106,7 @@ test('persistOauthToVm clears leftover oauth_cleared after a live credential', (
   assert.equal(vm.claude.has_refresh, true)
 })
 
-test('persistOauthToVm clears a 401 park after a live ticket is written', () => {
+test('persistOauthToVm clears a 401 park after a live ticket is written', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-'))
   const vmPath = path.join(dir, 'vm-05.json')
   fs.writeFileSync(
@@ -125,7 +125,7 @@ test('persistOauthToVm clears a 401 park after a live ticket is written', () => 
   const parked = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(parked.claude.temp_unschedulable_reason, 'authentication_failed_after_refresh')
   assert.equal(parked.claude.oauth_401_generation, 9)
-  persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
+  await persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(vm.claude.temp_unschedulable_until, undefined)
   assert.equal(vm.claude.temp_unschedulable_reason, undefined)
@@ -134,7 +134,7 @@ test('persistOauthToVm clears a 401 park after a live ticket is written', () => 
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('persistOauthToVm does not reopen an operator-disabled slot', () => {
+test('persistOauthToVm does not reopen an operator-disabled slot', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-'))
   const vmPath = path.join(dir, 'vm-02.json')
   fs.writeFileSync(
@@ -147,14 +147,14 @@ test('persistOauthToVm does not reopen an operator-disabled slot', () => {
       claude: {},
     }),
   )
-  persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
+  await persistOauthToVm(vmPath, { access_token: 'new', refresh_token: 'newrt', expires_at: 99 })
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(vm.schedulable, false)
   assert.equal(vm.schedule_disabled_reason, 'disabled')
   assert.equal(vm.status, 'paused')
 })
 
-test('persistOauthToVm does not un-revoke when the ticket did not rotate', () => {
+test('persistOauthToVm does not un-revoke when the ticket did not rotate', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-revoked-'))
   const vmPath = path.join(dir, 'vm-50.json')
   fs.writeFileSync(
@@ -171,7 +171,7 @@ test('persistOauthToVm does not un-revoke when the ticket did not rotate', () =>
       },
     }),
   )
-  persistOauthToVm(vmPath, {
+  await persistOauthToVm(vmPath, {
     access_token: 'same',
     refresh_token: 'same-rt',
     expires_at: 1_800_000_000_000,
@@ -182,7 +182,7 @@ test('persistOauthToVm does not un-revoke when the ticket did not rotate', () =>
   assert.equal(vm.schedulable, false)
 })
 
-test('healLeftoverAuthState does not clear oauth_revoked', () => {
+test('healLeftoverAuthState does not clear oauth_revoked', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-heal-revoked-'))
   const vmPath = path.join(dir, 'vm-50.json')
   fs.writeFileSync(
@@ -199,7 +199,7 @@ test('healLeftoverAuthState does not clear oauth_revoked', () => {
   assert.equal(vm.schedule_disabled_reason, 'oauth_revoked')
 })
 
-test('restoreScheduleAfterLiveCredential heals oauth_revoked only on an operator import', () => {
+test('restoreScheduleAfterLiveCredential heals oauth_revoked only on an operator import', async () => {
   const vm = {
     status: 'paused',
     schedulable: false,
@@ -216,7 +216,7 @@ test('restoreScheduleAfterLiveCredential heals oauth_revoked only on an operator
   assert.equal(vm.status, 'running')
 })
 
-test('persistOauthToVm heals revoke on an operator import even if expiry did not bump', () => {
+test('persistOauthToVm heals revoke on an operator import even if expiry did not bump', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-import-'))
   const vmPath = path.join(dir, 'vm-50.json')
   fs.writeFileSync(
@@ -233,7 +233,7 @@ test('persistOauthToVm heals revoke on an operator import even if expiry did not
       },
     }),
   )
-  persistOauthToVm(
+  await persistOauthToVm(
     vmPath,
     {
       access_token: 'new',
@@ -249,7 +249,7 @@ test('persistOauthToVm heals revoke on an operator import even if expiry did not
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('restoreScheduleAfterLiveCredential ignores operator stopped', () => {
+test('restoreScheduleAfterLiveCredential ignores operator stopped', async () => {
   const vm = {
     status: 'stopped',
     schedulable: false,
@@ -261,7 +261,7 @@ test('restoreScheduleAfterLiveCredential ignores operator stopped', () => {
   assert.equal(vm.schedule_disabled_reason, 'stopped')
 })
 
-test('slot identity only reads worker credentials.json, never leftover dotfile', () => {
+test('slot identity only reads worker credentials.json, never leftover dotfile', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-cred-'))
   const claude = path.join(home, '.claude')
   fs.mkdirSync(claude, { recursive: true })
@@ -294,7 +294,7 @@ test('slot identity only reads worker credentials.json, never leftover dotfile',
   assert.ok(!Object.prototype.hasOwnProperty.call(id, 'access_token'))
 })
 
-test('readWorkerCredentialFile infers setup-token from inference-only scopes', () => {
+test('readWorkerCredentialFile infers setup-token from inference-only scopes', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-infer-'))
   const claude = path.join(home, '.claude')
   fs.mkdirSync(claude, { recursive: true })
@@ -313,7 +313,7 @@ test('readWorkerCredentialFile infers setup-token from inference-only scopes', (
   assert.equal(cred.scope, 'user:inference')
 })
 
-test('writeWorkerCredentialFile maps inference-only oats to official-setup-token', () => {
+test('writeWorkerCredentialFile maps inference-only oats to official-setup-token', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-scope-'))
   writeWorkerCredentialFile(home, {
     type: 'setup-token',
@@ -329,7 +329,7 @@ test('writeWorkerCredentialFile maps inference-only oats to official-setup-token
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-test('writeWorkerCredentialFile preserves full-scope setup-token metadata', () => {
+test('writeWorkerCredentialFile preserves full-scope setup-token metadata', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-full-setup-'))
   writeWorkerCredentialFile(home, {
     type: 'setup-token',
@@ -351,7 +351,7 @@ test('writeWorkerCredentialFile preserves full-scope setup-token metadata', () =
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-test('writeWorkerCredentialFile stores claudeAiOauth and reads back', () => {
+test('writeWorkerCredentialFile stores claudeAiOauth and reads back', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-write-'))
   writeWorkerCredentialFile(home, {
     access_token: 'sk-ant-oat01-TEST',
@@ -376,7 +376,7 @@ test('writeWorkerCredentialFile stores claudeAiOauth and reads back', () => {
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-test('writeWorkerCredentialFile stores subscriptionType and falls back to the vm plan', () => {
+test('writeWorkerCredentialFile stores subscriptionType and falls back to the vm plan', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-sub-'))
   writeWorkerCredentialFile(home, {
     type: 'setup-token',
@@ -402,7 +402,7 @@ test('writeWorkerCredentialFile stores subscriptionType and falls back to the vm
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-test('ensureSlotSubscriptionType fills an old credential and keeps an existing plan', () => {
+test('ensureSlotSubscriptionType fills an old credential and keeps an existing plan', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-migrate-'))
   const file = path.join(home, '.claude', 'credentials.json')
   fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -414,7 +414,7 @@ test('ensureSlotSubscriptionType fills an old credential and keeps an existing p
 })
 
 for (const subscriptionType of [undefined, 'pro']) {
-  test(`startup preserves an identified Max plan when the credential contains ${subscriptionType || 'no plan'}`, (t) => {
+  test(`startup preserves an identified Max plan when the credential contains ${subscriptionType || 'no plan'}`, async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-startup-plan-'))
     t.after(() => fs.rmSync(root, { recursive: true, force: true }))
     const home = path.join(root, 'vms', 'vm-max', 'cli-home')
@@ -431,12 +431,13 @@ for (const subscriptionType of [undefined, 'pro']) {
     )
     const source = fs.readFileSync(new URL('../../src/server.mjs', import.meta.url), 'utf8')
     const start = source.indexOf(
-      'for (const vm of listVms(cfg.paths.project)) {\n  if (isCodexVm(vm)) continue\n  try {\n    ensureSlotSubscriptionType',
+      'for (const vm of await listVms(cfg.paths.project)) {\n  if (isCodexVm(vm)) continue\n  try {\n    ensureSlotSubscriptionType',
     )
     assert.ok(start >= 0, 'the startup credential migration must be exercised')
     const end = source.indexOf('\ncliNodeGuard =', start)
     assert.ok(end > start)
-    runInNewContext(source.slice(start, end), {
+    // The startup block awaits listVms (R6 B7c): run it as an async body.
+    await runInNewContext(`(async () => {\n${source.slice(start, end)}\n})()`, {
       listVms,
       isCodexVm,
       ensureSlotSubscriptionType,
@@ -451,7 +452,8 @@ for (const subscriptionType of [undefined, 'pro']) {
     assert.equal(doc.kinGeneration, 42)
     const written = fs.readFileSync(file, 'utf8')
     const mtime = fs.statSync(file).mtimeMs
-    runInNewContext(source.slice(start, end), {
+    // The startup block awaits listVms (R6 B7c): run it as an async body.
+    await runInNewContext(`(async () => {\n${source.slice(start, end)}\n})()`, {
       listVms,
       isCodexVm,
       ensureSlotSubscriptionType,
@@ -464,9 +466,9 @@ for (const subscriptionType of [undefined, 'pro']) {
   })
 }
 
-test('slotUidGidFromHomeDir maps numeric and named slot homes', () => {
+test('slotUidGidFromHomeDir maps numeric and named slot homes', async () => {
   assert.deepEqual(slotUidGidFromHomeDir('/opt/kin-gateway-rust/vms/vm-03/cli-home'), { uid: 10003, gid: 987 })
-  assert.deepEqual(slotUidGidFromHomeDir('/opt/vm2api/vms/claude-ios-145/cli-home'), { uid: 10001, gid: 987 })
+  assert.deepEqual(slotUidGidFromHomeDir('/opt/tapmodels/vms/claude-ios-145/cli-home'), { uid: 10001, gid: 987 })
   assert.deepEqual(slotUidGidFromHomeDir('/opt/kin-gateway/vms/bloat-ranges-3hicloudcom/cli-home'), {
     uid: 10001,
     gid: 987,
@@ -474,7 +476,7 @@ test('slotUidGidFromHomeDir maps numeric and named slot homes', () => {
   assert.equal(slotUidGidFromHomeDir('/tmp/kin-slot-write-xxx'), null)
 })
 
-test('ensureSlotClaudeOwnership creates the worker .claude dir', () => {
+test('ensureSlotClaudeOwnership creates the worker .claude dir', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-claude-own-'))
   const home = path.join(root, 'vms', 'vm-03', 'cli-home')
   fs.mkdirSync(home, { recursive: true })
@@ -483,7 +485,7 @@ test('ensureSlotClaudeOwnership creates the worker .claude dir', () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('persistOauthToVm writes scope from scopes array', () => {
+test('persistOauthToVm writes scope from scopes array', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-scope-'))
   const vmPath = path.join(dir, 'vm-05.json')
   fs.writeFileSync(
@@ -493,7 +495,7 @@ test('persistOauthToVm writes scope from scopes array', () => {
       claude: { mode: 'oauth', scope: 'user:profile user:inference', has_access: true, has_refresh: true },
     }),
   )
-  persistOauthToVm(
+  await persistOauthToVm(
     vmPath,
     {
       type: 'setup-token',
@@ -509,11 +511,11 @@ test('persistOauthToVm writes scope from scopes array', () => {
   assert.equal(vm.claude.scope, 'user:inference')
 })
 
-test('persistOauthToVm writes flattened oauth_account identity', () => {
+test('persistOauthToVm writes flattened oauth_account identity', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-ident-'))
   const vmPath = path.join(dir, 'vm-06.json')
   fs.writeFileSync(vmPath, JSON.stringify({ id: 'vm-06', claude: { mode: 'setup-token' } }))
-  persistOauthToVm(
+  await persistOauthToVm(
     vmPath,
     {
       type: 'setup-token',
@@ -534,7 +536,7 @@ test('persistOauthToVm writes flattened oauth_account identity', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('official setup-token persist omits refresh and marks mode', () => {
+test('official setup-token persist omits refresh and marks mode', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-setup-token-'))
   const vmPath = path.join(dir, 'vm-05.json')
   fs.writeFileSync(
@@ -546,7 +548,7 @@ test('official setup-token persist omits refresh and marks mode', () => {
       claude: { mode: 'oauth', has_access: true, has_refresh: true, email: 'a@b.c' },
     }),
   )
-  persistOauthToVm(
+  await persistOauthToVm(
     vmPath,
     {
       type: 'setup-token',
@@ -580,7 +582,7 @@ test('official setup-token persist omits refresh and marks mode', () => {
   assert.equal(cred.refresh_token, '')
 })
 
-test('clearRecoverableVmCooldown drops stale Codex codex_limited_until', () => {
+test('clearRecoverableVmCooldown drops stale Codex codex_limited_until', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-codex-'))
   const until = new Date(Date.now() + 86_400_000).toISOString()
   const vmPath = path.join(dir, 'vm-codex.json')
@@ -599,7 +601,7 @@ test('clearRecoverableVmCooldown drops stale Codex codex_limited_until', () => {
   assert.equal(vm.codex.extra.codex_limited_until, undefined)
 })
 
-test('clearRecoverableVmCooldown keeps Codex park when grant is dead', () => {
+test('clearRecoverableVmCooldown keeps Codex park when grant is dead', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-codex-dead-'))
   const until = new Date(Date.now() + 86_400_000).toISOString()
   const vmPath = path.join(dir, 'vm-codex.json')
@@ -615,4 +617,64 @@ test('clearRecoverableVmCooldown keeps Codex park when grant is dead', () => {
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   assert.equal(vm.temp_unschedulable_reason, 'oauth_revoked')
   assert.equal(vm.codex.extra.codex_limited_until, until)
+})
+
+test('observed plan metadata survives refresh and is cleared when the account changes', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-metadata-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, 'vm.json')
+  fs.writeFileSync(file, JSON.stringify({ id: 'vm-plan', claude: { account_uuid: 'one' } }))
+  await persistOauthToVm(file, {
+    access_token: 'synthetic',
+    account_uuid: 'one',
+    subscription_type: 'max',
+    rate_limit_tier: 'default_claude_max_20x',
+    billing_type: 'apple_subscription',
+  })
+  let vm = await persistOauthToVm(file, { access_token: 'synthetic-refreshed', account_uuid: 'one' })
+  assert.equal(vm.claude.rate_limit_tier, 'default_claude_max_20x')
+  assert.equal(vm.claude.billing_type, 'apple_subscription')
+  vm = await persistOauthToVm(file, { access_token: 'synthetic-other', account_uuid: 'two' })
+  assert.equal(vm.claude.billing_type, undefined)
+  assert.equal(vm.claude.rate_limit_tier, undefined)
+})
+
+test('worker mirrors cannot erase a cached profile with an absent or older credential plan', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'profile-mirror-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, 'vm.json')
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      id: 'vm-profile',
+      claude: {
+        account_uuid: 'one',
+        org_uuid: 'org-one',
+        subscription_type: 'max',
+        subscription_updated_at: '2026-10-31T00:00:00Z',
+        billing_type: 'apple_subscription',
+      },
+    }),
+  )
+  for (const subscription_type of [null, 'pro']) {
+    const vm = await persistOauthToVm(file, {
+      access_token: 'rotated',
+      account_uuid: 'one',
+      source: 'go-slot-worker',
+      subscription_type,
+    })
+    assert.equal(vm.claude.subscription_type, 'max')
+    assert.equal(vm.claude.billing_type, 'apple_subscription')
+  }
+  const replaced = await persistOauthToVm(
+    file,
+    { access_token: 'unknown-new-account', type: 'setup-token' },
+    { operatorImport: true },
+  )
+  assert.equal(replaced.claude.subscription_type, undefined)
+  assert.equal(replaced.claude.billing_type, undefined)
+  assert.equal(replaced.claude.subscription_updated_at, undefined)
+  assert.equal(replaced.claude.account_uuid, undefined)
+  assert.equal(replaced.claude.org_uuid, undefined)
+  assert.equal(replaced.claude.scope, 'user:inference')
 })

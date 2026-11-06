@@ -183,6 +183,8 @@ for (const [protocol, model, upstreamProtocol, modelOverride, review = {}] of [
       stickyRouter: {},
       accountQuota: {},
       apiKeyStore: {
+        // tapmodels 商业 Key 只读预检（不占并发，不计入 acquired），同 forced-tool-choice 夹具
+        canAccept: (record) => ({ ok: true, record }),
         acquire: () => {
           acquired++
           return { ok: true }
