@@ -1,6 +1,8 @@
 import { memo } from 'react'
+import { t as tVm } from '@/i18n'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { subscriptionListLabel } from '@/lib/subscription-expiry'
@@ -22,12 +24,21 @@ import {
   zoneOf,
   type WindowReadout,
 } from '@/features/vm/vm-rack-model'
+import { useLogCoverageStart } from './use-log-coverage'
 
 function MiniColumn({ w, now }: { w: WindowReadout; now: number }) {
+  const { t: tVm } = useTranslation('vm')
+
   const reset = w.reset ? resetCountdown(w.reset, now) : null
   const tip = [
-    `${w.label} ${w.pct == null ? w.note || '未探测' : `${Math.round(w.pct)}%`}`,
-    reset && `${reset} 后重置`,
+    tVm('vm:vmRackUnit.summary', {
+      label: w.label,
+      value1:
+        w.pct == null
+          ? w.note || tVm('vm:detailAccountTab.notProbed')
+          : `${Math.round(w.pct)}%`,
+    }),
+    reset && tVm('vm:vmRackUnit.resetsIn', { reset: reset }),
   ]
     .filter(Boolean)
     .join(' · ')
@@ -62,9 +73,15 @@ function MiniColumn({ w, now }: { w: WindowReadout; now: number }) {
 }
 
 const NOTE: Record<string, string> = {
-  dead: '无效凭证',
-  vacant: '未绑定账号',
-  unprobed: '额度未探测',
+  get dead() {
+    return tVm('vm:vmRackBlade.invalidCredentials')
+  },
+  get vacant() {
+    return tVm('vm:vmRackBlade.noAccountBound')
+  },
+  get unprobed() {
+    return tVm('vm:vmRackBlade.quotaNotProbed')
+  },
 }
 
 /** 小档单元：一屏看全队。重置在竖柱悬停提示里，5H / 7D / 总计成本在总计的提示里。 */
@@ -79,14 +96,14 @@ export const VmUnit = memo(function VmUnit({
 }) {
   const open = useOpenOnKey(vm)
   const state = bladeState(vm)
-  const ledger = vmCostLedger(vm, accounts)
+  const ledger = vmCostLedger(vm, accounts, useLogCoverageStart(), now)
   const total = ledger[ledger.length - 1]
   const email = String(vm.email || '')
   return (
     <article
       role='button'
       tabIndex={0}
-      aria-label={`查看 ${vm.id} 详情`}
+      aria-label={tVm('vm:vmListTable.viewDetailsFor', { id: vm.id })}
       style={tierStyle(vm)}
       className={cn(
         'relative grid min-h-[136px] min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto_auto_1fr_auto] gap-x-2 gap-y-1 rounded-[9px] px-2.5 ps-3 pt-2 pb-1.5 shadow-[inset_0_0_0_1px_var(--hairline)] transition-colors duration-150 ease-out hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring',
@@ -97,7 +114,10 @@ export const VmUnit = memo(function VmUnit({
       {...open}
     >
       <div className='col-span-2 flex min-w-0 items-center gap-1.5'>
-        <span className='font-mono text-[11px] text-muted-foreground'>
+        <span
+          className='font-mono text-[11px] text-muted-foreground'
+          title={vm.id}
+        >
           {vm.id}
         </span>
         <TierBadge vm={vm} className='ms-auto h-4 px-1 text-[9.5px]' />

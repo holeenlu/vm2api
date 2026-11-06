@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { getVm, listVms, markUnschedulable, migrateVmSchedule } from '../vm/vm-registry.mjs'
-import { vmCliHomePath, vmJsonPath } from '../vm/execution-context.mjs'
+import { vmCliHomePath, vmJsonPath, createExecutionContext } from '../vm/execution-context.mjs'
 import {
   expiresAtToMs,
   hasRefreshPresence,
@@ -38,8 +38,8 @@ import { slotAllowsModel } from './slot-model-gate.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { detectInboundPlatform } from '../protocol/platform-detect.mjs'
 import { resolveCredentialScheduleLevel } from './credential-weight.mjs'
-import { PLATFORM_SCOPE, normalizeOwnerId, vmMatchesOwnerScope, vmOwnerId } from '../admin/resource-owner.mjs'
-import { keyAllowsVm } from '../admin/key-scope.mjs'
+import { PLATFORM_SCOPE, normalizeOwnerId, vmMatchesOwnerScope, vmOwnerId } from '../admin/resource-scope.mjs'
+import { keyAllowsVm, refreshKeyScope, keyAllowsModel } from '../admin/key-scope.mjs'
 import {
   kernelFaults,
   rustKernelBusy,
@@ -51,117 +51,27 @@ import { SeatPlanner, rankSeatCandidates } from './seat-planner.mjs'
 import { GATE_DRAINING } from './quota-gate.mjs'
 import { activeHoursOf, evaluateActiveHours } from './active-hours.mjs'
 import { vmNodeReady } from '../cluster/placement.mjs'
+import { formatPoolSelectionSummary, normalizePoolConfig } from './pool-routing-policy.mjs'
+import { normalizeAdmissionFacts } from './admission-facts.mjs'
+import { HoldTimeTracker, estimateQueueWaitMs } from './queue-wait-estimate.mjs'
 
-const WAIT_TIMEOUT_MIN_MS = 1000
-const WAIT_TIMEOUT_MAX_MS = 120000
-
-export const QUEUE_MAX_MIN = 1
-export const QUEUE_MAX_MAX = 999
-export const SEAT_GRACE_MAX_MS = 120000
-export const SEAT_BUDGET_RESERVE_MAX = 0.5
-export const CIRCUIT_THRESHOLD_MAX = 20
-export const CIRCUIT_OPEN_MIN_MS = 1000
+export {
+  CIRCUIT_OPEN_MIN_MS,
+  CIRCUIT_THRESHOLD_MAX,
+  DEFAULT_POOL_ROUTING,
+  QUEUE_MAX_MAX,
+  QUEUE_MAX_MIN,
+  SEAT_BUDGET_RESERVE_MAX,
+  SEAT_GRACE_MAX_MS,
+  formatPoolSelectionSummary,
+  normalizePoolConfig,
+  normalizePoolRouting,
+} from './pool-routing-policy.mjs'
 
 /** A queued request re-reads eligibility this often, so cooldown lifts and new slots reach it. */
 const QUEUE_REFRESH_MS = 2000
-
-/** routing.pool defaults. `strategy` only places new seats; see seat-planner.mjs. */
-export const DEFAULT_POOL_ROUTING = Object.freeze({
-  strategy: 'balanced',
-  queue_max: 50,
-  seat_grace_ms: 30000,
-  seat_budget_reserve_pct: 0.02,
-  fallback_wait_timeout_ms: 30000,
-  sticky_wait_timeout_ms: 45000,
-  circuit_failure_threshold: 3,
-  circuit_open_ms: 30000,
-})
-
-const DEFAULT_CONFIG = {
-  ...DEFAULT_POOL_ROUTING,
-  worker_health_ttl_ms: 5000,
-  heartbeat_stale_ms: 15000,
-  fable_max_per_account: 4,
-  default_max_per_account: 2,
-}
-
-function clampNumber(value, fallback, min, max, { round = true } = {}) {
-  if (value == null || value === '') return fallback
-  const n = Number(value)
-  if (!Number.isFinite(n)) return fallback
-  const v = round ? Math.round(n) : n
-  return Math.min(max, Math.max(min, v))
-}
-
-function clampWaitTimeoutMs(value, fallback) {
-  return clampNumber(value, fallback, WAIT_TIMEOUT_MIN_MS, WAIT_TIMEOUT_MAX_MS)
-}
-
-/**
- * Normalize the stored `routing.pool` block. Legacy strategies (weighted
- * round-robin, round-robin, lru, fill-first) read as `balanced`; the old
- * per-account waiter cap is dropped in favor of the pool-wide `queue_max`.
- */
-export function normalizePoolRouting(pool = {}) {
-  const next = { ...(pool && typeof pool === 'object' ? pool : {}) }
-  delete next.max_waiters_per_account
-  next.strategy = next.strategy === 'fill' ? 'fill' : 'balanced'
-  next.queue_max = clampNumber(next.queue_max, DEFAULT_POOL_ROUTING.queue_max, QUEUE_MAX_MIN, QUEUE_MAX_MAX)
-  next.seat_grace_ms = clampNumber(next.seat_grace_ms, DEFAULT_POOL_ROUTING.seat_grace_ms, 0, SEAT_GRACE_MAX_MS)
-  next.seat_budget_reserve_pct = clampNumber(
-    next.seat_budget_reserve_pct,
-    DEFAULT_POOL_ROUTING.seat_budget_reserve_pct,
-    0,
-    SEAT_BUDGET_RESERVE_MAX,
-    { round: false },
-  )
-  next.sticky_wait_timeout_ms = clampWaitTimeoutMs(
-    next.sticky_wait_timeout_ms,
-    DEFAULT_POOL_ROUTING.sticky_wait_timeout_ms,
-  )
-  next.fallback_wait_timeout_ms = clampWaitTimeoutMs(
-    next.fallback_wait_timeout_ms,
-    DEFAULT_POOL_ROUTING.fallback_wait_timeout_ms,
-  )
-  // UnitCircuit used to read 0 / junk as its default; store that default so the
-  // panel shows the value that actually runs.
-  next.circuit_failure_threshold = circuitSetting(
-    next.circuit_failure_threshold,
-    DEFAULT_POOL_ROUTING.circuit_failure_threshold,
-    1,
-    CIRCUIT_THRESHOLD_MAX,
-  )
-  next.circuit_open_ms = circuitSetting(
-    next.circuit_open_ms,
-    DEFAULT_POOL_ROUTING.circuit_open_ms,
-    CIRCUIT_OPEN_MIN_MS,
-    Number.MAX_SAFE_INTEGER,
-  )
-  return next
-}
-
-function circuitSetting(value, fallback, min, max) {
-  if (!Number(value)) return fallback
-  return clampNumber(value, fallback, min, max)
-}
-
-function normalizePoolConfig(config = {}) {
-  return { ...DEFAULT_CONFIG, ...normalizePoolRouting(config) }
-}
-
-export function formatPoolSelectionSummary(details = {}) {
-  const reason = String(details.reason || '').trim()
-  if (!reason) return ''
-  const parts = [reason]
-  const soonest = Number(details.soonest_available_ms)
-  if (Number.isFinite(soonest) && soonest > 0) {
-    parts.push(`soonest=${Math.round(soonest / 1000)}s`)
-  }
-  const eligible = Number(details.eligible)
-  if (Number.isFinite(eligible)) parts.push(`eligible=${eligible}`)
-  if (details.sticky_cleared) parts.push('sticky_cleared')
-  return parts.join(' ')
-}
+/** Retry-After ceiling for a request turned away on its expected queue wait. */
+const QUEUE_ESTIMATE_RETRY_MAX_MS = 120_000
 
 function isUnboundAuthCooldown(candidate, bound, stickyCleared) {
   if (!stickyCleared || !bound) return false
@@ -378,6 +288,7 @@ export class PoolScheduler extends EventEmitter {
     this.maintenanceStopped = false
     this.lastUsed = new Map()
     this.cooldownTimers = new Map()
+    this.holdTimes = new HoldTimeTracker()
     this.planner = new SeatPlanner({
       graceMs: 0,
       reservePct: this.config.seat_budget_reserve_pct,
@@ -598,6 +509,16 @@ export class PoolScheduler extends EventEmitter {
         return fail('all_accounts_busy', waitCandidates, waitAvailable, waitPool)
       }
       const now = Date.now()
+      // Inspecting eligibility costs real time (worker health, quota reads), so a
+      // wake time that has already arrived means this snapshot aged out while it
+      // was being built. Re-read it instead of sleeping on a window that is
+      // already open; `availableAt` is always in the future when it is recorded,
+      // so a refreshed snapshot cannot report the same expiry twice.
+      const stale = waitPool.some((candidate) => {
+        const at = Number(candidate.availableAt) || 0
+        return at > 0 && at <= now
+      })
+      if (stale && now < loopDeadline) continue
       const wakeAts = waitPool.map((candidate) => Number(candidate.availableAt) || 0).filter((value) => value > now)
       // Health / quota hops are async; availableAt can expire before we slice the wait.
       const staleWindowWake =
@@ -697,6 +618,18 @@ export class PoolScheduler extends EventEmitter {
       }
     }
     const finish = (granted) => {
+      const scope = refreshKeyScope(granted.candidate.keyScope)
+      if (
+        !keyAllowsModel(scope, granted.candidate.requestedModel ?? granted.candidate.model) ||
+        !keyAllowsVm(scope, granted.candidate.vm)
+      ) {
+        granted.reservation.release()
+        if (granted.seatOpened) {
+          const seat = this.planner.seatOf(seatKey)
+          if (seat) this.planner.free(seat)
+        }
+        return fail('key_unavailable')
+      }
       consumed = true
       return {
         ...granted.candidate,
@@ -840,6 +773,14 @@ export class PoolScheduler extends EventEmitter {
           for (const vmId of ticket.vmId ? [ticket.vmId] : byVm.keys()) this.planner.pump(vmId)
         }
         if (ticket.granted) return finish(ticket.granted)
+        const expected = this.queueWaitBeyondBudget(ticket, byVm, failoverDeadline)
+        if (expected != null) {
+          return {
+            ...fail('pool_wait_estimate_exceeded'),
+            estimated_wait_ms: expected,
+            retry_after_ms: Math.min(expected, QUEUE_ESTIMATE_RETRY_MAX_MS),
+          }
+        }
         const until = ticket.kind === 'seat' ? ticket.stickyUntil : ticket.deadline
         await this.waitTicket(ticket, { signal, until: Math.min(until, Date.now() + QUEUE_REFRESH_MS) })
         if (ticket.granted) return finish(ticket.granted)
@@ -945,6 +886,42 @@ export class PoolScheduler extends EventEmitter {
     }
   }
 
+  /**
+   * Expected wait (ms) when it cannot fit in what this ticket may still wait,
+   * else null. A seat wait gets its sticky window plus the global fallback it
+   * moves to afterwards, and is served by whichever of home / any VM is sooner.
+   */
+  queueWaitBeyondBudget(ticket, byVm, failoverDeadline) {
+    const now = Date.now()
+    const until =
+      ticket.kind === 'seat'
+        ? Math.min(failoverDeadline, ticket.stickyUntil + this.config.fallback_wait_timeout_ms)
+        : ticket.deadline
+    if (!(until > now)) return null
+    const estimate = (candidates) =>
+      candidates.every(Boolean)
+        ? estimateQueueWaitMs(
+            candidates,
+            this.planner.queuedAhead(
+              candidates.map((candidate) => candidate.vmId),
+              ticket,
+            ),
+            this.holdTimes,
+            until,
+          )
+        : null
+    let expected
+    if (ticket.kind === 'conc') expected = estimate([byVm.get(ticket.vmId)])
+    else {
+      const anywhere = estimate([...byVm.values()])
+      const home = ticket.kind === 'seat' ? estimate([byVm.get(ticket.vmId)]) : null
+      // Unknown on either side keeps the wait: the unknown path may be the fast one.
+      expected =
+        anywhere == null || (ticket.kind === 'seat' && home == null) ? null : Math.min(anywhere, home ?? anywhere)
+    }
+    return expected != null && expected > until - now ? expected : null
+  }
+
   enqueueTicket({ seatKey, kind, vmId, candidates, deadline, stickyUntil = null }) {
     if (this.queuedTotal() >= this.config.queue_max) throw this.queueFullError([...candidates.keys()])
     const ticket = {
@@ -1046,6 +1023,8 @@ export class PoolScheduler extends EventEmitter {
     onlyVmIds = null,
   } = {}) {
     const now = Date.now()
+    keyScope = refreshKeyScope(keyScope)
+    if (!keyAllowsModel(keyScope, model)) return []
     const summaries = listVms(this.projectRoot)
     const candidates = Object.assign([], {
       cooldowns: { rate_limited: /** @type {number|null} */ (null), overloaded: /** @type {number|null} */ (null) },
@@ -1086,6 +1065,8 @@ export class PoolScheduler extends EventEmitter {
         pinned: !!pin,
         quotaRequest,
       })
+      keyScope = refreshKeyScope(keyScope)
+      if (!keyAllowsModel(keyScope, model) || !keyAllowsVm(keyScope, vm)) continue
       if (!eligibility.ok) {
         const kind = eligibility.reason
         if (kind === 'rate_limited' || kind === 'overloaded') {
@@ -1116,6 +1097,7 @@ export class PoolScheduler extends EventEmitter {
         state,
         model: normalizeModel(model),
         priority: priorityOf(vm, eligibility.account, now),
+        groupPriority: keyScope?.resource_priorities?.[vm.id] ?? 50,
         weight: weightOf(vm, state),
         inflight,
         maxConcurrency,
@@ -1134,6 +1116,7 @@ export class PoolScheduler extends EventEmitter {
         signal,
         ownerScope,
         keyScope,
+        requestedModel: model,
         exec: this.executionContext(vm, accountId),
       })
     }
@@ -1324,14 +1307,10 @@ export class PoolScheduler extends EventEmitter {
       markWait('fable_quota', until)
     }
     if (this.accountQuota?.weeklySplitOf) {
-      const split = this.accountQuota.weeklySplitOf(accountId, account)
+      const split = this.accountQuota.weeklySplitOf(accountId, account, eligibilityNow)
       const reason = splitBlocksModel(split, modelKey)
       if (reason) {
-        const until = this.accountQuota.weeklySplitResetAt?.(
-          accountId,
-          reason === 'fable_split' ? 'fable' : 'regular',
-          account,
-        )
+        const until = this.accountQuota.fableWindowResetAt?.(accountId, account)
         markWait(reason, until)
       }
     }
@@ -1345,7 +1324,9 @@ export class PoolScheduler extends EventEmitter {
     }
     let gateZone = null
     if (this.accountQuota && !pinned) {
-      const quotaGate = this.accountQuota.canAccept(accountId, { tier: vmTierOf(vm), quotaRequest, account })
+      const quotaGate = normalizeAdmissionFacts(
+        this.accountQuota.canAccept(accountId, { tier: vmTierOf(vm), quotaRequest, account }),
+      )
       if (!quotaGate.ok) {
         if (quotaGate.reason === 'concurrency_limit') markWait('concurrency_limit')
         else if (quotaGate.reason === 'rpm_limit') markWait('rpm_limit', quotaGate.detail?.reset_at)
@@ -1367,25 +1348,8 @@ export class PoolScheduler extends EventEmitter {
   }
 
   executionContext(vm, accountId) {
-    const homeDir = vmCliHomePath(this.projectRoot, vm.id)
-    const slot = readSlotCredentialIdentity(homeDir)
-    return {
-      vmId: vm.id,
-      accountId,
-      vm,
-      vmPath: vmJsonPath(this.projectRoot, vm.id),
-      homeDir,
-      oauth: {
-        email: slot?.email || vm.claude?.email || null,
-        account_uuid: slot?.account_uuid || accountId || vm.claude?.account_uuid || null,
-        org_uuid: slot?.org_uuid || vm.claude?.org_uuid || null,
-        expires_at: slot?.expires_at || vm.claude?.expires_at || null,
-      },
-      proxyUrl: vm.proxy?.url || null,
-      timezone: vm.timezone || 'UTC',
-      locale: vm.locale || 'en_US.UTF-8',
-      kernel: vm.kernel || null,
-    }
+    const slot = readSlotCredentialIdentity(vmCliHomePath(this.projectRoot, vm.id))
+    return createExecutionContext({ projectRoot: this.projectRoot, vm, accountId, credential: slot })
   }
 
   async getWorkerHealth(exec, { signal = undefined, state = null } = {}) {
@@ -1624,6 +1588,10 @@ export class PoolScheduler extends EventEmitter {
     }
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
+    // Commercial group priority, lower first. A key without a group leaves every
+    // candidate at the default, so this band is a no-op there.
+    const groupPriority = Math.min(...pool.map((candidate) => candidate.groupPriority ?? 50))
+    pool = pool.filter((candidate) => (candidate.groupPriority ?? 50) === groupPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
     pool = pool.filter((candidate) => candidate.loadRatio === minLoad)
     if (pool.length === 1) return { ...pool[0], selectionReason: reasonFor('priority-load') }
@@ -1638,6 +1606,8 @@ export class PoolScheduler extends EventEmitter {
     if (!candidates.length) return null
     const highestPriority = Math.max(...candidates.map((candidate) => candidate.priority))
     let pool = candidates.filter((candidate) => candidate.priority === highestPriority)
+    const groupPriority = Math.min(...pool.map((candidate) => candidate.groupPriority ?? 50))
+    pool = pool.filter((candidate) => (candidate.groupPriority ?? 50) === groupPriority)
     const minLoad = Math.min(...pool.map((candidate) => candidate.loadRatio))
     pool = pool.filter((candidate) => candidate.loadRatio === minLoad)
     pool.sort((left, right) => left.lastUsedAt - right.lastUsedAt || left.accountId.localeCompare(right.accountId))
@@ -1776,12 +1746,12 @@ export class PoolScheduler extends EventEmitter {
       if (cooldownActive(state?.cooldown_until, now)) return null
       if (isFableModel(candidate.model) && this.accountQuota?.fableWindowLimited?.(candidate.accountId, now, account))
         return null
-      if (
-        this.accountQuota?.weeklySplitOf &&
-        splitBlocksModel(this.accountQuota.weeklySplitOf(candidate.accountId, account), candidate.model)
-      )
-        return null
     }
+    if (
+      this.accountQuota?.weeklySplitOf &&
+      splitBlocksModel(this.accountQuota.weeklySplitOf(candidate.accountId, account, now), candidate.model)
+    )
+      return null
     for (const key of modelCooldownKeys(candidate.model)) {
       if (cooldownActive(state?.model_states?.[key]?.cooldown_until, now)) return null
     }
@@ -1791,6 +1761,9 @@ export class PoolScheduler extends EventEmitter {
   }
 
   reserve(candidate, { skipQuota = false, pinned = false } = {}) {
+    const scope = refreshKeyScope(candidate.keyScope)
+    if (!keyAllowsModel(scope, candidate.requestedModel ?? candidate.model) || !keyAllowsVm(scope, candidate.vm))
+      return null
     const snapshot = candidate.exec ? this.admissionSnapshot(candidate, { pinned }) : {}
     if (!snapshot) return null
     const requestInflight = this.inflight.get(candidate.accountId) || 0
@@ -1823,6 +1796,7 @@ export class PoolScheduler extends EventEmitter {
     this.inflight.set(candidate.accountId, (this.inflight.get(candidate.accountId) || 0) + 1)
     this.bumpFamily(candidate.accountId, family, 1)
     this.bumpVmInflight(candidate.vmId, 1)
+    const acquiredAt = Date.now()
     let released = false
     return {
       reserved: true,
@@ -1830,6 +1804,7 @@ export class PoolScheduler extends EventEmitter {
       release: () => {
         if (released) return
         released = true
+        this.holdTimes.note(candidate.vmId, Date.now() - acquiredAt)
         const next = Math.max(0, (this.inflight.get(candidate.accountId) || 1) - 1)
         if (next === 0) this.inflight.delete(candidate.accountId)
         else this.inflight.set(candidate.accountId, next)

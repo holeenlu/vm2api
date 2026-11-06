@@ -8,7 +8,8 @@
  * may pass either name.
  */
 
-import { getDb } from '../database.mjs'
+import { getDb, withTransaction } from '../database.mjs'
+import { recordVendorUsageSync } from '../../vendor/vendor-usage.mjs'
 import { collectErrors, enrichLogRow, excludeErrorClassSql, ingressAuthSql } from '../../admin/error-class.mjs'
 import {
   costColumnsFromUsage,
@@ -30,13 +31,23 @@ import {
   totalTokens,
 } from './usage-log-preds.mjs'
 import { collapseBlockKeywords, foldInterceptRows } from '../../protocol/intercept-stats.mjs'
+import { vmWindowForecast } from '../../usage/vm-quota-forecast.mjs'
+import {
+  addRollupBuckets,
+  BILLING_ACCOUNT_KEY_SQL,
+  ceilHourMs,
+  hourKey,
+  ROLLUP_SOURCE,
+  rollupMeasures,
+  windowSums,
+} from './usage-cost-rollup.mjs'
 
 /** settings key: ISO instant before which usage_logs rows may have been pruned. Monotonic. */
 const PRUNED_THROUGH_KEY = 'usage_logs_pruned_through'
 const BILLING_STATS_CACHE_TTL_MS = 10_000
 const BILLING_BACKFILL_INTERVAL_MS = 60_000
 
-function billingStatsCacheKey(accountWindows) {
+export function billingStatsCacheKey(accountWindows) {
   if (!Array.isArray(accountWindows) || accountWindows.length === 0) return 'rolling'
   const normalized = accountWindows
     .map((win) => ({
@@ -45,11 +56,20 @@ function billingStatsCacheKey(accountWindows) {
       reset_5h: win?.reset_5h || null,
       reset_7d: win?.reset_7d || null,
       reset_7d_oi: win?.reset_7d_oi || null,
+      cleared_5h: win?.cleared_windows?.['5h'] || null,
+      cleared_7d: win?.cleared_windows?.['7d'] || null,
+      cleared_fable: win?.cleared_windows?.['7d_oi'] || null,
     }))
     .sort((a, b) =>
       `${a.account_id}\0${a.vm_id}`.localeCompare(`${b.account_id}\0${b.vm_id}`, 'en', { sensitivity: 'case' }),
     )
   return JSON.stringify(normalized)
+}
+
+function billingWindowSince(win, key, duration, fallback, now) {
+  const start = extraWindowSince(win?.[`reset_${key}`], duration, now) ?? Date.parse(fallback)
+  const cleared = Date.parse(win?.cleared_windows?.[key] || '')
+  return Number.isFinite(cleared) && cleared <= now ? Math.max(start, cleared) : start
 }
 
 // Preserve per-row prompt denominators when aligning account quota windows.
@@ -62,9 +82,17 @@ function sumCostBuckets(rows) {
   }
 }
 
+// Rolling 5h / 7d totals over every account: the per-account buckets already partition all rows.
+function rollingTotal(byAccount) {
+  const rows = [...byAccount.values()]
+  const bucket = { ...sumCostBuckets(rows), unpriced: rows.reduce((sum, row) => sum + (Number(row.unpriced) || 0), 0) }
+  return { ...bucket, ...cacheHitStats(bucket) }
+}
+
 const SUMMARY_COLUMNS = [
   'id',
   'request_id',
+  'config_revision',
   'created_at',
   'log_mode',
   'method',
@@ -94,6 +122,7 @@ const SUMMARY_COLUMNS = [
   'cache_creation_1h_tokens',
   'requested_model',
   'upstream_model',
+  'response_model',
   'model_mismatch',
   'first_token_ms',
   'first_byte_ms',
@@ -118,6 +147,16 @@ const SUMMARY_COLUMNS = [
   'rate_multiplier',
   'service_tier',
   'upstream_service_tier',
+  'error_kind',
+  'authorization_mode',
+  'inbound_transport',
+  'upstream_path',
+  'upstream_transport',
+  'upstream_error_json',
+  'websocket_close_code',
+  'continuation_unavailable_reason',
+  'upstream_connection_exit_reason',
+  'retry_after_ms',
   'speed',
   'long_context',
   'session_id',
@@ -127,15 +166,28 @@ const SUMMARY_COLUMNS = [
   'intercept',
   'jev_state',
   'vm_owner_user_id',
+  'billing_status',
+  'billing_group_id',
+  'subscription_id',
+  'api_key_name',
+  'source',
   'image_model',
   'image_usage',
   'image_input_tokens',
   'image_output_tokens',
   'image_cost',
+  'execution_kind',
+  'account_resource_id',
+  'gateway_instance_id',
+  'dispatch_id',
+  'receipt_id',
+  'usage_confidence',
 ]
 
 function toRow(rec) {
   return SUMMARY_COLUMNS.map((c) => {
+    if (c === 'billing_status') return rec[c] || 'unmetered'
+    if (c === 'source') return rec[c] || 'protocol'
     if (c === 'created_at') return rec.created_at ?? rec.ts ?? null
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
@@ -194,17 +246,6 @@ function resolveAccountWindow(windows, row) {
     list.find((w) => w.vm_id && w.vm_id === row.vm_id) ||
     null
   )
-}
-
-function groupCostEvents(rows = []) {
-  const map = new Map()
-  for (const row of rows) {
-    const key = accountEventKey(row)
-    const list = map.get(key) || []
-    list.push(row)
-    map.set(key, list)
-  }
-  return map
 }
 
 function isFableRow(row) {
@@ -291,12 +332,14 @@ export function summarizeLatency(values) {
 }
 
 export class UsageLogsRepo {
-  constructor(db = getDb()) {
+  constructor(db = getDb(), { billingMaintenance = true } = {}) {
     this.db = db
+    this._billingMaintenance = billingMaintenance
     // Panel endpoints request the same expensive billing snapshot several times
     // during one refresh. Keep this cache repository-local so it never affects
     // request accounting or persists across processes.
     this._billingStatsCache = new Map()
+    this._forecastCache = new Map()
     this._billingBackfillAt = 0
     this._insert = db.prepare(`
       INSERT INTO usage_logs (${SUMMARY_COLUMNS.join(', ')})
@@ -356,8 +399,12 @@ export class UsageLogsRepo {
   }
 
   insertSummary(rec) {
-    this._insert.run(...toRow(rec))
-    return rec
+    return withTransaction(this.db, () => {
+      this._insert.run(...toRow(rec))
+      recordVendorUsageSync(this.db, this._getByRequestId.get(rec.request_id || rec.id))
+      this._billingStatsCache.clear()
+      return rec
+    })
   }
 
   vmOwnerOf(vmId) {
@@ -367,7 +414,14 @@ export class UsageLogsRepo {
 
   /** INSERT OR IGNORE (legacy import path). @returns true when inserted */
   insertSummaryIfAbsent(rec) {
-    return this._insertIfAbsent.run(...toRow(rec)).changes > 0
+    return withTransaction(this.db, () => {
+      const inserted = this._insertIfAbsent.run(...toRow(rec)).changes > 0
+      if (inserted) {
+        recordVendorUsageSync(this.db, this._getByRequestId.get(rec.request_id || rec.id))
+        this._billingStatsCache.clear()
+      }
+      return inserted
+    })
   }
 
   insertDebug(requestId, ts, record) {
@@ -536,7 +590,7 @@ export class UsageLogsRepo {
     }
     return this.db
       .prepare(`
-      SELECT strftime('${fmt}', created_at) AS bucket,
+      SELECT strftime('${fmt}', created_at, '+8 hours') AS bucket,
              COUNT(*) AS requests,
              SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
              COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -812,50 +866,20 @@ export class UsageLogsRepo {
     return this._costSelect(cond, params)
   }
 
-  costByAccount({ since = null, until = null } = {}) {
-    const { cond, params } = timeCond(since, until)
-    const rows = this.db
-      .prepare(`
-      SELECT
-        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
-        vm_id,
-        COUNT(*) AS requests,
-        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
-        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-        COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-        COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-        COALESCE(SUM(input_cost), 0) AS input_cost,
-        COALESCE(SUM(output_cost), 0) AS output_cost,
-        COALESCE(SUM(cache_read_cost), 0) AS cache_read_cost,
-        COALESCE(SUM(cache_creation_cost), 0) AS cache_creation_cost,
-        COALESCE(SUM(total_cost), 0) AS total_cost,
-        COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
-      FROM usage_logs ${cond}
-      GROUP BY 1, vm_id
-      ORDER BY total_cost DESC
-    `)
-      .all(...params)
-    return rows.map((r) => ({
-      account_id: r.account_id,
-      vm_id: r.vm_id || null,
-      requests: Number(r.requests || 0),
-      success: Number(r.success || 0),
-      errors: Number(r.errors || 0),
-      input_tokens: Number(r.input_tokens || 0),
-      output_tokens: Number(r.output_tokens || 0),
-      cache_read_tokens: Number(r.cache_read_tokens || 0),
-      cache_creation_tokens: Number(r.cache_creation_tokens || 0),
-      prompt_tokens: Number(r.prompt_tokens || 0),
-      input_cost: Number(r.input_cost || 0),
-      output_cost: Number(r.output_cost || 0),
-      cache_read_cost: Number(r.cache_read_cost || 0),
-      cache_creation_cost: Number(r.cache_creation_cost || 0),
-      total_cost: Number(r.total_cost || 0),
-      unpriced: Number(r.unpriced || 0),
-    }))
+  /** Per billing account (key, slot) usage at or after `since`, from the hourly rollup plus the partial edge hour. */
+  async costByAccount({ since = null } = {}) {
+    const sinceMs = since == null ? null : new Date(since).getTime()
+    const sums = await windowSums(this.db, {
+      sinceMs,
+      rollup: { select: 'account_key AS account_id, vm_ref AS vm_id', group: 'account_key, vm_ref' },
+      raw: { select: `${BILLING_ACCOUNT_KEY_SQL} AS account_id, NULLIF(vm_id, '') AS vm_id`, group: '1, 2' },
+      keyOf: accountEventKey,
+      successPred: SLA_SUCCESS_PRED,
+      errorPred: SLA_ERROR_PRED,
+    })
+    return [...sums.values()]
+      .map((r) => ({ ...addRollupBuckets([r]), account_id: r.account_id, vm_id: r.vm_id || null }))
+      .sort((a, b) => b.total_cost - a.total_cost)
   }
 
   /**
@@ -956,7 +980,7 @@ export class UsageLogsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost,
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost,
              COALESCE(SUM(duration_ms), 0) AS duration_ms_sum,
              SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) AS duration_n
       FROM usage_logs ${cond}
@@ -982,7 +1006,7 @@ export class UsageLogsRepo {
       SELECT ${expr} AS name,
              COUNT(*) AS requests,
              COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0) AS tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             COALESCE(SUM(${apiKeyId ? 'actual_cost' : 'total_cost'}), 0) AS total_cost
       FROM usage_logs ${cond}
       GROUP BY name ORDER BY requests DESC, total_cost DESC LIMIT ${limit}
     `)
@@ -1068,7 +1092,7 @@ export class UsageLogsRepo {
   }
 
   /** Official-standard totals: all-time + Shanghai calendar today + per account. */
-  billingStats(opts = {}) {
+  async billingStats(opts = {}) {
     const { accountWindows = null, now = Date.now() } = opts
     const cacheable = !Object.hasOwn(opts, 'now')
     const cacheNow = Date.now()
@@ -1076,36 +1100,32 @@ export class UsageLogsRepo {
     const cached = cacheable ? this._billingStatsCache.get(key) : null
     if (cached && cached.expires_at > cacheNow) return cached.value
 
-    // Historical cost repair is maintenance, not part of rendering a panel.
-    // Limit it independently so several panel endpoints cannot repeat the same
-    // synchronous scan in a single refresh.
-    if (cacheNow - this._billingBackfillAt >= BILLING_BACKFILL_INTERVAL_MS) {
-      this._billingBackfillAt = cacheNow
-      try {
-        this.backfillMissingCosts()
-      } catch {}
-    }
+    if (this._billingMaintenance) this.maintainBillingCosts()
 
-    const value = this._computeBillingStats({ accountWindows, now })
-    if (this._billingStatsCache.size > 32) {
-      for (const [cacheKey, entry] of this._billingStatsCache) {
-        if (entry.expires_at <= cacheNow) this._billingStatsCache.delete(cacheKey)
-      }
-    }
-    // Start the TTL after the expensive synchronous aggregation completes. On
-    // large databases the computation itself can exceed the TTL; anchoring the
-    // expiry at cache lookup time would make a freshly computed entry already
-    // stale and every refresh would scan the table again.
+    const value = await this._computeBillingStats({ accountWindows, now })
+    if (this._billingStatsCache.size >= 32) this._billingStatsCache.clear()
     if (cacheable) this._billingStatsCache.set(key, { value, expires_at: Date.now() + BILLING_STATS_CACHE_TTL_MS })
     return value
   }
 
-  _computeBillingStats({ accountWindows = null, now = Date.now() } = {}) {
+  // The reporting worker runs the existing repair before its read transaction,
+  // so all parts of a billing snapshot see the same committed database state.
+  maintainBillingCosts() {
+    const cacheNow = Date.now()
+    if (cacheNow - this._billingBackfillAt >= BILLING_BACKFILL_INTERVAL_MS) {
+      this._billingBackfillAt = cacheNow
+      try {
+        if (this.backfillMissingCosts()) this._billingStatsCache.clear()
+      } catch {}
+    }
+  }
+
+  async _computeBillingStats({ accountWindows = null, now = Date.now() } = {}) {
     const todayStart = shanghaiDayStartIso()
     const fiveHStart = new Date(now - WINDOW_5H_MS).toISOString()
     const sevenDStart = new Date(now - WINDOW_7D_MS).toISOString()
-    const accountsTotal = this.costByAccount()
-    const accountsToday = this.costByAccount({ since: todayStart })
+    const accountsTotal = await this.costByAccount()
+    const accountsToday = await this.costByAccount({ since: todayStart })
     // The per-account queries already cover every row. Re-sum them for the
     // global buckets instead of scanning the entire usage table two more times.
     // This matters on multi-GB databases where each synchronous full scan also
@@ -1132,25 +1152,39 @@ export class UsageLogsRepo {
       }
       eventsSince = new Date(earliest).toISOString()
     }
-    const events = aligned ? this._costEventsSince(eventsSince) : null
-    const fiveById = aligned ? null : new Map(this.costByAccount({ since: fiveHStart }).map((a) => [keyOf(a), a]))
-    const sevenById = aligned ? null : new Map(this.costByAccount({ since: sevenDStart }).map((a) => [keyOf(a), a]))
-    const eventsByKey = aligned ? groupCostEvents(events) : null
+    const fiveById = aligned
+      ? null
+      : new Map((await this.costByAccount({ since: fiveHStart })).map((a) => [keyOf(a), a]))
+    const sevenById = aligned
+      ? null
+      : new Map((await this.costByAccount({ since: sevenDStart })).map((a) => [keyOf(a), a]))
+    // Whole hours from the rollup; the hour each window starts in is read from usage_logs for that account only.
+    const hoursByKey = aligned ? this._rollupHoursByAccount(eventsSince) : null
+    const coverage = this.logCoverageStart()
+    const coveredSince = Date.parse(coverage || '') || 0
+    const forecast = (vmId, window) =>
+      vmWindowForecast(this.db, { vmId, window, coveredSince, now, cache: this._forecastCache })
+    const windowBucket = (a, sinceMs, fableOnly = false) => {
+      const edge = ceilHourMs(sinceMs)
+      const edgeHour = hourKey(edge)
+      const hours = (hoursByKey.get(keyOf(a)) || []).filter((r) => r.hour >= edgeHour && (!fableOnly || r.fable === 1))
+      const edgeRows =
+        edge > sinceMs
+          ? this._costEventsForAccount(a, sinceMs, edge).filter((row) => !fableOnly || isFableRow(row))
+          : []
+      return addRollupBuckets([...hours, bucketEventsSince(edgeRows, sinceMs)])
+    }
     const accounts = accountsTotal.map((a) => {
       const t = todayById.get(keyOf(a)) || emptyCostBucket()
       const win = aligned ? resolveAccountWindow(accountWindows, a) : null
-      const since5 = aligned ? (extraWindowSince(win?.reset_5h, WINDOW_5H_MS, now) ?? Date.parse(fiveHStart)) : null
-      const since7 = aligned ? (extraWindowSince(win?.reset_7d, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)) : null
-      const w = aligned
-        ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since5)
-        : fiveById.get(keyOf(a)) || emptyCostBucket()
-      const w7 = aligned
-        ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since7)
-        : sevenById.get(keyOf(a)) || emptyCostBucket()
+      const since5 = aligned ? billingWindowSince(win, '5h', WINDOW_5H_MS, fiveHStart, now) : null
+      const since7 = aligned ? billingWindowSince(win, '7d', WINDOW_7D_MS, sevenDStart, now) : null
+      const w = aligned ? windowBucket(a, since5) : fiveById.get(keyOf(a)) || emptyCostBucket()
+      const w7 = aligned ? windowBucket(a, since7) : sevenById.get(keyOf(a)) || emptyCostBucket()
       let window_fable = null
-      if (aligned && win?.reset_7d_oi) {
-        const sinceFable = extraWindowSince(win.reset_7d_oi, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)
-        const fable = bucketEventsSince((eventsByKey.get(keyOf(a)) || []).filter(isFableRow), sinceFable)
+      if (aligned && (win?.reset_7d_oi || win?.cleared_windows?.['7d_oi'])) {
+        const sinceFable = billingWindowSince(win, '7d_oi', WINDOW_7D_MS, sevenDStart, now)
+        const fable = windowBucket(a, sinceFable, true)
         window_fable = {
           cost: Number(fable.total_cost || 0),
           tokens: totalTokens(fable),
@@ -1193,6 +1227,10 @@ export class UsageLogsRepo {
         window_7d_unpriced: Number(w7.unpriced || 0),
         window_7d_start: aligned ? new Date(since7).toISOString() : sevenDStart,
         window_fable,
+        // Window capacity from the slot's used% history (codex-proxy-rs sampling); slot rows only.
+        forecast_5h: aligned && a.vm_id ? forecast(a.vm_id, '5h') : null,
+        forecast_7d: aligned && a.vm_id ? forecast(a.vm_id, '7d') : null,
+        forecast_fable: window_fable && a.vm_id ? forecast(a.vm_id, '7d_oi') : null,
       }
     })
     const window5h = aligned
@@ -1200,14 +1238,13 @@ export class UsageLogsRepo {
           ...sumCostBuckets(accounts.map((a) => a.window_5h)),
           ...cacheHitStats(sumCostBuckets(accounts.map((a) => a.window_5h))),
         }
-      : this._costSelect('WHERE created_at >= ?', [fiveHStart])
+      : rollingTotal(fiveById)
     const window7d = aligned
       ? {
           ...sumCostBuckets(accounts.map((a) => a.window_7d)),
           ...cacheHitStats(sumCostBuckets(accounts.map((a) => a.window_7d))),
         }
-      : this._costSelect('WHERE created_at >= ?', [sevenDStart])
-    const coverage = this.logCoverageStart()
+      : rollingTotal(sevenById)
     return {
       source: 'anthropic-official',
       currency: 'USD',
@@ -1251,12 +1288,32 @@ export class UsageLogsRepo {
     }
   }
 
-  _costEventsSince(since) {
+  /** Rollup hours since `since`, per billing account key, with the Fable flag kept apart. */
+  _rollupHoursByAccount(since) {
+    const rows = this.db
+      .prepare(
+        `SELECT account_key AS account_id, vm_ref AS vm_id, hour, fable, ${rollupMeasures(SLA_SUCCESS_PRED, SLA_ERROR_PRED)}
+           FROM ${ROLLUP_SOURCE} WHERE hour >= ? GROUP BY account_key, vm_ref, hour, fable`,
+      )
+      .all(hourKey(new Date(since).getTime()))
+    const map = new Map()
+    for (const row of rows) {
+      const key = accountEventKey(row)
+      const list = map.get(key) || []
+      list.push(row)
+      map.set(key, list)
+    }
+    return map
+  }
+
+  /** One billing account's rows in [sinceMs, untilMs) — the partial hour a quota window starts in. */
+  _costEventsForAccount(account, sinceMs, untilMs) {
+    const vm = account.vm_id || ''
     return this.db
       .prepare(
         `
       SELECT
-        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
+        ${BILLING_ACCOUNT_KEY_SQL} AS account_id,
         vm_id,
         created_at,
         model,
@@ -1275,10 +1332,11 @@ export class UsageLogsRepo {
         COALESCE(cache_creation_cost, 0) AS cache_creation_cost,
         COALESCE(total_cost, 0) AS total_cost
       FROM usage_logs
-      WHERE created_at >= ?
+      WHERE ${BILLING_ACCOUNT_KEY_SQL} = ? AND created_at >= ? AND created_at < ?
     `,
       )
-      .all(since)
+      .all(account.account_id, new Date(sinceMs).toISOString(), new Date(untilMs).toISOString())
+      .filter((row) => (row.vm_id || '') === vm)
   }
 
   ownerBilling({ ownerUserId = null, since = null, until = null, groupBy = 'vm' } = {}) {

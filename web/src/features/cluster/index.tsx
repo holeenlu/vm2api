@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { VIEW_TITLES } from '@/config/nav'
 import type { ClusterLocalStatus } from '@/types/panel-cluster'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { fmtUsd } from '@/lib/format'
@@ -35,7 +36,6 @@ import {
   clusterNodesQueryOptions,
 } from '@/features/cluster/queries'
 import { SshPanel, type SshPanelTab } from '@/features/cluster/ssh-panel'
-import { vmPoolsQueryOptions } from '@/features/keys/vm-pools-card'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { CreateVmDialog } from '@/features/vm/create-vm-dialog'
 
@@ -85,17 +85,23 @@ function MiniStat({
 function checkedTime(iso: string | null | undefined): string | null {
   const t = iso ? Date.parse(iso) : NaN
   if (!Number.isFinite(t)) return null
-  return `${new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })} 测得`
+  return new Date(t).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 export function ClusterPage() {
+  const { t } = useTranslation('cluster')
   const qc = useQueryClient()
   const dash = useQuery(dashboardQueryOptions(5000))
   const me = useQuery(meQueryOptions())
   const cluster = useQuery(clusterNodesQueryOptions())
   const localLink = useQuery(clusterLocalQueryOptions())
-  const pools = useQuery(vmPoolsQueryOptions())
-  const canManage = me.data?.role === 'admin'
+  // Cluster mutations and /api/panel/vms/:id/migration are super_admin-only;
+  // the migrate button and dialog render only behind this flag.
+  const canManage = me.data?.role === 'super_admin'
   const apiNodes = useMemo(() => cluster.data || [], [cluster.data])
   const dashVms = useMemo(() => (dash.data?.vms || []) as Vm[], [dash.data])
   const dashReady = !!dash.data && !dash.data.error && !dash.error
@@ -115,13 +121,15 @@ export function ClusterPage() {
     [apiNodes, dash.data?.host, dashReady, dashVms, hostName, localLink.data]
   )
   const summary = clusterSummary(machines)
+  // Slots belong to VM groups here; the upstream account-pool API was retired.
   const poolOf = useMemo(() => {
     const map = new Map<string, string>()
-    for (const p of pools.data?.pools || []) {
-      for (const id of p.vm_ids || []) map.set(id, p.name)
+    for (const vm of dashVms) {
+      const names = (vm.groups || []).map((group) => group.name).filter(Boolean)
+      if (names.length) map.set(vm.id, names.join(', '))
     }
     return map
-  }, [pools.data])
+  }, [dashVms])
 
   const [selected, setSelected] = useState(readSelected)
   const current: ClusterMachine | undefined =
@@ -148,7 +156,7 @@ export function ClusterPage() {
     mutationFn: (id: string) =>
       api(`/api/panel/cluster/nodes/${id}`, { method: 'DELETE' }),
     onSuccess: (_data, id) => {
-      toast.success('已移除节点')
+      toast.success(t('removed'))
       if (panel?.id === id) setPanel(null)
       qc.invalidateQueries({ queryKey: CLUSTER_NODES_KEY })
     },
@@ -161,6 +169,7 @@ export function ClusterPage() {
     onError: (err) => toast.error(err.message),
   })
 
+  const checkedAt = checkedTime(localLink.data?.checked_at)
   // 只有主控有：节点的 SSH / 直连 / Docker / 指纹都在「连接设置」里，底下不再重复一份。
   const localDetails = {
     rows: localLink.data
@@ -171,7 +180,9 @@ export function ClusterPage() {
         })
       : null,
     summary: localLink.data ? localDetailSummary(localLink.data) : '',
-    checkedAt: checkedTime(localLink.data?.checked_at),
+    checkedAt: checkedAt
+      ? t('localDetail.checkedAt', { value1: checkedAt })
+      : null,
     error: localLink.error ? localLink.error.message : null,
   }
 
@@ -186,7 +197,7 @@ export function ClusterPage() {
       title={VIEW_TITLES.cluster}
       extra={
         canManage ? (
-          <Button onClick={() => setJoinOpen(true)}>接入 VPS</Button>
+          <Button onClick={() => setJoinOpen(true)}>{t('join')}</Button>
         ) : undefined
       }
     >
@@ -211,7 +222,7 @@ ANTI-PATTERN: Local board vs remote table, lifetime spend per host, one-sample l
         <div className='space-y-3'>
           {dash.error || dash.data?.error ? (
             <Alert variant='destructive'>
-              <AlertTitle>本机指标加载失败</AlertTitle>
+              <AlertTitle>{t('localLoadFailed')}</AlertTitle>
               <AlertDescription>
                 {errorMessage(
                   dash.error || new Error(String(dash.data?.error))
@@ -221,63 +232,77 @@ ANTI-PATTERN: Local board vs remote table, lifetime spend per host, one-sample l
           ) : null}
           {cluster.error ? (
             <Alert variant='destructive'>
-              <AlertTitle>节点列表加载失败</AlertTitle>
+              <AlertTitle>{t('nodeLoadFailed')}</AlertTitle>
               <AlertDescription>{errorMessage(cluster.error)}</AlertDescription>
             </Alert>
           ) : null}
 
           <div className='grid grid-cols-2 gap-3 xl:grid-cols-4'>
             <MiniStat
-              label='机器'
+              label={t('machines')}
               value={String(summary.machines)}
               hint={
                 summary.offline ? (
                   <span className='text-[color:var(--status-bad)]'>
-                    {summary.offline} 台连不上
+                    {t('summary.offline', { count: summary.offline })}
                   </span>
                 ) : summary.online === summary.machines ? (
-                  '全部在线'
+                  t('summary.allOnline')
                 ) : (
-                  `${summary.online} 台在线`
+                  t('summary.online', { count: summary.online })
                 )
               }
               tone={summary.offline ? 'bad' : undefined}
             />
             <MiniStat
-              label='槽位'
+              label={t('slots')}
               value={String(summary.slots)}
               hint={[
-                `接单中 ${summary.on}`,
-                `受限 ${summary.restricted}`,
-                summary.stopped ? `停 ${summary.stopped}` : '',
+                t('summary.serving', { value1: summary.on }),
+                t('summary.restricted', { value1: summary.restricted }),
+                summary.stopped
+                  ? t('summary.stopped', { value1: summary.stopped })
+                  : '',
               ]
                 .filter(Boolean)
                 .join(' · ')}
             />
             <MiniStat
-              label='还能放'
-              value={summary.fit == null ? '—' : `${summary.fit} 台`}
+              label={t('capacity.room')}
+              value={
+                summary.fit == null
+                  ? '—'
+                  : t('capacity.fitCount', { count: summary.fit })
+              }
               hint={
                 summary.fit == null
-                  ? '内存读数还没到'
+                  ? t('summary.memoryPending')
                   : summary.fitBy.length
-                    ? `按 2G 槽算，${summary.fitBy.map((x) => `${x.name} ${x.fit}`).join(' · ')}`
-                    : '按 2G 槽算，每台都满了'
+                    ? t('summary.fitBy', {
+                        value1: summary.fitBy
+                          .map((x) => `${x.name} ${x.fit}`)
+                          .join(' · '),
+                      })
+                    : t('summary.allFull')
               }
               tone={summary.fit === 0 ? 'caution' : undefined}
             />
             <MiniStat
-              label='今日花费'
+              label={t('summary.todaySpend')}
               value={fmtUsd(today, 2)}
-              hint={total != null ? `累计 ${fmtUsd(total, 2)}` : undefined}
+              hint={
+                total != null
+                  ? t('summary.cumulative', { value1: fmtUsd(total, 2) })
+                  : undefined
+              }
             />
           </div>
 
           <Card className='gap-0 overflow-hidden py-0 shadow-none'>
             <div className='flex min-h-11 items-center gap-2 border-b px-4 py-2'>
-              <h3 className='text-[13px] font-semibold'>机器</h3>
+              <h3 className='text-[13px] font-semibold'>{t('machines')}</h3>
               <span className='text-[11px] text-muted-foreground'>
-                每 30 秒体检一次 · 点一行看这台的槽
+                {t('machine.tableHint')}
               </span>
             </div>
             <MachineTable
@@ -350,14 +375,17 @@ ANTI-PATTERN: Local board vs remote table, lifetime spend per host, one-sample l
         onOpenChange={(open) => {
           if (!open) setDropTarget(null)
         }}
-        title='移除节点'
+        title={t('removeTitle')}
         desc={
           dropTarget
-            ? `${dropTarget.name} · ${dropTarget.address}。断开 SSH、删除本地凭证与 Docker 桥；远端容器保持运行。`
+            ? t('removeDescription', {
+                value1: dropTarget.name,
+                value2: dropTarget.address,
+              })
             : ''
         }
-        confirmText='移除'
-        cancelBtnText='取消'
+        confirmText={t('remove')}
+        cancelBtnText={t('cancel')}
         destructive
         handleConfirm={() => {
           if (!dropTarget) return

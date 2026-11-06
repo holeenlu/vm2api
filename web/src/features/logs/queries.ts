@@ -1,31 +1,75 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query'
+import type { PanelRole } from '@/types/panel-auth'
 import type {
   RequestLogAttemptsPayload,
   RequestLogDetailPayload,
 } from '@/types/panel-logs'
 import type { RequestLogStats } from '@/types/panel-overview'
 import type {
-  ActiveSessionsData,
   UsageLogCursor,
   UsageLogFilterOptions,
   UsageLogFilters,
-  UsageLogSessionSuggestions,
   UsageLogsBatchResult,
   UsageLogsOverview,
   UsageLogsSummary,
 } from '@/types/panel-usage-logs'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 import { usageLogFiltersQuery } from './search'
 
 /** `/request-logs` 链路（错误归集、导出、调试详情）共用前缀。 */
-export const LOGS_QUERY_KEY = ['panel', 'request-logs'] as const
+export const LOGS_QUERY_KEY = panelQueryKeys.requestLogs()
 /** 滚动日志页全部查询的前缀：屏蔽集或手动刷新时整体失效。 */
-export const USAGE_LOGS_QUERY_KEY = ['panel', 'usage-logs'] as const
+export const USAGE_LOGS_QUERY_KEY = panelQueryKeys.usageLogs()
 export const USAGE_LOGS_BATCH_SIZE = 50
+
+export function usageLogRankingKey(filters: UsageLogFilters, scope?: string) {
+  return [...USAGE_LOGS_QUERY_KEY, 'ranking', filters, scope] as const
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
+/**
+ * Keep the log page renderable while an older control plane or a proxy returns
+ * the legacy `items` shape, an extra `data` envelope, or an incomplete empty
+ * response. Query functions should expose the current camelCase contract to
+ * components regardless of which compatible response shape was received.
+ */
+export function normalizeUsageLogsBatchResult(
+  payload: unknown
+): UsageLogsBatchResult {
+  let value = recordOf(payload)
+  if (value.data && typeof value.data === 'object') value = recordOf(value.data)
+  const logs = Array.isArray(value.logs)
+    ? value.logs
+    : Array.isArray(value.items)
+      ? value.items
+      : []
+  const cursor = value.nextCursor ?? value.next_cursor
+  const nextCursor =
+    cursor && typeof cursor === 'object' && !Array.isArray(cursor)
+      ? {
+          createdAt: String(
+            (cursor as Record<string, unknown>).createdAt ??
+              (cursor as Record<string, unknown>).created_at ??
+              ''
+          ),
+          id: String((cursor as Record<string, unknown>).id ?? ''),
+        }
+      : null
+  return {
+    logs,
+    nextCursor: nextCursor?.createdAt && nextCursor.id ? nextCursor : null,
+    hasMore: value.hasMore === true || value.has_more === true,
+  }
+}
 
 export function requestLogQueryOptions(id: string, enabled = true) {
   return queryOptions({
-    queryKey: ['panel', 'request-log', id] as const,
+    queryKey: panelQueryKeys.requestLog(id),
     queryFn: async () => {
       const item = await api<RequestLogDetailPayload>(
         `/api/panel/request-logs/${encodeURIComponent(id)}`
@@ -42,13 +86,14 @@ export function requestLogQueryOptions(id: string, enabled = true) {
 export function logStatsQueryOptions(
   since: string,
   refetchInterval?: number,
-  bucket: 'hour' | 'day' = 'hour'
+  bucket: 'hour' | 'day' = 'hour',
+  scope?: 'mine'
 ) {
   return queryOptions({
-    queryKey: ['panel', 'request-logs-stats', bucket, since] as const,
+    queryKey: panelQueryKeys.requestLogStats(bucket, since, scope),
     queryFn: () =>
       api<RequestLogStats>(
-        `/api/panel/request-logs/stats?bucket=${bucket}&since=${encodeURIComponent(since)}`
+        `/api/panel/request-logs/stats?bucket=${bucket}&since=${encodeURIComponent(since)}${scope === 'mine' ? '&scope=mine' : ''}`
       ),
     ...(refetchInterval
       ? { refetchInterval, refetchOnWindowFocus: false }
@@ -70,15 +115,18 @@ export function usageLogsBatchQueryOptions({
   shouldPoll: () => boolean
 }) {
   return infiniteQueryOptions({
-    queryKey: [...USAGE_LOGS_QUERY_KEY, 'batch', filters] as const,
-    queryFn: ({ pageParam }) => {
+    queryKey: panelQueryKeys.usageLogsBatch(filters),
+    queryFn: async ({ pageParam, signal }) => {
       const qs = usageLogFiltersQuery(filters)
       qs.set('limit', String(USAGE_LOGS_BATCH_SIZE))
       if (pageParam) {
         qs.set('cursor_created_at', pageParam.createdAt)
         qs.set('cursor_id', pageParam.id)
       }
-      return api<UsageLogsBatchResult>(`/api/panel/usage-logs?${qs}`)
+      const payload = await api<unknown>(`/api/panel/usage-logs?${qs}`, {
+        signal,
+      })
+      return normalizeUsageLogsBatchResult(payload)
     },
     initialPageParam: null as UsageLogCursor | null,
     getNextPageParam: (last) =>
@@ -92,7 +140,7 @@ export function usageLogsBatchQueryOptions({
 
 export function usageLogsSummaryQueryOptions(filters: UsageLogFilters) {
   return queryOptions({
-    queryKey: [...USAGE_LOGS_QUERY_KEY, 'summary', filters] as const,
+    queryKey: panelQueryKeys.usageLogsSummary(filters),
     queryFn: () =>
       api<UsageLogsSummary>(
         `/api/panel/usage-logs/summary?${usageLogFiltersQuery(filters)}`
@@ -100,48 +148,32 @@ export function usageLogsSummaryQueryOptions(filters: UsageLogFilters) {
   })
 }
 
-export function usageLogFilterOptionsQueryOptions(enabled = true) {
+export function usageLogFilterOptionsQueryOptions(
+  role?: PanelRole,
+  scope?: 'mine'
+) {
   return queryOptions({
-    queryKey: [...USAGE_LOGS_QUERY_KEY, 'filter-options'] as const,
+    queryKey: panelQueryKeys.usageLogsFilterOptions(role, scope),
     queryFn: () =>
-      api<UsageLogFilterOptions>('/api/panel/usage-logs/filter-options'),
+      api<UsageLogFilterOptions>(
+        '/api/panel/usage-logs/filter-options' +
+          (scope === 'mine' ? '?scope=mine' : '')
+      ),
     staleTime: 5 * 60_000,
-    enabled,
-  })
-}
-
-export function usageLogSessionSuggestionsQueryOptions(q: string) {
-  return queryOptions({
-    queryKey: [...USAGE_LOGS_QUERY_KEY, 'session-suggestions', q] as const,
-    queryFn: () =>
-      api<UsageLogSessionSuggestions>(
-        `/api/panel/usage-logs/session-suggestions?q=${encodeURIComponent(q)}&limit=20`
-      ),
-    enabled: q.length >= 2,
-    staleTime: 30_000,
-  })
-}
-
-export function activeSessionsQueryOptions() {
-  return queryOptions({
-    queryKey: [...USAGE_LOGS_QUERY_KEY, 'active-sessions'] as const,
-    queryFn: () =>
-      api<ActiveSessionsData>(
-        '/api/panel/usage-logs/active-sessions?minutes=5&limit=50'
-      ),
-    refetchInterval: 5000,
+    enabled: !!role,
   })
 }
 
 export function usageLogsOverviewQueryOptions(
   tz: string,
-  refetchInterval: number | false = false
+  refetchInterval: number | false = false,
+  scope?: 'mine'
 ) {
   return queryOptions({
-    queryKey: [...USAGE_LOGS_QUERY_KEY, 'overview', tz] as const,
+    queryKey: panelQueryKeys.usageLogsOverview(tz, scope),
     queryFn: () =>
       api<UsageLogsOverview>(
-        `/api/panel/usage-logs/overview?tz=${encodeURIComponent(tz)}`
+        `/api/panel/usage-logs/overview?tz=${encodeURIComponent(tz)}${scope === 'mine' ? '&scope=mine' : ''}`
       ),
     refetchInterval,
     refetchOnWindowFocus: false,

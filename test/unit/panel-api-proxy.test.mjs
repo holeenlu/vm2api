@@ -48,7 +48,65 @@ test('admin vm list and detail carry tenant owner and origin', async () => {
   assert.equal(detail.data.vm.origin, 'user_created')
 })
 
-test('summarizeProxyPool includes disconnect_on_error', () => {
+test('admin vm list exposes vendor metadata without leaking it to tenants', async () => {
+  const project = tmpDir()
+  writeVm(project, { id: 'vm-vendor', status: 'stopped', claude: {} })
+  const cfg = { paths: { project }, rewrite: { enabled: false }, base_url: 'http://127.0.0.1' }
+  const db = {
+    prepare: (sql) => {
+      assert.match(sql, /vendor_resources/)
+      return {
+        all: (...ids) => {
+          return ids.map((id) => ({
+            runtime_vm_id: id,
+            vendor_id: 'vendor-1',
+            vendor_name: '供应商一',
+            vendor_notes: 'Kenny 5x',
+          }))
+        },
+      }
+    },
+  }
+  const admin = await buildVmList({ cfg, accountQuota: fakeQuota(), routingConfig: {}, role: 'super_admin', db })
+  assert.equal(admin.data.items[0].vendor_id, 'vendor-1')
+  assert.equal(admin.data.items[0].vendor_name, '供应商一')
+  assert.equal(admin.data.items[0].notes, 'Kenny 5x')
+  const tenant = await buildVmList({
+    cfg,
+    accountQuota: fakeQuota(),
+    routingConfig: {},
+    role: 'user',
+    ownerUserId: null,
+    db,
+  })
+  assert.equal(tenant.data.items.length, 0)
+})
+
+test('vm list carries the account profile the supplier portal shows', async () => {
+  const project = tmpDir()
+  writeVm(project, {
+    id: 'vm-max',
+    status: 'stopped',
+    claude: {
+      access_token: 'sk-ant-oat01-x',
+      subscription_type: 'max',
+      rate_limit_tier: 'default_claude_max_20x',
+      billing_type: 'apple_subscription',
+      subscription_updated_at: '2026-11-05T00:00:00.000Z',
+    },
+  })
+  const cfg = { paths: { project }, rewrite: { enabled: false }, base_url: 'http://127.0.0.1' }
+  const listed = await buildVmList({ cfg, accountQuota: fakeQuota(), routingConfig: {} })
+  const row = listed.data.items[0]
+  assert.equal(row.subscription_type, 'max')
+  assert.equal(row.rate_limit_tier, 'default_claude_max_20x')
+  assert.equal(row.billing_type, 'apple_subscription')
+  assert.equal(row.subscription_updated_at, '2026-11-05T00:00:00.000Z')
+  assert.equal(row.chatgpt_subscription_active_until, null)
+  assert.equal(row.subscription_will_renew, null)
+})
+
+test('summarizeProxyPool includes disconnect_on_error', async () => {
   assert.deepEqual(summarizeProxyPool(null), {
     total: 0,
     free: 0,
@@ -59,7 +117,7 @@ test('summarizeProxyPool includes disconnect_on_error', () => {
     disconnect_on_error: false,
   })
   const dir = tmpDir()
-  const pool = new ProxyPool({ dataDir: dir })
+  const pool = await ProxyPool.create({ dataDir: dir })
   pool.importLines('10.0.0.9:1080')
   pool.updateConfig({ disconnect_on_error: true })
   pool.stopScheduler()
@@ -82,10 +140,10 @@ test('dashboard and vm detail merge pool health onto bound VM', async () => {
     claude: {},
     policy: { maxConcurrency: 4, weight: 1, priority: 8 },
   })
-  const pool = new ProxyPool({ dataDir })
+  const pool = await ProxyPool.create({ dataDir })
   pool.importLines('10.8.8.8:1080')
   const px = pool.snapshot().proxies[0]
-  pool.bind(px.id, 'vm-02')
+  await pool.bind(px.id, 'vm-02')
   const bound = pool.state.proxies[0]
   bound.status = 'ok'
   bound.latency_ms = 12
@@ -176,10 +234,10 @@ test('dead bound proxy blocks credential import', async () => {
     claude: {},
     policy: {},
   })
-  const pool = new ProxyPool({ dataDir })
+  const pool = await ProxyPool.create({ dataDir })
   pool.importLines('10.7.7.7:1080')
   const id = pool.snapshot().proxies[0].id
-  pool.bind(id, 'vm-03')
+  await pool.bind(id, 'vm-03')
   pool.setEnabled(id, false)
   pool.stopScheduler()
   const cfg = { paths: { project }, rewrite: {}, base_url: '' }
@@ -385,19 +443,19 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
     { id: 'vm-tokyo', node_id: 'node-a' },
     { id: 'vm-tenant', node_id: 'node-a', owner_user_id: 'user-1' },
   ]
-  const pool = new ProxyPool({
+  const pool = await ProxyPool.create({
     dataDir,
     vmNodeOf: (vmId) => vms.find((vm) => vm.id === vmId)?.node_id || null,
   })
   t.after(() => pool.stopScheduler())
   pool.ensureLocal()
   // A generic px-local bind lands each slot on its own VPS's local row.
-  assert.equal(pool.bind('px-local', 'vm-ctrl').proxy.id, 'px-local')
-  assert.equal(pool.bind('px-local', 'vm-tokyo').proxy.id, 'px-local-node-a')
-  assert.equal(pool.bind('px-local', 'vm-tenant').proxy.id, 'px-local-node-a')
+  assert.equal((await pool.bind('px-local', 'vm-ctrl')).proxy.id, 'px-local')
+  assert.equal((await pool.bind('px-local', 'vm-tokyo')).proxy.id, 'px-local-node-a')
+  assert.equal((await pool.bind('px-local', 'vm-tenant')).proxy.id, 'px-local-node-a')
 
   const nodes = [{ id: 'node-a', label: '东京-01' }]
-  const adminSnap = pool.panelSnapshot({ role: 'admin', vms, nodes })
+  const adminSnap = pool.panelSnapshot({ role: 'super_admin', vms, nodes })
   const local = adminSnap.proxies.find((p) => p.id === 'px-local')
   assert.ok(local)
   assert.equal(local.node_id, null)
@@ -428,7 +486,7 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
     routingConfig: {},
     proxyPool: pool,
     clusterNodes: nodes,
-    role: 'admin',
+    role: 'super_admin',
   })
   const tokyo = listed.data.items.find((item) => item.id === 'vm-tokyo')
   assert.equal(tokyo.node_name, '东京-01')
@@ -446,18 +504,14 @@ test('local proxy node labels are present for admin and absent for tenant', asyn
     role: 'user',
     ownerUserId: 'user-1',
   })
-  assert.equal(tenantList.data.items.length, 1)
-  const tenantVm = tenantList.data.items[0]
-  assert.equal(tenantVm.id, 'vm-tenant')
-  assert.equal(tenantVm.node_name, undefined)
-  assert.equal(tenantVm.proxy.node_name, undefined)
+  assert.equal(tenantList.data.items.length, 0)
 
   const adminAlloc = publicAllocatedProxy(
     pool,
     { id: 'px-local', kind: 'local' },
     {
       nodeId: 'node-a',
-      role: 'admin',
+      role: 'super_admin',
       nodes,
     },
   )

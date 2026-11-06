@@ -12,7 +12,7 @@ export function useLocalProxyLabelOpts(
   nodeId: string | null | undefined
 ): LocalProxyLabelOpts {
   const me = useQuery(meQueryOptions())
-  const revealNode = me.data?.role === 'admin' || me.data?.role === 'super'
+  const revealNode = me.data?.role === 'super_admin'
   const nodes = useQuery({
     ...clusterNodesQueryOptions(),
     refetchInterval: false,

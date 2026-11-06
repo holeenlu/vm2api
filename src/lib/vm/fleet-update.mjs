@@ -98,8 +98,8 @@ export async function applyNativeTelemetry({
       result.wrote = result.seed.wrote === true
       const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
       if (!written.supported || !written.wrote) return { ...result, code: written.error || 'telemetry_config_failed' }
-      const geo = readVmProxyGeo(record)
-      const egress = writeVmProxyTelemetryEgress(projectRoot, record, geo)
+      const geo = await readVmProxyGeo(record)
+      const egress = await writeVmProxyTelemetryEgress(projectRoot, record, geo)
       if (geo && !egress.wrote && egress.reason !== 'proxy_geo_unavailable') {
         return { ...result, code: egress.reason || 'telemetry_egress_write_failed', published: false, applied: false }
       }
@@ -230,6 +230,9 @@ export async function updateOneSlot(
       }
     }
     if (action === 'telemetry') {
+      if (normalizeVmKind(vm).kind === 'codex' || slotHost(vm).native) {
+        return { ...result, ok: true, skipped: true, skip_reason: 'telemetry_unsupported' }
+      }
       const enabled =
         telemetryEnabled === undefined ? vm.seed_policy?.telemetry_disabled === false : telemetryEnabled === true
       const vmRef = getVm(projectRoot, id) || vm

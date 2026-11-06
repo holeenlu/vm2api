@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { activateVmCragLicense } from '@/lib/api'
 import {
@@ -20,6 +21,7 @@ export function KernelLicenseDialog({
   vm: Vm
   onClose: () => void
 }) {
+  const { t } = useTranslation('wrap')
   const qc = useQueryClient()
   const [registrationCode, setRegistrationCode] = useState('')
   const license = useQuery(vmCragLicenseQueryOptions(vm.id))
@@ -33,7 +35,9 @@ export function KernelLicenseDialog({
         queryKey: kernelCatalogQueryOptions().queryKey,
       })
       toast.success(
-        data.license.valid ? 'CRAG 授权已激活' : '授权未生效，请检查状态'
+        data.license.valid
+          ? t('wrap:licenseActivated')
+          : t('wrap:licenseNotActive')
       )
     },
   })
@@ -57,7 +61,7 @@ export function KernelLicenseDialog({
       >
         <DialogTitle>{vm.name || vm.id}</DialogTitle>
         <DialogDescription className='sr-only'>
-          复制本机机器码，粘贴授权方签发的注册码。激活不会安装或启动内核。
+          {t('wrap:licenseDialogDescription')}
         </DialogDescription>
         <CragLicenseEditor
           data={license.data}

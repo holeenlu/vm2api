@@ -1,5 +1,6 @@
 import { type ReactNode, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { t, i18n } from '@/i18n'
 import type {
   LeaderboardEntry,
   LeaderboardScope,
@@ -13,6 +14,8 @@ import {
   Medal,
   Trophy,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { useAuthStore } from '@/stores/auth-store'
 import {
   formatCurrency,
   formatDuration,
@@ -36,17 +39,63 @@ import { EntryName } from './leaderboard-card'
 import { leaderboardQueryOptions } from './queries'
 
 const PERIODS: { id: StatsRange; label: string; empty: string }[] = [
-  { id: 'today', label: '今日', empty: '今日暂无数据' },
-  { id: '7days', label: '7天', empty: '暂无数据' },
-  { id: '30days', label: '30天', empty: '暂无数据' },
-  { id: 'thisMonth', label: '本月', empty: '本月暂无数据' },
+  {
+    id: 'today',
+    get label() {
+      return t('statistics:today')
+    },
+    get empty() {
+      return t('statistics:noTodayData')
+    },
+  },
+  {
+    id: '7days',
+    get label() {
+      return t('statistics:sevenDays')
+    },
+    get empty() {
+      return t('statistics:noData')
+    },
+  },
+  {
+    id: '30days',
+    get label() {
+      return t('statistics:thirtyDays')
+    },
+    get empty() {
+      return t('statistics:noData')
+    },
+  },
+  {
+    id: 'thisMonth',
+    get label() {
+      return t('statistics:thisMonth')
+    },
+    get empty() {
+      return t('statistics:noMonthData')
+    },
+  },
 ]
 
 const SCOPE_LABELS: Record<LeaderboardScope, string> = {
-  user: '用户',
-  key: '密钥',
-  vm: '供应商',
-  model: '模型',
+  get user() {
+    return t('statistics:user')
+  },
+  get key() {
+    return t('statistics:key')
+  },
+  get vm() {
+    return t('statistics:provider')
+  },
+  get model() {
+    return t('statistics:model')
+  },
+  get group() {
+    return t('statistics:group')
+  },
+  get endpoint() {
+    return t('statistics:entry')
+  },
 }
 
 const LIMIT = 50
@@ -80,19 +129,25 @@ function cacheHitClass(pct: number) {
 const COLUMNS: Column[] = [
   {
     key: 'totalRequests',
-    header: '请求数',
+    get header() {
+      return t('statistics:requestCount')
+    },
     value: (row) => row.totalRequests,
-    cell: (row) => row.totalRequests.toLocaleString(),
+    cell: (row) => row.totalRequests.toLocaleString(i18n.language),
   },
   {
     key: 'totalTokens',
-    header: 'Token 数',
+    get header() {
+      return t('statistics:tokenCount')
+    },
     value: (row) => row.totalTokens,
     cell: (row) => formatTokenAmount(row.totalTokens),
   },
   {
     key: 'totalCost',
-    header: '消耗金额',
+    get header() {
+      return t('statistics:spending')
+    },
     mono: true,
     defaultBold: true,
     value: (row) => row.totalCost,
@@ -100,14 +155,18 @@ const COLUMNS: Column[] = [
   },
   {
     key: 'totalActualCost',
-    header: '实收',
+    get header() {
+      return t('statistics:collected')
+    },
     mono: true,
     value: (row) => row.totalActualCost,
     cell: (row) => formatCurrency(row.totalActualCost),
   },
   {
     key: 'successRate',
-    header: '成功率',
+    get header() {
+      return t('statistics:successRate')
+    },
     value: (row) => (row.totalRequests > 0 ? row.successRate : null),
     cell: (row) =>
       row.totalRequests > 0 ? (
@@ -118,22 +177,28 @@ const COLUMNS: Column[] = [
   },
   {
     key: 'avgDurationMs',
-    header: '平均响应',
+    get header() {
+      return t('statistics:averageResponse')
+    },
     value: (row) => row.avgDurationMs,
     cell: (row) => formatDuration(row.avgDurationMs),
   },
   {
     key: 'avgTtftMs',
-    header: '平均 TTFT',
+    get header() {
+      return t('statistics:averageTtft')
+    },
     value: (row) => row.avgTtftMs,
     cell: (row) =>
       row.avgTtftMs && row.avgTtftMs > 0
-        ? `${Math.round(row.avgTtftMs).toLocaleString()} ms`
+        ? `${Math.round(row.avgTtftMs).toLocaleString(i18n.language)} ms`
         : '-',
   },
   {
     key: 'cacheHitRate',
-    header: '缓存命中率',
+    get header() {
+      return t('statistics:cacheHitRate')
+    },
     value: (row) => row.cacheHitRate,
     cell: (row) => {
       const pct = Number(row.cacheHitRate || 0) * 100
@@ -143,6 +208,8 @@ const COLUMNS: Column[] = [
 ]
 
 function RankCell({ rank }: { rank: number }) {
+  useTranslation('statistics')
+
   const icon =
     rank === 1 ? (
       <Trophy className='h-4 w-4 text-yellow-500' />
@@ -185,6 +252,12 @@ export function LeaderboardSection({
   scope: LeaderboardScope
   onScopeChange: (scope: LeaderboardScope) => void
 }) {
+  const { t } = useTranslation('statistics')
+
+  const canSeeMoney = useAuthStore((s) => Boolean(s.me?.role))
+  const visibleColumns = COLUMNS.filter(
+    (c) => canSeeMoney || !['totalCost', 'totalActualCost'].includes(c.key)
+  )
   const [period, setPeriod] = useState<StatsRange>('today')
   const [sortKey, setSortKey] = useState<SortKey | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
@@ -220,11 +293,14 @@ export function LeaderboardSection({
 
   const isBold = (col: Column) =>
     sortKey === col.key || (sortKey === null && col.defaultBold)
-  const empty = PERIODS.find((p) => p.id === period)?.empty ?? '暂无数据'
+  const empty =
+    PERIODS.find((p) => p.id === period)?.empty ?? t('statistics:noData')
 
   return (
     <section className='w-full'>
-      <h3 className='mb-3 text-base font-semibold'>排行榜</h3>
+      <h3 className='mb-3 text-base font-semibold'>
+        {t('statistics:leaderboard')}
+      </h3>
       <div className='mb-4 flex flex-wrap items-start gap-4'>
         <div className='flex min-w-[220px] flex-1 flex-col gap-2'>
           <Tabs
@@ -270,17 +346,19 @@ export function LeaderboardSection({
                   key={row}
                   className='grid gap-4'
                   style={{
-                    gridTemplateColumns: `repeat(${COLUMNS.length + 2}, minmax(0, 1fr))`,
+                    gridTemplateColumns: `repeat(${visibleColumns.length + 2}, minmax(0, 1fr))`,
                   }}
                 >
-                  {Array.from({ length: COLUMNS.length + 2 }).map((_, col) => (
-                    <Skeleton key={col} className='h-4 w-full' />
-                  ))}
+                  {Array.from({ length: visibleColumns.length + 2 }).map(
+                    (_, col) => (
+                      <Skeleton key={col} className='h-4 w-full' />
+                    )
+                  )}
                 </div>
               ))}
             </div>
             <div className='text-center text-xs text-muted-foreground'>
-              加载中...
+              {t('statistics:loading')}
             </div>
           </CardContent>
         </Card>
@@ -288,7 +366,7 @@ export function LeaderboardSection({
         <Card>
           <CardContent className='py-8'>
             <div className='text-center text-destructive'>
-              获取排行榜数据失败
+              {t('statistics:rankingError')}
             </div>
           </CardContent>
         </Card>
@@ -305,9 +383,11 @@ export function LeaderboardSection({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className='w-24'>排名</TableHead>
+                    <TableHead className='w-24'>
+                      {t('statistics:rank')}
+                    </TableHead>
                     <TableHead>{SCOPE_LABELS[scope]}</TableHead>
-                    {COLUMNS.map((col) => (
+                    {visibleColumns.map((col) => (
                       <TableHead
                         key={col.key}
                         className={cn(
@@ -359,7 +439,7 @@ export function LeaderboardSection({
                       >
                         <EntryName entry={row} scope={scope} />
                       </TableCell>
-                      {COLUMNS.map((col) => (
+                      {visibleColumns.map((col) => (
                         <TableCell
                           key={col.key}
                           className={cn(

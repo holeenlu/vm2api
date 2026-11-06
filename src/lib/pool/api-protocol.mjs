@@ -1,7 +1,11 @@
+import { createUsageEvidence } from '../protocol/usage-evidence.mjs'
+import { createStreamTiming } from '../protocol/stream-timing.mjs'
+import { keyScopeFromRequest, keyAllowsModel } from '../admin/key-scope.mjs'
 import { OFFICIAL_CLAUDE_CLI_UA } from '../identity/vm-identity.mjs'
+import { isBillingText, isOfficialIdentityText } from '../identity/official-profiles.mjs'
+import { restoreToolNamesInSSELine } from '../protocol/anthropic-policy.mjs'
 import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
-import { consumeClaudeSSEData } from '../protocol/convert.mjs'
 import { isCompleteAssistantMessage, mapUpstreamError } from '../core/errors.mjs'
 import { isContentPolicyErrorCode } from '../core/refusal-guard.mjs'
 import { forwardApi, readApiJson } from '../transport/api-kernel-client.mjs'
@@ -15,16 +19,17 @@ import {
   responsesSseToAnthropicEvents,
   isToolArgumentsError,
   responsesSseToChatChunk,
+  stripCodexIdentity,
   chatToCodexResponses,
 } from '../protocol/codex-convert.mjs'
-import { usageFromSseLine } from '../protocol/handle-codex.mjs'
-import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
+import { BETA_CLAUDE_CODE, BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
+import { stripCacheScopeFields } from '../protocol/cache-ttl.mjs'
 import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
-import { createStreamTiming } from '../protocol/stream-timing.mjs'
-import { mergeUsage } from '../protocol/openai-usage.mjs'
+import { upstreamPathForLog } from '../protocol/log-fields.mjs'
 
 export function resolveInferenceBackend(req) {
   if (req?.apiKeyKind !== 'managed') return 'oauth'
+  if (req.apiKeyRecord?.group_id) return keyScopeFromRequest(req).allowed_endpoints?.length ? 'api' : 'oauth'
   return String(req.apiKeyRecord?.category || '')
     .trim()
     .toLowerCase() === 'api'
@@ -143,20 +148,88 @@ function splitBetas(value) {
     .filter(Boolean)
 }
 
+/**
+ * Console personal / service-account keys (`sk-ant-usr-`, `sk-ant-svc-`) are
+ * plain x-api-key keys, but Anthropic bills a request as Claude Code usage —
+ * which their API credit does not cover ("credit balance is too low") —
+ * whenever it carries a Claude Code entrypoint marker. Verified 2026-11-04,
+ * each marker alone: the `claude-code-20250219` beta; a `cli` /
+ * `claude-desktop-3p` user-agent or billing-header entrypoint (`sdk-cli` /
+ * `sdk-ts` pass); a system block that is exactly the Claude Code / Agent SDK
+ * identity line (the same text inside a longer block passes). Other betas,
+ * x-app, x-stainless-*, metadata and streaming do not matter.
+ */
+export function apiBilledConsoleKey(apiKey) {
+  return /^sk-ant-(usr|svc)-/.test(String(apiKey || ''))
+}
+
+/**
+ * Remove those markers from a Messages body without changing what the model
+ * reads: the billing-header block (attribution metadata) is dropped, and a
+ * standalone identity block is folded into the next text block, which keeps
+ * the earliest cache breakpoint. An identity block with no text after it is
+ * dropped.
+ */
+export function withoutClaudeCodeAttribution(body) {
+  const system = body?.system
+  if (typeof system === 'string') {
+    if (isBillingText(system) || isOfficialIdentityText(system)) {
+      const { system: _drop, ...rest } = body
+      return rest
+    }
+    return body
+  }
+  if (!Array.isArray(system)) return body
+  const out = []
+  let pending = null
+  for (const block of system) {
+    const text = block?.type === 'text' && typeof block.text === 'string' ? block.text : null
+    if (text != null && isBillingText(text)) continue
+    if (text != null && isOfficialIdentityText(text)) {
+      pending = pending
+        ? {
+            ...pending,
+            text: `${pending.text}\n\n${text.trim()}`,
+            cache_control: pending.cache_control || block.cache_control,
+          }
+        : { text: text.trim(), cache_control: block.cache_control }
+      continue
+    }
+    if (pending && text != null) {
+      const merged = { ...block, text: `${pending.text}\n\n${text}` }
+      if (pending.cache_control && !block.cache_control) merged.cache_control = pending.cache_control
+      out.push(merged)
+      pending = null
+      continue
+    }
+    out.push(block)
+  }
+  if (out.length === system.length && !pending) return body
+  if (!out.length) {
+    const { system: _drop, ...rest } = body
+    return rest
+  }
+  return { ...body, system: out }
+}
+
 /** Caller context-1m follows the model-page 1M policy, same as the slot path. */
-function callerBetaTokens(value, model) {
-  const tokens = splitBetas(value)
+function callerBetaTokens(value, model, apiKey = '') {
+  let tokens = splitBetas(value)
+  if (apiBilledConsoleKey(apiKey)) tokens = tokens.filter((t) => t !== BETA_CLAUDE_CODE)
   if (!tokens.includes(BETA_CONTEXT_1M) || shouldPassContext1mByPolicy(model)) return tokens
   return tokens.filter((t) => t !== BETA_CONTEXT_1M)
 }
 
-function mergeCallerProtocolHeaders(base = {}, caller = {}, configured = {}, model = '') {
+function mergeCallerProtocolHeaders(base = {}, caller = {}, configured = {}, model = '', apiKey = '') {
   const out = { ...base }
   const configuredNames = new Set(Object.keys(configured).map((k) => k.toLowerCase()))
   for (const [name, value] of Object.entries(caller)) {
     const existing = Object.keys(out).filter((k) => k.toLowerCase() === name)
     if (name === 'anthropic-beta') {
-      const merged = new Set([...existing.flatMap((k) => splitBetas(out[k])), ...callerBetaTokens(value, model)])
+      const merged = new Set([
+        ...existing.flatMap((k) => splitBetas(out[k])),
+        ...callerBetaTokens(value, model, apiKey),
+      ])
       for (const k of existing) delete out[k]
       if (merged.size) out[name] = [...merged].join(',')
       continue
@@ -267,6 +340,26 @@ function mappedOpenAIResponsesFailure(resultBase, event, committed, extras = {})
   }
 }
 
+/** Restore client tool names before either upstream protocol is assembled or converted. */
+function restoreApiToolNames(line, reverse) {
+  if (!Object.keys(reverse).length || !String(line).startsWith('data:')) return line
+  const restored = restoreToolNamesInSSELine(line, reverse)
+  let event
+  try {
+    event = JSON.parse(String(restored).slice(5).trim())
+  } catch {
+    return restored
+  }
+  const restoreItem = (item) => {
+    if (['function_call', 'custom_tool_call'].includes(item?.type) && reverse[item.name]) {
+      item.name = reverse[item.name]
+    }
+  }
+  restoreItem(event.item)
+  for (const item of event.response?.output || []) restoreItem(item)
+  return `data: ${JSON.stringify(event)}`
+}
+
 export async function runApiInference({
   req,
   res,
@@ -281,15 +374,29 @@ export async function runApiInference({
   deliveryMode,
   signal,
   timeoutMs,
-  personaHideTokens,
-  cacheTtl,
+  usageView = null,
   converters,
   requestContext = null,
   passthrough = false,
+  toolNames = {},
 } = {}) {
   const canonical = officialMessagesBody(convertedBody)
   const model = canonical.model
-  const picked = selected || scheduler.pick(model)
+  const scope = keyScopeFromRequest(req)
+  if (!keyAllowsModel(scope, inbound?.model || model))
+    return {
+      ok: false,
+      status: 403,
+      terminalState: 'rejected',
+      body: { error: { type: 'permission_error', code: 'model_forbidden', message: '当前分组无权调用该模型' } },
+    }
+  // handle-protocol 已在 Key 授权范围内选好端点；直接调用时仍按同一范围挑选
+  const picked =
+    selected ||
+    scheduler.pick(model, Date.now(), {
+      allowed: scope.platform ? null : scope.allowed_endpoints,
+      groupType: scope.group_type,
+    })
   if (!picked.ok) {
     return {
       ok: false,
@@ -319,10 +426,14 @@ export async function runApiInference({
       },
     }
   }
+  // Claude Code sends `cache_control.scope` (prompt-caching-scope beta); API-key
+  // Messages rejects it with `...scope: Extra inputs are not permitted`.
+  // OpenAI endpoints receive the caller's Responses body (minus gateway identity fields)
+  // or the Chat conversion, never a Claude round-trip, so tool history and reasoning survive.
   const body = isOpenAI
     ? {
         ...(protocol === 'openai.responses'
-          ? inbound
+          ? stripCodexIdentity(inbound)
           : protocol === 'openai.chat'
             ? chatToCodexResponses(inbound)
             : claudeToOpenAIResponsesRequest(canonical)),
@@ -330,7 +441,7 @@ export async function runApiInference({
         stream: true,
         store: false,
       }
-    : { ...canonical, model: picked.upstream_model, stream: true }
+    : { ...stripCacheScopeFields(canonical), model: picked.upstream_model, stream: true }
   if (isOpenAI && protocol === 'openai.chat') {
     for (const name of ['temperature', 'top_p', 'parallel_tool_calls']) {
       if (inbound?.[name] != null) body[name] = inbound[name]
@@ -340,9 +451,14 @@ export async function runApiInference({
       delete body.reasoning_effort
     }
   }
+  // Native Responses and Chat bodies never had tool names rewritten, so there is nothing to restore.
+  const upstreamToolNames = isOpenAI && protocol !== 'anthropic.messages' ? {} : toolNames
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
+  const consoleKey = !isOpenAI && apiBilledConsoleKey(picked.key.api_key)
+  const outboundBody = consoleKey ? withoutClaudeCodeAttribution(body) : body
+  // A passed-through Claude Code user-agent names a cli / desktop entrypoint.
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind, {
-    passthrough,
+    passthrough: passthrough && !consoleKey,
   })
   const authHeaders = upstreamAuthHeaders(protocolKind, picked.key.api_key, {
     ...extraHeaders,
@@ -350,7 +466,7 @@ export async function runApiInference({
   })
   if (
     protocolKind === 'anthropic' &&
-    !passthrough &&
+    (!passthrough || consoleKey) &&
     !Object.keys(authHeaders).some((key) => key.toLowerCase() === 'user-agent')
   ) {
     authHeaders['user-agent'] = OFFICIAL_CLAUDE_CLI_UA
@@ -364,16 +480,22 @@ export async function runApiInference({
     callerProtocolHeaders,
     extraHeaders,
     canonical.model,
+    picked.key.api_key,
   )
 
-  const timing = createStreamTiming()
   let upstream
+  const upstreamUrl = isOpenAI ? responsesUrl(preset.base_url) : messagesUrl(preset.base_url)
+  if (req?.relayLog) {
+    req.relayLog.attempt_count = 1
+    req.relayLog.upstream_path = upstreamPathForLog(upstreamUrl)
+    req.relayLog.upstream_transport = 'http'
+  }
   try {
     upstream = await forwardApi({
       cfg,
-      url: isOpenAI ? responsesUrl(preset.base_url) : messagesUrl(preset.base_url),
+      url: upstreamUrl,
       headers,
-      body,
+      body: outboundBody,
       proxyUrl: picked.key.proxy_url,
       signal,
       timeoutMs,
@@ -400,10 +522,11 @@ export async function runApiInference({
   if (status === 429 && !picked.endpoint.disable_cooling) {
     const retry = Number(upstream.headers['retry-after'] || 30)
     const until = new Date(Date.now() + Math.max(1, retry) * 1000).toISOString()
+    // R6 临时同步出口，B7 删除
     try {
-      store.setKeyCooldown(picked.key.id, until)
+      store.setKeyCooldownSync(picked.key.id, until)
     } catch {}
-    scheduler.reload(store.listRaw())
+    scheduler.reload(store.listRawSync())
   }
 
   const resultBase = {
@@ -450,47 +573,48 @@ export async function runApiInference({
       res,
       converters,
       body,
-      timing,
+      toolNames: upstreamToolNames,
     })
   }
 
-  const classifierSseState = { dataBuf: '' }
-  let classifierError = null
-  let classifierStopped = false
-  let streamedUsage = null
+  const evidence = createUsageEvidence()
+  const timing = createStreamTiming()
+  let upstreamError = null
+  let upstreamStopped = false
+  // 流式结果没有组装后的 body；保留 stop_reason 供计费判断拒答（refusal 不计费）
+  let upstreamStopReason = null
   const readUpstreamLines = async (onLine) => {
     try {
       await readLines(upstream, async (line, receivedAt) => {
-        const event = consumeClaudeSSEData(line, classifierSseState)
+        const event = evidence.line(line)
         timing.observe(event, receivedAt)
-        streamedUsage = mergeUsage(streamedUsage, event?.message?.usage || event?.usage)
-        if (requestContext) {
-          // The same decoded event drives classifier validation and performance timing.
-          if (event?.type === 'error')
-            classifierError = {
-              ...event,
-              error: { ...event.error, ...(event.error?.code ? { upstream_code: event.error.code } : {}) },
-            }
-          if (event?.type === 'message_stop') classifierStopped = true
-        }
-        await onLine(line)
+        if (event?.type === 'message_delta' && event.delta?.stop_reason) upstreamStopReason = event.delta.stop_reason
+        if (event?.type === 'error')
+          upstreamError = {
+            ...event,
+            error: {
+              ...event.error,
+              ...(requestContext && event.error?.code ? { upstream_code: event.error.code } : {}),
+            },
+          }
+        if (event?.type === 'message_stop') upstreamStopped = true
+        await onLine(restoreApiToolNames(line, toolNames), receivedAt)
       })
     } catch (error) {
-      if (!requestContext) throw error
-      classifierError = {
+      upstreamError = {
         type: 'error',
         error: {
           type: 'api_error',
           code: 'upstream_stream_interrupted',
           status: 502,
-          message: String(error.message || 'Classifier stream interrupted').slice(0, 300),
+          message: String(error.message || 'Upstream stream interrupted').slice(0, 300),
         },
       }
     }
   }
-  const classifierFailure = () => {
-    if (!requestContext || (!classifierError && classifierStopped)) return null
-    const body = classifierError || {
+  const upstreamFailure = () => {
+    if (!upstreamError && (!requestContext || upstreamStopped)) return null
+    const body = upstreamError || {
       type: 'error',
       error: {
         type: 'api_error',
@@ -511,55 +635,28 @@ export async function runApiInference({
         ...(body.error?.retry_after ? { 'retry-after': String(body.error.retry_after) } : {}),
       },
       terminalState: 'rejected',
+      ...evidence.snapshot(),
+      ...timing.snapshot(),
     }
   }
 
   if (!clientStream) {
     const assembler = converters.createClaudeMessageAssembler()
     let committed = false
-    let sawMessageStop = false
-    let terminalError = null
     await readUpstreamLines(async (line) => {
-      applyMaybeUsageHide(line, personaHideTokens, cacheTtl, converters)
       converters.applyClaudeSSELineToMessage(line, assembler)
-      const raw = String(line || '')
-      if (raw.startsWith('data:')) {
-        if (!committed) committed = true
-        const piece = raw.slice(5).trim()
-        if (piece && piece !== '[DONE]') {
-          try {
-            const evt = JSON.parse(piece)
-            if (evt?.type === 'message_stop') sawMessageStop = true
-            if (evt?.type === 'error') terminalError = evt
-          } catch {}
-        }
-      }
+      if (String(line || '').startsWith('data:')) committed = true
     })
-    const failure = classifierFailure()
-    if (failure) return { ...failure, ...timing.snapshot(), committed: false }
-    if (terminalError) {
-      const declared = Number(terminalError.error?.status)
-      const status = declared >= 400 && declared < 600 ? declared : mapUpstreamError(200, terminalError).status
-      return {
-        ...resultBase,
-        ...timing.snapshot(),
-        ok: false,
-        status,
-        body: terminalError,
-        usage: assembler.message?.usage || null,
-        terminalState: 'rejected',
-        committed,
-        sawMessageStop,
-      }
-    }
+    const failure = upstreamFailure()
+    if (failure) return { ...failure, committed: false, ...timing.snapshot() }
     const assembled = assembler.message
-    if (!sawMessageStop) {
+    if (!upstreamStopped) {
       return {
         ...resultBase,
-        ...timing.snapshot(),
         ok: false,
         body: assembled || { type: 'error', error: { message: 'empty api upstream' } },
-        usage: assembled?.usage || null,
+        ...evidence.snapshot(),
+        ...timing.snapshot(),
         terminalState: assembled || committed ? 'incomplete' : 'rejected',
         committed,
         sawMessageStop: false,
@@ -569,10 +666,10 @@ export async function runApiInference({
     const complete = resultBase.ok && isCompleteAssistantMessage(hop)
     return {
       ...resultBase,
-      ...timing.snapshot(),
       ok: complete,
       body: assembled || { type: 'error', error: { message: 'empty api upstream' } },
-      usage: assembled?.usage || null,
+      ...evidence.snapshot(),
+      ...timing.snapshot(),
       terminalState: complete ? 'verified' : 'incomplete',
       committed,
       sawMessageStop: true,
@@ -589,9 +686,12 @@ export async function runApiInference({
 
   let committed = false
   let sawStop = false
+  const started = Date.now()
+  let ttftMs = null
   await readUpstreamLines(async (line) => {
-    if (personaHideTokens) line = converters.hidePersonaUsageInSseLine(line, personaHideTokens, cacheTtl) || line
-    if (String(line).includes('message_stop')) sawStop = true
+    if (usageView) line = converters.customerUsageInSseLine(line, usageView) || line
+    if (String(line).startsWith('data:') && ttftMs == null) ttftMs = Date.now() - started
+    sawStop = upstreamStopped
     if (!committed && String(line).startsWith('data:')) {
       committed = true
       if (protocol === 'anthropic.messages' && !res.headersSent) converters.writeSSEHeaders(res)
@@ -612,16 +712,17 @@ export async function runApiInference({
     else writeChunks(converters.claudeSSELineToResponsesEvents(line, state))
   })
 
-  const failure = classifierFailure()
-  if (failure) return { ...failure, ...timing.snapshot(), committed }
+  const failure = upstreamFailure()
+  if (failure) return { ...failure, committed, ttftMs }
 
   return {
     ...resultBase,
-    ...timing.snapshot(),
-    usage: streamedUsage,
     ok: resultBase.ok && (deliveryMode !== 'verified' || sawStop),
     terminalState: sawStop ? 'verified' : committed ? 'incomplete' : 'rejected',
+    ...evidence.snapshot(),
+    stopReason: upstreamStopReason,
     committed,
+    ttftMs,
   }
 }
 
@@ -635,7 +736,7 @@ async function runOpenAIResponsesUpstream({
   res,
   converters,
   body,
-  timing,
+  toolNames,
 }) {
   const chunks = []
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
@@ -644,9 +745,12 @@ async function runOpenAIResponsesUpstream({
   let committed = false
   let completed = false
   let sawTerminal = false
-  let streamedUsage = null
+  let ttftMs = null
+  const evidence = createUsageEvidence()
   let terminalFailure = null
   const pendingLines = []
+  const started = Date.now()
+  const timing = createStreamTiming(started)
 
   const writeStreamLine = (raw) => {
     if (!res.headersSent) converters.writeSSEHeaders(res)
@@ -677,17 +781,18 @@ async function runOpenAIResponsesUpstream({
   }
 
   await readLines(upstream, async (line, receivedAt) => {
+    line = restoreApiToolNames(line, toolNames)
+    const event = openAIResponsesSseEvent(line)
+    timing.observe(event, receivedAt)
+    evidence.line(line)
     if (conversionError) return
     const raw = String(line || '')
-    const event = openAIResponsesSseEvent(raw)
-    timing.observe(event, receivedAt)
     const failure = openAIResponsesFailure(event)
     if (failure) terminalFailure = failure
-    const seen = usageFromSseLine(raw)
-    if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
     const startsOutput = isOpenAIResponsesCommitEvent(event)
     const completes = event?.type === 'response.completed' || event?.type === 'response.done'
     const wasCommitted = committed
+    if ((startsOutput || completes) && ttftMs == null) ttftMs = Date.now() - started
     if (!committed && (startsOutput || completes)) committed = true
     if (!clientStream) {
       chunks.push(raw)
@@ -701,13 +806,33 @@ async function runOpenAIResponsesUpstream({
       return
     }
     writeStreamLine(raw)
+  }).catch((error) => {
+    conversionError = {
+      type: 'upstream_protocol_error',
+      code: 'upstream_stream_interrupted',
+      message: String(error.message || error).slice(0, 300),
+    }
   })
+
+  if (conversionError)
+    return {
+      ...resultBase,
+      ok: false,
+      status: 502,
+      body: { error: conversionError },
+      terminalState: 'incomplete',
+      committed,
+      ttftMs,
+      ...evidence.snapshot(),
+      ...timing.snapshot(),
+    }
 
   if (!clientStream) {
     if (terminalFailure)
       return mappedOpenAIResponsesFailure(resultBase, terminalFailure, committed, {
-        usage: streamedUsage,
+        ...evidence.snapshot(),
         ...timing.snapshot(),
+        ttftMs,
       })
     let assembled
     let outBody
@@ -721,52 +846,38 @@ async function runOpenAIResponsesUpstream({
       if (!isToolArgumentsError(error)) throw error
       return {
         ...resultBase,
-        ...timing.snapshot(),
         ok: false,
         status: 502,
         body: { error: { type: 'upstream_protocol_error', code: error.code, message: error.message } },
         terminalState: 'incomplete',
         committed,
-        usage: streamedUsage,
+        ...evidence.snapshot(),
       }
     }
     const hasBody = !!(assembled && (assembled.output || assembled.id || outBody))
     const complete = resultBase.ok && sawTerminal && hasBody
     return {
       ...resultBase,
-      ...timing.snapshot(),
       ok: complete,
       body: outBody,
-      usage: mergeUsage(streamedUsage, assembled?.usage || outBody?.usage),
+      ...evidence.snapshot(),
+      ...timing.snapshot(),
       terminalState: complete ? 'verified' : hasBody ? 'incomplete' : 'rejected',
       committed,
     }
   }
   if (terminalFailure)
     return mappedOpenAIResponsesFailure(resultBase, terminalFailure, committed, {
-      usage: streamedUsage,
+      ...evidence.snapshot(),
       ...timing.snapshot(),
+      ttftMs,
     })
-  if (conversionError)
-    return {
-      ...resultBase,
-      ok: false,
-      status: 502,
-      body: { error: conversionError },
-      terminalState: 'incomplete',
-      committed,
-      usage: streamedUsage,
-      ...timing.snapshot(),
-    }
-
   return {
     ...resultBase,
     ok: resultBase.ok && (deliveryMode !== 'verified' || completed || committed),
-    usage: streamedUsage,
+    ...evidence.snapshot(),
     terminalState: completed ? 'verified' : committed ? 'incomplete' : 'rejected',
     committed,
-    ...timing.snapshot(),
+    ttftMs,
   }
 }
-
-function applyMaybeUsageHide() {}

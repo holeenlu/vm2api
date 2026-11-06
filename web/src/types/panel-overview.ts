@@ -35,6 +35,8 @@ export type BillingSnapshot = {
   today?: { total_cost?: number; [key: string]: unknown }
   total?: { total_cost?: number; [key: string]: unknown }
   window_5h?: Record<string, unknown>
+  /** 使用记录明细的覆盖起点（库创建与已清理边界中较晚者）；之前的费用不计入。 */
+  log_coverage_start?: string | null
   accounts?: BillingAccountRow[]
 }
 

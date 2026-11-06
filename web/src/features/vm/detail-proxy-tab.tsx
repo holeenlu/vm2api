@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import type { Vm, VmProxySnap } from '@/types/panel-vm'
 import { Check, ChevronsUpDown } from 'lucide-react'
+import { useTranslation, Trans } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   localProxyText,
@@ -37,7 +38,7 @@ import {
 } from '@/features/proxies/proxy-tone'
 import { useLocalProxyLabelOpts } from '@/features/proxies/use-vps-ip'
 import { Field } from '@/features/vm/detail-section-primitives'
-import { proxyHealthOf } from '@/features/vm/proxy-health'
+import { proxyHealthOf, type ProxyHealth } from '@/features/vm/proxy-health'
 
 type VmProxyTabProps = {
   vm: Vm
@@ -52,14 +53,25 @@ type VmProxyTabProps = {
   canManage: boolean
   busy: (key: string) => boolean
   onBindIdChange: (id: string) => void
-  onUnbind: () => void
-  onAllocate: () => void
+  /** 不传则不显示（Gateway 账号必须有出站代理，不能解绑 / 自动分配）。 */
+  onUnbind?: () => void
+  onAllocate?: () => void
   onBind: () => void
   onProbe: () => void
   onGeo: () => void
+  /** 卡片说明，默认是 VM 槽位的出口说明。 */
+  description?: string
+  /** 覆盖健康分；null 表示没有可测记录，不画健康环。 */
+  health?: ProxyHealth | null
+  /** 出口时区与槽位时区对比（Gateway 账号没有槽位时区）。 */
+  compareTimezone?: boolean
+  /** 卡片下方的提示与操作。 */
+  notice?: ReactNode
 }
 
 export function VmProxyTab(props: VmProxyTabProps) {
+  const { t: tVm } = useTranslation('vm')
+
   const {
     vm,
     proxy,
@@ -74,8 +86,12 @@ export function VmProxyTab(props: VmProxyTabProps) {
     onBind,
     onProbe,
     onGeo,
+    description,
+    compareTimezone = true,
+    notice,
   } = props
-  const health = proxyHealthOf(vm, proxy)
+  const health =
+    props.health === undefined ? proxyHealthOf(vm, proxy) : props.health
   const local = !!boundId && proxyIsLocal(proxy)
   const fallbackOpts = useLocalProxyLabelOpts(vm.node_id)
   const labelOpts = localProxyOptsFromProxy(proxy, fallbackOpts)
@@ -100,31 +116,45 @@ export function VmProxyTab(props: VmProxyTabProps) {
       <Card>
         <CardHeader className='pb-2'>
           <CardTitle className='text-sm'>
-            {local ? '绑定的本地代理' : '绑定的 SOCKS5'}
+            {local
+              ? tVm('vm:detailProxyTab.boundLocalProxy')
+              : tVm('vm:detailProxyTab.boundSOCKS5')}
           </CardTitle>
         </CardHeader>
         <p className='px-6 pb-2 text-xs text-muted-foreground'>
-          {local
-            ? `${localLabel}：槽内流量与控制面代发请求（换票、刷新、测试）都从所在机器出网。每台 VPS 一条本地代理，绑定额度、测通与测地理都只算这台机器。`
-            : '出站经这条代理的 egress 网关。槽内不 Dial SOCKS。'}
+          {description ??
+            (local
+              ? tVm(
+                  'vm:detailProxyTab.slotTrafficAndControlPlaneRequestsTokenExchangeRefresh',
+                  { localLabel: localLabel }
+                )
+              : tVm(
+                  'vm:detailProxyTab.outboundTrafficUsesThisProxySEgressGatewaySlots'
+                ))}
         </p>
         <CardContent className='flex flex-wrap gap-6 pt-0'>
-          <HealthDonut score={health.score} label='健康' size={80} />
+          {health ? (
+            <HealthDonut
+              score={health.score}
+              label={tVm('vm:detailProxyTab.health')}
+              size={80}
+            />
+          ) : null}
           <div className='min-w-0 flex-1 divide-y'>
-            <Field label='绑定 ID'>
+            <Field label={tVm('vm:detailProxyTab.bindingID')}>
               <span className='field-host text-xs'>{boundId || '—'}</span>
             </Field>
             {proxy.label ? (
-              <Field label='代理名称'>
+              <Field label={tVm('vm:detailProxyTab.proxyName')}>
                 <span className='text-xs'>{proxy.label}</span>
               </Field>
             ) : null}
-            <Field label='地址'>
+            <Field label={tVm('vm:detailProxyTab.address')}>
               <span className='field-host text-xs'>
                 {proxyHostLabel(proxy, labelOpts)}
               </span>
             </Field>
-            <Field label='状态'>
+            <Field label={tVm('vm:detailAccountTab.status')}>
               <span className='flex items-center gap-2'>
                 {proxyStatusLabel(proxy)}
                 {vm.has_token && !proxy.host && !vm.proxy_id ? (
@@ -132,15 +162,15 @@ export function VmProxyTab(props: VmProxyTabProps) {
                     variant='pill'
                     tone={{
                       key: 'bad',
-                      text: '缺 SOCKS5',
+                      text: tVm('vm:detailProxyTab.sOCKS5Missing'),
                       cls: 'bad',
-                      label: '缺 SOCKS5 · fail closed',
+                      label: tVm('vm:detailProxyTab.sOCKS5MissingFailClosed'),
                     }}
                   />
                 ) : null}
               </span>
             </Field>
-            <Field label='延迟'>
+            <Field label={tVm('vm:detailProxyTab.latency')}>
               <span
                 className={cn(
                   'field-metric text-sm',
@@ -150,8 +180,15 @@ export function VmProxyTab(props: VmProxyTabProps) {
                 {proxy.latency_ms != null ? `${proxy.latency_ms}ms` : '—'}
               </span>
             </Field>
-            <Field label='认证'>{proxy.has_auth ? '有' : '无'}</Field>
-            <Field label='出口'>
+            <Field label={tVm('vm:detailProxyTab.authentication')}>
+              {/* 池外手填地址（Gateway 账号只存 协议//主机）不知道有没有账密，不显示「无」。 */}
+              {proxy.has_auth == null
+                ? '—'
+                : proxy.has_auth
+                  ? tVm('vm:detailProxyTab.yes')
+                  : tVm('vm:detailProxyTab.none')}
+            </Field>
+            <Field label={tVm('vm:createExitField.egress')}>
               {proxy.geo?.country || proxy.geo?.timezone ? (
                 <span className='flex flex-wrap items-center gap-1.5'>
                   {[proxy.geo.country_code || proxy.geo.country, proxy.geo.city]
@@ -171,15 +208,20 @@ export function VmProxyTab(props: VmProxyTabProps) {
                           key: 'none',
                           text: proxy.geo.timezone,
                           cls:
+                            compareTimezone &&
                             proxy.geo.timezone !== vm.timezone
                               ? 'caution'
                               : 'none',
                         }}
                       />
-                      {proxy.geo.timezone !== vm.timezone ? (
+                      {compareTimezone && proxy.geo.timezone !== vm.timezone ? (
                         <span className='text-[11px] text-muted-foreground'>
-                          槽位为 {vm.timezone || '—'}
-                          {canManage ? '，可在「运维 · 环境」跟随' : ''}
+                          {tVm(
+                            canManage
+                              ? 'vm:messages.slotTimezoneCanFollow'
+                              : 'vm:messages.slotTimezone',
+                            { timezone: vm.timezone || '—' }
+                          )}
                         </span>
                       ) : null}
                     </>
@@ -193,16 +235,17 @@ export function VmProxyTab(props: VmProxyTabProps) {
               ) : (
                 <span className='text-xs text-muted-foreground'>
                   {proxy.blocked_reason
-                    ? 'IPv6 已关闭'
+                    ? tVm('vm:detailProxyTab.iPv6Disabled')
                     : proxy.geo?.error
-                      ? '检测失败'
-                      : '未检测'}
+                      ? tVm('vm:detailProxyTab.checkFailed')
+                      : tVm('vm:detailProxyTab.notChecked')}
                 </span>
               )}
             </Field>
           </div>
         </CardContent>
       </Card>
+      {notice}
       {canManage ? (
         <div className='flex flex-wrap gap-2'>
           {boundId ? (
@@ -214,7 +257,7 @@ export function VmProxyTab(props: VmProxyTabProps) {
                 loading={busy('proxy:probe')}
                 disabled={!!proxy.blocked_reason}
               >
-                测通
+                <Trans ns='vm' i18nKey='detailProxyTab.checkConnection' />
               </Button>
               <Button
                 size='sm'
@@ -223,30 +266,34 @@ export function VmProxyTab(props: VmProxyTabProps) {
                 loading={busy('proxy:geo')}
                 disabled={!!proxy.blocked_reason}
               >
-                测地理
+                <Trans ns='vm' i18nKey='detailProxyTab.checkLocation' />
               </Button>
-              <Button
-                size='sm'
-                variant='outline'
-                loading={busy('proxy:unbind')}
-                disabled={busy('proxy:bind')}
-                onClick={onUnbind}
-              >
-                解绑
-              </Button>
+              {onUnbind ? (
+                <Button
+                  size='sm'
+                  variant='outline'
+                  loading={busy('proxy:unbind')}
+                  disabled={busy('proxy:bind')}
+                  onClick={onUnbind}
+                >
+                  <Trans ns='vm' i18nKey='detailProxyTab.unbind' />
+                </Button>
+              ) : null}
             </>
           ) : null}
-          <Button
-            size='sm'
-            variant='outline'
-            loading={busy('/allocate-proxy')}
-            onClick={onAllocate}
-          >
-            分配空闲出口
-          </Button>
+          {onAllocate ? (
+            <Button
+              size='sm'
+              variant='outline'
+              loading={busy('/allocate-proxy')}
+              onClick={onAllocate}
+            >
+              <Trans ns='vm' i18nKey='detailProxyTab.assignAvailableEgress' />
+            </Button>
+          ) : null}
           <Button size='sm' variant='ghost' asChild>
             <Link to='/settings/$tab' params={{ tab: 'socks5' }}>
-              设置里管理池
+              <Trans ns='vm' i18nKey='detailProxyTab.managePoolInSettings' />
             </Link>
           </Button>
         </div>
@@ -265,11 +312,13 @@ export function VmProxyTab(props: VmProxyTabProps) {
                 variant='outline'
                 role='combobox'
                 aria-expanded={pickerOpen}
-                aria-label='选择出口'
+                aria-label={tVm('vm:detailProxyTab.selectEgress')}
                 className='h-9 w-64 justify-between px-3 font-normal'
               >
                 <span className='truncate'>
-                  {selected ? proxyLabel(selected, labelOpts) : '选择出口'}
+                  {selected
+                    ? proxyLabel(selected, labelOpts)
+                    : tVm('vm:detailProxyTab.selectEgress')}
                 </span>
                 <ChevronsUpDown
                   aria-hidden='true'
@@ -283,10 +332,17 @@ export function VmProxyTab(props: VmProxyTabProps) {
                 <CommandInput
                   value={nodeQuery}
                   onValueChange={setNodeQuery}
-                  placeholder='筛选可用节点：名称、地址、国家或时区'
+                  placeholder={tVm(
+                    'vm:detailProxyTab.filterAvailableNodesByNameAddressCountryOrTimezone'
+                  )}
                 />
                 <CommandList>
-                  <CommandEmpty>没有匹配的可用节点</CommandEmpty>
+                  <CommandEmpty>
+                    <Trans
+                      ns='vm'
+                      i18nKey='detailProxyTab.noMatchingAvailableNodes'
+                    />
+                  </CommandEmpty>
                   {matched.map((p) => (
                     <CommandItem
                       key={p.id}
@@ -321,11 +377,13 @@ export function VmProxyTab(props: VmProxyTabProps) {
               !selectedId || selectedId === boundId || busy('proxy:unbind')
             }
           >
-            绑定
+            <Trans ns='vm' i18nKey='detailProxyTab.bind' />
           </Button>
         </div>
       ) : (
-        <p className='text-sm text-muted-foreground'>池里没有可绑的空闲出口</p>
+        <p className='text-sm text-muted-foreground'>
+          <Trans ns='vm' i18nKey='detailProxyTab.noAvailableEgressInThePool' />
+        </p>
       )}
     </TabsContent>
   )

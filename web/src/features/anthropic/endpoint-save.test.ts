@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import { PROXY_SAVED } from '@/features/proxies/proxy-picker'
 import {
   DEFAULT_URL,
   API_DEFAULTS,
   DIRECT,
   draftFromStored,
   endpointSaveRequest,
+  proxyIdField,
 } from './endpoint-save'
 
 const stored = draftFromStored({
@@ -42,6 +44,21 @@ describe('anthropic console endpoint save', () => {
     })
     expect(req.body).not.toHaveProperty('models')
     expect(req.body).not.toHaveProperty('name')
+  })
+
+  it('keeps a saved typed proxy URL: never sends proxy_id until the user picks one', () => {
+    const legacy = draftFromStored({
+      id: 'ep_2',
+      api_key_entries: [{ id: 'ek_2', proxy_id: '', has_proxy: true }],
+    })
+    expect(legacy.proxyId).toBe(PROXY_SAVED)
+    expect(proxyIdField(legacy.proxyId)).toEqual({})
+    expect(
+      endpointSaveRequest({ ...legacy, apiKey: 'sk-new' }, 'm1').body
+    ).toEqual({ key_id: 'ek_2', api_key: 'sk-new' })
+    expect(
+      endpointSaveRequest({ ...legacy, proxyId: 'px_3' }, 'm1').body
+    ).toEqual({ key_id: 'ek_2', proxy_id: 'px_3' })
   })
 
   it('creates a new endpoint with its first key and model', () => {
@@ -102,6 +119,28 @@ describe('anthropic console endpoint save', () => {
         { name: 'gpt-b', alias: 'gpt-b' },
       ],
     })
+  })
+
+  it('does not send stored models back as new ones, so a custom alias is never duplicated', () => {
+    const row = draftFromStored({
+      id: 'ep-alias',
+      base_url: 'https://relay.example',
+      api_key_entries: [{ id: 'ek' }],
+      models: [{ name: 'upstream-model', alias: 'Pretty Name' }],
+    })
+    // 预填的已保存模型以别名展示；原样保存不应回传任何模型
+    expect(row.fetchedModels).toEqual(['Pretty Name'])
+    expect(endpointSaveRequest(row, '').body).not.toHaveProperty(
+      'fetched_models'
+    )
+    // 本次新获取的模型照常回传，已保存的不重复
+    const refreshed = endpointSaveRequest(
+      { ...row, fetchedModels: ['Pretty Name', 'upstream-model', 'new-model'] },
+      ''
+    )
+    expect(refreshed.body.fetched_models).toEqual([
+      { name: 'new-model', alias: 'new-model' },
+    ])
   })
 
   it('requests a server-side merge without overwriting aliases or inventing a default model', () => {
