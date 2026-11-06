@@ -63,12 +63,12 @@ test('capabilities are honest: CRS default, client tools, docker runtime', () =>
   assert.equal(GATEWAY_CAPABILITIES.runtime, 'docker-container')
 })
 
-test('pickSchedulableVmId prefers sticky then active, skips unschedulable / no-token', () => {
+test('pickSchedulableVmId prefers sticky then active, skips unschedulable / no-token', async () => {
   const { root } = fixture()
-  assert.equal(pickSchedulableVmId(root, 'vm-02'), 'vm-02')
-  assert.equal(pickSchedulableVmId(root, 'vm-03'), 'vm-01')
-  assert.equal(pickSchedulableVmId(root, 'vm-04'), 'vm-01')
-  assert.equal(pickSchedulableVmId(root, null), 'vm-01')
+  assert.equal(await pickSchedulableVmId(root, 'vm-02'), 'vm-02')
+  assert.equal(await pickSchedulableVmId(root, 'vm-03'), 'vm-01')
+  assert.equal(await pickSchedulableVmId(root, 'vm-04'), 'vm-01')
+  assert.equal(await pickSchedulableVmId(root, null), 'vm-01')
 })
 
 test('resolveVmProxyUrl stays off unless proxy_cli_enabled', () => {

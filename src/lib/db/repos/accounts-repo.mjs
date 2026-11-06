@@ -9,6 +9,8 @@
  */
 
 import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
+import { cachedAccountRow, rememberAccountRow } from './account-snapshot-cache.mjs'
 
 const MAX_ALLOCATIONS_PER_ACCOUNT = 50
 
@@ -69,21 +71,19 @@ function buildExtra(acc) {
   })
 }
 
-export class AccountsRepo {
-  constructor(db = getDb()) {
-    this.db = db
-    this._get = db.prepare('SELECT * FROM accounts WHERE id = ?')
-    this._list = db.prepare('SELECT * FROM accounts ORDER BY id')
-    this._insert = db.prepare(`
-      INSERT INTO accounts (id, vm_id, email, name, platform, type, status,
+const GET_SQL = 'SELECT * FROM accounts WHERE id = ?'
+const LIST_SQL = 'SELECT * FROM accounts ORDER BY id'
+const INSERT_COLUMNS = `(id, vm_id, email, name, platform, type, status,
                             concurrency, concurrency_override,
                             max_rpm, rpm_override,
                             requests, tokens_in, tokens_out,
                             cache_read_tokens, cache_creation_tokens,
                             extra, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    this._update = db.prepare(`
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const INSERT_SQL = `INSERT INTO accounts ${INSERT_COLUMNS}`
+// 竞态 R10：并发首次 ensure 都读不到行时各自插入；冲突的一方不报错，之后读回胜者
+const INSERT_IF_ABSENT_SQL = `INSERT INTO accounts ${INSERT_COLUMNS} ON CONFLICT(id) DO NOTHING`
+const UPDATE_SQL = `
       UPDATE accounts SET vm_id = ?, email = ?, name = ?, type = ?,
                           concurrency = ?, concurrency_override = ?,
                           max_rpm = ?, rpm_override = ?,
@@ -91,67 +91,100 @@ export class AccountsRepo {
                           cache_read_tokens = ?, cache_creation_tokens = ?,
                           extra = ?, updated_at = ?
       WHERE id = ?
-    `)
-    this._insertAlloc = db.prepare(`
+    `
+// 字段级更新：只改这一项，不整行写回（并发的用量或窗口写入不被覆盖）
+const SET_LAST_BLOCKED_SQL =
+  "UPDATE accounts SET extra = json_set(COALESCE(NULLIF(extra, ''), '{}'), '$.last_blocked', json(?)), updated_at = ? WHERE id = ?"
+const SET_VM_TYPE_SQL =
+  'UPDATE accounts SET vm_id = COALESCE(?, vm_id), type = COALESCE(?, type), updated_at = ? WHERE id = ?'
+const INSERT_ALLOC_SQL = `
       INSERT INTO account_allocations (account_id, at, source, util_5h, util_7d, status_5h, status_7d, claim, tokens_in, tokens_out)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    this._trimAlloc = db.prepare(`
+    `
+const TRIM_ALLOC_SQL = `
       DELETE FROM account_allocations WHERE account_id = ? AND id NOT IN (
         SELECT id FROM account_allocations WHERE account_id = ? ORDER BY id DESC LIMIT ?
       )
-    `)
-    this._recentAlloc = db.prepare(`
-      SELECT * FROM account_allocations WHERE account_id = ? ORDER BY id DESC LIMIT ?
-    `)
-    this._removeAllocs = db.prepare('DELETE FROM account_allocations WHERE account_id = ?')
-    this._removeGroups = db.prepare('DELETE FROM account_groups WHERE account_id = ?')
-    this._remove = db.prepare('DELETE FROM accounts WHERE id = ?')
-    this._linkGroup = db.prepare(`
-      INSERT OR IGNORE INTO account_groups (account_id, group_id, priority, created_at)
-      VALUES (?, ?, ?, ?)
-    `)
+    `
+const RECENT_ALLOC_SQL = 'SELECT * FROM account_allocations WHERE account_id = ? ORDER BY id DESC LIMIT ?'
+const REMOVE_ALLOCS_SQL = 'DELETE FROM account_allocations WHERE account_id = ?'
+const REMOVE_GROUPS_SQL = 'DELETE FROM account_groups WHERE account_id = ?'
+const REMOVE_SQL = 'DELETE FROM accounts WHERE id = ?'
+const ALLOC_COUNT_SQL = 'SELECT COUNT(*) c FROM account_allocations WHERE account_id = ?'
+
+function insertParams(acc) {
+  const now = new Date().toISOString()
+  return [
+    acc.account_id,
+    acc.vm_id ?? null,
+    acc.email ?? null,
+    acc.name ?? acc.email ?? acc.account_id,
+    acc.platform ?? 'claude',
+    acc.type ?? 'oauth',
+    acc.status ?? 'active',
+    acc.max_concurrency ?? 2,
+    acc.concurrency_override ? 1 : 0,
+    acc.max_rpm ?? 0,
+    acc.rpm_override ? 1 : 0,
+    acc.requests ?? 0,
+    acc.tokens_in ?? 0,
+    acc.tokens_out ?? 0,
+    acc.cache_read_tokens ?? 0,
+    acc.cache_creation_tokens ?? 0,
+    buildExtra(acc),
+    acc.created_at ?? now,
+    acc.updated_at ?? now,
+  ]
+}
+
+/**
+ * 数据访问经 DbClient 异步执行（R6 B7b）。读到的行同时写进账号调度快照副本（account-snapshot-cache.mjs），
+ * 供 `PoolScheduler.reserve()` 的同步复核使用。
+ */
+export class AccountsRepo {
+  constructor(db = getDb()) {
+    this.db = db
+    this.client = dbClient(db)
   }
 
-  get(accountId) {
-    return rowToAccount(this._get.get(accountId))
+  _remember(accountId, row) {
+    rememberAccountRow(this.db, accountId, row || null)
+    return rowToAccount(row)
   }
 
-  list() {
-    return this._list.all().map(rowToAccount)
+  async get(accountId) {
+    return this._remember(accountId, await this.client.one(GET_SQL, accountId))
   }
 
-  /** Insert if missing, returns stored account. New accounts join the coding group (id=1). */
-  insert(acc) {
-    const now = new Date().toISOString()
-    this._insert.run(
-      acc.account_id,
-      acc.vm_id ?? null,
-      acc.email ?? null,
-      acc.name ?? acc.email ?? acc.account_id,
-      acc.platform ?? 'claude',
-      acc.type ?? 'oauth',
-      acc.status ?? 'active',
-      acc.max_concurrency ?? 2,
-      acc.concurrency_override ? 1 : 0,
-      acc.max_rpm ?? 0,
-      acc.rpm_override ? 1 : 0,
-      acc.requests ?? 0,
-      acc.tokens_in ?? 0,
-      acc.tokens_out ?? 0,
-      acc.cache_read_tokens ?? 0,
-      acc.cache_creation_tokens ?? 0,
-      buildExtra(acc),
-      acc.created_at ?? now,
-      acc.updated_at ?? now,
-    )
-    this._linkGroup.run(acc.account_id, acc.group_id ?? 1, acc.group_priority ?? 50, now)
+  async list() {
+    return (await this.client.many(LIST_SQL)).map((row) => this._remember(row.id, row))
+  }
+
+  /**
+   * 同步读：本进程最近一次经仓储读到或写后读回的行（account-snapshot-cache.mjs），不读库。从未读过时返回 undefined，
+   * 已确认不存在时返回 null。只给同步准入判定（AccountQuota.tryAcquire 等）在调用方没传账号行时使用。
+   */
+  cached(accountId) {
+    const row = cachedAccountRow(this.db, accountId)
+    return row === undefined ? undefined : rowToAccount(row)
+  }
+
+  /** Insert if missing, returns stored account. Commercial resource membership is maintained separately. */
+  async insert(acc) {
+    await this.client.run(INSERT_SQL, ...insertParams(acc))
+    return this.get(acc.account_id)
+  }
+
+  /** 不存在才插入（ON CONFLICT DO NOTHING），返回库里的行（并发插入时是先插入的一方）。 */
+  async insertIfAbsent(acc) {
+    await this.client.run(INSERT_IF_ABSENT_SQL, ...insertParams(acc))
     return this.get(acc.account_id)
   }
 
   /** Full-row save of a mutated account object. */
-  save(acc) {
-    this._update.run(
+  async save(acc) {
+    await this.client.run(
+      UPDATE_SQL,
       acc.vm_id ?? null,
       acc.email ?? null,
       acc.name ?? acc.email ?? acc.account_id,
@@ -172,15 +205,36 @@ export class AccountsRepo {
     return this.get(acc.account_id)
   }
 
-  remove(accountId) {
-    this._removeAllocs.run(accountId)
-    this._removeGroups.run(accountId)
-    const info = this._remove.run(accountId)
-    return info.changes > 0
+  /** 只写 `extra.last_blocked`（准入拒绝的记录），不整行写回。 */
+  async setLastBlocked(accountId, lastBlocked) {
+    await this.client.run(
+      SET_LAST_BLOCKED_SQL,
+      JSON.stringify(lastBlocked ?? null),
+      new Date().toISOString(),
+      accountId,
+    )
+    return this.get(accountId)
   }
 
-  addAllocation(accountId, alloc, { max = MAX_ALLOCATIONS_PER_ACCOUNT } = {}) {
-    this._insertAlloc.run(
+  /** 只改归属 VM 与类型（传 null 的保持不变）。 */
+  async setVmAndType(accountId, { vmId = null, type = null } = {}) {
+    await this.client.run(SET_VM_TYPE_SQL, vmId ?? null, type ?? null, new Date().toISOString(), accountId)
+    return this.get(accountId)
+  }
+
+  async remove(accountId) {
+    const removed = await this.client.tx(async (tx) => {
+      await tx.run(REMOVE_ALLOCS_SQL, accountId)
+      await tx.run(REMOVE_GROUPS_SQL, accountId)
+      return (await tx.run(REMOVE_SQL, accountId)).changes > 0
+    })
+    rememberAccountRow(this.db, accountId, null)
+    return removed
+  }
+
+  async addAllocation(accountId, alloc, { max = MAX_ALLOCATIONS_PER_ACCOUNT } = {}) {
+    await this.client.run(
+      INSERT_ALLOC_SQL,
       accountId,
       alloc.at || new Date().toISOString(),
       alloc.source ?? null,
@@ -192,27 +246,24 @@ export class AccountsRepo {
       alloc.tokens_in ?? null,
       alloc.tokens_out ?? null,
     )
-    this._trimAlloc.run(accountId, accountId, max)
+    await this.client.run(TRIM_ALLOC_SQL, accountId, accountId, max)
   }
 
-  recentAllocations(accountId, limit = 5) {
-    return this._recentAlloc
-      .all(accountId, limit)
-      .reverse()
-      .map((r) => ({
-        at: r.at,
-        source: r.source ?? undefined,
-        util_5h: r.util_5h,
-        util_7d: r.util_7d,
-        status_5h: r.status_5h ?? undefined,
-        status_7d: r.status_7d ?? undefined,
-        claim: r.claim,
-        tokens_in: r.tokens_in,
-        tokens_out: r.tokens_out,
-      }))
+  async recentAllocations(accountId, limit = 5) {
+    return (await this.client.many(RECENT_ALLOC_SQL, accountId, limit)).reverse().map((r) => ({
+      at: r.at,
+      source: r.source ?? undefined,
+      util_5h: r.util_5h,
+      util_7d: r.util_7d,
+      status_5h: r.status_5h ?? undefined,
+      status_7d: r.status_7d ?? undefined,
+      claim: r.claim,
+      tokens_in: r.tokens_in,
+      tokens_out: r.tokens_out,
+    }))
   }
 
-  allocationCount(accountId) {
-    return this.db.prepare('SELECT COUNT(*) c FROM account_allocations WHERE account_id = ?').get(accountId).c
+  async allocationCount(accountId) {
+    return (await this.client.one(ALLOC_COUNT_SQL, accountId)).c
   }
 }

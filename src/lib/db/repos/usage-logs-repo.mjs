@@ -9,6 +9,10 @@
  */
 
 import { getDb } from '../database.mjs'
+import { applyRate, fromMicros, microsOf, rowMicros, toMicros } from '../../core/money.mjs'
+import { microsSumSql, moneySql, usdSumSql } from './money-sql.mjs'
+import { dbClient } from '../db-client.mjs'
+import { recordVendorUsage } from '../../vendor/vendor-usage.mjs'
 import { collectErrors, enrichLogRow, excludeErrorClassSql, ingressAuthSql } from '../../admin/error-class.mjs'
 import {
   costColumnsFromUsage,
@@ -28,15 +32,32 @@ import {
   PROMPT_TOKENS_SQL,
   TOTAL_TOKENS_SQL,
   totalTokens,
+  UPSTREAM_PROMPT_TOKENS_SQL,
+  UPSTREAM_TOTAL_TOKENS_SQL,
+  upstreamTokenSql,
 } from './usage-log-preds.mjs'
 import { collapseBlockKeywords, foldInterceptRows } from '../../protocol/intercept-stats.mjs'
+import { vmWindowForecast } from '../../usage/vm-quota-forecast.mjs'
+import {
+  addRollupBuckets,
+  BILLING_ACCOUNT_KEY_SQL,
+  ceilHourMs,
+  hourKey,
+  ROLLUP_SOURCE,
+  rollupMeasures,
+  windowSums,
+} from './usage-cost-rollup.mjs'
 
 /** settings key: ISO instant before which usage_logs rows may have been pruned. Monotonic. */
 const PRUNED_THROUGH_KEY = 'usage_logs_pruned_through'
+/** `query` 按行判定错误类别时每次读的行数与一次调用最多读的行数；旧的 offset 分页最多跳过的行数。 */
+const QUERY_SCAN_CHUNK = 500
+const QUERY_SCAN_CAP = 5000
+const QUERY_MAX_OFFSET = 10_000
 const BILLING_STATS_CACHE_TTL_MS = 10_000
 const BILLING_BACKFILL_INTERVAL_MS = 60_000
 
-function billingStatsCacheKey(accountWindows) {
+export function billingStatsCacheKey(accountWindows) {
   if (!Array.isArray(accountWindows) || accountWindows.length === 0) return 'rolling'
   const normalized = accountWindows
     .map((win) => ({
@@ -62,9 +83,68 @@ function sumCostBuckets(rows) {
   }
 }
 
+// Rolling 5h / 7d totals over every account: the per-account buckets already partition all rows.
+function rollingTotal(byAccount) {
+  const rows = [...byAccount.values()]
+  const bucket = { ...sumCostBuckets(rows), unpriced: rows.reduce((sum, row) => sum + (Number(row.unpriced) || 0), 0) }
+  return { ...bucket, ...cacheHitStats(bucket) }
+}
+
+// 成本列是上游口径（账号成本 / 供应商结算依据），重算成本只读上游原始 token（119）
+const UPSTREAM_PRICE_TOKENS = [
+  'input_tokens',
+  'cache_read_tokens',
+  'cache_creation_tokens',
+  'cache_creation_5m_tokens',
+  'cache_creation_1h_tokens',
+]
+  .map((column) => `${upstreamTokenSql(column)} AS ${column}`)
+  .concat('output_tokens')
+  .join(', ')
+
+/** 重新定价改写的金额列（不含 actual_cost，它只在补算缺失成本时一并写）。 */
+const REPRICE_MONEY = [
+  'input_cost',
+  'output_cost',
+  'cache_read_cost',
+  'cache_creation_cost',
+  'web_search_cost',
+  'image_cost',
+  'total_cost',
+]
+
+/** usage_logs 的金额列（REAL 镜像）；`<name>_micros` 是权威值（迁移 126）。 */
+export const USAGE_LOG_MONEY_COLUMNS = [
+  'input_cost',
+  'output_cost',
+  'cache_read_cost',
+  'cache_creation_cost',
+  'web_search_cost',
+  'image_cost',
+  'total_cost',
+  'actual_cost',
+]
+
+/** 有效金额上限（2^51 微单位，core/money.mjs MAX_MONEY_MICROS + 1）对应的美元值。 */
+const MONEY_LIMIT_USD = '2251799813.685248'
+/**
+ * 整数列与 REAL 镜像不一致的行（上一版本在回滚期间写入或改写的行）。与迁移 126 的部分索引
+ * `idx_usage_logs_money_drift` 是同一个表达式，查询可以只读这个（通常为空的）索引。
+ */
+const MONEY_DRIFT_SQL = USAGE_LOG_MONEY_COLUMNS.map(
+  (c) =>
+    `(${c}_micros IS NOT CAST(ROUND(${c} * 1000000) AS INTEGER) AND (${c} IS NULL OR ABS(${c}) < ${MONEY_LIMIT_USD}))`,
+).join('\n   OR ')
+const SYNC_LEGACY_MONEY_SQL = `UPDATE usage_logs SET ${USAGE_LOG_MONEY_COLUMNS.map(
+  (c) =>
+    `${c}_micros = CASE WHEN ${c} IS NULL THEN NULL WHEN ABS(${c}) < ${MONEY_LIMIT_USD} THEN CAST(ROUND(${c} * 1000000) AS INTEGER) ELSE ${c}_micros END`,
+).join(', ')}
+  WHERE rowid IN (SELECT rowid FROM usage_logs INDEXED BY idx_usage_logs_money_drift WHERE ${MONEY_DRIFT_SQL} LIMIT ?)`
+
 const SUMMARY_COLUMNS = [
   'id',
   'request_id',
+  'config_revision',
   'created_at',
   'log_mode',
   'method',
@@ -92,8 +172,15 @@ const SUMMARY_COLUMNS = [
   'cache_creation_tokens',
   'cache_creation_5m_tokens',
   'cache_creation_1h_tokens',
+  // 119：主 token 列是客户计费口径；与之不同时这里存上游原始值，NULL 表示同主列
+  'upstream_input_tokens',
+  'upstream_cache_read_tokens',
+  'upstream_cache_creation_tokens',
+  'upstream_cache_creation_5m_tokens',
+  'upstream_cache_creation_1h_tokens',
   'requested_model',
   'upstream_model',
+  'response_model',
   'model_mismatch',
   'first_token_ms',
   'first_byte_ms',
@@ -118,6 +205,16 @@ const SUMMARY_COLUMNS = [
   'rate_multiplier',
   'service_tier',
   'upstream_service_tier',
+  'error_kind',
+  'authorization_mode',
+  'inbound_transport',
+  'upstream_path',
+  'upstream_transport',
+  'upstream_error_json',
+  'websocket_close_code',
+  'continuation_unavailable_reason',
+  'upstream_connection_exit_reason',
+  'retry_after_ms',
   'speed',
   'long_context',
   'session_id',
@@ -127,20 +224,74 @@ const SUMMARY_COLUMNS = [
   'intercept',
   'jev_state',
   'vm_owner_user_id',
+  'billing_status',
+  'billing_group_id',
+  'subscription_id',
+  'api_key_name',
+  'source',
   'image_model',
   'image_usage',
   'image_input_tokens',
   'image_output_tokens',
   'image_cost',
+  'execution_kind',
+  'account_resource_id',
+  'gateway_instance_id',
+  'dispatch_id',
+  'receipt_id',
+  'usage_confidence',
+  // M6：金额的权威值是整数微单位；上面的 REAL 列是镜像，由 toRow 从整数派生同时写
+  ...USAGE_LOG_MONEY_COLUMNS.map((c) => c + '_micros'),
 ]
+
+const INSERT_SQL = `
+      INSERT INTO usage_logs (${SUMMARY_COLUMNS.join(', ')})
+      VALUES (${SUMMARY_COLUMNS.map(() => '?').join(', ')})
+    `
+const INSERT_IF_ABSENT_SQL = `
+      INSERT OR IGNORE INTO usage_logs (${SUMMARY_COLUMNS.join(', ')})
+      VALUES (${SUMMARY_COLUMNS.map(() => '?').join(', ')})
+    `
+const INSERT_DEBUG_SQL = `
+      INSERT INTO request_log_debug (request_id, ts, record_json) VALUES (?, ?, ?)
+      ON CONFLICT(request_id) DO UPDATE SET ts = excluded.ts, record_json = excluded.record_json
+    `
+const INSERT_DEBUG_IF_ABSENT_SQL = `
+      INSERT OR IGNORE INTO request_log_debug (request_id, ts, record_json) VALUES (?, ?, ?)
+    `
+const GET_DEBUG_SQL = 'SELECT record_json FROM request_log_debug WHERE request_id = ?'
+const VM_OWNER_SQL = 'SELECT owner_user_id FROM vms WHERE id = ?'
+const LIST_DEBUG_SQL = 'SELECT record_json FROM request_log_debug ORDER BY ts DESC LIMIT ?'
+const GET_BY_REQUEST_ID_SQL = 'SELECT * FROM usage_logs WHERE request_id = ?'
+// OCTET_LENGTH counts encoded bytes and lets SQLite read TEXT size from metadata without loading each body.
+const DEBUG_BYTES_SQL = 'SELECT COALESCE(SUM(OCTET_LENGTH(record_json)), 0) AS n FROM request_log_debug'
+const DEBUG_COUNT_SQL = 'SELECT COUNT(*) AS n FROM request_log_debug'
+const DELETE_OLD_USAGE_SQL = 'DELETE FROM usage_logs WHERE created_at < ?'
+const DELETE_OLD_DEBUG_SQL = 'DELETE FROM request_log_debug WHERE ts < ?'
+const DELETE_OLDEST_DEBUG_SQL = `
+      DELETE FROM request_log_debug WHERE request_id IN (
+        SELECT request_id FROM request_log_debug ORDER BY ts ASC LIMIT ?
+      )
+    `
+
+/** 记录里的金额：有 `*_micros` 用它，否则（只给了美元值的写入方）在这里换算一次。 */
+function recMicros(rec, column) {
+  const micros = microsOf(rec[column + '_micros'])
+  return micros != null ? micros : toMicros(rec[column])
+}
 
 function toRow(rec) {
   return SUMMARY_COLUMNS.map((c) => {
+    if (c.endsWith('_micros') && USAGE_LOG_MONEY_COLUMNS.includes(c.slice(0, -7))) return recMicros(rec, c.slice(0, -7))
+    if (USAGE_LOG_MONEY_COLUMNS.includes(c)) return fromMicros(recMicros(rec, c))
+    if (c === 'billing_status') return rec[c] || 'unmetered'
+    if (c === 'source') return rec[c] || 'protocol'
     if (c === 'created_at') return rec.created_at ?? rec.ts ?? null
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
     if (c === 'has_tools') return rec.has_tools == null ? null : rec.has_tools ? 1 : 0
     if (c === 'cache_creation_tokens' && rec[c] == null) return null
+    if (c.startsWith('upstream_') && c.endsWith('_tokens')) return rec[c] == null ? null : Number(rec[c]) || 0
     if (
       c === 'input_tokens' ||
       c === 'output_tokens' ||
@@ -196,17 +347,6 @@ function resolveAccountWindow(windows, row) {
   )
 }
 
-function groupCostEvents(rows = []) {
-  const map = new Map()
-  for (const row of rows) {
-    const key = accountEventKey(row)
-    const list = map.get(key) || []
-    list.push(row)
-    map.set(key, list)
-  }
-  return map
-}
-
 function isFableRow(row) {
   const upstream = String(row?.upstream_model ?? '').trim()
   const model = String(row?.model ?? '').trim()
@@ -235,11 +375,11 @@ function bucketEventsSince(rows = [], sinceMs) {
         cache_read_tokens: Number(row.cache_read_tokens || 0),
         cache_creation_tokens: Number(row.cache_creation_tokens || 0),
         prompt_tokens: Number(row.prompt_tokens || 0),
-        input_cost: Number(row.input_cost || 0),
-        output_cost: Number(row.output_cost || 0),
-        cache_read_cost: Number(row.cache_read_cost || 0),
-        cache_creation_cost: Number(row.cache_creation_cost || 0),
-        total_cost: Number(row.total_cost || 0),
+        input_cost_micros: Number(row.input_cost_micros || 0),
+        output_cost_micros: Number(row.output_cost_micros || 0),
+        cache_read_cost_micros: Number(row.cache_read_cost_micros || 0),
+        cache_creation_cost_micros: Number(row.cache_creation_cost_micros || 0),
+        total_cost_micros: Number(row.total_cost_micros || 0),
       })),
     ),
     unpriced: picked.filter(unpricedWithTokens).length,
@@ -291,95 +431,94 @@ export function summarizeLatency(values) {
 }
 
 export class UsageLogsRepo {
-  constructor(db = getDb()) {
+  constructor(db = getDb(), { billingMaintenance = true } = {}) {
     this.db = db
+    this.client = dbClient(db)
+    this._billingMaintenance = billingMaintenance
     // Panel endpoints request the same expensive billing snapshot several times
     // during one refresh. Keep this cache repository-local so it never affects
     // request accounting or persists across processes.
     this._billingStatsCache = new Map()
+    this._forecastCache = new Map()
     this._billingBackfillAt = 0
-    this._insert = db.prepare(`
-      INSERT INTO usage_logs (${SUMMARY_COLUMNS.join(', ')})
-      VALUES (${SUMMARY_COLUMNS.map(() => '?').join(', ')})
-    `)
-    this._insertIfAbsent = db.prepare(`
-      INSERT OR IGNORE INTO usage_logs (${SUMMARY_COLUMNS.join(', ')})
-      VALUES (${SUMMARY_COLUMNS.map(() => '?').join(', ')})
-    `)
-    this._insertDebug = db.prepare(`
-      INSERT INTO request_log_debug (request_id, ts, record_json) VALUES (?, ?, ?)
-      ON CONFLICT(request_id) DO UPDATE SET ts = excluded.ts, record_json = excluded.record_json
-    `)
-    this._insertDebugIfAbsent = db.prepare(`
-      INSERT OR IGNORE INTO request_log_debug (request_id, ts, record_json) VALUES (?, ?, ?)
-    `)
-    this._getDebug = db.prepare('SELECT record_json FROM request_log_debug WHERE request_id = ?')
-    this._vmOwner = db.prepare('SELECT owner_user_id FROM vms WHERE id = ?')
-    this._listDebug = db.prepare('SELECT record_json FROM request_log_debug ORDER BY ts DESC LIMIT ?')
-    this._getByRequestId = db.prepare('SELECT * FROM usage_logs WHERE request_id = ?')
-    // OCTET_LENGTH counts encoded bytes and lets SQLite read TEXT size from metadata without loading each body.
-    this._debugBytes = db.prepare('SELECT COALESCE(SUM(OCTET_LENGTH(record_json)), 0) AS n FROM request_log_debug')
-    this._debugCount = db.prepare('SELECT COUNT(*) AS n FROM request_log_debug')
-    this._deleteOldUsage = db.prepare('DELETE FROM usage_logs WHERE created_at < ?')
-    this._deleteOldDebug = db.prepare('DELETE FROM request_log_debug WHERE ts < ?')
-    this._deleteOldestDebug = db.prepare(`
-      DELETE FROM request_log_debug WHERE request_id IN (
-        SELECT request_id FROM request_log_debug ORDER BY ts ASC LIMIT ?
-      )
-    `)
   }
 
   /** Cheap EXISTS: ≥1 2xx row visible to the caller (same ownerPred as request-log stats). */
-  hasSuccessfulRequest({ owner_user_id = null } = {}) {
+  async hasSuccessfulRequest({ owner_user_id = null } = {}) {
     const own = ownerPred(owner_user_id)
     const where = own.sql ? `AND ${own.sql}` : ''
-    const row = this.db
-      .prepare(`SELECT 1 AS ok FROM usage_logs WHERE status >= 200 AND status < 300 ${where} LIMIT 1`)
-      .get(...own.params)
+    const row = await this.client.one(
+      `SELECT 1 AS ok FROM usage_logs WHERE status >= 200 AND status < 300 ${where} LIMIT 1`,
+      ...own.params,
+    )
     return !!row
   }
 
-  belongsToOwner(requestId, ownerUserId) {
+  async belongsToOwner(requestId, ownerUserId) {
     if (!requestId) return false
     if (!ownerUserId) return true
     const own = ownerPred(ownerUserId)
-    const row = this.db
-      .prepare(`SELECT 1 AS ok FROM usage_logs WHERE request_id = ? AND ${own.sql} LIMIT 1`)
-      .get(requestId, ...own.params)
+    const row = await this.client.one(
+      `SELECT 1 AS ok FROM usage_logs WHERE request_id = ? AND ${own.sql} LIMIT 1`,
+      requestId,
+      ...own.params,
+    )
     return !!row
   }
 
-  getByRequestId(requestId) {
+  async getByRequestId(requestId) {
     if (!requestId) return null
-    const row = this._getByRequestId.get(requestId)
+    const row = await this.client.one(GET_BY_REQUEST_ID_SQL, requestId)
     return row ? enrichLogRow(fromRow(row)) : null
   }
 
-  insertSummary(rec) {
-    this._insert.run(...toRow(rec))
-    return rec
+  // 使用记录与供应商用量事实在同一个事务里写入（R6 B8：调用方是写回队列的 async 落库闭包 RequestLogStore.finish>persist，
+  // 在写回批事务内执行时嵌套为 SAVEPOINT）
+  async insertSummary(rec) {
+    return this.client.tx(async (tx) => {
+      await tx.run(INSERT_SQL, ...toRow(rec))
+      await recordVendorUsage(this.db, await tx.one(GET_BY_REQUEST_ID_SQL, rec.request_id || rec.id))
+      this._billingStatsCache.clear()
+      return rec
+    })
   }
 
-  vmOwnerOf(vmId) {
+  async vmOwnerOf(vmId) {
     if (!vmId) return null
-    return this._vmOwner.get(String(vmId))?.owner_user_id || null
+    return (await this.client.one(VM_OWNER_SQL, String(vmId)))?.owner_user_id || null
   }
 
   /** INSERT OR IGNORE (legacy import path). @returns true when inserted */
-  insertSummaryIfAbsent(rec) {
-    return this._insertIfAbsent.run(...toRow(rec)).changes > 0
+  async insertSummaryIfAbsent(rec) {
+    return this.client.tx(async (tx) => {
+      const inserted = (await tx.run(INSERT_IF_ABSENT_SQL, ...toRow(rec))).changes > 0
+      if (inserted) {
+        await recordVendorUsage(this.db, await tx.one(GET_BY_REQUEST_ID_SQL, rec.request_id || rec.id))
+        this._billingStatsCache.clear()
+      }
+      return inserted
+    })
   }
 
-  insertDebug(requestId, ts, record) {
-    this._insertDebug.run(requestId, ts || new Date().toISOString(), JSON.stringify(record))
+  async insertDebug(requestId, ts, record) {
+    await this.client.run(INSERT_DEBUG_SQL, requestId, ts || new Date().toISOString(), JSON.stringify(record))
   }
 
-  insertDebugIfAbsent(requestId, ts, record) {
-    return this._insertDebugIfAbsent.run(requestId, ts || new Date().toISOString(), JSON.stringify(record)).changes > 0
+  async insertDebugIfAbsent(requestId, ts, record) {
+    return (
+      (
+        await this.client.run(
+          INSERT_DEBUG_IF_ABSENT_SQL,
+          requestId,
+          ts || new Date().toISOString(),
+          JSON.stringify(record),
+        )
+      ).changes > 0
+    )
   }
 
-  getDebug(requestId) {
-    const row = this._getDebug.get(requestId)
+  async getDebug(requestId) {
+    const row = await this.client.one(GET_DEBUG_SQL, requestId)
     if (!row) return null
     try {
       return enrichLogRow(JSON.parse(row.record_json))
@@ -388,12 +527,11 @@ export class UsageLogsRepo {
     }
   }
 
-  listDebug({ limit = 20, owner_user_id = null } = {}) {
+  async listDebug({ limit = 20, owner_user_id = null } = {}) {
     const n = Math.max(1, Math.min(100, Number(limit) || 20))
     const own = ownerPred(owner_user_id)
     if (!own.sql) {
-      return this._listDebug
-        .all(n)
+      return (await this.client.many(LIST_DEBUG_SQL, n))
         .map((r) => {
           try {
             return enrichLogRow(JSON.parse(r.record_json))
@@ -403,16 +541,20 @@ export class UsageLogsRepo {
         })
         .filter(Boolean)
     }
-    return this.db
-      .prepare(`
+    return (
+      await this.client.many(
+        `
       SELECT d.record_json
       FROM request_log_debug d
       JOIN usage_logs u ON u.request_id = d.request_id
       WHERE ${own.sql}
       ORDER BY d.ts DESC
       LIMIT ?
-    `)
-      .all(...own.params, n)
+    `,
+        ...own.params,
+        n,
+      )
+    )
       .map((r) => {
         try {
           return enrichLogRow(JSON.parse(r.record_json))
@@ -424,12 +566,18 @@ export class UsageLogsRepo {
   }
 
   /**
-   * Filtered, paginated query over summaries (newest first).
-   * @returns {{ items: object[], total: number }}
+   * Filtered page over summaries (newest first), keyset on `(created_at DESC, id DESC)`（技术债 M5，数据访问分层 R4 遗留）。
+   * 不再整表 COUNT：返回 `{ items, next_cursor, has_more }`，`next_cursor` 为 `{ created_at, id }`，原样回传给下一页。
+   * - 游标谓词与使用记录页相同：先给 created_at 范围上界，索引从游标处开始扫，深翻页不随页数变慢；
+   * - 错误类别按行在 JS 判定（指定 `error_class`，或屏蔽 `auth` 以外的类别）时分块扫描，一次最多读 QUERY_SCAN_CAP 行；
+   *   读满仍不够一页时，游标指向最后读到的行、`has_more` 为 true，由调用方继续翻；
+   * - `offset` 只为旧调用方保留（没有游标时生效，最多 QUERY_MAX_OFFSET 行）。
    */
-  query({
+  async query({
     limit = 50,
     offset = 0,
+    cursor_created_at = null,
+    cursor_id = null,
     api_key_id = null,
     vm_id = null,
     account_id = null,
@@ -480,9 +628,20 @@ export class UsageLogsRepo {
         params.push(Number(status))
       }
     }
-    if (!error_class && exclude_error_class) {
+    let keep = null
+    if (error_class) keep = (row) => row.error_class === error_class
+    else if (exclude_error_class) {
       const excludeSql = excludeErrorClassSql(exclude_error_class)
       if (excludeSql) where.push(excludeSql)
+      // SQL 只能预先去掉一部分 auth；SQL 的判定比按行分类窄（例如 400 + "x-api-key header is required"），
+      // auth 仍按行再判一次，与改游标分页前的行为一致（M5 复审 P2-4）
+      const blocked = new Set(
+        String(exclude_error_class)
+          .split(',')
+          .map((c) => c.trim())
+          .filter(Boolean),
+      )
+      if (blocked.size) keep = (row) => !row.error_class || !blocked.has(row.error_class)
     }
     if (since) {
       where.push('created_at >= ?')
@@ -497,34 +656,73 @@ export class UsageLogsRepo {
       const like = `%${String(q).slice(0, 100)}%`
       params.push(like, like, like, like)
     }
-    const cond = where.length ? `WHERE ${where.join(' AND ')}` : ''
     const cap = Math.max(1, Math.min(5000, Number(maxLimit) || 500))
     const n = Math.max(1, Math.min(cap, Number(limit) || 50))
-    const off = Math.max(0, Number(offset) || 0)
-    if (error_class) {
-      const scan = Math.min(5000, Math.max(n + off, 2000))
-      const rows = this.db
-        .prepare(`SELECT * FROM usage_logs ${cond} ORDER BY created_at DESC, id DESC LIMIT ?`)
-        .all(...params, scan)
-        .map(fromRow)
-        .map(enrichLogRow)
-        .filter((row) => row.error_class === error_class)
-      return { items: rows.slice(off, off + n), total: rows.length }
+    let cursor =
+      cursor_created_at && cursor_id ? { created_at: String(cursor_created_at), id: String(cursor_id) } : null
+    const off = cursor ? 0 : Math.max(0, Math.min(QUERY_MAX_OFFSET, Math.trunc(Number(offset)) || 0))
+    const page = async (at, count, skip = 0) => {
+      const w = where.slice()
+      const p = params.slice()
+      if (at) {
+        w.push('created_at <= ? AND (created_at < ? OR id < ?)')
+        p.push(at.created_at, at.created_at, at.id)
+      }
+      return this.client.many(
+        `SELECT * FROM usage_logs ${w.length ? `WHERE ${w.join(' AND ')}` : ''} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        ...p,
+        count,
+        skip,
+      )
     }
-    const total = this.db.prepare(`SELECT COUNT(*) c FROM usage_logs ${cond}`).get(...params).c
-    const items = this.db
-      .prepare(`SELECT * FROM usage_logs ${cond} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
-      .all(...params, n, off)
-      .map(fromRow)
-      .map(enrichLogRow)
-    return { items, total }
+    const cursorOf = (row) => (row ? { created_at: row.created_at, id: row.id } : null)
+    if (!keep) {
+      const rows = await page(cursor, n + 1, off)
+      const items = rows.slice(0, n).map(fromRow).map(enrichLogRow)
+      const hasMore = rows.length > n
+      return { items, next_cursor: hasMore ? cursorOf(items.at(-1)) : null, has_more: hasMore }
+    }
+    const matches = []
+    let skip = off
+    let scanned = 0
+    let last = null
+    let exhausted = false
+    while (matches.length <= n) {
+      const rows = await page(cursor, QUERY_SCAN_CHUNK)
+      for (const raw of rows) {
+        scanned++
+        last = raw
+        const row = enrichLogRow(fromRow(raw))
+        if (!keep(row)) continue
+        if (skip > 0) {
+          skip--
+          continue
+        }
+        matches.push(row)
+        if (matches.length > n) break
+      }
+      if (matches.length > n) break
+      if (rows.length < QUERY_SCAN_CHUNK) {
+        exhausted = true
+        break
+      }
+      if (scanned >= QUERY_SCAN_CAP) break
+      cursor = cursorOf(last)
+    }
+    if (matches.length > n) {
+      const items = matches.slice(0, n)
+      return { items, next_cursor: cursorOf(items.at(-1)), has_more: true }
+    }
+    if (exhausted) return { items: matches, next_cursor: null, has_more: false }
+    // 读满 QUERY_SCAN_CAP 行仍不够一页：从最后读到的行继续
+    return { items: matches, next_cursor: cursorOf(last), has_more: true }
   }
 
   /**
    * Aggregate stats bucketed by day or hour (dashboard/usage charts).
    * @returns {Array<{bucket, requests, errors, input_tokens, output_tokens, avg_duration_ms}>}
    */
-  aggregate({ since = null, until = null, bucket = 'day', owner_user_id = null } = {}) {
+  async aggregate({ since = null, until = null, bucket = 'day', owner_user_id = null } = {}) {
     const fmt = bucket === 'hour' ? '%Y-%m-%dT%H:00' : '%Y-%m-%d'
     const { cond, params } = timeCond(since, until)
     const own = ownerPred(owner_user_id)
@@ -534,9 +732,9 @@ export class UsageLogsRepo {
       where = where ? `${where} AND ${own.sql}` : `WHERE ${own.sql}`
       allParams.push(...own.params)
     }
-    return this.db
-      .prepare(`
-      SELECT strftime('${fmt}', created_at) AS bucket,
+    return await this.client.many(
+      `
+      SELECT strftime('${fmt}', created_at, '+8 hours') AS bucket,
              COUNT(*) AS requests,
              SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
              COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -544,19 +742,19 @@ export class UsageLogsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost,
+             ${usdSumSql('total_cost')} AS total_cost,
              CAST(AVG(duration_ms) AS INTEGER) AS avg_duration_ms,
              CAST(AVG(first_token_ms) AS INTEGER) AS avg_first_token_ms
       FROM usage_logs ${where}
       GROUP BY bucket ORDER BY bucket
-    `)
-      .all(...allParams)
+    `,
+      ...allParams,
+    )
   }
 
   /** Grand totals (dashboard db_totals). */
-  totals() {
-    const row = this.db
-      .prepare(`
+  async totals() {
+    const row = await this.client.one(`
       SELECT COUNT(*) AS requests,
              SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
              COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -564,14 +762,13 @@ export class UsageLogsRepo {
              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
              COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(input_cost), 0) AS input_cost,
-             COALESCE(SUM(output_cost), 0) AS output_cost,
-             COALESCE(SUM(cache_read_cost), 0) AS cache_read_cost,
-             COALESCE(SUM(cache_creation_cost), 0) AS cache_creation_cost,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             ${usdSumSql('input_cost')} AS input_cost,
+             ${usdSumSql('output_cost')} AS output_cost,
+             ${usdSumSql('cache_read_cost')} AS cache_read_cost,
+             ${usdSumSql('cache_creation_cost')} AS cache_creation_cost,
+             ${usdSumSql('total_cost')} AS total_cost
       FROM usage_logs
     `)
-      .get()
     return { ...row, ...cacheHitStats(row) }
   }
 
@@ -600,94 +797,76 @@ export class UsageLogsRepo {
     return { usage, model: row.image_model, only }
   }
 
-  _repriceRows(rows, { writeActualCost = false } = {}) {
-    if (!rows.length) return { rows: 0, changed: 0, still_unpriced: 0, delta_usd: 0 }
-    const upd = writeActualCost
-      ? this.db.prepare(`
+  async _repriceRows(rows, { writeActualCost = false } = {}) {
+    if (!rows.length) return { rows: 0, changed: 0, still_unpriced: 0, delta_usd: 0, delta_micros: 0 }
+    // 整数列是权威值，REAL 镜像由它派生同时写（M6）
+    const money = REPRICE_MONEY.map((c) => `${c}_micros = ?, ${c} = ?`).join(', ')
+    const upd = `
       UPDATE usage_logs
-         SET input_cost = ?, output_cost = ?, cache_read_cost = ?,
-             cache_creation_cost = ?, web_search_cost = ?, image_cost = ?, total_cost = ?,
-             actual_cost = ?, pricing_model = ?, price_source = ?, price_version = ?,
-             long_context = ?
-       WHERE id = ?
-    `)
-      : this.db.prepare(`
-      UPDATE usage_logs
-         SET input_cost = ?, output_cost = ?, cache_read_cost = ?,
-             cache_creation_cost = ?, web_search_cost = ?, image_cost = ?, total_cost = ?,
+         SET ${money},${writeActualCost ? ' actual_cost_micros = ?, actual_cost = ?,' : ''}
              pricing_model = ?, price_source = ?, price_version = ?, long_context = ?
        WHERE id = ?
-    `)
+    `
     let changed = 0
     let still_unpriced = 0
-    let delta_usd = 0
-    this.db.exec('BEGIN')
-    try {
+    let delta_micros = 0
+    await this.client.tx(async (tx) => {
       for (const r of rows) {
         const model = r.upstream_model || r.model || r.requested_model
         const priced = costColumnsFromUsage(this._usageForPrice(r), model, this._imageForPrice(r))
         const same =
-          (r.input_cost ?? null) === (priced.input_cost ?? null) &&
-          (r.output_cost ?? null) === (priced.output_cost ?? null) &&
-          (r.cache_read_cost ?? null) === (priced.cache_read_cost ?? null) &&
-          (r.cache_creation_cost ?? null) === (priced.cache_creation_cost ?? null) &&
-          (r.web_search_cost ?? null) === (priced.web_search_cost ?? null) &&
-          (r.image_cost ?? null) === (priced.image_cost ?? null) &&
-          (r.total_cost ?? null) === (priced.total_cost ?? null) &&
+          REPRICE_MONEY.every((c) => (microsOf(r[c + '_micros']) ?? null) === (priced[c + '_micros'] ?? null)) &&
           (r.pricing_model ?? null) === (priced.pricing_model ?? null) &&
           (r.price_source ?? null) === (priced.price_source ?? null) &&
           (r.price_version ?? null) === (priced.price_version ?? null) &&
           (r.long_context ?? null) === (priced.long_context ?? null)
-        if (priced.pricing_model === UNPRICED_MODEL || priced.total_cost == null) still_unpriced += 1
+        if (priced.pricing_model === UNPRICED_MODEL || priced.total_cost_micros == null) still_unpriced += 1
         if (!same) {
           changed += 1
-          delta_usd +=
-            (Number(priced.total_cost) || 0) - (Number.isFinite(Number(r.total_cost)) ? Number(r.total_cost) : 0)
+          delta_micros += (priced.total_cost_micros || 0) - (microsOf(r.total_cost_micros) || 0)
         }
+        const moneyArgs = REPRICE_MONEY.flatMap((c) => [priced[c + '_micros'] ?? null, priced[c] ?? null])
+        const actualArgs = []
         if (writeActualCost) {
           const parsedRate = r.rate_multiplier == null ? 1 : Number(r.rate_multiplier)
           const rate = Number.isFinite(parsedRate) ? parsedRate : 1
-          const actual = priced.total_cost == null ? null : priced.total_cost * rate
-          upd.run(
-            priced.input_cost ?? null,
-            priced.output_cost ?? null,
-            priced.cache_read_cost ?? null,
-            priced.cache_creation_cost ?? null,
-            priced.web_search_cost ?? null,
-            priced.image_cost ?? null,
-            priced.total_cost ?? null,
-            actual,
-            priced.pricing_model ?? UNPRICED_MODEL,
-            priced.price_source ?? null,
-            priced.price_version ?? null,
-            priced.long_context ?? null,
-            r.id,
-          )
-        } else {
-          upd.run(
-            priced.input_cost ?? null,
-            priced.output_cost ?? null,
-            priced.cache_read_cost ?? null,
-            priced.cache_creation_cost ?? null,
-            priced.web_search_cost ?? null,
-            priced.image_cost ?? null,
-            priced.total_cost ?? null,
-            priced.pricing_model ?? UNPRICED_MODEL,
-            priced.price_source ?? null,
-            priced.price_version ?? null,
-            priced.long_context ?? null,
-            r.id,
-          )
+          const actual = applyRate(priced.total_cost_micros ?? null, rate)
+          actualArgs.push(actual, fromMicros(actual))
         }
+        await tx.run(
+          upd,
+          ...moneyArgs,
+          ...actualArgs,
+          priced.pricing_model ?? UNPRICED_MODEL,
+          priced.price_source ?? null,
+          priced.price_version ?? null,
+          priced.long_context ?? null,
+          r.id,
+        )
       }
-      this.db.exec('COMMIT')
-    } catch (e) {
-      try {
-        this.db.exec('ROLLBACK')
-      } catch {}
-      throw e
+    })
+    return { rows: rows.length, changed, still_unpriced, delta_usd: fromMicros(delta_micros), delta_micros }
+  }
+
+  /**
+   * 启动时（对外服务之前）把“只写了 REAL”的行的整数列按 ROUND(REAL × 1e6) 补齐（M6 回滚兼容）。
+   * 上一版本在回滚期间写入或改写的使用记录只改 REAL；这些行落在部分索引 idx_usage_logs_money_drift 里，
+   * 正常情况下索引为空，这一步只读一次空索引。按批次各自一个事务；改写整数列经汇总触发器同步更新小时汇总。
+   * 返回改写的行数。
+   */
+  async syncLegacyMoneyRows({ batch = 2000, onProgress = null, progressEvery = 50_000 } = {}) {
+    let total = 0
+    let reported = 0
+    for (;;) {
+      const changed = Number((await this.client.run(SYNC_LEGACY_MONEY_SQL, batch)).changes || 0)
+      total += changed
+      if (changed < batch) return total
+      // 每批单独提交；行数多时（实测约 2.8 万行/秒）按进度报告，便于判断启动为何还没开始监听
+      if (onProgress && total - reported >= progressEvery) {
+        reported = total
+        onProgress(total)
+      }
     }
-    return { rows: rows.length, changed, still_unpriced, delta_usd }
   }
 
   /**
@@ -696,64 +875,69 @@ export class UsageLogsRepo {
    * (cost stays NULL) so they are never guessed at standard rates. Idempotent.
    * Only `pricing_model IS NULL` rows; those set actual_cost = total_cost × rate_multiplier.
    */
-  backfillMissingCosts({ limit = 4000 } = {}) {
-    const rows = this.db
-      .prepare(`
+  async backfillMissingCosts({ limit = 4000 } = {}) {
+    const rows = await this.client.many(
+      `
       SELECT id, model, upstream_model, requested_model,
-             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-             cache_creation_5m_tokens, cache_creation_1h_tokens, web_search_requests,
+             ${UPSTREAM_PRICE_TOKENS},
+             web_search_requests,
              rate_multiplier, service_tier, speed, protocol, image_model, image_usage,
-             input_cost, output_cost, cache_read_cost, cache_creation_cost, web_search_cost,
-             image_cost, total_cost, pricing_model, price_source, price_version, long_context
+             input_cost_micros, output_cost_micros, cache_read_cost_micros, cache_creation_cost_micros,
+             web_search_cost_micros, image_cost_micros, total_cost_micros,
+             pricing_model, price_source, price_version, long_context
       FROM usage_logs
       WHERE pricing_model IS NULL
       LIMIT ?
-    `)
-      .all(Math.max(1, Math.min(20000, Number(limit) || 4000)))
-    return this._repriceRows(rows, { writeActualCost: true }).rows
+    `,
+      Math.max(1, Math.min(20000, Number(limit) || 4000)),
+    )
+    return (await this._repriceRows(rows, { writeActualCost: true })).rows
   }
 
   /** Rewrite cost columns in [since, until]; never actual_cost / rate_multiplier. */
-  repriceRange({ since, until } = {}) {
+  async repriceRange({ since, until } = {}) {
     const { cond, params } = timeCond(since, until)
     const where = cond ? `${cond} AND rowid > ?` : 'WHERE rowid > ?'
     // Keyset pages keep a month-long range from loading every row at once.
-    const page = this.db.prepare(`
+    const page = `
       SELECT rowid AS _rowid, id, model, upstream_model, requested_model,
-             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-             cache_creation_5m_tokens, cache_creation_1h_tokens, web_search_requests,
+             ${UPSTREAM_PRICE_TOKENS},
+             web_search_requests,
              rate_multiplier, service_tier, speed, protocol, image_model, image_usage,
-             input_cost, output_cost, cache_read_cost, cache_creation_cost, web_search_cost,
-             image_cost, total_cost, pricing_model, price_source, price_version, long_context
+             input_cost_micros, output_cost_micros, cache_read_cost_micros, cache_creation_cost_micros,
+             web_search_cost_micros, image_cost_micros, total_cost_micros,
+             pricing_model, price_source, price_version, long_context
       FROM usage_logs ${where}
       ORDER BY rowid
       LIMIT 2000
-    `)
+    `
     const out = { rows: 0, changed: 0, still_unpriced: 0, delta_usd: 0 }
+    let delta = 0
     let after = 0
     for (;;) {
-      const rows = page.all(...params, after)
+      const rows = await this.client.many(page, ...params, after)
       if (!rows.length) break
-      const part = this._repriceRows(rows, { writeActualCost: false })
+      const part = await this._repriceRows(rows, { writeActualCost: false })
       out.rows += part.rows
       out.changed += part.changed
       out.still_unpriced += part.still_unpriced
-      out.delta_usd += part.delta_usd
+      delta += part.delta_micros
       after = rows.at(-1)._rowid
     }
-    out.delta_usd = Math.round(out.delta_usd * 1e8) / 1e8
+    out.delta_usd = fromMicros(delta)
     return out
   }
 
-  unpricedModels({ since } = {}) {
+  async unpricedModels({ since } = {}) {
     const where = [`pricing_model = '${UNPRICED_MODEL}'`]
     const params = []
     if (since) {
       where.push('created_at >= ?')
       params.push(new Date(since).toISOString())
     }
-    return this.db
-      .prepare(`
+    return (
+      await this.client.many(
+        `
       SELECT COALESCE(NULLIF(upstream_model, ''), NULLIF(model, ''), NULLIF(requested_model, ''), '') AS model,
              COUNT(*) AS requests,
              MAX(created_at) AS last_seen
@@ -761,34 +945,36 @@ export class UsageLogsRepo {
       WHERE ${where.join(' AND ')}
       GROUP BY 1
       ORDER BY requests DESC, last_seen DESC
-    `)
-      .all(...params)
-      .map((r) => ({
-        model: r.model,
-        requests: Number(r.requests || 0),
-        last_seen: r.last_seen || null,
-      }))
+    `,
+        ...params,
+      )
+    ).map((r) => ({
+      model: r.model,
+      requests: Number(r.requests || 0),
+      last_seen: r.last_seen || null,
+    }))
   }
 
-  _costSelect(cond, params) {
-    const row = this.db
-      .prepare(`
+  async _costSelect(cond, params) {
+    const row = await this.client.one(
+      `
       SELECT
         COUNT(*) AS requests,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(${upstreamTokenSql('input_tokens')}), 0) AS input_tokens,
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-        COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-        COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-        COALESCE(SUM(input_cost), 0) AS input_cost,
-        COALESCE(SUM(output_cost), 0) AS output_cost,
-        COALESCE(SUM(cache_read_cost), 0) AS cache_read_cost,
-        COALESCE(SUM(cache_creation_cost), 0) AS cache_creation_cost,
-        COALESCE(SUM(total_cost), 0) AS total_cost,
-        COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
+        COALESCE(SUM(${upstreamTokenSql('cache_read_tokens')}), 0) AS cache_read_tokens,
+        COALESCE(SUM(${upstreamTokenSql('cache_creation_tokens')}), 0) AS cache_creation_tokens,
+        COALESCE(SUM(${UPSTREAM_PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
+        ${usdSumSql('input_cost')} AS input_cost,
+        ${usdSumSql('output_cost')} AS output_cost,
+        ${usdSumSql('cache_read_cost')} AS cache_read_cost,
+        ${usdSumSql('cache_creation_cost')} AS cache_creation_cost,
+        ${usdSumSql('total_cost')} AS total_cost,
+        COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${UPSTREAM_TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
       FROM usage_logs ${cond}
-    `)
-      .get(...params)
+    `,
+      ...params,
+    )
     const out = {
       requests: Number(row?.requests || 0),
       input_tokens: Number(row?.input_tokens || 0),
@@ -807,55 +993,25 @@ export class UsageLogsRepo {
   }
 
   /** Official cost of one slot / credential over a fixed span (a closed quota window). */
-  costBetween({ since, until, vmId = null, accountId = null } = {}) {
+  async costBetween({ since, until, vmId = null, accountId = null } = {}) {
     const { cond, params } = filterCond({ since, until, vmId, accountId })
     return this._costSelect(cond, params)
   }
 
-  costByAccount({ since = null, until = null } = {}) {
-    const { cond, params } = timeCond(since, until)
-    const rows = this.db
-      .prepare(`
-      SELECT
-        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
-        vm_id,
-        COUNT(*) AS requests,
-        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
-        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-        COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-        COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-        COALESCE(SUM(input_cost), 0) AS input_cost,
-        COALESCE(SUM(output_cost), 0) AS output_cost,
-        COALESCE(SUM(cache_read_cost), 0) AS cache_read_cost,
-        COALESCE(SUM(cache_creation_cost), 0) AS cache_creation_cost,
-        COALESCE(SUM(total_cost), 0) AS total_cost,
-        COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
-      FROM usage_logs ${cond}
-      GROUP BY 1, vm_id
-      ORDER BY total_cost DESC
-    `)
-      .all(...params)
-    return rows.map((r) => ({
-      account_id: r.account_id,
-      vm_id: r.vm_id || null,
-      requests: Number(r.requests || 0),
-      success: Number(r.success || 0),
-      errors: Number(r.errors || 0),
-      input_tokens: Number(r.input_tokens || 0),
-      output_tokens: Number(r.output_tokens || 0),
-      cache_read_tokens: Number(r.cache_read_tokens || 0),
-      cache_creation_tokens: Number(r.cache_creation_tokens || 0),
-      prompt_tokens: Number(r.prompt_tokens || 0),
-      input_cost: Number(r.input_cost || 0),
-      output_cost: Number(r.output_cost || 0),
-      cache_read_cost: Number(r.cache_read_cost || 0),
-      cache_creation_cost: Number(r.cache_creation_cost || 0),
-      total_cost: Number(r.total_cost || 0),
-      unpriced: Number(r.unpriced || 0),
-    }))
+  /** Per billing account (key, slot) usage at or after `since`, from the hourly rollup plus the partial edge hour. */
+  async costByAccount({ since = null } = {}) {
+    const sinceMs = since == null ? null : new Date(since).getTime()
+    const sums = await windowSums(this.db, {
+      sinceMs,
+      rollup: { select: 'account_key AS account_id, vm_ref AS vm_id', group: 'account_key, vm_ref' },
+      raw: { select: `${BILLING_ACCOUNT_KEY_SQL} AS account_id, NULLIF(vm_id, '') AS vm_id`, group: '1, 2' },
+      keyOf: accountEventKey,
+      successPred: SLA_SUCCESS_PRED,
+      errorPred: SLA_ERROR_PRED,
+    })
+    return [...sums.values()]
+      .map((r) => ({ ...addRollupBuckets([r]), account_id: r.account_id, vm_id: r.vm_id || null }))
+      .sort((a, b) => b.total_cost_micros - a.total_cost_micros)
   }
 
   /**
@@ -863,10 +1019,10 @@ export class UsageLogsRepo {
    * service_tier is folded to fast / flex / other-raw (standard aliases → NULL);
    * speed is 'fast' or NULL. unpriced_requests counts rows left without an estimate.
    */
-  costByModel({ vmId = null, accountId = null, since = null, until = null } = {}) {
+  async costByModel({ vmId = null, accountId = null, since = null, until = null } = {}) {
     const { cond, params } = filterCond({ since, until, vmId, accountId })
-    const rows = this.db
-      .prepare(`
+    const rows = await this.client.many(
+      `
       SELECT COALESCE(NULLIF(upstream_model, ''), NULLIF(model, ''), NULLIF(requested_model, ''), '—') AS model,
              CASE
                WHEN service_tier IS NULL OR service_tier IN ('', 'default', 'auto', 'standard') THEN NULL
@@ -877,22 +1033,23 @@ export class UsageLogsRepo {
              COALESCE(long_context, 0) AS long_context,
              COUNT(*) AS requests,
              SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' THEN 1 ELSE 0 END) AS unpriced_requests,
-             COALESCE(SUM(input_tokens), 0) AS input_tokens,
+             COALESCE(SUM(${upstreamTokenSql('input_tokens')}), 0) AS input_tokens,
              COALESCE(SUM(output_tokens), 0) AS output_tokens,
-             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-             COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-             COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(input_cost), 0) AS input_cost,
-             COALESCE(SUM(output_cost), 0) AS output_cost,
-             COALESCE(SUM(cache_read_cost), 0) AS cache_read_cost,
-             COALESCE(SUM(cache_creation_cost), 0) AS cache_creation_cost,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             COALESCE(SUM(${upstreamTokenSql('cache_read_tokens')}), 0) AS cache_read_tokens,
+             COALESCE(SUM(${upstreamTokenSql('cache_creation_tokens')}), 0) AS cache_creation_tokens,
+             COALESCE(SUM(${UPSTREAM_PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
+             ${usdSumSql('input_cost')} AS input_cost,
+             ${usdSumSql('output_cost')} AS output_cost,
+             ${usdSumSql('cache_read_cost')} AS cache_read_cost,
+             ${usdSumSql('cache_creation_cost')} AS cache_creation_cost,
+             ${usdSumSql('total_cost')} AS total_cost
       FROM usage_logs ${cond}
       GROUP BY 1, 2, 3, 4
-      ORDER BY total_cost DESC, requests DESC
+      ORDER BY ${microsSumSql('total_cost')} DESC, requests DESC
       LIMIT 24
-    `)
-      .all(...params)
+    `,
+      ...params,
+    )
     return rows.map((r) => ({
       model: r.model,
       service_tier: r.service_tier || null,
@@ -919,7 +1076,7 @@ export class UsageLogsRepo {
    * `models` / `endpoints` are ranked by request count and capped; `endpoints`
    * is the inbound request path (usage_logs keeps no separate upstream endpoint).
    */
-  vmUsageStats({ vmId, days = 30 } = {}) {
+  async vmUsageStats({ vmId, days = 30 } = {}) {
     return this._usageWindow({
       vmId,
       days,
@@ -930,7 +1087,7 @@ export class UsageLogsRepo {
   }
 
   /** Same window as vmUsageStats, isolated to one managed key. Third rank is the VM. */
-  keyUsageStats({ apiKeyId, days = 30 } = {}) {
+  async keyUsageStats({ apiKeyId, days = 30 } = {}) {
     return this._usageWindow({
       apiKeyId,
       days,
@@ -940,65 +1097,74 @@ export class UsageLogsRepo {
     })
   }
 
-  _usageWindow({ vmId = null, apiKeyId = null, days = 30, rankExpr, rankKey, rankLimit = 8 } = {}) {
+  async _usageWindow({ vmId = null, apiKeyId = null, days = 30, rankExpr, rankKey, rankLimit = 8 } = {}) {
     const empty = { days: 0, since: null, history: [], models: [], [rankKey]: [] }
     if (!vmId && !apiKeyId) return empty
     const span = Math.max(1, Math.min(90, Math.floor(Number(days)) || 30))
     const since = new Date(Date.parse(shanghaiDayStartIso()) - (span - 1) * 86400_000).toISOString()
     const { cond, params } = filterCond({ since, vmId, apiKeyId })
-    const history = this.db
-      .prepare(`
+    // Key 统计是客户视角（计费口径主列）；槽位统计是账号视角，读上游原始 token（119）
+    const tok = (column) => (apiKeyId ? column : upstreamTokenSql(column))
+    const history = (
+      await this.client.many(
+        `
       SELECT strftime('%Y-%m-%d', created_at, '+8 hours') AS day,
              COUNT(*) AS requests,
              SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
-             COALESCE(SUM(input_tokens), 0) AS input_tokens,
+             COALESCE(SUM(${tok('input_tokens')}), 0) AS input_tokens,
              COALESCE(SUM(output_tokens), 0) AS output_tokens,
-             COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-             COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-             COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost,
+             COALESCE(SUM(${tok('cache_read_tokens')}), 0) AS cache_read_tokens,
+             COALESCE(SUM(${tok('cache_creation_tokens')}), 0) AS cache_creation_tokens,
+             COALESCE(SUM(${apiKeyId ? PROMPT_TOKENS_SQL : UPSTREAM_PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
+             ${usdSumSql(apiKeyId ? 'actual_cost' : 'total_cost')} AS total_cost,
              COALESCE(SUM(duration_ms), 0) AS duration_ms_sum,
              SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) AS duration_n
       FROM usage_logs ${cond}
       GROUP BY day ORDER BY day
-    `)
-      .all(...params)
-      .map((r) => ({
-        day: r.day,
-        requests: Number(r.requests || 0),
-        errors: Number(r.errors || 0),
-        input_tokens: Number(r.input_tokens || 0),
-        output_tokens: Number(r.output_tokens || 0),
-        cache_read_tokens: Number(r.cache_read_tokens || 0),
-        cache_creation_tokens: Number(r.cache_creation_tokens || 0),
-        prompt_tokens: Number(r.prompt_tokens || 0),
-        total_cost: Number(r.total_cost || 0),
-        duration_ms_sum: Number(r.duration_ms_sum || 0),
-        duration_n: Number(r.duration_n || 0),
-      }))
-    const group = (expr, limit) =>
-      this.db
-        .prepare(`
+    `,
+        ...params,
+      )
+    ).map((r) => ({
+      day: r.day,
+      requests: Number(r.requests || 0),
+      errors: Number(r.errors || 0),
+      input_tokens: Number(r.input_tokens || 0),
+      output_tokens: Number(r.output_tokens || 0),
+      cache_read_tokens: Number(r.cache_read_tokens || 0),
+      cache_creation_tokens: Number(r.cache_creation_tokens || 0),
+      prompt_tokens: Number(r.prompt_tokens || 0),
+      total_cost: Number(r.total_cost || 0),
+      duration_ms_sum: Number(r.duration_ms_sum || 0),
+      duration_n: Number(r.duration_n || 0),
+    }))
+    const group = async (expr, limit) =>
+      (
+        await this.client.many(
+          `
       SELECT ${expr} AS name,
              COUNT(*) AS requests,
-             COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0) AS tokens,
-             COALESCE(SUM(total_cost), 0) AS total_cost
+             COALESCE(SUM(${apiKeyId ? TOTAL_TOKENS_SQL : UPSTREAM_TOTAL_TOKENS_SQL}), 0) AS tokens,
+             ${microsSumSql(apiKeyId ? 'actual_cost' : 'total_cost')} AS total_cost_micros
       FROM usage_logs ${cond}
-      GROUP BY name ORDER BY requests DESC, total_cost DESC LIMIT ${limit}
-    `)
-        .all(...params)
-        .map((r) => ({
-          name: r.name,
-          requests: Number(r.requests || 0),
-          tokens: Number(r.tokens || 0),
-          total_cost: Number(r.total_cost || 0),
-        }))
+      GROUP BY name ORDER BY requests DESC, total_cost_micros DESC LIMIT ${limit}
+    `,
+          ...params,
+        )
+      ).map((r) => ({
+        name: r.name,
+        requests: Number(r.requests || 0),
+        tokens: Number(r.tokens || 0),
+        total_cost: fromMicros(Number(r.total_cost_micros || 0)),
+      }))
     return {
       days: span,
       since,
       history,
-      models: group("COALESCE(NULLIF(upstream_model, ''), NULLIF(model, ''), NULLIF(requested_model, ''), '—')", 12),
-      [rankKey]: group(rankExpr, rankLimit),
+      models: await group(
+        "COALESCE(NULLIF(upstream_model, ''), NULLIF(model, ''), NULLIF(requested_model, ''), '—')",
+        12,
+      ),
+      [rankKey]: await group(rankExpr, rankLimit),
     }
   }
 
@@ -1007,7 +1173,7 @@ export class UsageLogsRepo {
    * `total` is every inbound inference request (warmup answers included) plus
    * gate blocks on other paths, so each stage's share uses one denominator.
    */
-  protocolEntryStats({ since = shanghaiDayStartIso() } = {}) {
+  async protocolEntryStats({ since = shanghaiDayStartIso() } = {}) {
     // COALESCE: a bare `col = x` on NULL yields NULL, and `NOT NULL` drops the row.
     const block = `(
       COALESCE(error_code, '') = 'policy_blocked'
@@ -1015,9 +1181,8 @@ export class UsageLogsRepo {
       OR COALESCE(final_state, '') IN ('policy_blocked', 'distill_blocked', 'refusal_guard', 'refusal_similar', 'refusal_device')
     )`
     const inference = `path IN ('/v1/messages', '/v1/responses', '/v1/chat/completions')`
-    const row = this.db
-      .prepare(
-        `SELECT
+    const row = await this.client.one(
+      `SELECT
            SUM(CASE WHEN ${inference} OR ${block} THEN 1 ELSE 0 END) AS total,
            SUM(CASE WHEN ${block} THEN 1 ELSE 0 END) AS blocked,
            SUM(CASE WHEN ${inference}
@@ -1026,11 +1191,10 @@ export class UsageLogsRepo {
                 THEN 1 ELSE 0 END) AS passed
          FROM usage_logs
          WHERE created_at >= ?`,
-      )
-      .get(since)
-    const keywords = this.db
-      .prepare(
-        `SELECT error_message AS message, COUNT(*) AS count
+      since,
+    )
+    const keywords = await this.client.many(
+      `SELECT error_message AS message, COUNT(*) AS count
          FROM usage_logs
          WHERE created_at >= ?
            AND ${block}
@@ -1039,11 +1203,10 @@ export class UsageLogsRepo {
          GROUP BY error_message
          ORDER BY count DESC
          LIMIT 50`,
-      )
-      .all(since)
-    const grouped = this.db
-      .prepare(
-        `SELECT intercept, via, error_message AS message,
+      since,
+    )
+    const grouped = await this.client.many(
+      `SELECT intercept, via, error_message AS message,
                 CASE WHEN ${block} THEN 1 ELSE 0 END AS blocked,
                 COUNT(*) AS count
          FROM usage_logs
@@ -1053,8 +1216,8 @@ export class UsageLogsRepo {
              OR (${inference} AND COALESCE(via, '') != 'warmup-intercept')
            )
          GROUP BY intercept, via, error_message, blocked`,
-      )
-      .all(since)
+      since,
+    )
     const folded = foldInterceptRows(grouped)
     return {
       since,
@@ -1068,7 +1231,7 @@ export class UsageLogsRepo {
   }
 
   /** Official-standard totals: all-time + Shanghai calendar today + per account. */
-  billingStats(opts = {}) {
+  async billingStats(opts = {}) {
     const { accountWindows = null, now = Date.now() } = opts
     const cacheable = !Object.hasOwn(opts, 'now')
     const cacheNow = Date.now()
@@ -1076,36 +1239,32 @@ export class UsageLogsRepo {
     const cached = cacheable ? this._billingStatsCache.get(key) : null
     if (cached && cached.expires_at > cacheNow) return cached.value
 
-    // Historical cost repair is maintenance, not part of rendering a panel.
-    // Limit it independently so several panel endpoints cannot repeat the same
-    // synchronous scan in a single refresh.
-    if (cacheNow - this._billingBackfillAt >= BILLING_BACKFILL_INTERVAL_MS) {
-      this._billingBackfillAt = cacheNow
-      try {
-        this.backfillMissingCosts()
-      } catch {}
-    }
+    if (this._billingMaintenance) await this.maintainBillingCosts()
 
-    const value = this._computeBillingStats({ accountWindows, now })
-    if (this._billingStatsCache.size > 32) {
-      for (const [cacheKey, entry] of this._billingStatsCache) {
-        if (entry.expires_at <= cacheNow) this._billingStatsCache.delete(cacheKey)
-      }
-    }
-    // Start the TTL after the expensive synchronous aggregation completes. On
-    // large databases the computation itself can exceed the TTL; anchoring the
-    // expiry at cache lookup time would make a freshly computed entry already
-    // stale and every refresh would scan the table again.
+    const value = await this._computeBillingStats({ accountWindows, now })
+    if (this._billingStatsCache.size >= 32) this._billingStatsCache.clear()
     if (cacheable) this._billingStatsCache.set(key, { value, expires_at: Date.now() + BILLING_STATS_CACHE_TTL_MS })
     return value
   }
 
-  _computeBillingStats({ accountWindows = null, now = Date.now() } = {}) {
+  // The reporting worker runs the existing repair before its read transaction,
+  // so all parts of a billing snapshot see the same committed database state.
+  async maintainBillingCosts() {
+    const cacheNow = Date.now()
+    if (cacheNow - this._billingBackfillAt >= BILLING_BACKFILL_INTERVAL_MS) {
+      this._billingBackfillAt = cacheNow
+      try {
+        if (await this.backfillMissingCosts()) this._billingStatsCache.clear()
+      } catch {}
+    }
+  }
+
+  async _computeBillingStats({ accountWindows = null, now = Date.now() } = {}) {
     const todayStart = shanghaiDayStartIso()
     const fiveHStart = new Date(now - WINDOW_5H_MS).toISOString()
     const sevenDStart = new Date(now - WINDOW_7D_MS).toISOString()
-    const accountsTotal = this.costByAccount()
-    const accountsToday = this.costByAccount({ since: todayStart })
+    const accountsTotal = await this.costByAccount()
+    const accountsToday = await this.costByAccount({ since: todayStart })
     // The per-account queries already cover every row. Re-sum them for the
     // global buckets instead of scanning the entire usage table two more times.
     // This matters on multi-GB databases where each synchronous full scan also
@@ -1132,25 +1291,40 @@ export class UsageLogsRepo {
       }
       eventsSince = new Date(earliest).toISOString()
     }
-    const events = aligned ? this._costEventsSince(eventsSince) : null
-    const fiveById = aligned ? null : new Map(this.costByAccount({ since: fiveHStart }).map((a) => [keyOf(a), a]))
-    const sevenById = aligned ? null : new Map(this.costByAccount({ since: sevenDStart }).map((a) => [keyOf(a), a]))
-    const eventsByKey = aligned ? groupCostEvents(events) : null
-    const accounts = accountsTotal.map((a) => {
+    const fiveById = aligned
+      ? null
+      : new Map((await this.costByAccount({ since: fiveHStart })).map((a) => [keyOf(a), a]))
+    const sevenById = aligned
+      ? null
+      : new Map((await this.costByAccount({ since: sevenDStart })).map((a) => [keyOf(a), a]))
+    // Whole hours from the rollup; the hour each window starts in is read from usage_logs for that account only.
+    const hoursByKey = aligned ? await this._rollupHoursByAccount(eventsSince) : null
+    const coverage = await this.logCoverageStart()
+    const coveredSince = Date.parse(coverage || '') || 0
+    const forecast = (vmId, window) =>
+      vmWindowForecast(this.db, { vmId, window, coveredSince, now, cache: this._forecastCache })
+    const windowBucket = async (a, sinceMs, fableOnly = false) => {
+      const edge = ceilHourMs(sinceMs)
+      const edgeHour = hourKey(edge)
+      const hours = (hoursByKey.get(keyOf(a)) || []).filter((r) => r.hour >= edgeHour && (!fableOnly || r.fable === 1))
+      const edgeRows =
+        edge > sinceMs
+          ? (await this._costEventsForAccount(a, sinceMs, edge)).filter((row) => !fableOnly || isFableRow(row))
+          : []
+      return addRollupBuckets([...hours, bucketEventsSince(edgeRows, sinceMs)])
+    }
+    const accounts = []
+    for (const a of accountsTotal) {
       const t = todayById.get(keyOf(a)) || emptyCostBucket()
       const win = aligned ? resolveAccountWindow(accountWindows, a) : null
       const since5 = aligned ? (extraWindowSince(win?.reset_5h, WINDOW_5H_MS, now) ?? Date.parse(fiveHStart)) : null
       const since7 = aligned ? (extraWindowSince(win?.reset_7d, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)) : null
-      const w = aligned
-        ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since5)
-        : fiveById.get(keyOf(a)) || emptyCostBucket()
-      const w7 = aligned
-        ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since7)
-        : sevenById.get(keyOf(a)) || emptyCostBucket()
+      const w = aligned ? await windowBucket(a, since5) : fiveById.get(keyOf(a)) || emptyCostBucket()
+      const w7 = aligned ? await windowBucket(a, since7) : sevenById.get(keyOf(a)) || emptyCostBucket()
       let window_fable = null
       if (aligned && win?.reset_7d_oi) {
         const sinceFable = extraWindowSince(win.reset_7d_oi, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)
-        const fable = bucketEventsSince((eventsByKey.get(keyOf(a)) || []).filter(isFableRow), sinceFable)
+        const fable = await windowBucket(a, sinceFable, true)
         window_fable = {
           cost: Number(fable.total_cost || 0),
           tokens: totalTokens(fable),
@@ -1159,7 +1333,7 @@ export class UsageLogsRepo {
           start: new Date(sinceFable).toISOString(),
         }
       }
-      return {
+      accounts.push({
         ...a,
         today: { ...t },
         window_5h: { ...w },
@@ -1172,7 +1346,7 @@ export class UsageLogsRepo {
         today_cache_creation_tokens: Number(t.cache_creation_tokens || 0),
         today_input_cost: Number(t.input_cost || 0),
         today_output_cost: Number(t.output_cost || 0),
-        today_cache_cost: Number(t.cache_read_cost || 0) + Number(t.cache_creation_cost || 0),
+        today_cache_cost: fromMicros((t.cache_read_cost_micros || 0) + (t.cache_creation_cost_micros || 0)),
         window_5h_cost: Number(w.total_cost || 0),
         window_5h_requests: Number(w.requests || 0),
         window_5h_tokens: totalTokens(w),
@@ -1183,7 +1357,7 @@ export class UsageLogsRepo {
         window_5h_cache_creation_tokens: Number(w.cache_creation_tokens || 0),
         window_5h_input_cost: Number(w.input_cost || 0),
         window_5h_output_cost: Number(w.output_cost || 0),
-        window_5h_cache_cost: Number(w.cache_read_cost || 0) + Number(w.cache_creation_cost || 0),
+        window_5h_cache_cost: fromMicros((w.cache_read_cost_micros || 0) + (w.cache_creation_cost_micros || 0)),
         window_5h_start: aligned ? new Date(since5).toISOString() : fiveHStart,
         window_7d_cost: Number(w7.total_cost || 0),
         window_7d_requests: Number(w7.requests || 0),
@@ -1193,21 +1367,24 @@ export class UsageLogsRepo {
         window_7d_unpriced: Number(w7.unpriced || 0),
         window_7d_start: aligned ? new Date(since7).toISOString() : sevenDStart,
         window_fable,
-      }
-    })
+        // Window capacity from the slot's used% history (codex-proxy-rs sampling); slot rows only.
+        forecast_5h: aligned && a.vm_id ? await forecast(a.vm_id, '5h') : null,
+        forecast_7d: aligned && a.vm_id ? await forecast(a.vm_id, '7d') : null,
+        forecast_fable: window_fable && a.vm_id ? await forecast(a.vm_id, '7d_oi') : null,
+      })
+    }
     const window5h = aligned
       ? {
           ...sumCostBuckets(accounts.map((a) => a.window_5h)),
           ...cacheHitStats(sumCostBuckets(accounts.map((a) => a.window_5h))),
         }
-      : this._costSelect('WHERE created_at >= ?', [fiveHStart])
+      : rollingTotal(fiveById)
     const window7d = aligned
       ? {
           ...sumCostBuckets(accounts.map((a) => a.window_7d)),
           ...cacheHitStats(sumCostBuckets(accounts.map((a) => a.window_7d))),
         }
-      : this._costSelect('WHERE created_at >= ?', [sevenDStart])
-    const coverage = this.logCoverageStart()
+      : rollingTotal(sevenById)
     return {
       source: 'anthropic-official',
       currency: 'USD',
@@ -1233,17 +1410,17 @@ export class UsageLogsRepo {
    * surviving row (a quiet hour looks like a gap) nor the current retain_days (raising
    * it does not bring deleted rows back) can stand in for that boundary.
    */
-  logCoverageStart() {
+  async logCoverageStart() {
     const created = Date.parse(
-      this.db.prepare("SELECT MIN(applied_at) AS t FROM schema_migrations WHERE version = '001'").get()?.t || '',
+      (await this.client.one("SELECT MIN(applied_at) AS t FROM schema_migrations WHERE version = '001'"))?.t || '',
     )
-    const pruned = Date.parse(this._prunedThrough() || '')
+    const pruned = Date.parse((await this._prunedThrough()) || '')
     const start = Math.max(Number.isFinite(created) ? created : -Infinity, Number.isFinite(pruned) ? pruned : -Infinity)
     return Number.isFinite(start) ? new Date(start).toISOString() : null
   }
 
-  _prunedThrough() {
-    const row = this.db.prepare(`SELECT value FROM settings WHERE key = '${PRUNED_THROUGH_KEY}'`).get()
+  async _prunedThrough() {
+    const row = await this.client.one(`SELECT value FROM settings WHERE key = '${PRUNED_THROUGH_KEY}'`)
     try {
       return row ? JSON.parse(row.value) : null
     } catch {
@@ -1251,12 +1428,31 @@ export class UsageLogsRepo {
     }
   }
 
-  _costEventsSince(since) {
-    return this.db
-      .prepare(
+  /** Rollup hours since `since`, per billing account key, with the Fable flag kept apart. */
+  async _rollupHoursByAccount(since) {
+    const rows = await this.client.many(
+      `SELECT account_key AS account_id, vm_ref AS vm_id, hour, fable, ${rollupMeasures(SLA_SUCCESS_PRED, SLA_ERROR_PRED)}
+           FROM ${ROLLUP_SOURCE} WHERE hour >= ? GROUP BY account_key, vm_ref, hour, fable`,
+      hourKey(new Date(since).getTime()),
+    )
+    const map = new Map()
+    for (const row of rows) {
+      const key = accountEventKey(row)
+      const list = map.get(key) || []
+      list.push(row)
+      map.set(key, list)
+    }
+    return map
+  }
+
+  /** One billing account's rows in [sinceMs, untilMs) — the partial hour a quota window starts in. */
+  async _costEventsForAccount(account, sinceMs, untilMs) {
+    const vm = account.vm_id || ''
+    return (
+      await this.client.many(
         `
       SELECT
-        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
+        ${BILLING_ACCOUNT_KEY_SQL} AS account_id,
         vm_id,
         created_at,
         model,
@@ -1264,24 +1460,27 @@ export class UsageLogsRepo {
         pricing_model,
         CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END AS success,
         CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END AS errors,
-        COALESCE(input_tokens, 0) AS input_tokens,
+        COALESCE(${upstreamTokenSql('input_tokens')}, 0) AS input_tokens,
         COALESCE(output_tokens, 0) AS output_tokens,
-        COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-        COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
-        (${PROMPT_TOKENS_SQL}) AS prompt_tokens,
-        COALESCE(input_cost, 0) AS input_cost,
-        COALESCE(output_cost, 0) AS output_cost,
-        COALESCE(cache_read_cost, 0) AS cache_read_cost,
-        COALESCE(cache_creation_cost, 0) AS cache_creation_cost,
-        COALESCE(total_cost, 0) AS total_cost
+        COALESCE(${upstreamTokenSql('cache_read_tokens')}, 0) AS cache_read_tokens,
+        COALESCE(${upstreamTokenSql('cache_creation_tokens')}, 0) AS cache_creation_tokens,
+        (${UPSTREAM_PROMPT_TOKENS_SQL}) AS prompt_tokens,
+        COALESCE(${moneySql('input_cost')}, 0) AS input_cost_micros,
+        COALESCE(${moneySql('output_cost')}, 0) AS output_cost_micros,
+        COALESCE(${moneySql('cache_read_cost')}, 0) AS cache_read_cost_micros,
+        COALESCE(${moneySql('cache_creation_cost')}, 0) AS cache_creation_cost_micros,
+        COALESCE(${moneySql('total_cost')}, 0) AS total_cost_micros
       FROM usage_logs
-      WHERE created_at >= ?
+      WHERE ${BILLING_ACCOUNT_KEY_SQL} = ? AND created_at >= ? AND created_at < ?
     `,
+        account.account_id,
+        new Date(sinceMs).toISOString(),
+        new Date(untilMs).toISOString(),
       )
-      .all(since)
+    ).filter((row) => (row.vm_id || '') === vm)
   }
 
-  ownerBilling({ ownerUserId = null, since = null, until = null, groupBy = 'vm' } = {}) {
+  async ownerBilling({ ownerUserId = null, since = null, until = null, groupBy = 'vm' } = {}) {
     const where = []
     const params = []
     const own = ownerPred(ownerUserId)
@@ -1300,33 +1499,35 @@ export class UsageLogsRepo {
     const cond = where.length ? `WHERE ${where.join(' AND ')}` : ''
     const grouped = groupBy === 'key' ? 'key' : 'vm'
     const groupCol = grouped === 'key' ? 'api_key_id' : 'vm_id'
-    const totals = this.db
-      .prepare(`
+    const totals = await this.client.one(
+      `
       SELECT COUNT(*) AS requests,
              SUM(CASE WHEN ${SUCCESS_PRED} THEN 1 ELSE 0 END) AS ok,
              SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END) AS fail,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS tokens_in,
              COALESCE(SUM(output_tokens), 0) AS tokens_out,
-             COALESCE(SUM(COALESCE(actual_cost, total_cost, 0)), 0) AS cost_usd,
-             COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS official_cost_usd
+             COALESCE(SUM(COALESCE(${moneySql('actual_cost')}, ${moneySql('total_cost')}, 0)), 0) / 1000000.0 AS cost_usd,
+             ${usdSumSql('total_cost')} AS official_cost_usd
       FROM usage_logs ${cond}
-    `)
-      .get(...params)
-    const items = this.db
-      .prepare(`
+    `,
+      ...params,
+    )
+    const items = await this.client.many(
+      `
       SELECT ${groupCol} AS id,
              COUNT(*) AS requests,
              SUM(CASE WHEN ${SUCCESS_PRED} THEN 1 ELSE 0 END) AS ok,
              SUM(CASE WHEN ${ERROR_PRED} THEN 1 ELSE 0 END) AS fail,
              COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS tokens_in,
              COALESCE(SUM(output_tokens), 0) AS tokens_out,
-             COALESCE(SUM(COALESCE(actual_cost, total_cost, 0)), 0) AS cost_usd,
-             COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS official_cost_usd
+             COALESCE(SUM(COALESCE(${moneySql('actual_cost')}, ${moneySql('total_cost')}, 0)), 0) / 1000000.0 AS cost_usd,
+             ${usdSumSql('total_cost')} AS official_cost_usd
       FROM usage_logs ${cond}
       GROUP BY ${groupCol}
       ORDER BY cost_usd DESC
-    `)
-      .all(...params)
+    `,
+      ...params,
+    )
     const num = (row, key) => Number(row?.[key] || 0)
     return {
       group_by: grouped,
@@ -1359,7 +1560,7 @@ export class UsageLogsRepo {
    * Windowed ops snapshot aligned with sub2api overview cards:
    * SLA / error / 429 / 503, QPS·TPS, duration + first_token percentiles, per-model.
    */
-  windowStats({ since = null, until = null, owner_user_id = null } = {}) {
+  async windowStats({ since = null, until = null, owner_user_id = null } = {}) {
     const { cond, params } = timeCond(since, until)
     const own = ownerPred(owner_user_id)
     let where = cond
@@ -1368,8 +1569,8 @@ export class UsageLogsRepo {
       where = where ? `${where} AND ${own.sql}` : `WHERE ${own.sql}`
       allParams.push(...own.params)
     }
-    const counts = this.db
-      .prepare(`
+    const counts = await this.client.one(
+      `
       SELECT
         COUNT(*) AS requests,
         SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
@@ -1384,10 +1585,11 @@ export class UsageLogsRepo {
         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
         COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
         COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
-        COALESCE(SUM(total_cost), 0) AS total_cost
+        ${usdSumSql('total_cost')} AS total_cost
       FROM usage_logs ${where}
-    `)
-      .get(...allParams)
+    `,
+      ...allParams,
+    )
     const requests = Number(counts?.requests || 0)
     const success = Number(counts?.success || 0)
     const errors = Number(counts?.errors || 0)
@@ -1408,32 +1610,31 @@ export class UsageLogsRepo {
     const windowSeconds =
       Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(1, (endMs - startMs) / 1000) : Math.max(1, requests)
 
-    const minuteRows = this.db
-      .prepare(`
+    const minuteRows = await this.client.many(
+      `
       SELECT strftime('%Y-%m-%dT%H:%M', created_at) AS minute,
              COUNT(*) AS requests,
              COALESCE(SUM(${TOTAL_TOKENS_SQL}), 0) AS tokens
       FROM usage_logs ${where}
       GROUP BY minute
-    `)
-      .all(...allParams)
+    `,
+      ...allParams,
+    )
     const peakReq = minuteRows.reduce((m, r) => Math.max(m, Number(r.requests || 0)), 0)
     const peakTok = minuteRows.reduce((m, r) => Math.max(m, Number(r.tokens || 0)), 0)
     const lastMinute = minuteRows.length ? minuteRows[minuteRows.length - 1] : null
 
     const ttftWhere = where ? `${where} AND first_token_ms IS NOT NULL` : 'WHERE first_token_ms IS NOT NULL'
     const durWhere = where ? `${where} AND duration_ms IS NOT NULL` : 'WHERE duration_ms IS NOT NULL'
-    const ttfts = this.db
-      .prepare(`SELECT first_token_ms AS v FROM usage_logs ${ttftWhere}`)
-      .all(...allParams)
-      .map((r) => r.v)
-    const durs = this.db
-      .prepare(`SELECT duration_ms AS v FROM usage_logs ${durWhere}`)
-      .all(...allParams)
-      .map((r) => r.v)
+    const ttfts = (await this.client.many(`SELECT first_token_ms AS v FROM usage_logs ${ttftWhere}`, ...allParams)).map(
+      (r) => r.v,
+    )
+    const durs = (await this.client.many(`SELECT duration_ms AS v FROM usage_logs ${durWhere}`, ...allParams)).map(
+      (r) => r.v,
+    )
 
-    const byModel = this.db
-      .prepare(`
+    const byModel = await this.client.many(
+      `
       SELECT COALESCE(NULLIF(upstream_model, ''), NULLIF(model, ''), '—') AS model,
              COUNT(*) AS requests,
              SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
@@ -1444,8 +1645,9 @@ export class UsageLogsRepo {
       GROUP BY 1
       ORDER BY requests DESC
       LIMIT 12
-    `)
-      .all(...allParams)
+    `,
+      ...allParams,
+    )
 
     return {
       since: since ? new Date(since).toISOString() : null,
@@ -1466,7 +1668,7 @@ export class UsageLogsRepo {
       cache_creation_tokens: cacheWrite,
       prompt_tokens: cache.prompt_tokens,
       cache_hit_rate: cache.cache_hit_rate,
-      sticky: this._stickyWindow({ since, until, owner_user_id }),
+      sticky: await this._stickyWindow({ since, until, owner_user_id }),
       total_cost: Number(counts?.total_cost || 0),
       qps: {
         current: lastMinute ? Number(lastMinute.requests || 0) / 60 : 0,
@@ -1488,11 +1690,11 @@ export class UsageLogsRepo {
         avg_first_token_ms: r.avg_first_token_ms ?? null,
         avg_duration_ms: r.avg_duration_ms ?? null,
       })),
-      error_collection: this.errorCollection({ since, until, owner_user_id }),
+      error_collection: await this.errorCollection({ since, until, owner_user_id }),
     }
   }
 
-  _stickyWindow({ since = null, until = null, owner_user_id = null } = {}) {
+  async _stickyWindow({ since = null, until = null, owner_user_id = null } = {}) {
     const empty = { selections: 0, hits: 0, rate: null }
     try {
       const parts = []
@@ -1511,13 +1713,14 @@ export class UsageLogsRepo {
         params.push(...own.params)
       }
       const where = parts.length ? `WHERE ${parts.join(' AND ')}` : ''
-      const rows = this.db
-        .prepare(`
+      const rows = await this.client.many(
+        `
         SELECT selection_reason, COUNT(*) AS n
         FROM request_attempts ${where}
         GROUP BY 1
-      `)
-        .all(...params)
+      `,
+        ...params,
+      )
       let selections = 0
       let hits = 0
       for (const row of rows) {
@@ -1535,33 +1738,36 @@ export class UsageLogsRepo {
     }
   }
 
-  errorCollection({ since = null, until = null, owner_user_id = null } = {}) {
+  async errorCollection({ since = null, until = null, owner_user_id = null } = {}) {
     const { cond, params } = timeCond(since, until)
     const own = ownerPred(owner_user_id)
     const errCond = `${cond ? `${cond} AND ` : 'WHERE '}${ERROR_PRED}${own.sql ? ` AND ${own.sql}` : ''}`
-    const rows = this.db
-      .prepare(`
+    const rows = await this.client.many(
+      `
       SELECT created_at AS ts, request_id, status, error_code, error_message, model, upstream_model, vm_id, ip_address AS ip, api_key_presented
       FROM usage_logs ${errCond}
       ORDER BY created_at DESC, id DESC
       LIMIT 2000
-    `)
-      .all(...params, ...own.params)
+    `,
+      ...params,
+      ...own.params,
+    )
     return {
       ...collectErrors(rows),
-      ingress_hits: this.ingressHits({ since, until, owner_user_id }),
+      ingress_hits: await this.ingressHits({ since, until, owner_user_id }),
     }
   }
 
   /** Invalid-key 401s grouped by presented token + IP (still counted when muted). */
-  ingressHits({ since = null, until = null, owner_user_id = null } = {}) {
+  async ingressHits({ since = null, until = null, owner_user_id = null } = {}) {
     const { cond, params } = timeCond(since, until)
     const own = ownerPred(owner_user_id)
     const authPred = own.sql ? `${ingressAuthSql()} AND ${own.sql}` : ingressAuthSql()
     const where = cond ? `${cond} AND ${authPred}` : `WHERE ${authPred}`
     try {
-      return this.db
-        .prepare(`
+      return (
+        await this.client.many(
+          `
         SELECT
           COALESCE(api_key_presented, '') AS api_key_presented,
           COALESCE(ip_address, '') AS ip,
@@ -1573,15 +1779,17 @@ export class UsageLogsRepo {
         GROUP BY 1, 2
         ORDER BY count DESC
         LIMIT 40
-      `)
-        .all(...params, ...own.params)
-        .map((row) => ({
-          api_key_presented: row.api_key_presented || '',
-          ip: row.ip || '',
-          count: Number(row.count || 0),
-          last_ts: row.last_ts || null,
-          error_code: row.error_code || null,
-        }))
+      `,
+          ...params,
+          ...own.params,
+        )
+      ).map((row) => ({
+        api_key_presented: row.api_key_presented || '',
+        ip: row.ip || '',
+        count: Number(row.count || 0),
+        last_ts: row.last_ts || null,
+        error_code: row.error_code || null,
+      }))
     } catch {
       return []
     }
@@ -1591,18 +1799,18 @@ export class UsageLogsRepo {
    * Age out summaries/debug independently, then trim debug blobs to maxBytes.
    * Number form `cleanup(7)` keeps the old retainDays-only call.
    */
-  cleanup(opts = {}) {
+  async cleanup(opts = {}) {
     const cfg = this._cleanupOpts(opts)
-    const usage_logs = this._pruneUsage(cfg.usageCutoff)
-    const debug_by_age = this._deleteOldDebug.run(cfg.debugCutoff).changes
-    const debug_by_size = this.trimDebugToMaxBytes(cfg.maxBytes)
+    const usage_logs = await this._pruneUsage(cfg.usageCutoff)
+    const debug_by_age = (await this.client.run(DELETE_OLD_DEBUG_SQL, cfg.debugCutoff)).changes
+    const debug_by_size = await this.trimDebugToMaxBytes(cfg.maxBytes)
     if (usage_logs + debug_by_age + debug_by_size > 0) {
       try {
-        this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+        await this.client.exec('PRAGMA wal_checkpoint(TRUNCATE)')
       } catch {}
     }
     try {
-      this.db.exec('PRAGMA optimize')
+      await this.client.exec('PRAGMA optimize')
     } catch {}
     return {
       usage_logs,
@@ -1613,29 +1821,24 @@ export class UsageLogsRepo {
   }
 
   /** Delete summaries before `cutoff` and advance the prune boundary in one transaction. */
-  _pruneUsage(cutoff) {
-    this.db.exec('BEGIN')
-    try {
-      const deleted = this._deleteOldUsage.run(cutoff).changes
+  async _pruneUsage(cutoff) {
+    return this.client.tx(async (tx) => {
+      const deleted = (await tx.run(DELETE_OLD_USAGE_SQL, cutoff)).changes
       if (deleted > 0) {
-        const prev = this._prunedThrough()
+        const prev = await this._prunedThrough()
         if (!prev || prev < cutoff) {
-          this.db
-            .prepare(`
+          await tx.run(
+            `
               INSERT INTO settings (key, value, updated_at) VALUES ('${PRUNED_THROUGH_KEY}', ?, ?)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-            `)
-            .run(JSON.stringify(cutoff), new Date().toISOString())
+            `,
+            JSON.stringify(cutoff),
+            new Date().toISOString(),
+          )
         }
       }
-      this.db.exec('COMMIT')
       return deleted
-    } catch (e) {
-      try {
-        this.db.exec('ROLLBACK')
-      } catch {}
-      throw e
-    }
+    })
   }
 
   _cleanupOpts(opts) {
@@ -1650,35 +1853,35 @@ export class UsageLogsRepo {
     }
   }
 
-  debugBytes() {
-    return Number(this._debugBytes.get().n || 0)
+  async debugBytes() {
+    return Number((await this.client.one(DEBUG_BYTES_SQL)).n || 0)
   }
 
-  countDebug() {
-    return Number(this._debugCount.get().n || 0)
+  async countDebug() {
+    return Number((await this.client.one(DEBUG_COUNT_SQL)).n || 0)
   }
 
   /** Delete oldest debug rows until the stored JSON bytes fit maxBytes. */
-  trimDebugToMaxBytes(maxBytes) {
+  async trimDebugToMaxBytes(maxBytes) {
     const cap = Math.max(0, Number(maxBytes) || 0)
     if (cap <= 0) return 0
     let deleted = 0
     for (let i = 0; i < 8; i++) {
-      const used = this.debugBytes()
+      const used = await this.debugBytes()
       if (used <= cap) return deleted
-      const count = this.countDebug()
+      const count = await this.countDebug()
       if (!count) return deleted
       const avg = Math.max(1, Math.floor(used / count))
       const need = Math.min(count, Math.max(1, Math.ceil((used - cap) / avg) + 1))
-      const n = this._deleteOldestDebug.run(need).changes
+      const n = (await this.client.run(DELETE_OLDEST_DEBUG_SQL, need)).changes
       if (!n) return deleted
       deleted += n
     }
     return deleted
   }
 
-  count() {
-    return this.db.prepare('SELECT COUNT(*) c FROM usage_logs').get().c
+  async count() {
+    return (await this.client.one('SELECT COUNT(*) c FROM usage_logs')).c
   }
 }
 

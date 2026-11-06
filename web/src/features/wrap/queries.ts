@@ -1,6 +1,7 @@
 import { queryOptions } from '@tanstack/react-query'
 import type { CragLicenseStatus } from '@/types/panel-vm'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 
 export type KernelId = 'cli-node' | 'crag'
 
@@ -47,7 +48,7 @@ export type KernelInstallReport = {
 
 export function kernelCatalogQueryOptions() {
   return queryOptions({
-    queryKey: ['panel', 'kernels'] as const,
+    queryKey: panelQueryKeys.kernels(),
     queryFn: () => api<KernelCatalog>('/api/panel/kernels'),
   })
 }

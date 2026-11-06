@@ -109,7 +109,7 @@ export async function preflightMigration({ projectRoot, vm, targetNodeId, memory
   )
   const [total, available, free] = facts.trim().split(/\s+/).map(Number)
   const requested = parseMemoryBytes(memory) + OVERHEAD
-  const reserved = listVms(projectRoot, routing)
+  const reserved = (await listVms(projectRoot, routing))
     .filter((v) => v.node_id === targetNodeId && v.id !== vm.id)
     .reduce((sum, v) => sum + parseMemoryBytes(slotMemory(v, routing)) + (v.runtime_type === 'kvm' ? OVERHEAD : 0), 0)
   assertMigrationCapacity({

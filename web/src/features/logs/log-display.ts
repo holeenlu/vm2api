@@ -1,7 +1,8 @@
+import { t as translate } from '@/i18n'
 /**
  * 滚动日志页的纯展示逻辑（不含组件），移植自 claude-code-hub 的
  * `model-audit-display.ts` / `thinking-effort-badge.tsx` / 表格内联计算，
- * 并按 vm2api 的 `ProviderChainItem`（request_attempts 直出）改写供应商链部分。
+ * 并按 tapmodels 的 `ProviderChainItem`（request_attempts 直出）改写账号决策链部分。
  */
 import type {
   CacheTtlApplied,
@@ -13,9 +14,9 @@ import { toast } from 'sonner'
 export async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text)
-    toast.success('已复制')
+    toast.success(translate('logs:copied'))
   } catch {
-    toast.error('复制失败')
+    toast.error(translate('logs:copyFailed'))
   }
 }
 
@@ -63,8 +64,12 @@ export function statusBadgeTooltip(
   errorCode: string | null | undefined
 ): string | null {
   if (!isIncompleteCommitted(statusCode, finalState)) return null
-  const state = terminalStateLabel(finalState ?? null) || '响应未完整结束'
-  return errorCode ? `${state}（${errorCode}）` : state
+  const state =
+    terminalStateLabel(finalState ?? null) ||
+    translate('logs:incompleteResponse')
+  return errorCode
+    ? translate('logs:stateWithCode', { state, code: errorCode })
+    : state
 }
 
 export function isSuccessStatus(statusCode: number | null): boolean {
@@ -76,19 +81,22 @@ export function isSuccessStatus(statusCode: number | null): boolean {
 /** hub `common.relativeTimeShort`：刚刚 / N秒前 / N分前 / … / N年前。 */
 export function formatShortDistance(date: Date, now: Date): string {
   if (Number.isNaN(date.getTime())) return '-'
-  if (date > now) return '刚刚'
+  if (date > now) return translate('logs:justNow')
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000)
   const minutes = Math.floor(seconds / 60)
   const hours = Math.floor(minutes / 60)
   const days = Math.floor(hours / 24)
-  if (days >= 365) return `${Math.floor(days / 365)}年前`
-  if (days >= 30) return `${Math.floor(days / 30)}月前`
-  if (days >= 7) return `${Math.floor(days / 7)}周前`
-  if (days > 0) return `${days}天前`
-  if (hours > 0) return `${hours}时前`
-  if (minutes > 0) return `${minutes}分前`
-  if (seconds > 0) return `${seconds}秒前`
-  return '刚刚'
+  if (days >= 365)
+    return translate('logs:yearsAgo', { count: Math.floor(days / 365) })
+  if (days >= 30)
+    return translate('logs:monthsAgo', { count: Math.floor(days / 30) })
+  if (days >= 7)
+    return translate('logs:weeksAgo', { count: Math.floor(days / 7) })
+  if (days > 0) return translate('logs:daysAgo', { count: days })
+  if (hours > 0) return translate('logs:hoursAgo', { count: hours })
+  if (minutes > 0) return translate('logs:minutesAgo', { count: minutes })
+  if (seconds > 0) return translate('logs:secondsAgo', { count: seconds })
+  return translate('logs:justNow')
 }
 
 // ---------- 缓存 ----------
@@ -187,20 +195,39 @@ export type ModelAuditDisplay = {
   effectiveRequestModel: string | null
 }
 
+function comparableModel(value: string | null): string | null {
+  if (!value) return null
+  const normalized = value
+    .split('/')
+    .filter(Boolean)
+    .pop()
+    ?.replace(/\[1m\]$/i, '')
+    .trim()
+    .toLowerCase()
+  return normalized || null
+}
+
 /**
- * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：vm2api 的
+ * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：tapmodels 的
  * `model` 就是计价用的生效模型（`requested_model` 是客户端原值）。
  */
 export function resolveModelAuditDisplay(row: {
   originalModel: string | null
   model: string | null
   actualResponseModel: string | null
+  /** Backend authoritative comparison: requested model vs response model. */
+  modelMismatch?: number | null
 }): ModelAuditDisplay {
   const effectiveRequestModel = row.model ?? row.originalModel
+  const requestedModel = row.originalModel ?? effectiveRequestModel
+  const actualResponseModel = row.actualResponseModel?.trim() || null
+  const recordedMismatch =
+    row.modelMismatch == null ? null : row.modelMismatch === 1
   const hasActualMismatch = Boolean(
-    row.actualResponseModel &&
-    effectiveRequestModel &&
-    row.actualResponseModel !== effectiveRequestModel
+    actualResponseModel &&
+    requestedModel &&
+    (recordedMismatch ??
+      comparableModel(requestedModel) !== comparableModel(actualResponseModel))
   )
   return {
     primaryBillingModel: effectiveRequestModel,
@@ -208,7 +235,7 @@ export function resolveModelAuditDisplay(row: {
       row.originalModel && row.model && row.originalModel !== row.model
     ),
     hasActualMismatch,
-    secondaryActualModel: hasActualMismatch ? row.actualResponseModel : null,
+    secondaryActualModel: hasActualMismatch ? actualResponseModel : null,
     effectiveRequestModel,
   }
 }
@@ -240,22 +267,55 @@ export function thinkingEffortBadgeClass(effort: string): string {
   )
 }
 
-// ---------- 供应商链 ----------
+// ---------- 账号决策链 ----------
 
 const SELECTION_REASON_LABELS: Record<string, string> = {
-  sticky: '粘性会话',
-  'sticky-spill': '粘性溢出',
-  'family-affinity': '家族亲和',
-  'device-affinity': '设备 / machine 所在 VM',
-  'priority-load': '优先级负载',
-  'seat-held': '已占席位',
-  balanced: '平衡',
-  fill: '填充',
-  queued: '排队授予',
-  peek: '单候选',
+  get sticky() {
+    return translate('logs:stickySession')
+  },
+  get 'sticky-spill'() {
+    return translate('logs:stickySpill')
+  },
+  get 'family-affinity'() {
+    return translate('logs:familyAffinity')
+  },
+  get 'device-affinity'() {
+    return translate('logs:deviceAffinity')
+  },
+  get 'priority-load'() {
+    return translate('logs:priorityLoad')
+  },
+  get 'seat-held'() {
+    return translate('logs:seatHeld')
+  },
+  get balanced() {
+    return translate('logs:balanced')
+  },
+  get gateway_worker() {
+    return translate('logs:gatewayWorkerSelection')
+  },
+  get gateway_worker_retry() {
+    return translate('logs:gatewayWorkerRetry')
+  },
+  get gateway_worker_observed() {
+    return translate('logs:gatewayWorkerObserved')
+  },
+  get fill() {
+    return translate('logs:fill')
+  },
+  get queued() {
+    return translate('logs:queuedGrant')
+  },
+  get peek() {
+    return translate('logs:singleCandidate')
+  },
   // 预调度之前的轮询策略已删除，但 request_attempts 里的历史行仍带这两个值。
-  'round-robin': '轮询',
-  'weighted-round-robin': '加权轮询',
+  get 'round-robin'() {
+    return translate('logs:roundRobin')
+  },
+  get 'weighted-round-robin'() {
+    return translate('logs:weightedRoundRobin')
+  },
 }
 
 export function selectionReasonLabel(reason: string | null): string | null {
@@ -264,14 +324,30 @@ export function selectionReasonLabel(reason: string | null): string | null {
 }
 
 const TERMINAL_STATE_LABELS: Record<string, string> = {
-  verified: '成功',
-  incomplete: '响应未完整结束',
-  transport_error: '传输错误',
-  cancelled: '已取消',
-  exhausted: '候选耗尽',
-  rejected: '被拒绝',
-  error: '错误',
-  unknown: '未知',
+  get verified() {
+    return translate('logs:success')
+  },
+  get incomplete() {
+    return translate('logs:incompleteResponse')
+  },
+  get transport_error() {
+    return translate('logs:transportError')
+  },
+  get cancelled() {
+    return translate('logs:cancelled')
+  },
+  get exhausted() {
+    return translate('logs:candidatesExhausted')
+  },
+  get rejected() {
+    return translate('logs:rejected')
+  },
+  get error() {
+    return translate('logs:error')
+  },
+  get unknown() {
+    return translate('logs:unknown')
+  },
 }
 
 export function terminalStateLabel(state: string | null): string | null {
@@ -292,133 +368,95 @@ export function chainItemStatus(item: ProviderChainItem): ChainItemStatus {
   return 'pending'
 }
 
+/** Gateway Worker 的 BPS 尝试标签：BPS 或“BPS · 阶段 X”；其他通道为 null。 */
+export function attemptRouteLabel(item: ProviderChainItem): string | null {
+  if (item.route !== 'bps') return null
+  return item.stage
+    ? translate('logs:bpsAttemptStage', { stage: item.stage })
+    : translate('logs:bpsAttempt')
+}
+
 /** 尝试的展示名：槽位名 → 槽位 id → 账号。 */
 export function chainItemName(item: ProviderChainItem): string {
-  return item.vmName || item.vmId || item.providerName || '未知'
+  return (
+    item.vmName || item.vmId || item.providerName || translate('logs:unknown')
+  )
 }
 
 /** 重试次数 = 尝试数 - 1（每条 request_attempts 都是真实上游请求）。 */
-export function retryCount(chain: readonly ProviderChainItem[]): number {
-  return Math.max(0, chain.length - 1)
+export function retryCount(
+  chain: readonly ProviderChainItem[] | null | undefined
+): number {
+  return Math.max(0, Array.isArray(chain) ? chain.length - 1 : 0)
 }
 
 /** 最终服务方：已提交下游的那次，否则最后一次。 */
 export function finalChainItem(
-  chain: readonly ProviderChainItem[]
+  chain: readonly ProviderChainItem[] | null | undefined
 ): ProviderChainItem | null {
+  if (!Array.isArray(chain)) return null
   for (let i = chain.length - 1; i >= 0; i--) {
     if (chain[i].downstreamCommitted) return chain[i]
   }
   return chain.length ? chain[chain.length - 1] : null
 }
 
-/** 行级供应商名：最终尝试 → 行上的槽位 / 账号 → 未知。 */
+/** 行级账号名：最终尝试 → 行上的槽位 / 账号 → 未知。 */
 export function finalProviderName(row: UsageLogRow): string {
   const last = finalChainItem(row.providerChain)
   if (last) return chainItemName(last)
-  return row.vmName || row.vmId || row.providerName || '未知'
+  return row.vmName || row.vmId || row.providerName || translate('logs:unknown')
 }
 
-/** 首次尝试的实测队列等待。历史总调度时间不能当作排队。 */
+/** 队列等待取首次尝试：后续尝试的 wait 只是重试间隔，不是排队。 */
 export function queueWaitMs(
-  chain: readonly ProviderChainItem[]
+  chain: readonly ProviderChainItem[] | null | undefined
 ): number | null {
-  const wait = chain[0]?.queueWaitMs
+  const wait = Array.isArray(chain) ? chain[0]?.waitMs : null
   return wait != null && wait >= 0 ? wait : null
 }
 
 // ---------- 延迟分解 ----------
 
 export type LatencySegment = {
-  key:
-    | 'wait'
-    | 'scheduling'
-    | 'prefill'
-    | 'tokenWait'
-    | 'generation'
-    | 'finalization'
+  key: 'wait' | 'ttft' | 'generation'
   label: string
   ms: number
   percent: number
   color: string
 }
 
-function measuredNonNeg(n: number | null | undefined): number | null {
-  return n != null && Number.isFinite(n) && n >= 0 ? n : null
-}
-
 /**
- * 排队 → 上游响应等待（至 TTFB）→ 首 Token 等待（TTFB→TTFT）→ 内容输出 → 收尾。
- * 生成段只用实测 `generationMs`，终点 = firstByteMs + generationMs；
- * 缺窗口不把总耗时减 TTFT 当成生成。越界的排队只丢该段。
+ * hub `LatencyBreakdownBar` 的三段，TTFB 段（tapmodels 无数据）换成排队等待：
+ * 等待 → 等待首 Token → 生成。首 token 越界整体放弃；等待越界只丢该段。
  */
 export function latencySegments(input: {
   waitMs: number | null
-  queueWaitMs?: number | null
-  schedulingMs?: number | null
-  firstByteMs: number | null
   ttftMs: number | null
-  generationMs: number | null
   durationMs: number | null
 }): LatencySegment[] | null {
-  const durationMs = measuredNonNeg(input.durationMs)
-  if (durationMs == null || durationMs <= 0) return null
-
-  const firstByteMs = measuredNonNeg(input.firstByteMs)
-  const ttftMs = measuredNonNeg(input.ttftMs)
-  const generationMs = measuredNonNeg(input.generationMs)
-  const waitMs = measuredNonNeg(input.waitMs)
-
-  if (firstByteMs != null && firstByteMs > durationMs) return null
-  if (ttftMs != null && ttftMs > durationMs) return null
-  if (firstByteMs != null && ttftMs != null && ttftMs < firstByteMs) return null
-
-  const cap = firstByteMs ?? ttftMs
-  const wait = waitMs != null && cap != null && waitMs <= cap ? waitMs : 0
-  const queue = measuredNonNeg(input.queueWaitMs)
-  const scheduling = measuredNonNeg(input.schedulingMs)
-  const split =
-    queue != null && scheduling != null && queue + scheduling <= wait + 1
-  const prefill = firstByteMs != null ? firstByteMs - wait : 0
-  const tokenWait =
-    firstByteMs != null && ttftMs != null
-      ? ttftMs - firstByteMs
-      : firstByteMs == null && ttftMs != null
-        ? ttftMs - wait
-        : 0
-
-  let generation = 0
-  let finalization = 0
-  const windowMs =
-    generationMs != null && generationMs > 0 ? generationMs : null
-  if (firstByteMs != null && windowMs != null) {
-    const endMs = firstByteMs + windowMs
-    if (
-      endMs <= durationMs &&
-      (ttftMs == null || (ttftMs >= firstByteMs && ttftMs <= endMs))
-    ) {
-      const visibleStart = ttftMs != null ? ttftMs : firstByteMs
-      generation = endMs - visibleStart
-      finalization = durationMs - endMs
-    }
-  }
-
-  const generationLabel =
-    firstByteMs != null && ttftMs != null ? '内容输出' : '上游输出时间'
+  const { ttftMs, durationMs } = input
+  if (ttftMs == null || durationMs == null) return null
+  if (ttftMs < 0 || durationMs <= 0 || ttftMs > durationMs) return null
+  const wait =
+    input.waitMs != null && input.waitMs >= 0 && input.waitMs <= ttftMs
+      ? input.waitMs
+      : 0
   const parts: Array<[LatencySegment['key'], string, number, string]> = [
-    ['scheduling', '调度处理', split ? scheduling : 0, 'bg-indigo-500'],
+    ['wait', translate('logs:queueWait'), wait, 'bg-blue-500'],
     [
-      'wait',
-      split ? '排队等待' : '调度与排队（未拆分）',
-      split ? queue : wait,
-      'bg-blue-500',
+      'ttft',
+      translate('logs:awaitingFirstToken'),
+      ttftMs - wait,
+      'bg-violet-500',
     ],
-    ['prefill', '上游响应等待', prefill, 'bg-sky-500'],
-    ['tokenWait', '首 Token 等待', tokenWait, 'bg-violet-500'],
-    ['generation', generationLabel, generation, 'bg-emerald-500'],
-    ['finalization', '收尾', finalization, 'bg-slate-400'],
+    [
+      'generation',
+      translate('logs:generationTime'),
+      durationMs - ttftMs,
+      'bg-emerald-500',
+    ],
   ]
-  if (parts.every(([, , ms]) => ms <= 0)) return null
   return parts.map(([key, label, ms, color]) => ({
     key,
     label,
@@ -431,4 +469,48 @@ export function latencySegments(input: {
 /** 条宽：真实占比，非零段至少 3%，免得 1ms 段塌成 0 宽却仍出现在图例里。 */
 export function segmentWidth(segment: LatencySegment): number {
   return segment.ms > 0 ? Math.max(segment.percent, 3) : 0
+}
+
+/** Class IDs are API values; labels are resolved in the current UI language. */
+const ERROR_LABEL_KEYS: Record<string, string> = {
+  auth: 'logs:errorClass.auth',
+  request: 'logs:errorClass.request',
+  signature: 'logs:errorClass.signature',
+  rate_limit: 'logs:errorClass.rate_limit',
+  quota: 'logs:errorClass.quota',
+  overloaded: 'logs:errorClass.overloaded',
+  unavailable: 'logs:errorClass.unavailable',
+  timeout: 'logs:errorClass.timeout',
+  credential: 'logs:errorClass.credential',
+  proxy: 'logs:errorClass.proxy',
+  upstream: 'logs:errorClass.upstream',
+  other: 'logs:errorClass.other',
+  distill: 'logs:errorClass.distill',
+  refusal: 'logs:errorClass.refusal',
+}
+export function errorClassLabel(
+  id: string | null | undefined,
+  fallback?: string | null
+): string {
+  return id && ERROR_LABEL_KEYS[id]
+    ? translate(ERROR_LABEL_KEYS[id])
+    : fallback || id || translate('logs:unknown')
+}
+
+export function errorOwnerLabel(owner: string): string {
+  if (owner === 'provider') return translate('logs:ownerProvider')
+  if (owner === 'client') return translate('logs:ownerClient')
+  if (owner === 'platform') return translate('logs:ownerPlatform')
+  return owner
+}
+
+export type RequestType = 'ws' | 'stream' | 'sync'
+
+/** 「类型」列：入站 WebSocket 优先，其余按是否流式；未知流式标记按非流式。 */
+export function requestTypeOf(row: {
+  inboundTransport?: string | null
+  stream: boolean | null
+}): RequestType {
+  if (row.inboundTransport === 'websocket') return 'ws'
+  return row.stream ? 'stream' : 'sync'
 }

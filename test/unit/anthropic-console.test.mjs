@@ -81,7 +81,10 @@ test('stored OpenAI key retains its protocol for testing without exposing its se
 test('saving fetched models merges against current endpoint aliases on the server', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-model-merge-'))
   const store = new ApiEndpointStore({ dataDir: dir })
-  const endpoint = store.create({ base_url: 'https://relay.example', models: [{ name: 'm1', alias: 'custom-alias' }] })
+  const endpoint = await store.create({
+    base_url: 'https://relay.example',
+    models: [{ name: 'm1', alias: 'custom-alias' }],
+  })
   const response = {}
   const scheduler = new ApiScheduler()
   const handlePanel = createPanelHandler({
@@ -91,7 +94,7 @@ test('saving fetched models merges against current endpoint aliases on the serve
     apiScheduler: scheduler,
     requireAuth(req) {
       req.panelUser = 'admin'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, body) {
@@ -459,7 +462,7 @@ test('panel keeps upstream 401 and 429 inside data so the page can render them',
       },
       requireAuth(req) {
         req.panelUser = 'admin'
-        req.panelRole = 'admin'
+        req.panelRole = 'super_admin'
         return true
       },
       json(_res, status, body) {
@@ -490,11 +493,11 @@ test('panel keeps upstream 401 and 429 inside data so the page can render them',
 })
 
 test('anthropic console is admin-only', () => {
-  assert.equal(canViewPage('admin', 'anthropic'), true)
+  assert.equal(canViewPage('super_admin', 'anthropic'), true)
   assert.equal(canViewPage('user', 'anthropic'), false)
-  assert.equal(canViewPage('super', 'anthropic'), false)
+  assert.equal(canViewPage('admin', 'anthropic'), false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'user').ok, false)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'super_admin').ok, true)
 })
 test('saved Anthropic row reloads its proxy and can test or fetch models without retyping the key', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-console-row-'))
@@ -530,7 +533,7 @@ test('saved Anthropic row reloads its proxy and can test or fetch models without
     },
     requireAuth(req) {
       req.panelUser = 'admin'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, body) {
@@ -558,7 +561,7 @@ test('saved Anthropic row reloads its proxy and can test or fetch models without
   const savedKey = response.body.item.api_key_entries[0]
   assert.equal(savedKey.proxy_id, 'px-1')
 
-  const reloaded = new ApiEndpointStore({ dataDir: dir }).list()
+  const reloaded = await new ApiEndpointStore({ dataDir: dir }).list()
   assert.equal(reloaded[0].api_key_entries[0].proxy_id, 'px-1')
   assert.equal(reloaded[0].api_key_entries[0].api_key.includes('sk-ant-saved'), false)
 
@@ -641,7 +644,7 @@ test('an explicit direct choice overrides a saved proxy for both test and model 
     forwardApi: forward,
     requireAuth(req) {
       req.panelUser = 'admin'
-      req.panelRole = 'admin'
+      req.panelRole = 'super_admin'
       return true
     },
     json(_res, status, body) {
@@ -664,4 +667,37 @@ test('an explicit direct choice overrides a saved proxy for both test and model 
   await handlePanel(models, {}, new URL('http://localhost/api/panel/api-endpoints/fetch-models'))
   assert.equal(response.status, 200, JSON.stringify(response.body))
   assert.deepEqual(seen, ['', ''])
+})
+
+test('a saved key with only a typed proxy_url keeps that proxy unless the caller picks one', async () => {
+  const store = {
+    listRaw: () => [
+      {
+        base_url: 'https://api.anthropic.com',
+        auth_scheme: 'x_api_key',
+        api_key_entries: [{ id: 'ek_1', api_key: 'sk-ant-saved', proxy_id: '', proxy_url: 'socks5://10.0.0.8:1080' }],
+      },
+    ],
+  }
+  const seen = []
+  const forward = async (request) => {
+    seen.push(request.proxyUrl)
+    return {
+      statusCode: 200,
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from(JSON.stringify({ content: [{ type: 'text', text: 'pong' }] }))
+      },
+    }
+  }
+  const run = (key) =>
+    runAnthropicConsole({
+      cfg: {},
+      store,
+      input: { model: 'claude-haiku-5-5', message: 'Hi', keys: [key], key_index: 0 },
+      forward,
+    })
+  const saved = await run({ key_id: 'ek_1' })
+  await run({ key_id: 'ek_1', proxy_id: '' })
+  assert.deepEqual(seen, ['socks5://10.0.0.8:1080', ''])
+  assert.equal(saved.items[0].proxy, true)
 })

@@ -1,54 +1,32 @@
 import { type SVGProps } from 'react'
 import { cn } from '@/lib/utils'
+import { useBranding } from '@/context/branding-provider'
 
 export function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {
+  const brand = useBranding()
+  if (brand.logo_url)
+    return (
+      <img
+        src={brand.logo_url}
+        alt={props['aria-hidden'] ? '' : brand.name}
+        className={cn(
+          'block size-6 max-h-full max-w-full object-contain',
+          className
+        )}
+      />
+    )
   return (
     <svg
-      id='vm2api-brand-logo'
-      viewBox='0 0 48 48'
+      id='tapmodels-brand-logo'
+      viewBox='0 0 64 64'
       xmlns='http://www.w3.org/2000/svg'
-      fill='none'
-      className={cn('size-6', className)}
+      className={cn('block size-6 max-h-full max-w-full', className)}
       {...props}
     >
-      <title>vm2api</title>
-      <defs>
-        <filter id='vm2api-glow' x='-30%' y='-30%' width='160%' height='160%'>
-          <feGaussianBlur in='SourceGraphic' stdDeviation='2' result='blur' />
-          <feMerge>
-            <feMergeNode in='blur' />
-            <feMergeNode in='SourceGraphic' />
-          </feMerge>
-        </filter>
-        <linearGradient id='vm2api-cyan' x1='0%' y1='0%' x2='100%' y2='100%'>
-          <stop offset='0%' stopColor='#00f0ff' />
-          <stop offset='100%' stopColor='#0099ff' />
-        </linearGradient>
-      </defs>
-
-      {/* Terminal Chevron > */}
-      <path
-        d='M12 12 L24 24 L12 36'
-        stroke='currentColor'
-        strokeWidth='5.5'
-        strokeLinecap='round'
-        strokeLinejoin='round'
-      />
-
-      {/* Neon Cyan Slash / */}
-      <path
-        d='M28 36 L36 12'
-        stroke='url(#vm2api-cyan)'
-        strokeWidth='5.5'
-        strokeLinecap='round'
-        filter='url(#vm2api-glow)'
-      />
-      <path
-        d='M28 36 L36 12'
-        stroke='#00f0ff'
-        strokeWidth='4.5'
-        strokeLinecap='round'
-      />
+      <title>{brand.name}</title>
+      <rect x='7' y='12' width='30' height='16' rx='5' fill='#101820' />
+      <rect x='40' y='12' width='17' height='16' rx='5' fill='#08b7a6' />
+      <rect x='25' y='31' width='20' height='24' rx='5' fill='#101820' />
     </svg>
   )
 }

@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import type {
   CragLicenseResponse,
   VmActiveHours,
@@ -74,7 +75,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 export function normalizePanelError(
   payload: unknown,
   status = 0,
-  fallback = '请求失败'
+  fallback = t('lib:api.requestFailed')
 ): NormalizedPanelError {
   const body = asRecord(payload)
   const error = asRecord(body?.error)
@@ -107,8 +108,32 @@ function apiErrorFrom(payload: unknown, status: number, fallback: string) {
 function unwrapEnvelope(payload: unknown, status: number): unknown {
   const body = asRecord(payload)
   if (!body) return payload
-  if (body.ok === false) throw apiErrorFrom(body, status, '请求失败')
+  if (body.ok === false)
+    throw apiErrorFrom(body, status, t('lib:api.requestFailed'))
   return body.data !== undefined ? body.data : payload
+}
+
+// Only HTTP fallback labels are localized. Structured server messages stay verbatim.
+const HTTP_ERROR_KEYS: Record<number, string> = {
+  400: 'badRequest',
+  403: 'forbidden',
+  404: 'notFound',
+  408: 'requestTimeout',
+  409: 'conflict',
+  413: 'payloadTooLarge',
+  422: 'unprocessable',
+  429: 'rateLimited',
+  500: 'internalError',
+  502: 'badGateway',
+  503: 'serviceUnavailable',
+  504: 'gatewayTimeout',
+}
+
+function httpErrorFallback(res: Response): string {
+  const key = HTTP_ERROR_KEYS[res.status]
+  return key
+    ? t('lib:api.' + key)
+    : res.statusText || t('lib:api.requestFailed')
 }
 
 function isPanelApiPath(path: string): boolean {
@@ -133,14 +158,14 @@ export async function api<T = unknown>(
   path: string,
   opts: RequestInit = {}
 ): Promise<T> {
-  if (!hasSession()) throw new ApiError('未登录', 401)
+  if (!hasSession()) throw new ApiError(t('lib:api.notSignedIn'), 401)
   const res = await panelFetch(path, opts)
   const json = (await res.json().catch(() => ({}))) as Json
   if (res.status === 401) {
-    throw apiErrorFrom(json, res.status, '登录已过期')
+    throw apiErrorFrom(json, res.status, t('lib:api.sessionExpired'))
   }
   if (!res.ok) {
-    throw apiErrorFrom(json, res.status, res.statusText || '请求失败')
+    throw apiErrorFrom(json, res.status, httpErrorFallback(res))
   }
   return unwrapEnvelope(json, res.status) as T
 }
@@ -160,6 +185,8 @@ export type VmPatch = {
   allowed_models?: string[]
   auth_scheme?: string
   schedule_level?: number | 'auto' | null
+  /** OpenAI 选槽权重 1–100；null = 回到默认 1。 */
+  weight?: number | null
   /** null = 清除工作时段，恢复 24h 接单。 */
   active_hours?: VmActiveHours | null
   /** Docker 槽在线提升内存（仅上调）。 */
@@ -209,10 +236,10 @@ export async function loginRequest(input: {
       }),
     })
   } catch {
-    throw new ApiError(`无法连接鉴权服务: ${url}`)
+    throw new ApiError(t('lib:api.authUnavailable', { url }))
   }
   if (res.status === 405)
-    throw new ApiError(`405 Method Not Allowed: ${url}`, 405)
+    throw new ApiError(t('lib:api.methodNotAllowed', { url }), 405)
   const json = (await res.json().catch(() => ({}))) as {
     token?: string
     user?: string
@@ -225,7 +252,7 @@ export async function loginRequest(input: {
     throw new ApiError(
       json.error?.message ||
         json.message ||
-        `登录失败 HTTP ${res.status} @ ${url}`,
+        t('lib:api.loginFailed', { status: res.status, url }),
       res.status
     )
   }

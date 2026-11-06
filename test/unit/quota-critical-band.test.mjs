@@ -69,7 +69,7 @@ const largeColdRisk = {
   largeCold: true,
 }
 
-function setUtil(q, id, { u5 = null, u7 = null } = {}) {
+async function setUtil(q, id, { u5 = null, u7 = null } = {}) {
   const headers = {}
   if (u5 != null) {
     headers['anthropic-ratelimit-unified-5h-utilization'] = String(u5)
@@ -79,84 +79,84 @@ function setUtil(q, id, { u5 = null, u7 = null } = {}) {
     headers['anthropic-ratelimit-unified-7d-utilization'] = String(u7)
     headers['anthropic-ratelimit-unified-7d-status'] = 'allowed'
   }
-  q.ingestHeaders(id, headers)
+  await q.ingestHeaders(id, headers)
 }
 
-test('79% admits a small request and rejects a single large cold with inflight=0', () => {
+test('79% admits a small request and rejects a single large cold with inflight=0', async () => {
   const q = quota()
-  setUtil(q, 'a', { u5: 0.79 })
-  assert.equal(q.canAccept('a', { requestRisk: smallRisk }).ok, true)
-  const large = q.canAccept('a', { requestRisk: largeColdRisk })
+  await setUtil(q, 'a', { u5: 0.79 })
+  assert.equal((await q.canAccept('a', { requestRisk: smallRisk })).ok, true)
+  const large = await q.canAccept('a', { requestRisk: largeColdRisk })
   assert.equal(large.ok, false)
   assert.equal(large.reason, 'quota_guard_request_too_large')
   assert.equal(q.tryAcquire('a', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
   assert.equal(q.inflight.get('a') || 0, 0)
 })
 
-test('5h and 7d bands are independent', () => {
+test('5h and 7d bands are independent', async () => {
   const q = quota()
-  setUtil(q, 'five', { u5: 0.79, u7: 0.2 })
-  assert.equal(q.canAccept('five', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
-  assert.equal(q.canAccept('five', { requestRisk: smallRisk }).ok, true)
+  await setUtil(q, 'five', { u5: 0.79, u7: 0.2 })
+  assert.equal((await q.canAccept('five', { requestRisk: largeColdRisk })).reason, 'quota_guard_request_too_large')
+  assert.equal((await q.canAccept('five', { requestRisk: smallRisk })).ok, true)
 
-  setUtil(q, 'seven', { u5: 0.2, u7: 0.78 })
-  assert.equal(q.canAccept('seven', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
-  assert.equal(q.canAccept('seven', { requestRisk: smallRisk }).ok, true)
+  await setUtil(q, 'seven', { u5: 0.2, u7: 0.78 })
+  assert.equal((await q.canAccept('seven', { requestRisk: largeColdRisk })).reason, 'quota_guard_request_too_large')
+  assert.equal((await q.canAccept('seven', { requestRisk: smallRisk })).ok, true)
 
-  setUtil(q, 'open', { u5: 0.5, u7: 0.5 })
-  assert.equal(q.canAccept('open', { requestRisk: largeColdRisk }).ok, true)
+  await setUtil(q, 'open', { u5: 0.5, u7: 0.5 })
+  assert.equal((await q.canAccept('open', { requestRisk: largeColdRisk })).ok, true)
 })
 
-test('past the line plus overshoot still blocks ordinary requests', () => {
+test('past the line plus overshoot still blocks ordinary requests', async () => {
   const q = quota()
-  setUtil(q, 'line', { u5: 0.8 })
-  assert.equal(q.canAccept('line', { requestRisk: smallRisk }).ok, true, 'at the line, inside the 5% overshoot')
-  setUtil(q, 'full', { u5: 0.85 })
-  assert.equal(q.canAccept('full', { requestRisk: smallRisk }).reason, 'quota_5h_safety')
-  setUtil(q, 'over', { u5: 0.99 })
-  assert.equal(q.canAccept('over').reason, 'quota_5h_safety')
+  await setUtil(q, 'line', { u5: 0.8 })
+  assert.equal((await q.canAccept('line', { requestRisk: smallRisk })).ok, true, 'at the line, inside the 5% overshoot')
+  await setUtil(q, 'full', { u5: 0.85 })
+  assert.equal((await q.canAccept('full', { requestRisk: smallRisk })).reason, 'quota_5h_safety')
+  await setUtil(q, 'over', { u5: 0.99 })
+  assert.equal((await q.canAccept('over')).reason, 'quota_5h_safety')
 })
 
-test('failed or cancelled release does not leave a reservation or stale band debt', () => {
+test('failed or cancelled release does not leave a reservation or stale band debt', async () => {
   const q = quota()
-  setUtil(q, 'rel', { u5: 0.79 })
+  await setUtil(q, 'rel', { u5: 0.79 })
   assert.equal(q.tryAcquire('rel', { requestRisk: smallRisk }).ok, true)
   assert.equal(q.inflight.get('rel'), 1)
   q.release('rel')
   assert.equal(q.inflight.get('rel'), 0)
   assert.equal(q.staleSettled.get('rel') || 0, 0)
-  assert.equal(q.canAccept('rel', { requestRisk: smallRisk }).ok, true)
+  assert.equal((await q.canAccept('rel', { requestRisk: smallRisk })).ok, true)
 })
 
-test('stale reading after an in-band settle blocks the next large request', () => {
+test('stale reading after an in-band settle blocks the next large request', async () => {
   const q = quota()
-  setUtil(q, 'stale', { u5: 0.79 })
+  await setUtil(q, 'stale', { u5: 0.79 })
   assert.equal(q.tryAcquire('stale', { requestRisk: smallRisk }).ok, true)
-  q.noteBandSettled('stale')
+  await q.noteBandSettled('stale')
   q.release('stale')
-  assert.equal(q.canAccept('stale', { requestRisk: smallRisk }).ok, true)
-  assert.equal(q.canAccept('stale', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
-  setUtil(q, 'stale', { u5: 0.86 })
-  assert.equal(q.canAccept('stale', { requestRisk: smallRisk }).reason, 'quota_5h_safety')
+  assert.equal((await q.canAccept('stale', { requestRisk: smallRisk })).ok, true)
+  assert.equal((await q.canAccept('stale', { requestRisk: largeColdRisk })).reason, 'quota_guard_request_too_large')
+  await setUtil(q, 'stale', { u5: 0.86 })
+  assert.equal((await q.canAccept('stale', { requestRisk: smallRisk })).reason, 'quota_5h_safety')
 })
 
-test('a same-percent header after settle keeps the stale large-cold block', () => {
+test('a same-percent header after settle keeps the stale large-cold block', async () => {
   const q = quota()
-  setUtil(q, 'lag', { u5: 0.78 })
+  await setUtil(q, 'lag', { u5: 0.78 })
   assert.equal(q.tryAcquire('lag', { requestRisk: smallRisk }).ok, true)
-  q.noteBandSettled('lag')
+  await q.noteBandSettled('lag')
   q.release('lag')
-  setUtil(q, 'lag', { u5: 0.78 })
-  assert.equal(q.canAccept('lag', { requestRisk: largeColdRisk }).reason, 'quota_guard_request_too_large')
+  await setUtil(q, 'lag', { u5: 0.78 })
+  assert.equal((await q.canAccept('lag', { requestRisk: largeColdRisk })).reason, 'quota_guard_request_too_large')
 })
 
-test('official usage refresh clears stale band debt', () => {
+test('official usage refresh clears stale band debt', async () => {
   const q = quota()
-  setUtil(q, 'off', { u5: 0.79 })
+  await setUtil(q, 'off', { u5: 0.79 })
   assert.equal(q.tryAcquire('off', { requestRisk: smallRisk }).ok, true)
-  q.noteBandSettled('off')
+  await q.noteBandSettled('off')
   q.release('off')
-  q.ingestOAuthUsage('off', {
+  await q.ingestOAuthUsage('off', {
     ok: true,
     limits_present: true,
     five_hour: { utilization: 0.79, status: 'allowed' },
@@ -200,15 +200,19 @@ class RuntimeRepo {
   constructor(accounts = null) {
     this.accounts = accounts
   }
-  schedulingSnapshot(ids) {
+  async schedulingSnapshot(ids) {
     return new Map(
-      ids.map((id) => [
-        id,
-        {
-          state: this.get(id),
-          account: this.accounts?.get(id) ? { status: 'active', schedulable: true, ...this.accounts.get(id) } : null,
-        },
-      ]),
+      await Promise.all(
+        ids.map(async (id) => [
+          id,
+          {
+            state: this.get(id),
+            account: (await this.accounts?.get(id))
+              ? { status: 'active', schedulable: true, ...(await this.accounts.get(id)) }
+              : null,
+          },
+        ]),
+      ),
     )
   }
   writeHeartbeat(input) {
@@ -230,8 +234,8 @@ test('scheduler switches using requestRisk on the quotaRequest body estimate', a
   const root = schedulerProject()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const accountQuota = quota()
-  setUtil(accountQuota, 'account-1', { u5: 0.79 })
-  setUtil(accountQuota, 'account-2', { u5: 0.2 })
+  await setUtil(accountQuota, 'account-1', { u5: 0.79 })
+  await setUtil(accountQuota, 'account-2', { u5: 0.2 })
   const orig = accountQuota.canAccept.bind(accountQuota)
   accountQuota.canAccept = (id, opts = {}) => orig(id, { ...opts, requestRisk: largeColdRisk })
   const origAcq = accountQuota.tryAcquire.bind(accountQuota)
@@ -257,8 +261,8 @@ test('all in-band accounts yield quota_guard_request_too_large', async (t) => {
   const root = schedulerProject()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const accountQuota = quota()
-  setUtil(accountQuota, 'account-1', { u5: 0.79 })
-  setUtil(accountQuota, 'account-2', { u5: 0.77 })
+  await setUtil(accountQuota, 'account-1', { u5: 0.79 })
+  await setUtil(accountQuota, 'account-2', { u5: 0.77 })
   const orig = accountQuota.canAccept.bind(accountQuota)
   accountQuota.canAccept = (id, opts = {}) => orig(id, { ...opts, requestRisk: largeColdRisk })
   const pool = new PoolScheduler({
@@ -336,7 +340,7 @@ test('token estimate counts a long prompt as large cold on first turn', () => {
   assert.equal(risk.largeCold, true)
 })
 
-test('output ceiling does not make a short prompt large in the critical band', () => {
+test('output ceiling does not make a short prompt large in the critical band', async () => {
   clearCachePrefixSessions()
   const account = 'band'
   const session = 'sess-demo'
@@ -381,15 +385,15 @@ test('output ceiling does not make a short prompt large in the critical band', (
   assert.ok(omitted.uncachedTokens < DEFAULT_LARGE_COLD_UNCACHED_TOKENS)
 
   const q = quota()
-  setUtil(q, account, { u5: 0.79 })
+  await setUtil(q, account, { u5: 0.79 })
   const warmReq = { body: turn(2), sessionId: session }
-  assert.equal(q.canAccept(account, { quotaRequest: warmReq }).ok, true)
+  assert.equal((await q.canAccept(account, { quotaRequest: warmReq })).ok, true)
   assert.equal(q.tryAcquire(account, { quotaRequest: warmReq }).ok, true)
-  q.noteBandSettled(account)
+  await q.noteBandSettled(account)
   q.release(account)
   assert.equal(q.staleSettled.get(account), 1)
-  assert.equal(q.canAccept(account, { quotaRequest: warmReq }).ok, true)
-  assert.equal(q.canAccept(account, { quotaRequest: { body: turn(0), sessionId: 'sess-new' } }).ok, true)
+  assert.equal((await q.canAccept(account, { quotaRequest: warmReq })).ok, true)
+  assert.equal((await q.canAccept(account, { quotaRequest: { body: turn(0), sessionId: 'sess-new' } })).ok, true)
 
   const huge = {
     model: 'claude-opus-5-5',
@@ -398,7 +402,7 @@ test('output ceiling does not make a short prompt large in the critical band', (
   }
   assert.equal(estimateRequestRisk(huge, { accountId: account, sessionId: 'sess-huge' }).largeCold, true)
   assert.equal(
-    q.canAccept(account, { quotaRequest: { body: huge, sessionId: 'sess-huge' } }).reason,
+    (await q.canAccept(account, { quotaRequest: { body: huge, sessionId: 'sess-huge' } })).reason,
     'quota_guard_request_too_large',
   )
 })
@@ -433,7 +437,7 @@ test('quota prediction respects caller cache ownership when switching away from 
   assert.equal(risk.cold, !!actual.break)
 })
 
-test('stale band still blocks a warm turn whose new user text is itself large', () => {
+test('stale band still blocks a warm turn whose new user text is itself large', async () => {
   clearCachePrefixSessions()
   const base = {
     model: 'claude-opus-5-5',
@@ -455,13 +459,13 @@ test('stale band still blocks a warm turn whose new user text is itself large', 
   assert.equal(risk.largeCold, false)
   assert.ok(risk.uncachedTokens >= DEFAULT_LARGE_COLD_UNCACHED_TOKENS)
   const q = quota()
-  setUtil(q, 'band', { u5: 0.79 })
+  await setUtil(q, 'band', { u5: 0.79 })
   const quotaRequest = { body: extended, sessionId: 'sess' }
-  assert.equal(q.canAccept('band', { quotaRequest }).ok, true)
+  assert.equal((await q.canAccept('band', { quotaRequest })).ok, true)
   assert.equal(q.tryAcquire('band', { quotaRequest }).ok, true)
-  q.noteBandSettled('band')
+  await q.noteBandSettled('band')
   q.release('band')
-  assert.equal(q.canAccept('band', { quotaRequest }).reason, 'quota_guard_request_too_large')
+  assert.equal((await q.canAccept('band', { quotaRequest })).reason, 'quota_guard_request_too_large')
 })
 
 test('quota_guard_request_too_large stays a 429 and is not rewritten to pool_unavailable', () => {
@@ -475,12 +479,12 @@ test('quota_guard_request_too_large stays a 429 and is not rewritten to pool_una
   assert.equal(rewritten.body.error.code, 'quota_guard_request_too_large')
 })
 
-test('prompt estimate is skipped below the band and walked once for in-band accounts', () => {
+test('prompt estimate is skipped below the band and walked once for in-band accounts', async () => {
   resetPromptEstimateStats()
   const q = quota()
-  setUtil(q, 'low', { u5: 0.5, u7: 0.2 })
-  setUtil(q, 'band-a', { u5: 0.79 })
-  setUtil(q, 'band-b', { u5: 0.76 })
+  await setUtil(q, 'low', { u5: 0.5, u7: 0.2 })
+  await setUtil(q, 'band-a', { u5: 0.79 })
+  await setUtil(q, 'band-b', { u5: 0.76 })
   const body = {
     model: 'claude-opus-4-5',
     max_tokens: 1024,
@@ -488,16 +492,16 @@ test('prompt estimate is skipped below the band and walked once for in-band acco
     tools: [{ name: 'Read', description: 'read a file', input_schema: { type: 'object' } }],
   }
   const quotaRequest = { body, sessionId: 'sess-1' }
-  assert.equal(q.canAccept('low', { quotaRequest }).ok, true)
+  assert.equal((await q.canAccept('low', { quotaRequest })).ok, true)
   assert.equal(promptEstimateStats.misses, 0)
-  q.canAccept('band-a', { quotaRequest })
-  q.canAccept('band-b', { quotaRequest })
+  await q.canAccept('band-a', { quotaRequest })
+  await q.canAccept('band-b', { quotaRequest })
   q.tryAcquire('band-a', { quotaRequest })
   assert.equal(promptEstimateStats.misses, 1)
   q.release('band-a')
 })
 
-test('admission and the panel agree near the gate (vm-10: pro, 7d 90% of a 95% line)', () => {
+test('admission and the panel agree near the gate (vm-10: pro, 7d 90% of a 95% line)', async () => {
   const tier = { limit_5h: 0.95, limit_7d: 0.95, max_concurrency: 2 }
   const q = new AccountQuota({
     dataDir: tmpDir(),
@@ -506,14 +510,14 @@ test('admission and the panel agree near the gate (vm-10: pro, 7d 90% of a 95% l
       tiers: { default: tier, pro: tier, max: tier },
     },
   })
-  const panel = (u7) => {
-    q.ingestHeaders('vm10', {
+  const panel = async (u7) => {
+    await q.ingestHeaders('vm10', {
       'anthropic-ratelimit-unified-5h-utilization': '0.12',
       'anthropic-ratelimit-unified-5h-status': 'allowed',
       'anthropic-ratelimit-unified-7d-utilization': String(u7),
       'anthropic-ratelimit-unified-7d-status': 'allowed_warning',
     })
-    const acc = q.repo.get('vm10')
+    const acc = await q.repo.get('vm10')
     const now = Date.now()
     return evaluateAccount({
       vm: { id: 'vm-10', schedulable: true },
@@ -528,19 +532,19 @@ test('admission and the panel agree near the gate (vm-10: pro, 7d 90% of a 95% l
     })
   }
 
-  const near = panel(0.9)
+  const near = await panel(0.9)
   assert.equal(near.key, 'drain', 'the console must not paint this as 可用')
   assert.equal(near.accept, true)
-  assert.equal(q.canAccept('vm10', { requestRisk: smallRisk }).ok, true)
+  assert.equal((await q.canAccept('vm10', { requestRisk: smallRisk })).ok, true)
   q.inflight.set('vm10', 1)
-  assert.equal(q.canAccept('vm10', { requestRisk: smallRisk }).reason, 'quota_band_inflight')
+  assert.equal((await q.canAccept('vm10', { requestRisk: smallRisk })).reason, 'quota_band_inflight')
   q.inflight.set('vm10', 0)
 
-  const open = panel(0.5)
+  const open = await panel(0.5)
   assert.equal(open.key, 'ok')
-  assert.equal(q.canAccept('vm10', { requestRisk: largeColdRisk }).ok, true)
+  assert.equal((await q.canAccept('vm10', { requestRisk: largeColdRisk })).ok, true)
 
-  const gated = panel(1)
+  const gated = await panel(1)
   assert.equal(gated.accept, false)
-  assert.equal(q.canAccept('vm10', { requestRisk: smallRisk }).ok, false)
+  assert.equal((await q.canAccept('vm10', { requestRisk: smallRisk })).ok, false)
 })

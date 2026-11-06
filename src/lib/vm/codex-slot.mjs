@@ -12,6 +12,7 @@ import {
   hasSpendableCodexCredits,
 } from '../protocol/codex-usage.mjs'
 import { openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
+import { codexUsageWindows, recordQuotaObservations } from '../usage/quota-observations.mjs'
 
 export { isCodexVm }
 
@@ -315,7 +316,12 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
   else delete vm.codex.extra.codex_limited_until
 }
 
-export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredits, credits, planType } = {}) {
+/** Writes the record synchronously when called; the observation history after it (async, R6 B7c). */
+export async function persistCodexQuotaSnapshot(
+  projectRoot,
+  vmId,
+  { extra, resetCredits, credits, planType, email, subscription } = {},
+) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   let vm
@@ -339,6 +345,11 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   }
   const plan = String(planType || '').trim()
   if (plan) vm.codex.plan_type = plan
+  const mail = String(email || '').trim()
+  if (mail) vm.codex.email = mail
+  if (subscription && typeof subscription === 'object') {
+    vm.codex.subscription = { ...subscription, fetched_at: new Date().toISOString() }
+  }
   if (resetCredits && typeof resetCredits === 'object') {
     vm.codex.reset_credits = {
       available_count: Math.max(0, Number(resetCredits.available_count) || 0),
@@ -352,7 +363,18 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   }
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(file, vm, { mode: 0o600 })
+  if (extra && typeof extra === 'object') await recordQuotaObservations(vmId, codexUsageWindows(vm.codex.usage))
   return vm
+}
+
+/** accounts/check purchase origin as the panel's billing channel key. */
+export function codexBillingType(origin) {
+  const value = String(origin || '').toLowerCase()
+  if (!value) return null
+  if (/ios|apple/.test(value)) return 'apple_subscription'
+  if (/android|google/.test(value)) return 'google_subscription'
+  if (/web|stripe/.test(value)) return 'stripe_subscription'
+  return value
 }
 
 export function summarizeCodexSlot(projectRoot, vm = {}) {
@@ -363,6 +385,8 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
   const usage = buildCodexUsageView(Object.keys(extra).length ? extraToCodexSnapshot(extra) : vm.codex?.usage || {})
   const hasAccess = !!(first.access_token || vm.codex?.has_access)
   const hasRefresh = !!(first.refresh_token || vm.codex?.has_refresh)
+  const subscription =
+    vm.codex?.subscription && typeof vm.codex.subscription === 'object' ? vm.codex.subscription : null
   return {
     platform: 'openai',
     family: 'codex',
@@ -371,8 +395,13 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     email: first.email || vm.codex?.email || vm.email || null,
     expires_at: first.expires_at || vm.codex?.expires_at || null,
     chatgpt_account_id: first.chatgpt_account_id || vm.codex?.chatgpt_account_id || null,
-    chatgpt_subscription_active_until: first.chatgpt_subscription_active_until || null,
+    // The live account check outranks the id_token claim, which is frozen at login.
+    chatgpt_subscription_active_until:
+      subscription?.renews_at || subscription?.expires_at || first.chatgpt_subscription_active_until || null,
     chatgpt_plan_type: first.chatgpt_plan_type || null,
+    subscription,
+    billing_type: codexBillingType(subscription?.purchase_origin_platform),
+    subscription_updated_at: subscription?.fetched_at || null,
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,

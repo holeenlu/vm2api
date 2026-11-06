@@ -64,14 +64,14 @@ function mkdtempOnDataVolume({ tmpDir }) {
 }
 
 /** Drop backups past the retention window (pre_restore keeps the newest 3). */
-function applyRetention(repo, retention) {
-  const drop = [...repo.beyondRetention(retention), ...repo.preRestoreBeyond(3)]
+async function applyRetention(repo, retention) {
+  const drop = [...(await repo.beyondRetention(retention)), ...(await repo.preRestoreBeyond(3))]
   for (const rec of drop) {
     try {
       if (rec.file_path && fs.existsSync(rec.file_path)) fs.rmSync(rec.file_path, { force: true })
     } catch {}
     try {
-      repo.remove(rec.id)
+      await repo.remove(rec.id)
     } catch {}
   }
   return drop.length
@@ -86,7 +86,7 @@ function applyRetention(repo, retention) {
  *
  * @returns backup record (status 'ok')
  */
-export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null, retention = 7 }) {
+export async function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null, retention = 7 }) {
   const repo = new BackupRepo(getDb())
   let tmp = null
   try {
@@ -169,7 +169,7 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
       fs.chmodSync(filePath, 0o600)
     } catch {}
 
-    const rec = repo.insert({
+    const rec = await repo.insert({
       id,
       created_at: createdAt,
       kind,
@@ -183,11 +183,11 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
       error: null,
       note: noteOut,
     })
-    applyRetention(repo, retention)
+    await applyRetention(repo, retention)
     return rec
   } catch (e) {
     try {
-      repo.insert({
+      await repo.insert({
         id,
         created_at: createdAt,
         kind,

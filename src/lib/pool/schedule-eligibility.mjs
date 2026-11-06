@@ -3,7 +3,8 @@
  * Green on the console must mean the scheduler will actually select the slot.
  */
 import { hasBoundExit, isLocalEgressProxy } from '../vm/egress.mjs'
-import { isVmScheduleReady, vmHasClaudeCredential, isCodexVm } from '../vm/vm-registry.mjs'
+import { vmScheduleReadyWith, vmHasClaudeCredential, isCodexVm } from '../vm/vm-registry.mjs'
+import { vendorRuntimeBlock } from '../vendor/vendor-runtime-policy.mjs'
 import { expiresAtToMs, hasRefreshPresence } from '../oauth/oauth-credentials.mjs'
 import { rustKernelBusy } from '../transport/rust-kernel-client.mjs'
 import { socksProxyEndpoint } from '../vm/socks-address.mjs'
@@ -101,12 +102,19 @@ export function slotHasBoundProxy(vm) {
   return hasBoundExit(vm.proxy)
 }
 
-export function evaluateSlotGate(vm) {
+/** Slot gate. Reads the supplier block (`vendorRuntimeBlock`) for supplier VMs; `vendorBlock` on the result lets reserve() re-check synchronously. */
+export async function evaluateSlotGate(vm) {
+  const vendorBlock = isCodexVm(vm) ? null : await vendorRuntimeBlock(vm)
+  return { ...slotGateWith(vm, vendorBlock), vendorBlock }
+}
+
+/** Same gate with the supplier block already read: pure (R6 B7b, used inside reserve()'s synchronous segment). */
+export function slotGateWith(vm, vendorBlock = null) {
   if (isCodexVm(vm)) return { ok: false, reason: 'codex_vm' }
   const blocked = proxyBlockedReason(vm?.proxy)
   if (blocked) return { ok: false, reason: blocked }
   const oauthProjection = /^oauth_/.test(String(vm?.schedule_disabled_reason || ''))
-  if (!isVmScheduleReady(vm, { allowMissingCredential: oauthProjection })) {
+  if (!vmScheduleReadyWith(vm, vendorBlock, { allowMissingCredential: oauthProjection })) {
     if (!oauthProjection) return { ok: false, reason: 'vm_unschedulable' }
   }
   if (!vmHasClaudeCredential(vm) && !oauthProjection) return { ok: false, reason: 'no_credential' }

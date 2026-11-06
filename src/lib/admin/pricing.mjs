@@ -5,6 +5,16 @@
  */
 import { extractOpenaiUsage, isOpenaiWireUsage } from '../protocol/openai-usage.mjs'
 import { resolvePrice } from './price-catalog.mjs'
+import { mediaCharge } from './media-pricing.mjs'
+import {
+  addPicos,
+  allocateMicros,
+  fromMicros,
+  microsToPicos,
+  priceMicros,
+  roundDiv,
+  tokenPicos,
+} from '../core/money.mjs'
 
 export const PRICING_CURRENCY = 'USD'
 export const UNPRICED_MODEL = 'unpriced'
@@ -103,13 +113,57 @@ export function normalizeUsage(usage = {}) {
   }
 }
 
-function usd(tokens, perMTok) {
-  if (!tokens || !perMTok) return 0
-  return (tokens / 1_000_000) * perMTok
+/** tokens × 价格表单价（$/MTok）的精确值，皮美元（Number，超出安全整数时 BigInt）；舍入只在 allocateMicros 里做一次（M6）。 */
+function picos(tokens, perMTok) {
+  return tokenPicos(tokens, priceMicros(perMTok))
 }
 
-function round8(v) {
-  return Math.round((Number(v) || 0) * 1e8) / 1e8
+/** 按次单价（美元）× 次数的精确值，皮美元。 */
+function perCallPicos(count, unitUsd) {
+  if (!count || !unitUsd) return 0
+  return microsToPicos(priceMicros(unitUsd), count)
+}
+
+/**
+ * 一行的各计价部分（皮美元）→ 整数微单位：总额从精确和四舍五入一次，各部分按最大余数法分摊，使之和恰为总额。
+ * `image` 为 undefined 表示这一行没有生图部分（image_cost 保持缺省）。REAL 字段是 micros / 1e6 的镜像，只用于展示。
+ */
+function moneyOf(parts) {
+  const withImage = parts.image !== undefined
+  const exact = [
+    parts.input || 0,
+    parts.output || 0,
+    parts.cache_read || 0,
+    parts.cache_5m || 0,
+    parts.cache_1h || 0,
+    parts.web_search || 0,
+  ]
+  if (withImage) exact.push(parts.image || 0)
+  const { total, parts: m } = allocateMicros(exact)
+  const cacheCreation = m[3] + m[4]
+  const out = {
+    input_cost_micros: m[0],
+    output_cost_micros: m[1],
+    cache_read_cost_micros: m[2],
+    cache_creation_cost_micros: cacheCreation,
+    cache_creation_5m_cost_micros: m[3],
+    cache_creation_1h_cost_micros: m[4],
+    web_search_cost_micros: m[5],
+    total_cost_micros: total,
+    input_cost: fromMicros(m[0]),
+    output_cost: fromMicros(m[1]),
+    cache_read_cost: fromMicros(m[2]),
+    cache_creation_cost: fromMicros(cacheCreation),
+    cache_creation_5m_cost: fromMicros(m[3]),
+    cache_creation_1h_cost: fromMicros(m[4]),
+    web_search_cost: fromMicros(m[5]),
+    total_cost: fromMicros(total),
+  }
+  if (withImage) {
+    out.image_cost_micros = m[6]
+    out.image_cost = fromMicros(m[6])
+  }
+  return out
 }
 
 function cacheSplit(u) {
@@ -135,14 +189,7 @@ function emptyCost(extra = {}) {
     rates: null,
     mode: extra.mode ?? 'standard',
     long_context: extra.long_context ?? false,
-    input_cost: 0,
-    output_cost: 0,
-    cache_read_cost: 0,
-    cache_creation_cost: 0,
-    cache_creation_5m_cost: 0,
-    cache_creation_1h_cost: 0,
-    web_search_cost: 0,
-    total_cost: 0,
+    ...moneyOf({}),
     ...extra,
   }
 }
@@ -181,11 +228,12 @@ function selectBand(price, mode, prompt) {
 /**
  * Official standard cost for one request's usage object.
  * After normalizeUsage, input_tokens is the uncached bucket for every vendor.
+ * `parts` 是各计价部分的精确值（皮美元），未定价时为 null；金额字段由 moneyOf 统一舍入。
  */
-export function calculateCost(usage = {}, model = null) {
+function textCost(usage = {}, model = null, { resolvedPrice = null } = {}) {
   const u = normalizeUsage(usage)
   const mid = model || u.model || u.upstream_model || u.requested_model || ''
-  const resolved = resolvePrice(mid)
+  const resolved = resolvedPrice || resolvePrice(mid)
   const outputTokens = n(u.output_tokens)
   const cacheRead = n(u.cache_read_tokens)
   const { cache5m, cache1h } = cacheSplit(u)
@@ -201,11 +249,14 @@ export function calculateCost(usage = {}, model = null) {
   }
 
   if (!resolved) {
-    return emptyCost({
-      model: mid || null,
-      pricing_key: null,
-      ...tokens,
-    })
+    return {
+      cost: emptyCost({
+        model: mid || null,
+        pricing_key: null,
+        ...tokens,
+      }),
+      parts: null,
+    }
   }
 
   const { platform, price, source, version, id } = resolved
@@ -215,14 +266,17 @@ export function calculateCost(usage = {}, model = null) {
     const billed = openaiBillingMode(u)
     service_tier = billed.tier
     if (!billed.mode) {
-      return emptyCost({
-        model: mid || null,
-        pricing_key: id,
-        price_source: source,
-        price_version: version,
-        service_tier: null,
-        ...tokens,
-      })
+      return {
+        cost: emptyCost({
+          model: mid || null,
+          pricing_key: id,
+          price_source: source,
+          price_version: version,
+          service_tier: null,
+          ...tokens,
+        }),
+        parts: null,
+      }
     }
     mode = billed.mode
   } else if (billedSpeed(u) === 'fast' && price.modes?.fast) {
@@ -232,55 +286,109 @@ export function calculateCost(usage = {}, model = null) {
   const prompt = inputTokens + cacheRead + cache5m + cache1h
   const selected = selectBand(price, mode, prompt)
   if (selected.unpriced) {
-    return emptyCost({
+    return {
+      cost: emptyCost({
+        model: mid || null,
+        pricing_key: id,
+        price_source: source,
+        price_version: version,
+        mode: selected.mode,
+        service_tier,
+        speed: selected.mode === 'fast' ? 'fast' : platform === 'anthropic' ? 'standard' : billedSpeed(u),
+        long_context: selected.long_context,
+        ...tokens,
+      }),
+      parts: null,
+    }
+  }
+
+  const rates = selected.rates
+  const parts = {
+    input: picos(inputTokens, rates.input),
+    output: picos(outputTokens, rates.output),
+    cache_read: picos(cacheRead, rates.cache_read),
+    cache_5m: picos(cache5m, rates.cache_5m),
+    cache_1h: picos(cache1h, rates.cache_1h),
+    web_search: perCallPicos(webSearchRequests, price.per_call?.web_search),
+  }
+  const speed = selected.mode === 'fast' ? 'fast' : 'standard'
+
+  return {
+    cost: {
       model: mid || null,
       pricing_key: id,
       price_source: source,
       price_version: version,
+      currency: PRICING_CURRENCY,
+      known: true,
+      rates,
       mode: selected.mode,
       service_tier,
-      speed: selected.mode === 'fast' ? 'fast' : platform === 'anthropic' ? 'standard' : billedSpeed(u),
+      speed,
       long_context: selected.long_context,
       ...tokens,
-    })
-  }
-
-  const rates = selected.rates
-  const input_cost = usd(inputTokens, rates.input)
-  const output_cost = usd(outputTokens, rates.output)
-  const cache_read_cost = usd(cacheRead, rates.cache_read)
-  const cache_creation_5m_cost = usd(cache5m, rates.cache_5m)
-  const cache_creation_1h_cost = usd(cache1h, rates.cache_1h)
-  const cache_creation_cost = cache_creation_5m_cost + cache_creation_1h_cost
-  const web_search_cost = webSearchRequests * (price.per_call?.web_search || 0)
-  const total_cost = input_cost + output_cost + cache_read_cost + cache_creation_cost + web_search_cost
-  const speed = selected.mode === 'fast' ? 'fast' : 'standard'
-
-  return {
-    model: mid || null,
-    pricing_key: id,
-    price_source: source,
-    price_version: version,
-    currency: PRICING_CURRENCY,
-    known: true,
-    rates,
-    mode: selected.mode,
-    service_tier,
-    speed,
-    long_context: selected.long_context,
-    ...tokens,
-    input_cost: round8(input_cost),
-    output_cost: round8(output_cost),
-    cache_read_cost: round8(cache_read_cost),
-    cache_creation_cost: round8(cache_creation_cost),
-    cache_creation_5m_cost: round8(cache_creation_5m_cost),
-    cache_creation_1h_cost: round8(cache_creation_1h_cost),
-    web_search_cost: round8(web_search_cost),
-    total_cost: round8(total_cost),
+      ...moneyOf(parts),
+    },
+    parts,
   }
 }
 
+function calculateTextCost(usage = {}, model = null, options = {}) {
+  return textCost(usage, model, options).cost
+}
+
 /** Raw billing band inputs, persisted so a later backfill re-prices with the same band. */
+// Commercial settlement carries image evidence in the same persisted usage object.
+export function calculateCost(usage = {}, model = null, options = {}) {
+  const media = mediaCharge(usage, options.media)
+  if (media) return mediaCost(usage, model, media)
+  const image = usage?.image_generation
+  if (!image) return calculateTextCost(usage, model, options)
+  const text = textCost(image.only ? {} : usage, model, options)
+  const img = imagePriced(image.usage, image.model, {
+    resolvedPrice: image.only ? options.resolvedPrice : options.resolvedPrice?.image_price,
+  })
+  const known = (image.only || text.cost.known) && img.known
+  const money = known ? moneyOf({ ...(image.only ? {} : text.parts), image: img.picos }) : null
+  return {
+    ...text.cost,
+    ...(money || {}),
+    known,
+    pricing_key: image.only ? img.pricing_key : text.cost.pricing_key,
+    price_source: image.only ? img.price_source : text.cost.price_source,
+    price_version: image.only ? img.price_version : text.cost.price_version,
+    // 已定价时生图部分随其余部分一起按最大余数法分摊（来自 money），各部分之和等于总额；未定价时保留单独估算值
+    ...(known
+      ? {}
+      : {
+          image_cost_micros: img.image_cost_micros,
+          image_cost: img.image_cost,
+          total_cost_micros: null,
+          total_cost: null,
+        }),
+  }
+}
+
+// 分组媒体计费（按张生图、按次网页搜索）：费用与 token 无关，rate_multiplier 非空时覆盖分组倍率
+function mediaCost(usage, model, media) {
+  const isImage = media.kind === 'image'
+  return {
+    model: model || null,
+    pricing_key: isImage ? `image_count:${media.tier}` : 'web_search_per_call',
+    price_source: 'group',
+    price_version: null,
+    currency: PRICING_CURRENCY,
+    known: true,
+    media,
+    rate_multiplier: media.rate_multiplier,
+    ...moneyOf(
+      isImage
+        ? { image: microsToPicos(media.total_cost_micros) }
+        : { web_search: microsToPicos(media.total_cost_micros), image: 0 },
+    ),
+  }
+}
+
 export function billingBandFromUsage(usage = {}) {
   const tier = String(usage?.service_tier ?? '')
     .trim()
@@ -303,9 +411,17 @@ function tokenCount(v) {
  * codex-proxy-rs `image_calculated_cost`: text input at the base rates, image input and output
  * at `price.image`. A split that does not add up stays unpriced; nothing is guessed.
  */
-export function imageCostFromUsage(usage, imageModel = null) {
+export function imageCostFromUsage(usage, imageModel = null, options = {}) {
+  const { picos: _picos, ...out } = imagePriced(usage, imageModel, options)
+  return out
+}
+
+/** imageCostFromUsage 加上精确值 `picos`（皮美元），供同一行的文本部分一起分摊。 */
+function imagePriced(usage, imageModel = null, { resolvedPrice = null } = {}) {
   const unknown = {
     known: false,
+    picos: null,
+    image_cost_micros: null,
     image_cost: null,
     image_input_tokens: tokenCount(usage?.input_tokens) ?? 0,
     image_output_tokens: tokenCount(usage?.output_tokens) ?? 0,
@@ -314,7 +430,7 @@ export function imageCostFromUsage(usage, imageModel = null) {
     price_version: null,
   }
   if (!usage || typeof usage !== 'object') return unknown
-  const resolved = resolvePrice(imageModel || IMAGE_DEFAULT_PRICE_ID)
+  const resolved = resolvedPrice || resolvePrice(imageModel || IMAGE_DEFAULT_PRICE_ID)
   const rates = resolved?.price
   if (!rates?.image) return unknown
   const input = tokenCount(usage.input_tokens)
@@ -340,15 +456,19 @@ export function imageCostFromUsage(usage, imageModel = null) {
       cachedImage = image
     } else return unknown
   }
-  const cost =
-    usd(text - cachedText, rates.input) +
-    usd(cachedText, rates.cache_read) +
-    usd(image - cachedImage, rates.image.input) +
-    usd(cachedImage, rates.image.cache_read) +
-    usd(output, rates.image.output)
+  const exact = [
+    picos(text - cachedText, rates.input),
+    picos(cachedText, rates.cache_read),
+    picos(image - cachedImage, rates.image.input),
+    picos(cachedImage, rates.image.cache_read),
+    picos(output, rates.image.output),
+  ].reduce(addPicos, 0)
+  const micros = typeof exact === 'number' ? roundDiv(exact, 1_000_000) : Number(roundDiv(exact, 1_000_000n))
   return {
     known: true,
-    image_cost: round8(cost),
+    picos: exact,
+    image_cost_micros: micros,
+    image_cost: fromMicros(micros),
     image_input_tokens: input,
     image_output_tokens: output,
     pricing_key: resolved.id,
@@ -357,23 +477,56 @@ export function imageCostFromUsage(usage, imageModel = null) {
   }
 }
 
+/** usage_logs 金额列：整数列为权威值，REAL 列是镜像；未定价时两者都为 null。 */
+export const COST_COLUMN_KEYS = [
+  'input_cost',
+  'output_cost',
+  'cache_read_cost',
+  'cache_creation_cost',
+  'web_search_cost',
+  'image_cost',
+  'total_cost',
+]
+
+function costColumns(money, known) {
+  const out = {}
+  for (const key of COST_COLUMN_KEYS) {
+    const micros = known ? (money[key + '_micros'] ?? null) : null
+    out[key + '_micros'] = micros
+    out[key] = fromMicros(micros)
+  }
+  return out
+}
+
 /**
  * `image` = `{ usage, model, only }`: image generation usage on the same row. `only` marks an
  * Images endpoint row, which has no text-model usage. Either part unpriced → the whole row is.
  */
-export function costColumnsFromUsage(usage, model, image = null) {
-  const img = image ? imageCostFromUsage(image.usage, image.model) : null
+export function costColumnsFromUsage(usage, model, image = null, options = {}) {
+  const media = mediaCharge(usage, options.media)
+  if (media) {
+    const c = mediaCost(usage, model, media)
+    return {
+      ...costColumns(c, true),
+      pricing_model: c.pricing_key,
+      price_source: c.price_source,
+      price_version: null,
+      service_tier: null,
+      speed: null,
+      long_context: 0,
+    }
+  }
+  image = image || usage?.image_generation
+  const img = image
+    ? imagePriced(image.usage, image.model, {
+        resolvedPrice: image.only ? options.resolvedPrice : options.resolvedPrice?.image_price,
+      })
+    : null
   const band = billingBandFromUsage(normalizeUsage(usage))
   if (image?.only) {
     const known = img.known
     return {
-      input_cost: known ? 0 : null,
-      output_cost: known ? 0 : null,
-      cache_read_cost: known ? 0 : null,
-      cache_creation_cost: known ? 0 : null,
-      web_search_cost: known ? 0 : null,
-      image_cost: known ? img.image_cost : null,
-      total_cost: known ? img.image_cost : null,
+      ...costColumns(known ? moneyOf({ image: img.picos }) : {}, known),
       pricing_model: known ? img.pricing_key : UNPRICED_MODEL,
       price_source: known ? img.price_source : null,
       price_version: known ? img.price_version : null,
@@ -381,16 +534,13 @@ export function costColumnsFromUsage(usage, model, image = null) {
       long_context: known ? 0 : null,
     }
   }
-  const c = calculateCost(usage, model)
+  const text = textCost(usage, model, options)
+  const c = text.cost
   const known = c.known && (!img || img.known)
+  const money = known ? moneyOf(img ? { ...text.parts, image: img.picos } : text.parts) : {}
   return {
-    input_cost: known ? c.input_cost : null,
-    output_cost: known ? c.output_cost : null,
-    cache_read_cost: known ? c.cache_read_cost : null,
-    cache_creation_cost: known ? c.cache_creation_cost : null,
-    web_search_cost: known ? c.web_search_cost : null,
-    image_cost: known && img ? img.image_cost : null,
-    total_cost: known ? round8(c.total_cost + (img?.image_cost || 0)) : null,
+    // 没有生图部分时 money 不含 image_cost_micros，image_cost 为 null（与改造前一致）
+    ...costColumns(money, known),
     pricing_model: known ? c.pricing_key : UNPRICED_MODEL,
     price_source: known ? c.price_source : null,
     price_version: known ? c.price_version : null,
@@ -399,8 +549,11 @@ export function costColumnsFromUsage(usage, model, image = null) {
   }
 }
 
+const BUCKET_COST_KEYS = ['input_cost', 'output_cost', 'cache_read_cost', 'cache_creation_cost', 'total_cost']
+
+/** 成本桶：金额按整数微单位累加（`*_micros`），REAL 字段只是镜像。 */
 export function emptyCostBucket() {
-  return {
+  const out = {
     requests: 0,
     success: 0,
     errors: 0,
@@ -408,14 +561,15 @@ export function emptyCostBucket() {
     output_tokens: 0,
     cache_read_tokens: 0,
     cache_creation_tokens: 0,
-    input_cost: 0,
-    output_cost: 0,
-    cache_read_cost: 0,
-    cache_creation_cost: 0,
-    total_cost: 0,
   }
+  for (const key of BUCKET_COST_KEYS) {
+    out[key] = 0
+    out[key + '_micros'] = 0
+  }
+  return out
 }
 
+/** 合并成本桶；行里的金额读 `*_micros`（SQL 一律 SUM 整数列），不再对 REAL 求和。 */
 export function sumCostBuckets(rows = []) {
   const out = emptyCostBucket()
   for (const r of rows) {
@@ -426,11 +580,8 @@ export function sumCostBuckets(rows = []) {
     out.output_tokens += n(r.output_tokens)
     out.cache_read_tokens += n(r.cache_read_tokens)
     out.cache_creation_tokens += n(r.cache_creation_tokens)
-    out.input_cost = round8(out.input_cost + n(r.input_cost))
-    out.output_cost = round8(out.output_cost + n(r.output_cost))
-    out.cache_read_cost = round8(out.cache_read_cost + n(r.cache_read_cost))
-    out.cache_creation_cost = round8(out.cache_creation_cost + n(r.cache_creation_cost))
-    out.total_cost = round8(out.total_cost + n(r.total_cost))
+    for (const key of BUCKET_COST_KEYS) out[key + '_micros'] += Math.round(n(r[key + '_micros']))
   }
+  for (const key of BUCKET_COST_KEYS) out[key] = fromMicros(out[key + '_micros'])
   return out
 }

@@ -6,8 +6,8 @@ import path from 'node:path'
 import { AccountQuota } from '../../src/lib/pool/account-quota.mjs'
 import { parseVmQuotaOverride, vmQuotaOverrideOf } from '../../src/lib/pool/vm-quota-override.mjs'
 
-function quota() {
-  return new AccountQuota({
+async function quota() {
+  return await AccountQuota.create({
     dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vm-quota-')),
     config: {
       quota: { block_on_5h: true, block_on_7d: true },
@@ -20,8 +20,8 @@ function quota() {
   })
 }
 
-function setUtil(q, accountId, u5, u7 = 0.1) {
-  q.ingestHeaders(
+async function setUtil(q, accountId, u5, u7 = 0.1) {
+  await q.ingestHeaders(
     accountId,
     {
       'anthropic-ratelimit-unified-5h-utilization': String(u5),
@@ -32,22 +32,22 @@ function setUtil(q, accountId, u5, u7 = 0.1) {
   )
 }
 
-test('VM 5h threshold override only moves that VM gate', () => {
-  const q = quota()
+test('VM 5h threshold override only moves that VM gate', async () => {
+  const q = await quota()
   q.setVmQuotaOverride('vm-a', { limit_5h: 0.95 })
-  setUtil(q, 'acc-a', 0.9)
-  setUtil(q, 'acc-b', 0.9)
-  assert.equal(q.canAccept('acc-a').ok, true)
-  assert.equal(q.canAccept('acc-b').reason, 'quota_5h_safety')
+  await setUtil(q, 'acc-a', 0.9)
+  await setUtil(q, 'acc-b', 0.9)
+  assert.equal((await q.canAccept('acc-a')).ok, true)
+  assert.equal((await q.canAccept('acc-b')).reason, 'quota_5h_safety')
 })
 
-test('VM block switch off lets the slot run past its threshold; clearing restores global', () => {
-  const q = quota()
-  setUtil(q, 'acc-a', 0.9)
+test('VM block switch off lets the slot run past its threshold; clearing restores global', async () => {
+  const q = await quota()
+  await setUtil(q, 'acc-a', 0.9)
   q.setVmQuotaOverride('vm-a', { block_on_5h: false })
-  assert.equal(q.canAccept('acc-a').ok, true)
+  assert.equal((await q.canAccept('acc-a')).ok, true)
   q.setVmQuotaOverride('vm-a', null)
-  assert.equal(q.canAccept('acc-a').reason, 'quota_5h_safety')
+  assert.equal((await q.canAccept('acc-a')).reason, 'quota_5h_safety')
 })
 
 test('parseVmQuotaOverride rejects out-of-range and unknown fields, null field follows global', () => {

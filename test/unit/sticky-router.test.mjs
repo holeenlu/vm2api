@@ -16,7 +16,7 @@ function tmpDir(prefix = 'kin-sticky-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
-test('string and header parent ids stay on one family and do not cross API keys', () => {
+test('string and header parent ids stay on one family and do not cross API keys', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { apiKeyRecord: { id: 'key-a' }, headers: {} }
   const other = { apiKeyRecord: { id: 'key-b' }, headers: {} }
@@ -40,11 +40,11 @@ test('string and header parent ids stay on one family and do not cross API keys'
   const otherParent = r.familyKey(req, 'second-parent', 'anthropic')
   assert.notEqual(familyA, familyB)
   assert.notEqual(familyA, otherParent)
-  r.bind(familyA, { accountId: 'acc', vmId: 'vm-10' })
-  const moved = r.rebindFamily(familyA, { accountId: 'acc-2', vmId: 'vm-20' })
+  await r.bind(familyA, { accountId: 'acc', vmId: 'vm-10' })
+  const moved = await r.rebindFamily(familyA, { accountId: 'acc-2', vmId: 'vm-20' })
   assert.equal(moved.generation, 2)
-  assert.equal(r.resolve(familyA).vmId, 'vm-20')
-  assert.equal(r.resolve(familyA).sessionId, null)
+  assert.equal((await r.resolve(familyA)).vmId, 'vm-20')
+  assert.equal((await r.resolve(familyA)).sessionId, null)
 })
 
 test('a declared child without parent or root is rejected as a relation', () => {
@@ -56,43 +56,43 @@ test('a declared child without parent or root is rejected as a relation', () => 
   assert.equal(childDeclaredWithoutParent({ metadata: { user_id: { device_id: 'dev' } } }, {}), false)
 })
 
-test('bind + resolve + hits increment', () => {
+test('bind + resolve + hits increment', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('conv-1', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'sess-9' })
-  const hit = r.resolve('conv-1')
+  await r.bind('conv-1', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'sess-9' })
+  const hit = await r.resolve('conv-1')
   assert.equal(hit.accountId, 'acc-1')
   assert.equal(hit.vmId, 'vm-1')
   assert.equal(hit.sessionId, 'sess-9')
-  r.bind('conv-1', { accountId: 'acc-1', vmId: 'vm-1' })
-  assert.equal(r.stats().sessions['conv-1'].hits, 2)
+  await r.bind('conv-1', { accountId: 'acc-1', vmId: 'vm-1' })
+  assert.equal((await r.stats()).sessions['conv-1'].hits, 2)
   // session_id preserved from previous bind
-  assert.equal(r.stats().sessions['conv-1'].session_id, 'sess-9')
+  assert.equal((await r.stats()).sessions['conv-1'].session_id, 'sess-9')
 })
 
-test('bind keeps outbound session on the same VM and overwrites after a VM change', () => {
+test('bind keeps outbound session on the same VM and overwrites after a VM change', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S1' })
-  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S2' })
-  assert.equal(r.resolve('conv-s').sessionId, 'S1')
-  assert.equal(r.resolve('conv-s').vmId, 'vm-1')
+  await r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S1' })
+  await r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S2' })
+  assert.equal((await r.resolve('conv-s')).sessionId, 'S1')
+  assert.equal((await r.resolve('conv-s')).vmId, 'vm-1')
 
-  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-2', sessionId: 'S3' })
-  assert.equal(r.resolve('conv-s').vmId, 'vm-2')
-  assert.equal(r.resolve('conv-s').sessionId, 'S3')
+  await r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-2', sessionId: 'S3' })
+  assert.equal((await r.resolve('conv-s')).vmId, 'vm-2')
+  assert.equal((await r.resolve('conv-s')).sessionId, 'S3')
 
-  r.unbind('conv-s')
-  r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S4' })
-  assert.equal(r.resolve('conv-s').vmId, 'vm-1')
-  assert.equal(r.resolve('conv-s').sessionId, 'S4')
+  await r.unbind('conv-s')
+  await r.bind('conv-s', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S4' })
+  assert.equal((await r.resolve('conv-s')).vmId, 'vm-1')
+  assert.equal((await r.resolve('conv-s')).sessionId, 'S4')
 })
 
-test('bind stays locked when both VM and account differ', () => {
+test('bind stays locked when both VM and account differ', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('conv-lock', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S1' })
-  r.bind('conv-lock', { accountId: 'acc-2', vmId: 'vm-2', sessionId: 'S2' })
-  assert.equal(r.resolve('conv-lock').accountId, 'acc-1')
-  assert.equal(r.resolve('conv-lock').vmId, 'vm-1')
-  assert.equal(r.resolve('conv-lock').sessionId, 'S1')
+  await r.bind('conv-lock', { accountId: 'acc-1', vmId: 'vm-1', sessionId: 'S1' })
+  await r.bind('conv-lock', { accountId: 'acc-2', vmId: 'vm-2', sessionId: 'S2' })
+  assert.equal((await r.resolve('conv-lock')).accountId, 'acc-1')
+  assert.equal((await r.resolve('conv-lock')).vmId, 'vm-1')
+  assert.equal((await r.resolve('conv-lock')).sessionId, 'S1')
 })
 
 test('mergeStickyConfig normalizes outbound_session to rebuild or passthrough', () => {
@@ -107,27 +107,27 @@ test('mergeStickyConfig normalizes outbound_session to rebuild or passthrough', 
   assert.equal(r.config.outbound_session, 'passthrough')
 })
 
-test('expired sessions purge on resolve/stats', () => {
+test('expired sessions purge on resolve/stats', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: -1 } } })
-  r.bind('conv-2', { accountId: 'a', vmId: 'v' })
-  assert.equal(r.resolve('conv-2'), null)
-  assert.equal(r.stats().active_sessions, 0)
+  await r.bind('conv-2', { accountId: 'a', vmId: 'v' })
+  assert.equal(await r.resolve('conv-2'), null)
+  assert.equal((await r.stats()).active_sessions, 0)
 })
 
-test('disabled sticky returns null and binds nothing', () => {
+test('disabled sticky returns null and binds nothing', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: false } } })
-  r.bind('conv-3', { accountId: 'a', vmId: 'v' })
-  assert.equal(r.resolve('conv-3'), null)
+  await r.bind('conv-3', { accountId: 'a', vmId: 'v' })
+  assert.equal(await r.resolve('conv-3'), null)
 })
 
-test('sticky sessions persist across re-open', () => {
+test('sticky sessions persist across re-open', async () => {
   const dir = tmpDir()
   const cfg = { sticky: { enabled: true, ttl_seconds: 3600 } }
   const r1 = new StickyRouter({ dataDir: dir, config: cfg })
-  r1.bind('conv-4', { accountId: 'acc-4', vmId: 'vm-4' })
+  await r1.bind('conv-4', { accountId: 'acc-4', vmId: 'vm-4' })
 
   const r2 = new StickyRouter({ dataDir: dir, config: cfg })
-  const hit = r2.resolve('conv-4')
+  const hit = await r2.resolve('conv-4')
   assert.ok(hit)
   assert.equal(hit.accountId, 'acc-4')
 })
@@ -147,9 +147,9 @@ test('extractKey prefers metadata.user_id session over headers', () => {
   assert.equal(key, 'meta-sess')
 })
 
-test('caller session wins over a persistable envelope', () => {
+test('caller session wins over a persistable envelope', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, mode: 'conversation' } } })
-  const a = r.extractPoolKey(
+  const a = await r.extractPoolKey(
     { apiKeyRecord: { id: 'key_f041' }, headers: { 'thread-id': '01a0b947-aaaa' } },
     {
       thread_id: '01a0b947-aaaa',
@@ -162,7 +162,7 @@ test('caller session wins over a persistable envelope', () => {
       ],
     },
   )
-  const b = r.extractPoolKey(
+  const b = await r.extractPoolKey(
     { apiKeyRecord: { id: 'key_f041' }, headers: { 'thread-id': '01a0bab2-bbbb' } },
     {
       thread_id: '01a0bab2-bbbb',
@@ -180,14 +180,14 @@ test('caller session wins over a persistable envelope', () => {
   assert.notEqual(a, b)
 })
 
-test('envelope without a session id stays one key per API key', () => {
+test('envelope without a session id stays one key per API key', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, mode: 'conversation' } } })
   const body = {
     messages: [{ role: 'user', content: 'Persistable response items (JSON):\n[{"text":"任务"}]' }],
   }
-  assert.equal(r.extractPoolKey({ apiKeyRecord: { id: 'key_f041' } }, body), 'kkey_f041:envelope')
+  assert.equal(await r.extractPoolKey({ apiKeyRecord: { id: 'key_f041' } }, body), 'kkey_f041:envelope')
   assert.equal(
-    r.extractPoolKey(
+    await r.extractPoolKey(
       { apiKeyRecord: { id: 'key_f041' } },
       {
         metadata: { user_id: { device_id: 'dev-aaaa', session_id: 'sess-aaaa' } },
@@ -247,7 +247,7 @@ test('extractKey ignores x-client-request-id and hashes first user', () => {
   assert.equal(a, b)
 })
 
-test('later blocks of the first user message stay on one session slot', () => {
+test('later blocks of the first user message stay on one session slot', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { apiKeyRecord: { id: 'key_f041' }, headers: {} }
   const first = {
@@ -277,14 +277,14 @@ test('later blocks of the first user message stay on one session slot', () => {
   const other = {
     messages: [{ role: 'user', content: [{ type: 'text', text: 'a different conversation' }] }],
   }
-  const a = r.extractPoolKey(req, first, { platform: 'anthropic' })
-  const b = r.extractPoolKey(req, next, { platform: 'anthropic' })
+  const a = await r.extractPoolKey(req, first, { platform: 'anthropic' })
+  const b = await r.extractPoolKey(req, next, { platform: 'anthropic' })
   assert.equal(a, b)
   assert.equal(r.collectPoolKeys(req, next, { platform: 'anthropic' }).length, 1)
-  assert.notEqual(a, r.extractPoolKey(req, other, { platform: 'anthropic' }))
+  assert.notEqual(a, await r.extractPoolKey(req, other, { platform: 'anthropic' }))
 })
 
-test('a shared system-reminder opener does not merge different conversations', () => {
+test('a shared system-reminder opener does not merge different conversations', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { apiKeyRecord: { id: 'key_f041' }, headers: {} }
   const opener = (question, extra = []) => ({
@@ -299,15 +299,15 @@ test('a shared system-reminder opener does not merge different conversations', (
       ...extra,
     ],
   })
-  const a = r.extractPoolKey(req, opener('会话 A 的问题'), { platform: 'anthropic' })
-  const b = r.extractPoolKey(req, opener('会话 B 的问题'), { platform: 'anthropic' })
+  const a = await r.extractPoolKey(req, opener('会话 A 的问题'), { platform: 'anthropic' })
+  const b = await r.extractPoolKey(req, opener('会话 B 的问题'), { platform: 'anthropic' })
   assert.match(a, /^p:anthropic:kkey_f041:ch:/)
   assert.notEqual(a, b)
   const next = opener('会话 A 的问题', [
     { role: 'assistant', content: 'ok' },
     { role: 'user', content: 'continue' },
   ])
-  assert.equal(r.extractPoolKey(req, next, { platform: 'anthropic' }), a)
+  assert.equal(await r.extractPoolKey(req, next, { platform: 'anthropic' }), a)
 })
 
 test('extractKey mode=ip uses forwarded address', () => {
@@ -342,7 +342,7 @@ test('extractOfficialFamilyKey binds parent and child hops by device_id', () => 
   )
 })
 
-test('parent and child session ids stay on separate slots', () => {
+test('parent and child session ids stay on separate slots', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const parentReq = {
     headers: { 'user-agent': 'claude-cli/2.1.241 (external, sdk-cli)', 'x-claude-code-session-id': 'parent-sess' },
@@ -355,13 +355,13 @@ test('parent and child session ids stay on separate slots', () => {
     },
   }
   const childBody = { metadata: { user_id: { device_id: 'aabbcc', session_id: 'child-sess' } } }
-  assert.equal(r.extractPoolKey(parentReq, parentBody), 'parent-sess')
-  assert.equal(r.extractPoolKey(childReq, childBody), 'child-sess')
+  assert.equal(await r.extractPoolKey(parentReq, parentBody), 'parent-sess')
+  assert.equal(await r.extractPoolKey(childReq, childBody), 'child-sess')
   assert.deepEqual(r.collectPoolKeys(childReq, childBody), ['child-sess'])
-  r.bind('child-sess', { accountId: 'acc-2', vmId: 'vm-02' })
-  r.bind('child-sess', { accountId: 'acc-9', vmId: 'vm-09', sessionId: 'outbound-2' })
-  assert.equal(r.resolve('child-sess').vmId, 'vm-02')
-  assert.equal(r.resolve('child-sess').sessionId, 'outbound-2')
+  await r.bind('child-sess', { accountId: 'acc-2', vmId: 'vm-02' })
+  await r.bind('child-sess', { accountId: 'acc-9', vmId: 'vm-09', sessionId: 'outbound-2' })
+  assert.equal((await r.resolve('child-sess')).vmId, 'vm-02')
+  assert.equal((await r.resolve('child-sess')).sessionId, 'outbound-2')
 })
 
 function companionHaiku(sessionId, deviceId = '998dad9c1e3eccf11cd192c3919d4d1f') {
@@ -388,7 +388,7 @@ function companionHaiku(sessionId, deviceId = '998dad9c1e3eccf11cd192c3919d4d1f'
   }
 }
 
-test('haiku subagent keeps its own session and does not reuse the parent key', () => {
+test('haiku subagent keeps its own session and does not reuse the parent key', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const device = '8cd2bdff61fcd056'
   const req = { apiKeyRecord: { id: 'key_f0419454c00d' }, headers: { 'user-agent': 'Go-http-client/1.1' } }
@@ -400,16 +400,16 @@ test('haiku subagent keeps its own session and does not reuse the parent key', (
     ],
     metadata: { user_id: { device_id: device, session_id: 'parent-sess' } },
   }
-  const parentKey = r.extractPoolKey(req, parentBody, { platform: 'anthropic' })
-  r.bind(parentKey, { accountId: 'acc-parent', vmId: 'vm-10', sessionId: 'out-parent', deviceId: device })
+  const parentKey = await r.extractPoolKey(req, parentBody, { platform: 'anthropic' })
+  await r.bind(parentKey, { accountId: 'acc-parent', vmId: 'vm-10', sessionId: 'out-parent', deviceId: device })
   const child = companionHaiku('1334bab2-94bb-4429-a694-b2fa3434b1f5', device)
-  const childKey = r.extractPoolKey(req, child, { platform: 'anthropic' })
+  const childKey = await r.extractPoolKey(req, child, { platform: 'anthropic' })
   assert.notEqual(childKey, parentKey)
   assert.doesNotMatch(String(childKey), /fam:/)
   assert.match(String(childKey), /1334bab2-94bb-4429-a694-b2fa3434b1f5/)
 })
 
-test('explicit parent session shares a family VM and keeps a separate session key', () => {
+test('explicit parent session shares a family VM and keeps a separate session key', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { apiKeyRecord: { id: 'key_family' }, headers: {} }
   const parentBody = {
@@ -423,30 +423,30 @@ test('explicit parent session shares a family VM and keeps a separate session ke
     tools: [{ name: 'Read' }],
     metadata: { user_id: { device_id: 'dev-1', session_id: 'child-sess', parent_session_id: 'parent-sess' } },
   }
-  const parentKey = r.extractPoolKey(req, parentBody, { platform: 'anthropic' })
-  const childKey = r.extractPoolKey(req, childBody, { platform: 'anthropic' })
+  const parentKey = await r.extractPoolKey(req, parentBody, { platform: 'anthropic' })
+  const childKey = await r.extractPoolKey(req, childBody, { platform: 'anthropic' })
   assert.notEqual(parentKey, childKey)
   const family = r.familyKey(req, 'parent-sess', 'anthropic')
-  r.bind(family, { accountId: 'acc-parent', vmId: 'vm-10' })
-  r.bind(parentKey, { accountId: 'acc-parent', vmId: 'vm-10', sessionId: 'out-parent', slotIndex: 0 })
-  r.bind(childKey, { accountId: 'acc-parent', vmId: 'vm-10', sessionId: 'out-child', slotIndex: 1 })
-  assert.equal(r.resolve(family).vmId, 'vm-10')
-  assert.equal(r.resolve(parentKey).slotIndex, 0)
-  assert.equal(r.resolve(childKey).slotIndex, 1)
-  assert.notEqual(r.resolve(parentKey).sessionId, r.resolve(childKey).sessionId)
+  await r.bind(family, { accountId: 'acc-parent', vmId: 'vm-10' })
+  await r.bind(parentKey, { accountId: 'acc-parent', vmId: 'vm-10', sessionId: 'out-parent', slotIndex: 0 })
+  await r.bind(childKey, { accountId: 'acc-parent', vmId: 'vm-10', sessionId: 'out-child', slotIndex: 1 })
+  assert.equal((await r.resolve(family)).vmId, 'vm-10')
+  assert.equal((await r.resolve(parentKey)).slotIndex, 0)
+  assert.equal((await r.resolve(childKey)).slotIndex, 1)
+  assert.notEqual((await r.resolve(parentKey)).sessionId, (await r.resolve(childKey)).sessionId)
 })
 
-test('companion haiku sessions stay independent without an explicit parent', () => {
+test('companion haiku sessions stay independent without an explicit parent', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { apiKeyRecord: { id: 'key_side' }, headers: {} }
-  const a = r.extractPoolKey(req, companionHaiku('sess-a'), { platform: 'anthropic' })
-  const b = r.extractPoolKey(req, companionHaiku('sess-b'), { platform: 'anthropic' })
+  const a = await r.extractPoolKey(req, companionHaiku('sess-a'), { platform: 'anthropic' })
+  const b = await r.extractPoolKey(req, companionHaiku('sess-b'), { platform: 'anthropic' })
   assert.notEqual(a, b)
   assert.doesNotMatch(String(a), /fam:/)
   assert.doesNotMatch(String(b), /fam:/)
 })
 
-test('a stale parent and a real haiku chat do not absorb the companion rule', () => {
+test('a stale parent and a real haiku chat do not absorb the companion rule', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 3600 } } })
   const device = 'dev-old'
   const req = { apiKeyRecord: { id: 'key_stale' }, headers: {} }
@@ -455,10 +455,10 @@ test('a stale parent and a real haiku chat do not absorb the companion rule', ()
     messages: [{ role: 'user', content: 'old' }],
     metadata: { user_id: { device_id: device, session_id: 'old-sess' } },
   }
-  const parentKey = r.extractPoolKey(req, parentBody, { platform: 'anthropic' })
-  r.bind(parentKey, { accountId: 'acc-old', vmId: 'vm-old', sessionId: 'out-old', deviceId: device })
-  const prev = r.stats().sessions[parentKey]
-  r.repo.upsert(parentKey, {
+  const parentKey = await r.extractPoolKey(req, parentBody, { platform: 'anthropic' })
+  await r.bind(parentKey, { accountId: 'acc-old', vmId: 'vm-old', sessionId: 'out-old', deviceId: device })
+  const prev = (await r.stats()).sessions[parentKey]
+  await r.repo.upsert(parentKey, {
     account_id: prev.account_id,
     vm_id: prev.vm_id,
     session_id: prev.session_id,
@@ -468,7 +468,7 @@ test('a stale parent and a real haiku chat do not absorb the companion rule', ()
     hits: prev.hits,
   })
   const companion = companionHaiku('fresh-child', device)
-  const fam = r.extractPoolKey(req, companion, { platform: 'anthropic' })
+  const fam = await r.extractPoolKey(req, companion, { platform: 'anthropic' })
   assert.notEqual(fam, parentKey)
   assert.match(fam, /fresh-child$/)
   assert.doesNotMatch(fam, /fam:/)
@@ -482,25 +482,25 @@ test('a stale parent and a real haiku chat do not absorb the companion rule', ()
     ],
     metadata: { user_id: { device_id: 'dev-chat', session_id: 'chat-sess' } },
   }
-  r.bind(parentKey, { accountId: 'acc-old', vmId: 'vm-old' })
-  assert.match(r.extractPoolKey(req, chat, { platform: 'anthropic' }), /chat-sess$/)
+  await r.bind(parentKey, { accountId: 'acc-old', vmId: 'vm-old' })
+  assert.match(await r.extractPoolKey(req, chat, { platform: 'anthropic' }), /chat-sess$/)
 })
 
-test('anthropic and openai sticky keys do not share a session', () => {
+test('anthropic and openai sticky keys do not share a session', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { headers: { 'x-session-id': 'same-session' } }
   const body = { metadata: { user_id: { session_id: 'same-session' } } }
-  const claude = r.extractPoolKey(req, body, { platform: 'anthropic' })
-  const gpt = r.extractPoolKey(req, body, { platform: 'openai' })
+  const claude = await r.extractPoolKey(req, body, { platform: 'anthropic' })
+  const gpt = await r.extractPoolKey(req, body, { platform: 'openai' })
   assert.equal(claude, 'p:anthropic:same-session')
   assert.equal(gpt, 'p:openai:same-session')
-  r.bind(claude, { accountId: 'acc-claude', vmId: 'vm-claude' })
-  assert.equal(r.resolve(gpt), null)
-  assert.equal(r.extractPoolKey(req, body, { platform: 'openai' }), gpt)
-  assert.equal(r.resolve(r.extractPoolKey(req, body, { platform: 'anthropic' })).vmId, 'vm-claude')
+  await r.bind(claude, { accountId: 'acc-claude', vmId: 'vm-claude' })
+  assert.equal(await r.resolve(gpt), null)
+  assert.equal(await r.extractPoolKey(req, body, { platform: 'openai' }), gpt)
+  assert.equal((await r.resolve(await r.extractPoolKey(req, body, { platform: 'anthropic' }))).vmId, 'vm-claude')
 })
 
-test('a caller session does not stick through a content fingerprint', () => {
+test('a caller session does not stick through a content fingerprint', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const firstUser = [{ role: 'user', content: '同一段跨协议会话的首条消息' }]
   const anthropic = {
@@ -510,34 +510,34 @@ test('a caller session does not stick through a content fingerprint', () => {
   const openai = { messages: firstUser }
   const req = { apiKeyRecord: { id: 'key_cross_protocol' }, headers: {} }
 
-  const primary = r.extractPoolKey(req, anthropic)
+  const primary = await r.extractPoolKey(req, anthropic)
   const aliases = r.collectPoolKeys(req, anthropic)
   assert.equal(primary, 'kkey_cross_protocol:anthropic-session')
   assert.deepEqual(aliases, ['kkey_cross_protocol:anthropic-session'])
-  r.bind(primary, { accountId: 'acc-1', vmId: 'vm-01', sessionId: 'out-1' })
-  r.bind(primary, { accountId: 'acc-2', vmId: 'vm-02', sessionId: 'out-2' })
-  assert.equal(r.resolve(primary).vmId, 'vm-01')
-  assert.equal(r.resolve(primary).sessionId, 'out-1')
-  assert.equal(r.resolve(r.extractPoolKey(req, openai)), null)
+  await r.bind(primary, { accountId: 'acc-1', vmId: 'vm-01', sessionId: 'out-1' })
+  await r.bind(primary, { accountId: 'acc-2', vmId: 'vm-02', sessionId: 'out-2' })
+  assert.equal((await r.resolve(primary)).vmId, 'vm-01')
+  assert.equal((await r.resolve(primary)).sessionId, 'out-1')
+  assert.equal(await r.resolve(await r.extractPoolKey(req, openai)), null)
 })
 
-test('explicit session is the stable lock when concurrent turns have different first messages', () => {
+test('explicit session is the stable lock when concurrent turns have different first messages', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true } } })
   const req = { apiKeyRecord: { id: 'key_lock' }, headers: { 'x-session-id': 'shared-session' } }
   const first = { messages: [{ role: 'user', content: 'first visible turn' }] }
   const second = { messages: [{ role: 'user', content: 'trimmed current turn' }] }
-  assert.equal(r.extractPoolKey(req, first), 'kkey_lock:shared-session')
-  assert.equal(r.extractPoolKey(req, second), 'kkey_lock:shared-session')
+  assert.equal(await r.extractPoolKey(req, first), 'kkey_lock:shared-session')
+  assert.equal(await r.extractPoolKey(req, second), 'kkey_lock:shared-session')
   assert.deepEqual(r.collectPoolKeys(req, first), ['kkey_lock:shared-session'])
   assert.deepEqual(r.collectPoolKeys(req, second), ['kkey_lock:shared-session'])
 })
 
-test('provisional bind does not increment hits', () => {
+test('provisional bind does not increment hits', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('conv-p', { accountId: 'acc', vmId: 'vm-1' }, { countHit: false })
-  assert.equal(r.stats().sessions['conv-p'].hits, 0)
-  r.bind('conv-p', { accountId: 'acc', vmId: 'vm-1' })
-  assert.equal(r.stats().sessions['conv-p'].hits, 1)
+  await r.bind('conv-p', { accountId: 'acc', vmId: 'vm-1' }, { countHit: false })
+  assert.equal((await r.stats()).sessions['conv-p'].hits, 0)
+  await r.bind('conv-p', { accountId: 'acc', vmId: 'vm-1' })
+  assert.equal((await r.stats()).sessions['conv-p'].hits, 1)
 })
 
 test('extractKey isolates the same session per API key', () => {
@@ -575,34 +575,34 @@ test('canonical identity keys ignore account_uuid changes', () => {
   assert.equal(r.canonicalDeviceKey(first.device_id), r.canonicalDeviceKey(second.device_id))
 })
 
-test('device affinity bind carries no session seat and can move to another VM', () => {
+test('device affinity bind carries no session seat and can move to another VM', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
   const key = r.canonicalDeviceKey('device-affinity')
-  const first = r.bindDeviceAffinity(key, { accountId: 'acc-1', vmId: 'vm-01' })
+  const first = await r.bindDeviceAffinity(key, { accountId: 'acc-1', vmId: 'vm-01' })
   assert.equal(first.generation, 1)
-  let hit = r.resolve(key)
+  let hit = await r.resolve(key)
   assert.equal(hit.accountId, 'acc-1')
   assert.equal(hit.vmId, 'vm-01')
   assert.equal(hit.sessionId, null)
   assert.equal(hit.slotIndex, null)
-  assert.equal(r.stats().sessions[key].hits, 0)
+  assert.equal((await r.stats()).sessions[key].hits, 0)
 
-  const moved = r.bindDeviceAffinity(key, { accountId: 'acc-2', vmId: 'vm-02' })
+  const moved = await r.bindDeviceAffinity(key, { accountId: 'acc-2', vmId: 'vm-02' })
   assert.equal(moved.generation, 2)
-  hit = r.resolve(key)
+  hit = await r.resolve(key)
   assert.equal(hit.accountId, 'acc-2')
   assert.equal(hit.vmId, 'vm-02')
   assert.equal(hit.sessionId, null)
   assert.equal(hit.slotIndex, null)
 })
 
-test('migrateLegacyIdentity lazily writes canonical keys on a legacy hit', () => {
+test('migrateLegacyIdentity lazily writes canonical keys on a legacy hit', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
   const req = { apiKeyRecord: { id: 'key_legacy' }, headers: {} }
   const legacyKey = r.isolateKey('legacy-session', req)
-  r.bind(legacyKey, { accountId: 'acc-legacy', vmId: 'vm-legacy', sessionId: 'out-legacy' })
+  await r.bind(legacyKey, { accountId: 'acc-legacy', vmId: 'vm-legacy', sessionId: 'out-legacy' })
 
-  const result = r.migrateLegacyIdentity(legacyKey, { sessionId: 'legacy-session', deviceId: 'device-legacy' })
+  const result = await r.migrateLegacyIdentity(legacyKey, { sessionId: 'legacy-session', deviceId: 'device-legacy' })
   assert.equal(result.sessionKey, 'sess:legacy-session')
   assert.equal(result.deviceKey, 'dev2:device-legacy')
 
@@ -610,170 +610,180 @@ test('migrateLegacyIdentity lazily writes canonical keys on a legacy hit', () =>
   assert.doesNotMatch(result.sessionKey, /key_legacy|^k/)
   assert.doesNotMatch(result.deviceKey, /key_legacy|^k/)
 
-  const sessionHit = r.resolve(result.sessionKey)
+  const sessionHit = await r.resolve(result.sessionKey)
   assert.equal(sessionHit.accountId, 'acc-legacy')
   assert.equal(sessionHit.vmId, 'vm-legacy')
-  const deviceHit = r.resolve(result.deviceKey)
+  const deviceHit = await r.resolve(result.deviceKey)
   assert.equal(deviceHit.accountId, 'acc-legacy')
   assert.equal(deviceHit.vmId, 'vm-legacy')
 
   // The legacy row itself is untouched, still readable.
-  const legacyHit = r.resolve(legacyKey)
+  const legacyHit = await r.resolve(legacyKey)
   assert.equal(legacyHit.accountId, 'acc-legacy')
   assert.equal(legacyHit.vmId, 'vm-legacy')
 })
 
-test('migrateLegacyIdentity does not overwrite an existing canonical session binding on conflict', () => {
+test('migrateLegacyIdentity does not overwrite an existing canonical session binding on conflict', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
   const req = { apiKeyRecord: { id: 'key_conflict' }, headers: {} }
   const sessionKey = r.canonicalSessionKey('conflict-session')
   // A prior request already bound the canonical session key to vm-a.
-  r.bind(sessionKey, { accountId: 'acc-a', vmId: 'vm-a' })
+  await r.bind(sessionKey, { accountId: 'acc-a', vmId: 'vm-a' })
 
   // A stale legacy row for the same logical session points at a different VM.
   const legacyKey = r.isolateKey('conflict-session', req)
-  r.bind(legacyKey, { accountId: 'acc-b', vmId: 'vm-b' })
+  await r.bind(legacyKey, { accountId: 'acc-b', vmId: 'vm-b' })
 
-  const result = r.migrateLegacyIdentity(legacyKey, { sessionId: 'conflict-session', deviceId: 'device-conflict' })
+  const result = await r.migrateLegacyIdentity(legacyKey, {
+    sessionId: 'conflict-session',
+    deviceId: 'device-conflict',
+  })
   assert.equal(result.sessionKey, sessionKey)
 
   // bind()'s locked semantics keep the already-bound VM; the legacy hit does not
   // silently move or merge the canonical session onto vm-b.
-  const hit = r.resolve(sessionKey)
+  const hit = await r.resolve(sessionKey)
   assert.equal(hit.vmId, 'vm-a')
   assert.equal(hit.accountId, 'acc-a')
 
   // The legacy row itself is left exactly as it was (no cleanup, no rewrite).
-  const legacyHit = r.resolve(legacyKey)
+  const legacyHit = await r.resolve(legacyKey)
   assert.equal(legacyHit.vmId, 'vm-b')
   assert.equal(legacyHit.accountId, 'acc-b')
 })
 
-test('migrateLegacyIdentity is a no-op without a resolvable legacy hit and deletes nothing', () => {
+test('migrateLegacyIdentity is a no-op without a resolvable legacy hit and deletes nothing', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('unrelated-conv', { accountId: 'acc-unrelated', vmId: 'vm-unrelated' })
-  const before = r.stats().active_sessions
+  await r.bind('unrelated-conv', { accountId: 'acc-unrelated', vmId: 'vm-unrelated' })
+  const before = (await r.stats()).active_sessions
 
-  const missing = r.migrateLegacyIdentity('never-bound-legacy-key', {
+  const missing = await r.migrateLegacyIdentity('never-bound-legacy-key', {
     sessionId: 'orphan-session',
     deviceId: 'orphan-device',
   })
   assert.equal(missing.sessionKey, null)
   assert.equal(missing.deviceKey, null)
-  assert.equal(r.resolve('sess:orphan-session'), null)
-  assert.equal(r.resolve('dev2:orphan-device'), null)
+  assert.equal(await r.resolve('sess:orphan-session'), null)
+  assert.equal(await r.resolve('dev2:orphan-device'), null)
 
   // No canonical keys were minted, and the unrelated row is untouched.
-  assert.equal(r.stats().active_sessions, before)
-  assert.equal(r.resolve('unrelated-conv').vmId, 'vm-unrelated')
+  assert.equal((await r.stats()).active_sessions, before)
+  assert.equal((await r.resolve('unrelated-conv')).vmId, 'vm-unrelated')
 })
 
-test('migrateLegacyIdentity without a trusted device/session identity mints nothing', () => {
+test('migrateLegacyIdentity without a trusted device/session identity mints nothing', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
   const req = { apiKeyRecord: { id: 'key_notrust' }, headers: {} }
   const legacyKey = r.isolateKey('untrusted-session', req)
-  r.bind(legacyKey, { accountId: 'acc-untrusted', vmId: 'vm-untrusted' })
+  await r.bind(legacyKey, { accountId: 'acc-untrusted', vmId: 'vm-untrusted' })
 
-  const result = r.migrateLegacyIdentity(legacyKey, {})
+  const result = await r.migrateLegacyIdentity(legacyKey, {})
   assert.equal(result.sessionKey, null)
   assert.equal(result.deviceKey, null)
 })
 
-test('migrateLegacyIdentity keeps a live device home VM', () => {
+test('migrateLegacyIdentity keeps a live device home VM', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
   const req = { apiKeyRecord: { id: 'key_home' }, headers: {} }
-  r.bindDeviceAffinity(r.canonicalDeviceKey('device-home'), { accountId: 'acc-home', vmId: 'vm-home' })
+  await r.bindDeviceAffinity(r.canonicalDeviceKey('device-home'), { accountId: 'acc-home', vmId: 'vm-home' })
   const legacyKey = r.isolateKey('old-session', req)
-  r.bind(legacyKey, { accountId: 'acc-old', vmId: 'vm-old' })
+  await r.bind(legacyKey, { accountId: 'acc-old', vmId: 'vm-old' })
 
-  r.migrateLegacyIdentity(legacyKey, { sessionId: 'old-session', deviceId: 'device-home' })
-  assert.equal(r.resolve('sess:old-session').vmId, 'vm-old')
-  assert.equal(r.resolve('dev2:device-home').vmId, 'vm-home')
+  await r.migrateLegacyIdentity(legacyKey, { sessionId: 'old-session', deviceId: 'device-home' })
+  assert.equal((await r.resolve('sess:old-session')).vmId, 'vm-old')
+  assert.equal((await r.resolve('dev2:device-home')).vmId, 'vm-home')
 })
 
-test('sessionPoolKeys uses one canonical key across API keys and keeps legacy aliases', () => {
+test('sessionPoolKeys uses one canonical key across API keys and keeps legacy aliases', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
   const body = { metadata: { user_id: JSON.stringify({ device_id: 'dev-s', session_id: 'sess-s' }) } }
   const reqA = { apiKeyRecord: { id: 'a' }, headers: {} }
   const reqB = { apiKeyRecord: { id: 'b' }, headers: {} }
-  const legacy = r.extractPoolKey(reqA, body, { platform: 'anthropic' })
-  r.bind(legacy, { accountId: 'acc-s', vmId: 'vm-s' })
+  const legacy = await r.extractPoolKey(reqA, body, { platform: 'anthropic' })
+  await r.bind(legacy, { accountId: 'acc-s', vmId: 'vm-s' })
 
-  const peek = r.sessionPoolKeys(reqA, body, { sessionId: 'sess-s', deviceId: 'dev-s', migrate: false })
+  const peek = await r.sessionPoolKeys(reqA, body, { sessionId: 'sess-s', deviceId: 'dev-s', migrate: false })
   assert.deepEqual(peek, { stickyKey: legacy, stickyKeys: [legacy] })
-  assert.equal(r.resolve('sess:sess-s'), null)
+  assert.equal(await r.resolve('sess:sess-s'), null)
 
-  const a = r.sessionPoolKeys(reqA, body, { sessionId: 'sess-s', deviceId: 'dev-s' })
+  const a = await r.sessionPoolKeys(reqA, body, { sessionId: 'sess-s', deviceId: 'dev-s' })
   assert.deepEqual(a, { stickyKey: 'sess:sess-s', stickyKeys: ['sess:sess-s', legacy] })
-  assert.equal(r.resolve('sess:sess-s').vmId, 'vm-s')
-  const b = r.sessionPoolKeys(reqB, body, { sessionId: 'sess-s', deviceId: 'dev-s' })
+  assert.equal((await r.resolve('sess:sess-s')).vmId, 'vm-s')
+  const b = await r.sessionPoolKeys(reqB, body, { sessionId: 'sess-s', deviceId: 'dev-s' })
   assert.deepEqual(b, { stickyKey: 'sess:sess-s', stickyKeys: ['sess:sess-s'] })
-  assert.equal(r.familyPoolKey(reqA, 'sess-s', { trusted: true }), r.familyPoolKey(reqB, 'sess-s', { trusted: true }))
-  assert.match(r.familyPoolKey(reqA, 'sess-s'), /ka:family:sess-s$/)
+  assert.equal(
+    await r.familyPoolKey(reqA, 'sess-s', { trusted: true }),
+    await r.familyPoolKey(reqB, 'sess-s', { trusted: true }),
+  )
+  assert.match(await r.familyPoolKey(reqA, 'sess-s'), /ka:family:sess-s$/)
 })
 
-test('unbind and unbindByAccount drop dead bindings', () => {
+test('unbind and unbindByAccount drop dead bindings', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('conv-dead', { accountId: 'acc-x', vmId: 'vm-02' })
-  r.bind('conv-other', { accountId: 'acc-y', vmId: 'vm-04' })
-  r.unbind('conv-dead')
-  assert.equal(r.resolve('conv-dead'), null)
-  r.bind('conv-dead', { accountId: 'acc-x', vmId: 'vm-02' })
-  r.unbindByAccount({ vmId: 'vm-02' })
-  assert.equal(r.resolve('conv-dead'), null)
-  assert.equal(r.resolve('conv-other').vmId, 'vm-04')
+  await r.bind('conv-dead', { accountId: 'acc-x', vmId: 'vm-02' })
+  await r.bind('conv-other', { accountId: 'acc-y', vmId: 'vm-04' })
+  await r.unbind('conv-dead')
+  assert.equal(await r.resolve('conv-dead'), null)
+  await r.bind('conv-dead', { accountId: 'acc-x', vmId: 'vm-02' })
+  await r.unbindByAccount({ vmId: 'vm-02' })
+  assert.equal(await r.resolve('conv-dead'), null)
+  assert.equal((await r.resolve('conv-other')).vmId, 'vm-04')
 })
 
-test('proxy pool import/bind/config persist across re-open', () => {
+test('proxy pool import/bind/config persist across re-open', async () => {
   const dir = tmpDir('kin-proxy-')
-  const pool = new ProxyPool({ dataDir: dir })
+  const pool = await ProxyPool.create({ dataDir: dir })
   const res = pool.importLines('socks5://user:pass@10.0.0.1:1080\n10.0.0.2:1080\nbadline:xx\n10.0.0.1:1080:user:pass')
   assert.equal(res.added, 2)
   const id = pool.snapshot().proxies[0].id
-  assert.equal(pool.bind(id, 'vm-1').ok, true)
+  assert.equal((await pool.bind(id, 'vm-1')).ok, true)
   pool.updateConfig({ probe_interval_min: 30, max_failures: 3 })
   pool.stopScheduler()
 
-  const pool2 = new ProxyPool({ dataDir: dir })
+  await pool.flush()
+
+  const pool2 = await ProxyPool.create({ dataDir: dir })
   const snap = pool2.snapshot()
   assert.equal(snap.totals.total, 2)
   assert.equal(snap.config.probe_interval_min, 30)
   assert.equal(snap.config.max_failures, 3)
   assert.equal(snap.proxies.find((p) => p.id === id).bound_vm_id, 'vm-1')
-  const forVm = pool2.getProxyForVm('vm-1')
+  const forVm = await pool2.getProxyForVm('vm-1')
   assert.equal(forVm.url, 'socks5://user:pass@10.0.0.1:1080')
   pool2.stopScheduler()
 })
 
-test('proxy remove + unbindVm persist', () => {
+test('proxy remove + unbindVm persist', async () => {
   const dir = tmpDir('kin-proxy-')
-  const pool = new ProxyPool({ dataDir: dir })
+  const pool = await ProxyPool.create({ dataDir: dir })
   pool.importLines('10.1.1.1:1080\n10.1.1.2:1080')
   const [a, b] = pool.snapshot().proxies.map((p) => p.id)
-  pool.bind(a, 'vm-z')
+  await pool.bind(a, 'vm-z')
   pool.unbindVm('vm-z')
-  pool.remove(b)
+  await pool.remove(b)
   pool.stopScheduler()
 
-  const pool2 = new ProxyPool({ dataDir: dir })
+  await pool.flush()
+
+  const pool2 = await ProxyPool.create({ dataDir: dir })
   const snap = pool2.snapshot()
   assert.equal(snap.totals.total, 1)
   assert.equal(snap.proxies[0].bound_vm_id, null)
   pool2.stopScheduler()
 })
 
-test('disconnect_on_error config persists and runtime failure disables slot', () => {
+test('disconnect_on_error config persists and runtime failure disables slot', async () => {
   const dir = tmpDir('kin-proxy-')
   const disabled = []
   const disconnected = []
-  const pool = new ProxyPool({
+  const pool = await ProxyPool.create({
     dataDir: dir,
     onDisableVm: (vmId, reason, proxyId) => disabled.push({ vmId, reason, proxyId }),
     onDisconnectVm: (vmId, reason, proxyId) => disconnected.push({ vmId, reason, proxyId }),
   })
   pool.importLines('10.2.2.2:1080')
   const id = pool.snapshot().proxies[0].id
-  pool.bind(id, 'vm-err')
+  await pool.bind(id, 'vm-err')
   assert.equal(pool.snapshot().config.disconnect_on_error, false)
   const skipped = pool.reportRuntimeFailure('vm-err', 'proxy_transport_failure')
   assert.equal(skipped.skipped, true)
@@ -784,7 +794,9 @@ test('disconnect_on_error config persists and runtime failure disables slot', ()
   assert.equal(updated.config.disconnect_on_error, true)
   pool.stopScheduler()
 
-  const pool2 = new ProxyPool({
+  await pool.flush()
+
+  const pool2 = await ProxyPool.create({
     dataDir: dir,
     onDisableVm: (vmId, reason, proxyId) => disabled.push({ vmId, reason, proxyId }),
     onDisconnectVm: (vmId, reason, proxyId) => disconnected.push({ vmId, reason, proxyId }),
@@ -842,32 +854,36 @@ test('isShortProbeRequest leaves conversations alone', () => {
   assert.equal(isShortProbeRequest({ messages: [{ role: 'user', content: '  ' }] }), false)
 })
 
-test('replaceSession remints the outbound session on the same VM', () => {
+test('replaceSession remints the outbound session on the same VM', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('sess:a', { accountId: 'acc', vmId: 'vm-05', sessionId: 'old-session', slotIndex: 0 })
-  r.bind(
+  await r.bind('sess:a', { accountId: 'acc', vmId: 'vm-05', sessionId: 'old-session', slotIndex: 0 })
+  await r.bind(
     'sess:a',
     { accountId: 'acc', vmId: 'vm-05', sessionId: 'new-session', slotIndex: 1 },
     { countHit: false, replaceSession: true },
   )
-  assert.equal(r.resolve('sess:a').sessionId, 'new-session')
-  assert.equal(r.resolve('sess:a').slotIndex, 1)
-  r.bind('sess:a', { accountId: 'acc', vmId: 'vm-05' }, { countHit: false, replaceSession: true, clearSlot: true })
-  assert.equal(r.resolve('sess:a').sessionId, null)
-  assert.equal(r.resolve('sess:a').slotIndex, null)
+  assert.equal((await r.resolve('sess:a')).sessionId, 'new-session')
+  assert.equal((await r.resolve('sess:a')).slotIndex, 1)
+  await r.bind(
+    'sess:a',
+    { accountId: 'acc', vmId: 'vm-05' },
+    { countHit: false, replaceSession: true, clearSlot: true },
+  )
+  assert.equal((await r.resolve('sess:a')).sessionId, null)
+  assert.equal((await r.resolve('sess:a')).slotIndex, null)
   r.db?.close?.()
 })
 
-test('clearing a finished dialog slot keeps the VM and the original sticky expiry', () => {
+test('clearing a finished dialog slot keeps the VM and the original sticky expiry', async () => {
   const r = new StickyRouter({ dataDir: tmpDir(), config: { sticky: { enabled: true, ttl_seconds: 60 } } })
-  r.bind('sess:a', { accountId: 'acc', vmId: 'vm-05', sessionId: 'live', deviceId: 'dev-1', slotIndex: 2 })
-  const before = r.repo.get('sess:a')
-  r.bind(
+  await r.bind('sess:a', { accountId: 'acc', vmId: 'vm-05', sessionId: 'live', deviceId: 'dev-1', slotIndex: 2 })
+  const before = await r.repo.get('sess:a')
+  await r.bind(
     'sess:a',
     { accountId: before.account_id, vmId: before.vm_id, sessionId: before.session_id },
     { countHit: false, ifGeneration: before.generation, clearSlot: true, keepExpiry: true },
   )
-  const after = r.repo.get('sess:a')
+  const after = await r.repo.get('sess:a')
   assert.equal(after.vm_id, 'vm-05')
   assert.equal(after.account_id, 'acc')
   assert.equal(after.session_id, 'live')
@@ -875,6 +891,6 @@ test('clearing a finished dialog slot keeps the VM and the original sticky expir
   assert.equal(after.slot_index, null)
   assert.equal(after.expires_at, before.expires_at)
   assert.equal(after.bound_at, before.bound_at)
-  assert.equal(r.resolve('sess:a').slotIndex, null)
+  assert.equal((await r.resolve('sess:a')).slotIndex, null)
   r.db?.close?.()
 })
