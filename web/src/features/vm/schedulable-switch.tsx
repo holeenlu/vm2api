@@ -1,10 +1,17 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { i18n, t as tr } from '@/i18n'
 import type { ScheduleState, Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { expiresAtToMs } from '@/lib/fable-status'
-import { isRestrictedSchedule, restrictionUntilOf } from '@/lib/vm-status'
+import { SYSTEM_TIMEZONE } from '@/lib/system-time'
+import {
+  backendStatusLabel,
+  isRestrictedSchedule,
+  restrictionUntilOf,
+} from '@/lib/vm-status'
 import { Switch } from '@/components/ui/switch'
 import {
   Tooltip,
@@ -13,30 +20,45 @@ import {
 } from '@/components/ui/tooltip'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
+import { useVmPerms } from '@/features/vm/vm-perms'
 
 function formatRestrictionUntil(until: number | null | undefined): string {
   const ms = expiresAtToMs(until)
   if (!ms) return ''
-  return new Date(ms).toLocaleString()
+  return new Date(ms).toLocaleString(i18n.language, {
+    timeZone: SYSTEM_TIMEZONE,
+  })
 }
 
 export function vmSchedulableProps(vm: Vm) {
   const scheduleState: ScheduleState | undefined = isRestrictedSchedule(vm)
     ? 'restricted'
     : vm.schedule_state
+  const vendorControlledOff = [
+    'vendor_paused',
+    'vendor_disabled',
+    'vendor_archived',
+  ].includes(
+    String(vm.schedule_disabled_reason || vm.restriction_reason || '').trim()
+  )
   return {
     vmId: vm.id,
-    // 受限（含维护 / 代理暂停）仍是「开」：开关只表达操作员意图和不可调度。
-    schedulable:
-      scheduleState === 'restricted'
+    // 自动受限（额度 / 冷却 / 维护）仍是「开」；供应商暂停由供应商开关控制。
+    schedulable: vendorControlledOff
+      ? false
+      : scheduleState === 'restricted'
         ? true
         : scheduleState
           ? scheduleState === 'on'
           : vm.schedulable !== false,
+    vendorControlledOff,
     scheduleState,
     restrictionUntil: restrictionUntilOf(vm),
     restrictionReason: vm.restriction_reason,
-    unschedulableText: vm.unschedulable_text || vm.unschedulable_reason || null,
+    unschedulableText:
+      backendStatusLabel(
+        vm.unschedulable_text || vm.unschedulable_reason || ''
+      ) || null,
   }
 }
 
@@ -46,7 +68,9 @@ export function SchedulableSwitch({
   scheduleState,
   restrictionUntil,
   unschedulableText,
+  vendorControlledOff = false,
   className,
+  onToggle,
 }: {
   vmId: string
   schedulable: boolean
@@ -54,21 +78,33 @@ export function SchedulableSwitch({
   restrictionUntil?: number | null
   restrictionReason?: string | null
   unschedulableText?: string | null
+  vendorControlledOff?: boolean
   className?: string
+  /** 非 VM 资源（如 Gateway 账号）的调度接口；未提供时调用 VM 的 /schedulable。 */
+  onToggle?: (next: boolean) => Promise<unknown>
 }) {
+  const { t: tVm } = useTranslation('vm')
+
   const qc = useQueryClient()
   const restricted = scheduleState === 'restricted'
+  const canEdit = useVmPerms().edit
   const [optimistic, setOptimistic] = useState<boolean | null>(null)
   const checked = optimistic ?? schedulable
   const mutation = useMutation({
     mutationFn: (next: boolean) =>
-      api(`/api/panel/vms/${encodeURIComponent(vmId)}/schedulable`, {
-        method: 'POST',
-        body: JSON.stringify({ schedulable: next }),
-      }),
+      onToggle
+        ? onToggle(next)
+        : api(`/api/panel/vms/${encodeURIComponent(vmId)}/schedulable`, {
+            method: 'POST',
+            body: JSON.stringify({ schedulable: next }),
+          }),
     onMutate: (next) => setOptimistic(next),
     onSuccess: async (_data, next) => {
-      toast.success(next ? '已开启调度' : '已关闭调度')
+      toast.success(
+        next
+          ? tVm('vm:schedulableSwitch.schedulingEnabled')
+          : tVm('vm:schedulableSwitch.schedulingDisabled')
+      )
       await Promise.all([
         qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
         qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
@@ -83,16 +119,19 @@ export function SchedulableSwitch({
   })
 
   const untilText = formatRestrictionUntil(restrictionUntil)
-  const tooltip =
-    scheduleState === 'unschedulable' && !checked
-      ? `不可调度：${unschedulableText || '错误'}。处理后点击重新开启调度`
+  const tooltip = vendorControlledOff
+    ? tVm('vm:schedulableSwitch.vendorControlledOff')
+    : scheduleState === 'unschedulable' && !checked
+      ? tr('vm:sync14008UnschedulableHelp', {
+          value1: unschedulableText || tr('lib:status.unavailable'),
+        })
       : restricted && checked
         ? untilText
-          ? `调度开，当前受限至 ${untilText}`
-          : '调度开，当前受限'
+          ? tr('vm:sync14008RestrictedUntil', { value1: untilText })
+          : tr('vm:schedulableSwitch.schedulingEnabledCurrentlyRestricted')
         : checked
-          ? '点击关闭调度'
-          : '点击开启调度'
+          ? tr('vm:schedulableSwitch.clickToDisableScheduling')
+          : tr('vm:schedulableSwitch.clickToEnableScheduling')
 
   return (
     <Tooltip>
@@ -104,7 +143,7 @@ export function SchedulableSwitch({
         >
           <Switch
             checked={checked}
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || vendorControlledOff || !canEdit}
             onCheckedChange={(next) => mutation.mutate(next)}
             aria-label={tooltip}
           />

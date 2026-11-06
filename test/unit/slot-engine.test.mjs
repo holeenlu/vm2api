@@ -31,7 +31,7 @@ import {
   summarizeVm,
 } from '../../src/lib/vm/vm-registry.mjs'
 
-test('session slots default to native capacity and clamp persisted values', () => {
+test('session slots default to native capacity and clamp persisted values', async () => {
   assert.equal(KERNEL_NATIVE_SLOT_COUNT, 20)
   assert.equal(normalizeSessionSlots(undefined), 20)
   assert.equal(normalizeSessionSlots(0), 1)
@@ -41,7 +41,7 @@ test('session slots default to native capacity and clamp persisted values', () =
   assert.equal(normalizeInferenceConfig({}).session_slots, 20)
 })
 
-test('routing patch rejects session slots outside the native range', () => {
+test('routing patch rejects session slots outside the native range', async () => {
   assert.deepEqual(validateInferenceRoutingPatch({ inference: { session_slots: 0 } }), [
     'inference.session_slots 必须是 1–20 的整数',
   ])
@@ -71,14 +71,14 @@ function writeVm(root, id, extra = {}) {
   return file
 }
 
-test('vm engine overrides routing, empty inherits rust', () => {
+test('vm engine overrides routing, empty inherits rust', async () => {
   assert.equal(resolveInferenceEngine({}, {}), 'rust')
   assert.equal(resolveInferenceEngine({}, { inference: { engine: 'rust' } }), 'rust')
   assert.equal(resolveInferenceEngine({ inference_engine: 'go' }, { inference: { engine: 'rust' } }), 'rust')
   assert.equal(resolveInferenceEngine({ inference_engine: 'rust' }, { inference: { engine: 'go' } }), 'rust')
 })
 
-test('kernel dataplane defaults wrap and accepts cc and crag', () => {
+test('kernel dataplane defaults wrap and accepts cc and crag', async () => {
   assert.equal(resolveKernelDataplane({}, {}), 'wrap')
   assert.equal(resolveKernelDataplane({}, { inference: { dataplane: 'crag' } }), 'crag')
   assert.equal(resolveKernelDataplane({}, { inference: { dataplane: 'cc-node' } }), 'cc')
@@ -98,7 +98,7 @@ test('kernel dataplane defaults wrap and accepts cc and crag', () => {
   assert.equal(cragPatch.patch.dataplane, 'crag')
 })
 
-test('crag kernel version stays legacy unless the VM or routing pins v2', () => {
+test('crag kernel version stays legacy unless the VM or routing pins v2', async () => {
   assert.equal(resolveCragKernelVersion({}, {}), 'legacy')
   assert.equal(resolveCragKernelVersion({}, { inference: { crag_kernel_version: 'crag-v2' } }), 'v2')
   assert.equal(
@@ -117,7 +117,7 @@ test('crag kernel version stays legacy unless the VM or routing pins v2', () => 
   ])
 })
 
-test('resolveCliSystemLayout follows persona_preset, not leftover inject-only', () => {
+test('resolveCliSystemLayout follows persona_preset, not leftover inject-only', async () => {
   assert.equal(resolveCliSystemLayout({}, {}), 'identity')
   assert.equal(resolveCliSystemLayout({}, { compatibility: { persona_preset: 'official_full' } }), 'identity')
   assert.equal(resolveCliSystemLayout({}, { compatibility: { persona_preset: 'official' } }), 'identity')
@@ -129,7 +129,7 @@ test('resolveCliSystemLayout follows persona_preset, not leftover inject-only', 
   )
 })
 
-test('official_cc inference: rust is always cli-hop; stored go is rust', () => {
+test('official_cc inference: rust is always cli-hop; stored go is rust', async () => {
   assert.equal(resolveOfficialCcInference({}, {}), 'cli-hop')
   assert.equal(resolveOfficialCcInference({}, { official_cc: {} }), 'cli-hop')
   assert.equal(resolveOfficialCcInference({}, { official_cc: { inference: 'cli-hop' } }), 'cli-hop')
@@ -149,13 +149,13 @@ test('official_cc inference: rust is always cli-hop; stored go is rust', () => {
   assert.equal(assertCliHopAllowed({ inference_engine: 'go' }, { official_cc: { inference: 'cli-hop' } }).ok, true)
 })
 
-test('setup-token rust slots still cli-hop; only token minting skips CLI', () => {
+test('setup-token rust slots still cli-hop; only token minting skips CLI', async () => {
   const rust = { inference_engine: 'rust', claude: { mode: 'setup-token' } }
   assert.equal(resolveInferenceEngine(rust, {}), 'rust')
   assert.equal(resolveOfficialCcInference(rust, {}), 'cli-hop')
 })
 
-test('slot persona inherit vs override', () => {
+test('slot persona inherit vs override', async () => {
   const routing = { compatibility: { persona_preset: 'official_full' } }
   assert.equal(resolveSlotPersonaPreset({}, routing), 'official_full')
   assert.equal(resolveSlotPersonaPreset({ persona_preset: 'zero' }, routing), 'zero')
@@ -169,47 +169,47 @@ test('slot persona inherit vs override', () => {
   assert.equal(personaModeFromPreset('official_full'), 'official_full')
 })
 
-test('persistSlotEnginePolicy writes inherit as deleted fields', () => {
+test('persistSlotEnginePolicy writes inherit as deleted fields', async () => {
   const root = makeRoot()
   const file = writeVm(root, 'vm-01')
   persistSlotEnginePolicy(root, 'vm-01', { inference_engine: 'rust', persona_preset: 'zero' })
   let saved = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(saved.inference_engine, 'rust')
   assert.equal(saved.persona_preset, 'zero')
-  assert.equal(summarizeVm(saved).inference_engine, 'rust')
-  assert.equal(summarizeVm(saved).persona_preset, 'zero')
+  assert.equal((await summarizeVm(saved)).inference_engine, 'rust')
+  assert.equal((await summarizeVm(saved)).persona_preset, 'zero')
   persistSlotEnginePolicy(root, 'vm-01', { inference_engine: '', persona_preset: '' })
   saved = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(saved.inference_engine, undefined)
   assert.equal(saved.persona_preset, undefined)
-  assert.equal(summarizeVm(saved).inference_engine, null)
-  assert.equal(summarizeVm(saved).persona_preset, null)
+  assert.equal((await summarizeVm(saved)).inference_engine, null)
+  assert.equal((await summarizeVm(saved)).persona_preset, null)
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('persisted CRAG pin survives summary projection and overrides conflicting global defaults', (t) => {
+test('persisted CRAG pin survives summary projection and overrides conflicting global defaults', async (t) => {
   const root = makeRoot()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   writeVm(root, 'vm-01', { dataplane: 'wrap', crag_kernel_version: 'legacy' })
   getVm(root, 'vm-01')
   persistSlotEnginePolicy(root, 'vm-01', { dataplane: 'crag', crag_kernel_version: 'v2' })
-  const summary = listVms(root)[0]
+  const summary = (await listVms(root))[0]
   assert.equal(summary.dataplane, 'crag')
   assert.equal(summary.crag_kernel_version, 'v2')
   assert.equal(resolveKernelDataplane(summary, { inference: { dataplane: 'wrap' } }), 'crag')
   assert.equal(resolveCragKernelVersion(summary, { inference: { crag_kernel_version: 'legacy' } }), 'v2')
   persistSlotEnginePolicy(root, 'vm-01', { dataplane: 'wrap', crag_kernel_version: '' })
-  const wrapped = listVms(root)[0]
+  const wrapped = (await listVms(root))[0]
   assert.equal(wrapped.dataplane, 'wrap')
   assert.equal(wrapped.crag_kernel_version, null)
   assert.equal(resolveKernelDataplane(wrapped, { inference: { dataplane: 'crag' } }), 'wrap')
 })
 
-test('persistSlotEnginePolicyMany updates listed ids only', () => {
+test('persistSlotEnginePolicyMany updates listed ids only', async () => {
   const root = makeRoot()
   writeVm(root, 'vm-01')
   writeVm(root, 'vm-02')
-  const report = persistSlotEnginePolicyMany(root, ['vm-01'], { inference_engine: 'rust' })
+  const report = await persistSlotEnginePolicyMany(root, ['vm-01'], { inference_engine: 'rust' })
   assert.equal(report.updated, 1)
   assert.equal(report.items[0].inference_engine, 'rust')
   const two = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-02.json'), 'utf8'))
@@ -217,7 +217,7 @@ test('persistSlotEnginePolicyMany updates listed ids only', () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('patch parsers reject unknown values', () => {
+test('patch parsers reject unknown values', async () => {
   assert.equal(parseSlotEnginePolicyPatch({}).ok, false)
   assert.equal(parseSlotEnginePolicyPatch({ inference_engine: 'kvm' }).ok, false)
   assert.equal(parseSlotEnginePolicyPatch({ persona_preset: 'custom' }).ok, false)

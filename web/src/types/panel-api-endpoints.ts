@@ -9,6 +9,7 @@ export type ApiKeyEntry = {
    */
   api_key: string
   key_suffix?: string
+  has_proxy?: boolean
   proxy_url?: string
   proxy_id?: string
   disabled?: boolean
@@ -31,6 +32,10 @@ export type ApiEndpointPreset = {
 }
 
 export type ApiEndpoint = {
+  groups?: { id: number; name: string }[]
+  groups_version?: number
+  connection_editable?: boolean
+  headers_configured?: boolean
   id: string
   name?: string
   base_url?: string

@@ -1,3 +1,4 @@
+import { t as tVm } from '@/i18n'
 import type { Vm } from '@/types/panel-vm'
 
 function num(v: unknown): number {
@@ -53,11 +54,17 @@ export function bootOutcome(data: unknown): { ok: boolean; message: string } {
     const why = r.error || r.reason || r.code
     return {
       ok: false,
-      message: `已开机，但内核未就绪${why ? `：${String(why)}` : ''}`,
+      message: tVm(
+        why ? 'vm:messages.kernelNotReadyReason' : 'vm:messages.kernelNotReady',
+        { reason: String(why || '') }
+      ),
     }
   }
   return {
     ok: true,
-    message: res.vm?.schedulable === true ? '已开机，调度已开启' : '已开机',
+    message:
+      res.vm?.schedulable === true
+        ? tVm('vm:detailToday.startedSchedulingEnabled')
+        : tVm('vm:detailToday.started'),
   }
 }

@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { VIEW_TITLES } from '@/config/nav'
+import { useTranslation } from 'react-i18next'
 import { opsSince } from '@/lib/ops-window'
 import { PageHeader } from '@/components/page-header'
 import { CardGridSkeleton, SectionSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
 import { logStatsQueryOptions } from '@/features/logs/queries'
+import { AccessGuardMetricsPanel } from './access-guard-metrics'
 import { DatabaseOverview } from './database-overview'
 import {
   PromptCacheMetricsPanel,
@@ -31,6 +32,7 @@ function DatabasePageSkeleton() {
 }
 
 export function DatabasePage() {
+  const { t } = useTranslation('database')
   const [window, setWindow] = useState<PromptCacheWindow>('1h')
   const since = useMemo(() => opsSince(window), [window])
   const metrics = useQuery(databaseMetricsQueryOptions())
@@ -39,7 +41,7 @@ export function DatabasePage() {
   )
 
   return (
-    <PageHeader title={VIEW_TITLES.database}>
+    <PageHeader title={t('pageTitle')}>
       <QueryGate
         loading={metrics.isLoading}
         error={metrics.error}
@@ -50,6 +52,10 @@ export function DatabasePage() {
             <DatabaseOverview
               metrics={metrics.data.database}
               sampledAt={metrics.data.sampled_at}
+            />
+            <AccessGuardMetricsPanel
+              writeBehind={metrics.data.write_behind}
+              routeBudget={metrics.data.route_budget}
             />
             <UsageCacheMetricsPanel metrics={metrics.data.usage_cache} />
             <PromptCacheMetricsPanel

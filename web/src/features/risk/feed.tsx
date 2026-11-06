@@ -1,19 +1,33 @@
+import { t as translate } from '@/i18n'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { RelativeTime } from '@/features/logs/relative-time'
 import { type FeedKind, evidenceOf, feedKindOf } from './model'
 
 const KIND_NAME: Record<FeedKind, string> = {
-  distill: '蒸馏',
-  'hard-regex': '硬正则',
-  refusal: '拒答缓存',
-  jev: '决策模型',
-  upstream: '上游拒答',
+  get distill() {
+    return translate('risk:distillation')
+  },
+  get 'hard-regex'() {
+    return translate('risk:hardRegex')
+  },
+  get refusal() {
+    return translate('risk:refusalCache')
+  },
+  get jev() {
+    return translate('risk:decisionModel')
+  },
+  get upstream() {
+    return translate('risk:upstreamRefusal')
+  },
 }
 
 function who(row: UsageLogRow) {
   const parts = [row.userName, row.keyName].filter(Boolean)
-  return parts.length ? parts.join(' · ') : row.clientIp || '匿名'
+  return parts.length
+    ? parts.join(' · ')
+    : row.clientIp || translate('risk:anonymous')
 }
 
 /** One line per request; the whole row opens the request detail. */
@@ -32,6 +46,8 @@ export function RiskFeed({
   showKind: boolean
   onOpen: (row: UsageLogRow) => void
 }) {
+  useTranslation('risk')
+
   if (loading) {
     return (
       <div className='space-y-2 p-4' aria-busy='true'>

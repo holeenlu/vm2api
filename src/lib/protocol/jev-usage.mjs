@@ -61,7 +61,12 @@ export function normalizeJevUsage(value = {}) {
 export function recordJevUsage(value) {
   if (!recorder) return
   try {
-    recorder(normalizeJevUsage(value))
+    // 记录器可以是 async（R6 B6b：JevUsageRepo.record 经 DbClient 事务写入），拒绝同样计入存储错误
+    const pending = recorder(normalizeJevUsage(value))
+    if (typeof pending?.catch === 'function')
+      pending.catch(() => {
+        storageErrors++
+      })
   } catch {
     storageErrors++
   }

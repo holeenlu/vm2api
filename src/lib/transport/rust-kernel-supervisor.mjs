@@ -20,7 +20,7 @@ import { cacheTtlFromRouting, normalizeCacheTtl } from '../protocol/cache-ttl.mj
 import { thinkingDisplayMode } from '../protocol/thinking.mjs'
 import { getModelPolicy } from '../protocol/model-policy.mjs'
 import { ccEntrypointFromRouting } from '../identity/crs-persona.mjs'
-import { setVmSchedulable, listVms, getVm } from '../vm/vm-registry.mjs'
+import { setVmSchedulable, listVmIds, getVm } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isKvmRuntime, runtimeKind } from '../vm/runtime-kind.mjs'
 import { slotExecArgv } from '../vm/slot-exec.mjs'
@@ -178,7 +178,7 @@ export async function reconcileCliHopRuntime(exec, { runDockerExec = runDocker }
   const root = projectRootFromExec(exec)
   const vmId = exec?.vmId || exec?.vm?.id
   if (root && vmId && exec?.vm?.schedulable !== false && String(exec?.vm?.status || '').toLowerCase() === 'paused') {
-    setVmSchedulable(root, vmId, true)
+    await setVmSchedulable(root, vmId, true)
     actions.push('status_running')
   }
   return { ok: true, actions, reason: 'transparent_egress' }
@@ -617,7 +617,7 @@ async function startKvmGuestKernel(
     const waited = await waitForHealth(exec, budget, allowMissingCredential)
     if (waited?.ok) {
       waited.reconcile = await reconcileCliHopRuntime(exec, { runDockerExec })
-      return waited
+      return { ...waited, reason: 'already_up' }
     }
   }
   const retired = await retireLegacyTelemetryBeforeStart(exec, runDockerExec)
@@ -721,7 +721,7 @@ async function startRustKernel(
     const waited = await waitForHealth(exec, waitMs, allowMissingCredential)
     if (waited?.ok) {
       waited.reconcile = await reconcileCliHopRuntime(exec, { runDockerExec })
-      return waited
+      return { ...waited, reason: 'already_up' }
     }
   }
   const retired = await retireLegacyTelemetryBeforeStart(exec, runDockerExec)
@@ -973,7 +973,8 @@ export function syncClaudeKernelConfigs(projectRoot, routing) {
   if (!projectRoot) return { updated: 0, skipped: 0 }
   let updated = 0
   let skipped = 0
-  for (const { id } of listVms(projectRoot)) {
+  // Only ids: the synchronous projection reads the VM files, not the database-backed summaries (R6 B7c).
+  for (const id of listVmIds(projectRoot)) {
     const vm = getVm(projectRoot, id)
     if (!vm || isCodexVm(vm)) {
       skipped += 1

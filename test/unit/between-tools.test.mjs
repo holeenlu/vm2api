@@ -15,7 +15,7 @@ import {
 } from '../../src/lib/protocol/model-policy.mjs'
 
 openDatabase({ dbPath: ':memory:' })
-resetModelPolicy()
+await resetModelPolicy()
 after(() => closeDatabase())
 const fixture = (overrides = {}) => ({
   ...classifierFixture({ model: 'claude-sonnet-5-5' }),
@@ -81,17 +81,17 @@ for (const [name, prepare, code] of paths) {
   })
 }
 
-test('between_tools is an explicit capability that survives saved policy merging', () => {
+test('between_tools is an explicit capability that survives saved policy merging', async () => {
   const old = seedDefaultPolicy()
   delete old.models['claude-sonnet-5-5'].capabilities.supports_between_tools
-  saveModelPolicy(old)
+  await saveModelPolicy(old)
   assert.equal(getModelPolicy().models['claude-sonnet-5-5'].capabilities.supports_between_tools, true)
   try {
     old.models['claude-sonnet-5-5'].capabilities.supports_between_tools = false
-    saveModelPolicy(old)
+    await saveModelPolicy(old)
     assert.throws(() => prepareClassifierBody(fixture()), /between_tools/)
   } finally {
-    resetModelPolicy()
+    await resetModelPolicy()
   }
 })
 
@@ -119,10 +119,10 @@ test('between_tools preserves signed and redacted history through a tool loop', 
   }
 })
 
-test('between_tools rejects incompatible injected effort without changing saved policy', () => {
+test('between_tools rejects incompatible injected effort without changing saved policy', async () => {
   const policy = seedDefaultPolicy()
   policy.models['claude-sonnet-5-5'].params.default_effort = 'xhigh'
-  saveModelPolicy(policy)
+  await saveModelPolicy(policy)
   try {
     assert.throws(() => prepareAnthropicRequest(fixture(), { unofficial: true }), /xhigh or max/)
     const out = prepareAnthropicRequest(fixture({ output_config: { effort: 'low' } }), { unofficial: true })
@@ -131,7 +131,7 @@ test('between_tools rejects incompatible injected effort without changing saved 
     // Classifier assembly does not inject a configured default.
     assert.equal(prepareClassifierBody(fixture()).output_config, undefined)
   } finally {
-    resetModelPolicy()
+    await resetModelPolicy()
   }
 })
 

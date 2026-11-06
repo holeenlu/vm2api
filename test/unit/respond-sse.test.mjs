@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
+import { zstdCompressSync } from 'node:zlib'
 import { applySseSocketTuning, createRespond, parseRequestUrl, readBody } from '../../src/lib/http/respond.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 
@@ -105,4 +106,43 @@ test('oversized protocol body returns 413 before scheduling', async () => {
   assert.equal(scheduled, false)
   assert.equal(res.statusCode, 413)
   assert.equal(res.body.error.code, 'body_too_large')
+})
+
+test('Responses rejects oversized or corrupt zstd bodies before scheduling', async () => {
+  let scheduled = false
+  const { handleProtocol } = createHandleProtocol({
+    cfg: { limits: { max_body_bytes: 512 }, rewrite: { enabled: false } },
+    json(res, status, body) {
+      res.statusCode = status
+      res.body = body
+    },
+    readBody,
+    requireAuth: () => true,
+    requestLog: { start: () => ({ request_id: 'req-zstd' }), finish() {} },
+    stats: { errors: 0 },
+    groupsRepo: { rateMultiplier: () => 1 },
+    getFailoverRunner() {
+      scheduled = true
+      throw new Error('scheduler called')
+    },
+  })
+  for (const [bytes, status, code] of [
+    [
+      zstdCompressSync(Buffer.from(JSON.stringify({ model: 'gpt-5', input: 'x'.repeat(10000) }))),
+      413,
+      'body_too_large',
+    ],
+    [Buffer.from('broken'), 400, 'invalid_content_encoding'],
+  ]) {
+    const req = Readable.from([bytes])
+    req.headers = { 'content-encoding': 'zstd' }
+    // 与上游同文件的 413 用例一致：入口会挂 close / aborted 监听，夹具需是真实 EventEmitter
+    const res = new EventEmitter()
+    res.statusCode = 0
+    res.body = null
+    await handleProtocol(req, res, 'openai.responses', '/v1/responses')
+    assert.equal(res.statusCode, status)
+    assert.equal(res.body.error.code, code)
+    assert.equal(scheduled, false)
+  }
 })

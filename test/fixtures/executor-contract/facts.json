@@ -1,0 +1,46 @@
+{
+  "note": "Gateway 事实直读（设计第 19 节）的跨语言夹具：由 Node 的 vault.mjs 与 secure.mjs 生成，Worker facts_crypto.go 必须能解开",
+  "db_secret": "facts-fixture-db-secret",
+  "secret_json": "enc:v1:OR/jvVkJWTrH7crC:DGvzP5IFxlerl2yE71FrSg==:MC4Z/eChZQfsKHlbVE52rQ6J2fSZ85QOnqs0HeZD1zfO8+SuJFaWU4mm2AMeajPsxds=",
+  "secret_plain": {
+    "proxy_url": "socks5h://user:pass@127.0.0.1:1080"
+  },
+  "keyring": {
+    "active": "mk_20261106_b6a4e513",
+    "keys": {
+      "mk_20261106_b6a4e513": "eewUEqGt1pa8kDrbOeZ00F21O7vH2fdUeegZE3ibYE0="
+    }
+  },
+  "credentials": [
+    {
+      "account_resource_id": "gw-01",
+      "grant_kind": "bps",
+      "revision": 3,
+      "master_key_id": "mk_20261106_b6a4e513",
+      "wrapped_key": "/GeJ2VLJMHuZg+vyH/h4m5U/iMcVSDrt3h6He6FZW9rx2KsizmHgxFmqm2io6FqS4whpwtl12hXnxpkI",
+      "ciphertext": "groYQpwWu573hhS4VljK8mQ0Tr4GLzW4KmDPigCUuX9k7GwV/RyMIMQ0aaS0dXAYOUPvEpBqKYNMCvYZkscSRFkxP/Xbip7ZEUThN5q21ZDdYvei/oXTJXzuukECr3Fqtxs=",
+      "token_fingerprint": "9ac270068a12ff29"
+    },
+    {
+      "account_resource_id": "gw-01",
+      "grant_kind": "native",
+      "revision": 7,
+      "master_key_id": "mk_20261106_b6a4e513",
+      "wrapped_key": "afOgZmjUchOypOPL0M1KNHDhcg/1BfaBk9TXnvQ/V9PkZGFI1U3EFjlpt3FvRkQssHFzGp879KUh3/OS",
+      "ciphertext": "1YMH9PLV/3+Ran0MOxwCbR3DZ1tJnT5y9v8MTaFB6P4iXqY9MqZDdbhiuJn1ejmfBMhsFZBmw3IO45nJrTczSpf9XFG1y9sj8ru6HZ79NqOpfWyrUTwEdGgZ3DLO/AA39g3+5Zkz6HkeqBU=",
+      "token_fingerprint": "b7b890f5c4890571"
+    }
+  ],
+  "plain": {
+    "native": {
+      "access_token": "at-native",
+      "refresh_token": "rt-native",
+      "id_token": "it-native"
+    },
+    "bps": {
+      "access_token": "at-bps",
+      "refresh_token": "rt-bps",
+      "id_token": "it-bps"
+    }
+  }
+}

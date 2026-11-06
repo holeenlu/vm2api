@@ -1,8 +1,18 @@
 import { createElement } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { HealthPane } from './health-pane'
+
+// The assertions below locate the control by its zh-CN accessible name.
+const originalLanguage = i18n.language
+beforeAll(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterAll(async () => {
+  await i18n.changeLanguage(originalLanguage)
+})
 
 function renderMinTokens(config: Record<string, unknown>) {
   const client = new QueryClient({
