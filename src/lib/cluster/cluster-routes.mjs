@@ -16,6 +16,7 @@ import {
 import { preflightNode, slotImageJob, startSlotImageBuild } from './placement.mjs'
 import { ClusterError } from './ssh-link.mjs'
 import { runtimeKind } from '../vm/runtime-kind.mjs'
+import { auditSensitiveAction as defaultAuditSensitiveAction } from '../admin/route-audit.mjs'
 
 function kernelOf(value) {
   const kernel = String(value || '').trim()
@@ -34,7 +35,13 @@ function clampInt(v, lo, hi, dflt) {
   return Math.min(hi, Math.max(lo, n))
 }
 
-export function createClusterRoutes({ manager, json, readBody, ok }) {
+export function createClusterRoutes({
+  manager,
+  json,
+  readBody,
+  ok,
+  auditSensitiveAction = defaultAuditSensitiveAction,
+}) {
   function fail(res, err) {
     const status = err instanceof ClusterError ? err.status : 500
     const code = err instanceof ClusterError ? err.code : 'cluster_error'
@@ -45,13 +52,13 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
     const p = url.pathname
     const m = req.method
 
-    if (p === `${PREFIX}/nodes` && m === 'GET') return json(res, 200, ok({ items: manager.list() }))
+    if (p === `${PREFIX}/nodes` && m === 'GET') return json(res, 200, ok({ items: await manager.list() }))
     if (p === `${PREFIX}/local` && m === 'GET') {
       return json(res, 200, ok(await manager.localStatus({ refresh: url.searchParams.get('refresh') === '1' })))
     }
     if (p === `${PREFIX}/nodes` && m === 'POST') {
       const body = await readBody(req, MAX_BODY)
-      return json(res, 201, ok(manager.add(body)))
+      return json(res, 201, ok(await manager.add(body)))
     }
     if (p === `${PREFIX}/nodes/probe` && m === 'POST') {
       const body = await readBody(req, MAX_BODY)
@@ -63,7 +70,7 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
     const id = nm[1]
     const sub = nm[2] || ''
 
-    if (sub === '' && m === 'GET') return json(res, 200, ok(manager.get(id)))
+    if (sub === '' && m === 'GET') return json(res, 200, ok(await manager.get(id)))
     if (sub === '' && m === 'PATCH') {
       const body = await readBody(req, MAX_BODY)
       return json(res, 200, ok(await manager.update(id, body)))
@@ -76,13 +83,18 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
       await manager.remove(id)
       return json(res, 200, ok({ id }))
     }
-    if (sub === '/reconnect' && m === 'POST') return json(res, 200, ok(manager.reconnect(id)))
+    if (sub === '/reconnect' && m === 'POST') return json(res, 200, ok(await manager.reconnect(id)))
     if (sub === '/direct-link' && m === 'PUT') {
       const body = await readBody(req, MAX_BODY)
       return json(res, 200, ok(await manager.setDirectLink(id, body)))
     }
     if (sub === '/direct-link' && m === 'DELETE') return json(res, 200, ok(await manager.clearDirectLink(id)))
-    if (sub === '/shell-ticket' && m === 'POST') return json(res, 200, ok(manager.issueShellTicket(id)))
+    if (sub === '/shell-ticket' && m === 'POST') {
+      const issued = manager.issueShellTicket(id)
+      // 节点终端是宿主机 root shell：签发前后都不记票据本身，只记操作者、来源 IP、节点与签发时间
+      await auditSensitiveAction(req, 'cluster.shell_ticket', id, { expires_in: issued?.expires_in ?? null })
+      return json(res, 200, ok(issued))
+    }
 
     if (sub === '/docker/info' && m === 'GET') return json(res, 200, ok(await dockerInfo(manager.docker(id))))
     if (sub === '/preflight' && m === 'POST') {
@@ -94,13 +106,14 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
           await preflightNode(id, {
             kernel: kernelOf(body.kernel),
             runtime: runtimeKind({ runtime_type: body.runtime_type }),
+            memory: body.memory,
           }),
         ),
       )
     }
     if (sub === '/slot-image' && m === 'POST') {
       const body = await readBody(req, MAX_BODY)
-      manager.get(id)
+      await manager.get(id)
       return json(
         res,
         202,
@@ -110,7 +123,7 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
       )
     }
     if (sub === '/slot-image' && m === 'GET') {
-      manager.get(id)
+      await manager.get(id)
       return json(
         res,
         200,
@@ -118,7 +131,7 @@ export function createClusterRoutes({ manager, json, readBody, ok }) {
       )
     }
     if (sub === '/docker/install' && m === 'POST') return json(res, 202, ok(manager.startDockerInstall(id)))
-    if (sub === '/docker/install' && m === 'GET') return json(res, 200, ok(manager.get(id).install))
+    if (sub === '/docker/install' && m === 'GET') return json(res, 200, ok((await manager.get(id)).install))
     if (sub === '/docker/containers' && m === 'GET') {
       return json(res, 200, ok({ items: await listContainers(manager.docker(id)) }))
     }

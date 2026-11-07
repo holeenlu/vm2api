@@ -1,3 +1,6 @@
+import { vendorRuntimeBlock } from '../vendor/vendor-runtime-policy.mjs'
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
+import { isDbOpen, getDb } from '../db/database.mjs'
 /**
  * Multi-VM registry — load all vms/*.json (except active.json)
  * Writes go through atomicWriteJson so the DB credential mirror
@@ -22,6 +25,7 @@ import {
   applyHold,
   applyScheduleOff,
   applyUnschedulable,
+  clearLegacyProxyScheduleOff as clearLegacyProxyScheduleOffState,
   deriveScheduleFields,
   isUnschedulableReason,
   migrateScheduleRecord,
@@ -31,9 +35,10 @@ import { manualScheduleLevelOf, parseScheduleLevelInput } from '../pool/credenti
 import { vmQuotaOverrideOf } from '../pool/vm-quota-override.mjs'
 import { activeHoursOf, parseActiveHoursInput } from '../pool/active-hours.mjs'
 import { rollWindowHistory } from '../pool/window-history.mjs'
+import { codexUsageWindows, recordQuotaObservations } from '../usage/quota-observations.mjs'
 import { normalizeOwnerId, vmOriginOf, vmOwnerId, VM_ORIGIN } from '../admin/resource-owner.mjs'
 import { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
-import { canClaudeResetCredits } from '../oauth/credential-mode.mjs'
+import { canClaudeResetCredits, canReadAccountProfile } from '../oauth/credential-mode.mjs'
 import { validTimezone } from '../core/timezone.mjs'
 import {
   extraFromCodexHeaders,
@@ -53,28 +58,86 @@ import { ensureSlotSmbios } from './machine-spec.mjs'
 
 export { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
 
-export function listVms(projectRoot, routing = null) {
+/**
+ * VM summaries, in file order. Async (R6 B7c): the supplier block and the group fields are read from the
+ * database. Group membership and versions are read once for the whole list (two queries), not per VM.
+ * A record that cannot be summarized is skipped, as before.
+ */
+export async function listVms(projectRoot, routing = null) {
   const dir = path.join(projectRoot, 'vms')
   if (!fs.existsSync(dir)) return []
-  const files = listVmRecordFiles(dir)
-  return files
-    .map((f) => {
-      try {
-        const raw = readJsonCached(path.join(dir, f))
-        if (!raw?.id) return null
-        return summarizeVm(raw, projectRoot, routing)
-      } catch {
-        return null
-      }
-    })
-    .filter(Boolean)
+  const raws = []
+  for (const f of listVmRecordFiles(dir)) {
+    try {
+      const raw = readJsonCached(path.join(dir, f))
+      if (raw?.id) raws.push(raw)
+    } catch {}
+  }
+  if (!raws.length) return []
+  let groupsByVm = null
+  let versions = null
+  if (isDbOpen()) {
+    try {
+      const groups = new GroupsRepo(getDb())
+      groupsByVm = await groups.forResourceKind('vm')
+      versions = await groups.resourceVersionsOfKind('vm')
+    } catch {
+      // Every summary reads its groups: a failed read used to drop each one.
+      return []
+    }
+  }
+  const out = []
+  for (const raw of raws) {
+    try {
+      const vendorBlock = await vendorRuntimeBlock(raw)
+      out.push(
+        buildVmSummary(raw, projectRoot, routing, {
+          vendorBlock,
+          groups: groupsByVm ? groupsByVm.get(String(raw.id)) || [] : null,
+          groupsVersion: versions ? versions.get(String(raw.id)) || 0 : 0,
+        }),
+      )
+    } catch {}
+  }
+  return out
+}
+
+/**
+ * VM ids on disk, in `listVms` order, without building summaries (no database reads). The Claude scheduler only
+ * needs the ids and re-reads each record with getVm (R6 B7b).
+ */
+export function listVmIds(projectRoot) {
+  const dir = path.join(projectRoot, 'vms')
+  if (!fs.existsSync(dir)) return []
+  const ids = []
+  for (const f of listVmRecordFiles(dir)) {
+    try {
+      const raw = readJsonCached(path.join(dir, f))
+      if (raw?.id) ids.push(raw.id)
+    } catch {}
+  }
+  return ids
 }
 
 export function getVm(projectRoot, id) {
   return readJsonCached(path.join(projectRoot, 'vms', `${id}.json`))
 }
 
-export function summarizeVm(vm, projectRoot = null, routing = null) {
+/** One VM summary (async, R6 B7c): reads the supplier block and the VM's group fields. */
+export async function summarizeVm(vm, projectRoot = null, routing = null) {
+  const vendorBlock = await vendorRuntimeBlock(vm)
+  let groups = null
+  let groupsVersion = 0
+  if (isDbOpen()) {
+    const repo = new GroupsRepo(getDb())
+    groups = await repo.forResource('vm', vm.id)
+    groupsVersion = await repo.resourceVersion('vm', vm.id)
+  }
+  return buildVmSummary(vm, projectRoot, routing, { vendorBlock, groups, groupsVersion })
+}
+
+/** The summary from what summarizeVm / listVms read; `groups` is null when the database is closed. */
+function buildVmSummary(vm, projectRoot, routing, { vendorBlock, groups, groupsVersion }) {
   const kind = normalizeVmKind(vm)
   const codex = kind.kind === 'codex' ? summarizeCodexSlot(projectRoot, vm) : null
   const quota = codex?.usage?.quota || {}
@@ -124,6 +187,17 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     refresh_error: kind.kind === 'codex' ? null : vm.claude?.refresh_error || null,
     account_tier:
       kind.kind === 'codex' ? 'codex' : vm.claude?.account_tier || (hasAccessPresence(vm.claude) ? 'pro' : null),
+    subscription_type:
+      kind.kind === 'codex' ? codex?.subscription?.subscription_plan || null : vm.claude?.subscription_type || null,
+    rate_limit_tier: kind.kind === 'codex' ? null : vm.claude?.rate_limit_tier || null,
+    billing_type: kind.kind === 'codex' ? codex?.billing_type || null : vm.claude?.billing_type || null,
+    subscription_updated_at:
+      kind.kind === 'codex' ? codex?.subscription_updated_at || null : vm.claude?.subscription_updated_at || null,
+    // Idle OAuth slots intentionally keep tokens in the worker file. vm.json
+    // commonly has only has_refresh after the access token is rotated/expired;
+    // the worker can refresh before the profile request, so either credential
+    // presence is sufficient here. Profile scope/mode checks still apply.
+    can_refresh_profile: kind.kind !== 'codex' && hasCredentialPresence(vm.claude) && canReadAccountProfile(vm.claude),
     has_session_key: false,
     max_concurrency: kind.kind === 'codex' ? openAIPolicy.max_concurrency : (vm.policy?.maxConcurrency ?? 2),
     max_concurrency_override:
@@ -158,14 +232,17 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     claude_code_version: vm.claude_code_version || null,
     stats: vm.stats || {},
     fingerprint: vm.fingerprint || null,
-    schedulable: vm.schedulable !== false,
+    vendor_account_resource_id: vm.vendor_account_resource_id || null,
+    schedulable: !vendorBlock && vm.schedulable !== false,
     schedule_manual: vm.schedule_manual === true,
-    schedule_disabled_reason: vm.schedule_disabled_reason || null,
+    schedule_disabled_reason: vendorBlock || vm.schedule_disabled_reason || null,
     schedule_off: vm.schedule_off === true,
     unschedulable: vm.unschedulable || null,
     schedule_hold: vm.schedule_hold || null,
     temp_unschedulable_until: vm.claude?.temp_unschedulable_until || vm.temp_unschedulable_until || null,
     temp_unschedulable_reason: vm.claude?.temp_unschedulable_reason || vm.temp_unschedulable_reason || null,
+    groups: (groups || []).map(({ id, name, platform, status }) => ({ id, name, platform, status })),
+    groups_version: groups ? groupsVersion : 0,
     owner_user_id: normalizeOwnerId(vm.owner_user_id),
     origin: vmOriginOf(vm),
     proxy_id: vm.proxy?.id || null,
@@ -196,6 +273,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     plan_type: codex?.plan_type || null,
     chatgpt_subscription_active_until: kind.kind === 'codex' ? codex?.chatgpt_subscription_active_until || null : null,
     chatgpt_plan_type: kind.kind === 'codex' ? codex?.chatgpt_plan_type || null : null,
+    subscription: kind.kind === 'codex' ? codex?.subscription || null : null,
     claude_reset_credits: kind.kind === 'codex' ? null : vm.claude_reset_credits || null,
   }
 }
@@ -228,8 +306,10 @@ export function persistAccountTier(projectRoot, vmId, tier, { source = null } = 
 /**
  * Merge live `x-codex-*` headers (and optional park-until) into vm.codex.
  * Cluster 5H/7D meters read this via summarizeCodexSlot -> usage.quota.
+ * The record write and quota schedule are one synchronous step; the observation
+ * history is written after it (async, R6 B7c; advisory, never rejects).
  */
-export function persistCodexUsage(
+export async function persistCodexUsage(
   projectRoot,
   vmId,
   { headers, extra, limitedUntil, quotaExceeded = false, now = Date.now(), policy = null } = {},
@@ -278,8 +358,11 @@ export function persistCodexUsage(
   )
   vm.updated_at = new Date(now).toISOString()
   atomicWriteJson(file, vm, { mode: 0o600 })
+  const windows = codexUsageWindows(vm.codex.usage)
   syncCodexQuotaSchedule(projectRoot, vm, { now, policy })
-  return getVm(projectRoot, vmId) || vm
+  const saved = getVm(projectRoot, vmId) || vm
+  if (isDbOpen()) await recordQuotaObservations(vmId, windows, { now })
+  return saved
 }
 
 /**
@@ -294,7 +377,10 @@ export function syncCodexQuotaSchedule(projectRoot, vm, { now = Date.now(), poli
   const leftover = isLeftoverQuotaScheduleOff(vm)
   if (ev.action === 'restrict' || ev.action === 'restore') {
     const until = ev.until
-    if (until == null && /_local$/.test(ev.reason || '')) clearVmQuotaRestriction(file)
+    // Clearing only matters to drop a stale until; without one it would delete
+    // the reason that markVmRestriction writes straight back.
+    const staleUntil = vm.temp_unschedulable_until != null || vm.claude?.temp_unschedulable_until != null
+    if (until == null && /_local$/.test(ev.reason || '') && staleUntil) clearVmQuotaRestriction(file)
     const next = markVmRestriction(file, { until, reason: ev.reason })
     if (next) {
       vm.claude = next.claude
@@ -458,17 +544,17 @@ export function persistSlotEnginePolicy(projectRoot, vmId, patch = {}) {
   return vm
 }
 
-export function persistSlotEnginePolicyMany(projectRoot, ids, patch = {}) {
+export async function persistSlotEnginePolicyMany(projectRoot, ids, patch = {}) {
   const targets =
     Array.isArray(ids) && ids.length
       ? ids.map((id) => String(id || '').trim()).filter(Boolean)
-      : listVms(projectRoot).map((vm) => vm.id)
+      : (await listVms(projectRoot)).map((vm) => vm.id)
   const items = []
   const missing = []
   for (const id of targets) {
     const vm = persistSlotEnginePolicy(projectRoot, id, patch)
     if (!vm) missing.push(id)
-    else items.push(summarizeVm(vm))
+    else items.push(await summarizeVm(vm))
   }
   return { updated: items.length, missing, items }
 }
@@ -523,8 +609,14 @@ export function vmHasSchedulableCredential(vm, projectRoot = null) {
  * If schedulable is back on, the account must remain selectable.
  * Empty inventory slots (no Claude token) stay out of the pool.
  */
-export function isVmScheduleReady(vm, { allowMissingCredential = false } = {}) {
+export async function isVmScheduleReady(vm, { allowMissingCredential = false } = {}) {
   if (!vm) return false
+  return vmScheduleReadyWith(vm, await vendorRuntimeBlock(vm), { allowMissingCredential })
+}
+
+/** Same gate with the supplier block already read (`vendorRuntimeBlock`): pure, for synchronous admission re-checks. */
+export function vmScheduleReadyWith(vm, vendorBlock, { allowMissingCredential = false } = {}) {
+  if (!vm || vendorBlock) return false
   if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
   if (!allowMissingCredential && !vmHasClaudeCredential(vm)) return false
   const status = String(vm.status || '').toLowerCase()
@@ -532,37 +624,54 @@ export function isVmScheduleReady(vm, { allowMissingCredential = false } = {}) {
   return true
 }
 
-/** Re-read vm.json, apply a schedule mutation, write. Returns the summary, or null when absent. */
-function writeSchedule(projectRoot, id, mutate) {
+/** Re-read vm.json, apply a schedule mutation, write. Returns the record, or null when absent. Synchronous. */
+function writeScheduleRecord(projectRoot, id, mutate) {
   const file = path.join(projectRoot, 'vms', `${id}.json`)
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
   migrateScheduleRecord(vm)
-  if (mutate(vm) === false) return summarizeVm(vm)
+  if (mutate(vm) === false) return vm
   atomicWriteJson(file, vm, { mode: 0o600 })
-  return summarizeVm(vm)
+  return vm
+}
+
+/**
+ * Same, resolving to the summary (R6 B7c: summaries read the database). The record is written
+ * synchronously when called; a mutation that throws rejects the returned Promise.
+ */
+async function writeSchedule(projectRoot, id, mutate) {
+  const vm = writeScheduleRecord(projectRoot, id, mutate)
+  return vm ? summarizeVm(vm) : null
 }
 
 /** 调度关 / 调度开 by the operator. Turning on also clears 不可调度. */
-export function setScheduleOff(projectRoot, id, off, { reason = null, preserveStatus = true } = {}) {
+export async function setScheduleOff(projectRoot, id, off, { reason = null, preserveStatus = true } = {}) {
   return writeSchedule(projectRoot, id, (vm) => applyScheduleOff(vm, off, { reason, preserveStatus }))
 }
 
+/** Clear a legacy proxy failure stored as operator-off state without lifting a real manual off. */
+export async function clearLegacyProxyScheduleOff(projectRoot, id) {
+  return writeSchedule(projectRoot, id, (vm) => (clearLegacyProxyScheduleOffState(vm) ? undefined : false))
+}
+
 /** A deterministic failure: the slot stays out until an operator action clears it. */
-export function markUnschedulable(projectRoot, id, reason, detail = null) {
+export async function markUnschedulable(projectRoot, id, reason, detail = null) {
   return writeSchedule(projectRoot, id, (vm) => {
     if (vm.unschedulable?.reason === reason && !detail) return false
     applyUnschedulable(vm, reason, detail)
   })
 }
 
-/** Rewrite one record onto the four-state fields (drops a leftover quota-off). */
+/**
+ * Rewrite one record onto the four-state fields (drops a leftover quota-off). Synchronous; returns the
+ * written record (no caller reads a summary from it, R6 B7c).
+ */
 export function migrateVmSchedule(projectRoot, id) {
-  return writeSchedule(projectRoot, id, () => {})
+  return writeScheduleRecord(projectRoot, id, () => {})
 }
 
 /** `by` must be an operator action (see CLEAR_BY); background paths may not call this. */
-export function clearUnschedulable(projectRoot, id, { by, only = null } = {}) {
+export async function clearUnschedulable(projectRoot, id, { by, only = null } = {}) {
   return writeSchedule(projectRoot, id, (vm) => {
     if (!vm.unschedulable) return false
     if (only && !only.includes(vm.unschedulable.reason)) return false
@@ -570,11 +679,11 @@ export function clearUnschedulable(projectRoot, id, { by, only = null } = {}) {
   })
 }
 
-export function setScheduleHold(projectRoot, id, reason, detail = null) {
+export async function setScheduleHold(projectRoot, id, reason, detail = null) {
   return writeSchedule(projectRoot, id, (vm) => applyHold(vm, reason, detail))
 }
 
-export function clearScheduleHold(projectRoot, id, reason, { tag = null } = {}) {
+export async function clearScheduleHold(projectRoot, id, reason, { tag = null } = {}) {
   return writeSchedule(projectRoot, id, (vm) => {
     if (vm.schedule_hold?.reason !== reason) return false
     applyClearHold(vm, reason, { tag })
@@ -591,7 +700,7 @@ const LEGACY_WORKER_RELOAD = /^[a-z_]*_worker_reload$/
  * - true from automatic callers only fixes the soft paused mark: it never
  *   reopens 调度关 or 不可调度 (decision 6). Holds are cleared by their owners.
  */
-export function setVmSchedulable(
+export async function setVmSchedulable(
   projectRoot,
   id,
   schedulable,
@@ -621,22 +730,22 @@ export function setVmSchedulable(
 }
 export const KERNEL_UPDATE_HOLD = 'kernel_update'
 
-export function holdSchedulableSlots(project, reason = KERNEL_UPDATE_HOLD) {
+export async function holdSchedulableSlots(project, reason = KERNEL_UPDATE_HOLD) {
   const held = []
-  for (const vm of listVms(project)) {
+  for (const vm of await listVms(project)) {
     if (vm?.schedulable === false) continue
-    const summary = setScheduleHold(project, vm.id, HOLD_MAINTENANCE, { tag: reason })
+    const summary = await setScheduleHold(project, vm.id, HOLD_MAINTENANCE, { tag: reason })
     if (summary) held.push(vm.id)
   }
   return held
 }
 
-export function resumeSchedulableSlots(project, ids, reason = KERNEL_UPDATE_HOLD) {
+export async function resumeSchedulableSlots(project, ids, reason = KERNEL_UPDATE_HOLD) {
   const restored = []
   for (const id of ids || []) {
     const vm = getVm(project, id)
     if (!vm || !isMaintenanceHold(vm, reason)) continue
-    const summary = clearScheduleHold(project, id, HOLD_MAINTENANCE, { tag: reason })
+    const summary = await clearScheduleHold(project, id, HOLD_MAINTENANCE, { tag: reason })
     if (summary?.schedulable !== false) restored.push(id)
   }
   return restored
@@ -710,7 +819,8 @@ export function clearKernelRestartPending(project, id) {
   })
 }
 
-export function bindVmProxy(projectRoot, id, proxyInfo) {
+/** Writes the binding synchronously when called; resolves to the summary (R6 B7c). */
+export async function bindVmProxy(projectRoot, id, proxyInfo) {
   const file = path.join(projectRoot, 'vms', `${id}.json`)
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -720,6 +830,7 @@ export function bindVmProxy(projectRoot, id, proxyInfo) {
         host: proxyInfo.host,
         port: proxyInfo.port,
         scheme: proxyInfo.scheme || proxyInfo.kind || 'socks5',
+        expires_at: proxyInfo.expires_at || null,
         url: proxyInfo.url || null,
         username: proxyInfo.username || null,
         password: proxyInfo.password == null ? null : proxyInfo.password,
@@ -821,7 +932,7 @@ export function repairSlotSmbios(projectRoot) {
  * The fingerprint carries its own copy of the zone — leaving that stale would
  * make the workstation identity disagree with the container clock.
  */
-export function persistVmTimezone(projectRoot, id, timezone, { source = 'manual' } = {}) {
+export async function persistVmTimezone(projectRoot, id, timezone, { source = 'manual' } = {}) {
   const zone = validTimezone(timezone)
   if (!zone) return null
   const file = path.join(projectRoot, 'vms', `${id}.json`)
@@ -833,35 +944,4 @@ export function persistVmTimezone(projectRoot, id, timezone, { source = 'manual'
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(file, vm)
   return summarizeVm(vm)
-}
-
-export function persistVmOwner(projectRoot, id, { ownerUserId = null, origin = null } = {}) {
-  const file = path.join(projectRoot, 'vms', `${id}.json`)
-  if (!fs.existsSync(file)) return null
-  const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
-  vm.owner_user_id = normalizeOwnerId(ownerUserId)
-  vm.origin = origin || vmOriginOf({ ...vm, owner_user_id: vm.owner_user_id })
-  vm.updated_at = new Date().toISOString()
-  atomicWriteJson(file, vm, { mode: 0o600 })
-  return vm
-}
-
-/** Return administrator-assigned slots to the platform when their tenant is removed. */
-export function reclaimAssignedVms(projectRoot, ownerIds, { onError = null } = {}) {
-  const reclaimed = []
-  if (!ownerIds.size) return reclaimed
-  const dir = path.join(projectRoot, 'vms')
-  for (const name of listVmRecordFiles(dir)) {
-    try {
-      const vm = readJsonCached(path.join(dir, name))
-      if (!vm?.id || !ownerIds.has(vmOwnerId(vm)) || vmOriginOf(vm) !== VM_ORIGIN.adminAssigned) continue
-      // Keep credentials, quota cooldowns and the operator's scheduling switch intact.
-      persistVmOwner(projectRoot, vm.id, { ownerUserId: null, origin: VM_ORIGIN.platform })
-      reclaimed.push(vm.id)
-    } catch (error) {
-      if (!onError) throw error
-      onError(error, name)
-    }
-  }
-  return reclaimed
 }

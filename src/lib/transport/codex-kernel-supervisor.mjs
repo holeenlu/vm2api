@@ -12,6 +12,7 @@ import { assertProxyAllowed } from '../vm/proxy-policy.mjs'
 import { maxRequestBytes } from '../core/config.mjs'
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { codexKernelHealth, codexKernelPaths } from './codex-kernel-client.mjs'
+import { closeCodexKernelLogFd, openCodexKernelLog, trackCodexKernelLog } from './codex-kernel-log.mjs'
 import { computedUpstreamTransport, normalizeCodexRouting } from '../protocol/codex-route.mjs'
 
 const starts = new Map()
@@ -232,17 +233,27 @@ export async function ensureCodexKernel(exec, { timeoutMs = 8000 } = {}) {
     }
   }
   const live = await waitForHealth(exec, Math.min(800, Math.max(200, Number(timeoutMs) || 800)))
-  if (live.ok) return { ok: true, reused: true, health: live.health }
+  if (live.ok) {
+    trackCodexKernelLog(exec.vmId)
+    return { ok: true, reused: true, health: live.health }
+  }
   const current = starts.get(exec.vmId)
   if (!childHasExited(current)) return waitForHealth(exec, timeoutMs)
   try {
     if (paths.socketPath) fs.unlinkSync(paths.socketPath)
   } catch {}
-  const child = spawn(bin, [paths.configPath], {
-    env: kernelEnv(),
-    stdio: 'ignore',
-    detached: true,
-  })
+  // stderr goes straight to a per-slot file the kernel keeps after a control-plane restart (#684).
+  const stderrLog = openCodexKernelLog(exec.vmId)
+  let child
+  try {
+    child = spawn(bin, [paths.configPath], {
+      env: kernelEnv(),
+      stdio: ['ignore', 'ignore', stderrLog],
+      detached: true,
+    })
+  } finally {
+    closeCodexKernelLogFd(stderrLog)
+  }
   child.unref()
   starts.set(exec.vmId, child)
   writeLimitStamp(paths.configPath, wanted)

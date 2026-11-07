@@ -73,7 +73,7 @@ test('listTestableModels(openai) hides Claude ids', () => {
   assert.ok(claude.length > 0)
   assert.ok(gpt.every((m) => /^(gpt-|codex-)/i.test(m.id) || m.family === 'codex'))
   assert.ok(claude.every((m) => !/^(gpt-|codex-)/i.test(m.id) && m.family !== 'codex'))
-  assert.ok(gpt.some((m) => m.id === 'gpt-5.4'))
+  assert.ok(gpt.some((m) => m.id === 'gpt-6.1-sol'))
   assert.ok(!gpt[0].id.includes('mini'))
 })
 
@@ -92,7 +92,7 @@ test('runVmTestChat Codex slot loopbacks /v1/responses and never /v1/messages', 
     body: {
       id: 'resp_test',
       object: 'response',
-      model: 'gpt-5.4',
+      model: 'gpt-6.1-sol',
       output_text: 'hello from responses',
       usage: { input_tokens: 8, output_tokens: 3 },
       status: 'completed',
@@ -103,7 +103,7 @@ test('runVmTestChat Codex slot loopbacks /v1/responses and never /v1/messages', 
   const result = await runVmTestChat({
     projectRoot: root,
     vmId: 'vm-codex-01',
-    model: 'gpt-5.4',
+    model: 'gpt-6.1-sol',
     prompt: 'hello',
     max_tokens: 64,
     baseUrl,
@@ -120,7 +120,7 @@ test('runVmTestChat Codex slot loopbacks /v1/responses and never /v1/messages', 
   assert.equal(calls[0].headers.authorization, 'Bearer test-master-key')
   assert.match(String(calls[0].headers['user-agent'] || ''), /codex_cli_rs/i)
   assert.ok(calls[0].headers['x-codex-installation-id'])
-  assert.equal(calls[0].body.model, 'gpt-5.4')
+  assert.equal(calls[0].body.model, 'gpt-6.1-sol')
   assert.equal(Array.isArray(calls[0].body.input), true)
   assert.equal(calls[0].body.input[0].role, 'user')
   assert.equal(calls[0].body.input[0].content[0].type, 'input_text')
@@ -159,7 +159,7 @@ test('runVmTestChat Codex slot refreshes OAuth after wrapped 401', async (t) => 
       body: {
         id: 'resp_retry',
         object: 'response',
-        model: 'gpt-5.4',
+        model: 'gpt-6.1-sol',
         output_text: 'after refresh',
         status: 'completed',
       },
@@ -168,7 +168,7 @@ test('runVmTestChat Codex slot refreshes OAuth after wrapped 401', async (t) => 
   const result = await runVmTestChat({
     projectRoot: root,
     vmId: 'vm-codex-01',
-    model: 'gpt-5.4',
+    model: 'gpt-6.1-sol',
     prompt: 'hello',
     max_tokens: 16,
     baseUrl,
@@ -233,11 +233,11 @@ test('resolveTestModels refresh merges ChatGPT ids and ignores 401', async (t) =
     fetchImpl: async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ models: [{ slug: 'gpt-5.6' }, { slug: 'gpt-5.4' }] }),
+      json: async () => ({ models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-6.1-sol' }] }),
     }),
   })
   assert.equal(merged.source, 'chatgpt')
-  assert.ok(merged.items.some((m) => m.id === 'gpt-5.6'))
+  assert.ok(merged.items.some((m) => m.id === 'gpt-6-astra'))
   assert.equal(merged.protocol, 'openai.responses')
 
   const denied = await resolveTestModels({
@@ -277,12 +277,12 @@ test('syncCodexCatalog refreshes OAuth on 401 then merges GPT ids', async (t) =>
       return {
         ok: true,
         status: 200,
-        json: async () => ({ models: [{ slug: 'gpt-5.6' }, { slug: 'gpt-5.5' }] }),
+        json: async () => ({ models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-5.5' }] }),
       }
     },
   })
   assert.equal(result.ok, true)
-  assert.ok(result.ids.includes('gpt-5.6'))
+  assert.ok(result.ids.includes('gpt-6-astra'))
   assert.ok(result.ids.includes('gpt-5.5'))
   const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01', 'codex-credentials.json'), 'utf8'))
   assert.equal(saved.accounts[0].access_token, 'at-rotated')

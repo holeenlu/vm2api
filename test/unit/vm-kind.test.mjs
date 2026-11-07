@@ -5,39 +5,39 @@ import { isCodexVm, normalizeVmKind, stampVmKind } from '../../src/lib/vm/vm-kin
 import { summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
 import { buildRecreatedVmRecord } from '../../src/lib/vm/vm-recreate.mjs'
 
-test('null or non-object VM is Claude, not a TypeError', () => {
+test('null or non-object VM is Claude, not a TypeError', async () => {
   assert.equal(normalizeVmKind(null).kind, 'claude')
   assert.equal(normalizeVmKind(undefined).kind, 'claude')
   assert.equal(isCodexVm(null), false)
   assert.equal(isCodexVm(undefined), false)
 })
 
-test('unmarked VM is Claude', () => {
+test('unmarked VM is Claude', async () => {
   const kind = normalizeVmKind({ id: 'vm-01', inference_engine: 'rust' })
   assert.equal(kind.kind, 'claude')
   assert.equal(kind.platform, 'anthropic')
   assert.equal(isCodexVm({ inference_engine: 'rust' }), false)
 })
 
-test('explicit openai/codex wins over missing flags', () => {
+test('explicit openai/codex wins over missing flags', async () => {
   const kind = normalizeVmKind({ platform: 'openai', family: 'codex' })
   assert.equal(kind.kind, 'codex')
   assert.equal(isCodexVm({ platform: 'openai' }), true)
 })
 
-test('explicit anthropic ignores leftover Codex flags', () => {
+test('explicit anthropic ignores leftover Codex flags', async () => {
   const vm = { platform: 'anthropic', family: 'claude', codex_kernel: true, inference_engine: 'codex' }
   assert.equal(isCodexVm(vm), false)
   assert.equal(normalizeVmKind(vm).kind, 'claude')
 })
 
-test('legacy unmarked Codex flags still classify as Codex', () => {
+test('legacy unmarked Codex flags still classify as Codex', async () => {
   assert.equal(isCodexVm({ codex_kernel: true }), true)
   assert.equal(isCodexVm({ inference_engine: 'codex' }), true)
   assert.equal(isCodexVm({ runtime: { codex_kernel: '1' } }), true)
 })
 
-test('stamp writes platform and drops the other credential bag', () => {
+test('stamp writes platform and drops the other credential bag', async () => {
   const claude = { claude: { email: 'a@x' }, codex: { email: 'b@x' } }
   stampVmKind(claude, { platform: 'anthropic' })
   assert.equal(claude.platform, 'anthropic')
@@ -53,8 +53,8 @@ test('stamp writes platform and drops the other credential bag', () => {
   assert.deepEqual(codex.codex, {})
 })
 
-test('summarizeVm does not mix Claude email onto a Codex slot', () => {
-  const summary = summarizeVm({
+test('summarizeVm does not mix Claude email onto a Codex slot', async () => {
+  const summary = await summarizeVm({
     id: 'vm-codex-01',
     platform: 'openai',
     family: 'codex',
@@ -66,8 +66,8 @@ test('summarizeVm does not mix Claude email onto a Codex slot', () => {
   assert.equal(summary.has_token, false)
 })
 
-test('Claude pool gate skips Codex VMs', () => {
-  const gate = evaluateSlotGate({
+test('Claude pool gate skips Codex VMs', async () => {
+  const gate = await evaluateSlotGate({
     id: 'vm-codex-01',
     status: 'running',
     schedulable: true,
@@ -80,7 +80,7 @@ test('Claude pool gate skips Codex VMs', () => {
   assert.equal(gate.reason, 'codex_vm')
 })
 
-test('recreate keeps Codex kind and wipes Claude leftover', () => {
+test('recreate keeps Codex kind and wipes Claude leftover', async () => {
   const next = buildRecreatedVmRecord({
     id: 'vm-09',
     name: '09',

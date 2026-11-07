@@ -11,6 +11,9 @@ EnvironmentFile=-/run/kin-guest/slot.env
 Environment=HOME=/home/kincli
 Environment=CLAUDE_CONFIG_DIR=/home/kincli/.claude
 Environment=KIN_SUBMIT_WAIT_MS=30000
+# #681: run payload binaries from guest-local copies, refreshed before every start
+# ('+' = as root; '-' = a failed refresh keeps the previous copies and still starts).
+ExecStartPre=-+/usr/local/sbin/kin-guest-setup payload
 ExecStart=/usr/local/sbin/kin-kernel-start
 Restart=always
 RestartSec=2

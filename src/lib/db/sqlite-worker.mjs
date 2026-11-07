@@ -13,17 +13,26 @@ import { parentPort, workerData } from 'node:worker_threads'
 import { DatabaseSync } from 'node:sqlite'
 import { UsageLogsRepo } from './repos/usage-logs-repo.mjs'
 import { UsageLogsView } from './repos/usage-logs-view.mjs'
+import { readVendorUsage } from '../vendor/vendor-account-usage.mjs'
+import { vendorUsage } from '../vendor/vendor-usage.mjs'
+import { quotaForecastForAccount } from '../gateway-worker/quota-forecast.mjs'
 
 const VIEW_METHODS = new Set([
   'listBatch',
+  'ranking',
   'summary',
   'filterOptions',
   'activeSessions',
   'overview',
-  'sessionSuggestions',
   'exportRows',
 ])
 const REPO_METHODS = new Set(['totals', 'aggregate', 'windowStats'])
+// Supplier usage reports and Gateway account forecasts take the connection first: (db, ...args).
+const VENDOR_METHODS = new Map([
+  ['readVendorUsage', readVendorUsage],
+  ['vendorUsage', vendorUsage],
+  ['quotaForecastForAccount', quotaForecastForAccount],
+])
 
 const cache = new Map()
 
@@ -41,6 +50,7 @@ function cachedPrepare(db) {
   return db
 }
 
+let db = null
 let view = null
 let repo = null
 
@@ -54,11 +64,16 @@ function call(msg) {
     if (!REPO_METHODS.has(msg.method)) throw new Error(`usage repo method not readable: ${msg.method}`)
     return repo[msg.method](...(msg.args || []))
   }
+  if (msg.kind === 'vendor') {
+    const read = VENDOR_METHODS.get(msg.method)
+    if (!read) throw new Error(`vendor usage method not readable: ${msg.method}`)
+    return read(db, ...(msg.args || []))
+  }
   throw new Error('unknown sqlite worker op')
 }
 
 try {
-  const db = cachedPrepare(new DatabaseSync(workerData.path, { readOnly: true }))
+  db = cachedPrepare(new DatabaseSync(workerData.path, { readOnly: true }))
   db.exec('PRAGMA query_only = ON')
   db.exec('PRAGMA busy_timeout = 5000')
   db.exec('PRAGMA foreign_keys = ON')
@@ -73,11 +88,13 @@ try {
       }
       return
     }
-    try {
-      parentPort.postMessage({ id: msg.id, ok: true, result: call(msg) })
-    } catch (err) {
-      parentPort.postMessage({ id: msg.id, ok: false, error: String(err?.message || err) })
-    }
+    // 使用记录视图（R6 B6a）与供应商用量报表（R6 B4）经 DbClient 读取，返回 Promise；语句仍同步执行，结果在本条消息的微任务内就绪
+    Promise.resolve()
+      .then(() => call(msg))
+      .then(
+        (result) => parentPort.postMessage({ id: msg.id, ok: true, result }),
+        (err) => parentPort.postMessage({ id: msg.id, ok: false, error: String(err?.message || err) }),
+      )
   })
   parentPort.postMessage({ ready: true })
 } catch (err) {

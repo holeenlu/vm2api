@@ -86,17 +86,26 @@ export type RequestAttempt = {
   [key: string]: unknown
 }
 
-/** `GET /request-logs` normal 模式响应。debug 模式不返回 total/limit/offset。 */
+/** `GET /request-logs` 的键集游标；原样作为下一页的 `cursor_created_at` / `cursor_id` 传回。 */
+export type RequestLogsCursor = { created_at: string; id: string }
+
+/**
+ * `GET /request-logs` normal 模式响应（键集游标分页，不返回总数）。
+ * debug 模式不返回 next_cursor/has_more/limit/offset。
+ */
 export type RequestLogsResponse = {
   mode?: 'normal' | 'debug'
   items?: RequestLogItem[]
+  /** 下一页游标；没有更多时为 null。 */
+  next_cursor?: RequestLogsCursor | null
   /**
-   * 无 error_class 时是筛选后全表 COUNT(*)，分页可信；
-   * 有 error_class 时只是「最近 scan 行内命中数」，会低估。
+   * 是否还有下一页。按行判定错误类别时一次最多扫描 5000 行，扫满仍不够一页也为 true，
+   * 此时本页可能少于 limit 条，继续用 next_cursor 翻页。
    */
-  total?: number
+  has_more?: boolean
   /** 钳制**前**的回声值，判断实际条数请用 items.length。 */
   limit?: number
+  /** offset 回声（上游公开参数，保留到上游删除为止）；有游标时不生效。 */
   offset?: number
   config?: { muted_error_classes?: string[]; mode?: string }
 }

@@ -53,7 +53,6 @@ patches/
 /.tmp/
 /.tmp-*
 /tmp/
-/AGENTS.md
 /docs/benchmarks.zip
 /docs/benchmarks/*
 !/docs/benchmarks/README.md
@@ -74,3 +73,6 @@ patches/
 .omp
 /dist/
 share/wrap-cli/dist/
+
+# Local Docker acceptance data and credentials
+/.local/

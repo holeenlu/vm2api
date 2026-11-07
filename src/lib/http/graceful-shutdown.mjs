@@ -14,7 +14,8 @@
 
 export function createGracefulShutdown({
   server: initialServer = null,
-  drainTimeoutMs = Number(process.env.KIN_SHUTDOWN_DRAIN_TIMEOUT_MS) || 25_000,
+  // 流式推理常持续一两分钟：等不到它们结束就切断会漏扣费（审计阶段 1 W2），默认 120 秒；compose 的 stop_grace_period 需更长
+  drainTimeoutMs = Number(process.env.KIN_SHUTDOWN_DRAIN_TIMEOUT_MS) || 120_000,
   logger = console,
   exit = (code) => process.exit(code),
   beforeDrain,

@@ -116,7 +116,7 @@ export async function collectLivePanelCredentials(
     map.set(vm.id, live)
     if (shouldMirror(vm, live) && exec.homeDir) {
       try {
-        mirrorWorkerCredentialsToVm(vmJsonPath(projectRoot, vm.id), exec.homeDir)
+        await mirrorWorkerCredentialsToVm(vmJsonPath(projectRoot, vm.id), exec.homeDir)
       } catch {}
     }
   })

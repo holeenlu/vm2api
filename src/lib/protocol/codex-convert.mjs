@@ -60,10 +60,28 @@ function imageUrlOf(part) {
   if (typeof part?.image_url === 'string') return part.image_url
   if (typeof part?.image_url?.url === 'string') return part.image_url.url
   if (typeof part?.url === 'string') return part.url
+  // Anthropic 图片块（审计 P1-P4：此前 base64 来源被静默丢弃）
+  const source = part?.source
+  if (source?.type === 'base64' && typeof source.data === 'string' && source.data)
+    return `data:${source.media_type || 'image/png'};base64,${source.data}`
+  if (source?.type === 'url' && typeof source.url === 'string') return source.url
   return ''
 }
 
-function userContentParts(content) {
+/**
+ * Chat `file` 内容块 → Responses `input_file`（CPR 10e25ce2，68595209 放宽）：`file_id`、`file_data`、`file_url`
+ * 至少提供一种，保留可选 `filename`；非 PDF 与 URL 文件是否可用由上游判断。
+ */
+function chatFilePart(file) {
+  if (!file || typeof file !== 'object' || Array.isArray(file)) return null
+  const out = { type: 'input_file' }
+  for (const key of ['file_id', 'file_data', 'file_url', 'filename']) {
+    if (typeof file[key] === 'string' && file[key].trim()) out[key] = file[key]
+  }
+  return out.file_id || out.file_data || out.file_url ? out : null
+}
+
+function userContentParts(content, role = 'user') {
   if (typeof content === 'string') return content ? [{ type: 'input_text', text: content }] : []
   if (!Array.isArray(content)) {
     const text = content?.text || ''
@@ -79,6 +97,11 @@ function userContentParts(content) {
     if (part.type === 'image_url' || part.type === 'image' || part.type === 'input_image') {
       const url = imageUrlOf(part)
       if (url) parts.push({ type: 'input_image', image_url: url })
+      continue
+    }
+    if (part.type === 'file' && role === 'user') {
+      const file = chatFilePart(part.file)
+      if (file) parts.push(file)
       continue
     }
     const text = part.text || ''
@@ -97,13 +120,14 @@ function chatMessageToItems(message) {
   if (!message || typeof message !== 'object') return []
   if (message.role === 'tool') {
     const output = typeof message.content === 'string' ? message.content : textParts(message.content)
-    return [
-      {
-        type: 'function_call_output',
-        call_id: message.tool_call_id || message.id || 'call_unknown',
-        output: output || '',
-      },
-    ]
+    const item = {
+      type: 'function_call_output',
+      call_id: message.tool_call_id || message.id || 'call_unknown',
+      output: output || '',
+    }
+    // tool 消息的非空工具名映射到 function_call_output.name（CPR 10e25ce2）
+    if (typeof message.name === 'string' && message.name) item.name = message.name
+    return [item]
   }
   if (message.role === 'assistant') {
     const items = []
@@ -128,7 +152,7 @@ function chatMessageToItems(message) {
     return items
   }
   const role = message.role === 'system' || message.role === 'developer' ? 'developer' : 'user'
-  const parts = userContentParts(message.content)
+  const parts = userContentParts(message.content, role)
   if (!parts.length) return []
   return [{ type: 'message', role, content: parts }]
 }
@@ -206,6 +230,36 @@ function toolsToCodex(tools) {
   })
 }
 
+/**
+ * Chat `web_search_options` → Responses `web_search` 工具（CPR 10e25ce2）：保留 `search_context_size`，
+ * `user_location.approximate` 展平为 `{ type: 'approximate', city, country, region, timezone }`。
+ * 返回 null 表示未请求搜索；返回 { error } 表示形状不受支持。
+ */
+function chatWebSearchTool(options) {
+  if (options == null) return null
+  if (typeof options !== 'object' || Array.isArray(options)) return { error: 'web_search_options' }
+  const tool = { type: 'web_search' }
+  if (options.search_context_size != null) {
+    if (typeof options.search_context_size !== 'string' || !options.search_context_size)
+      return { error: 'web_search_options.search_context_size' }
+    tool.search_context_size = options.search_context_size
+  }
+  if (options.user_location != null) {
+    const location = options.user_location
+    if (location?.type !== 'approximate' || !location.approximate || typeof location.approximate !== 'object')
+      return { error: 'web_search_options.user_location' }
+    const flat = { type: 'approximate' }
+    for (const field of ['city', 'country', 'region', 'timezone']) {
+      const value = location.approximate[field]
+      if (value == null) continue
+      if (typeof value !== 'string') return { error: `web_search_options.user_location.approximate.${field}` }
+      flat[field] = value
+    }
+    tool.user_location = flat
+  }
+  return { tool }
+}
+
 export function chatToCodexResponses(body = {}) {
   const messages = Array.isArray(body.messages) ? body.messages : []
   const input = messages.flatMap(chatMessageToItems)
@@ -215,10 +269,17 @@ export function chatToCodexResponses(body = {}) {
     stream: body.stream !== false,
     store: false,
   }
-  const tools = toolsToCodex(body.tools)
-  if (tools) out.tools = tools
-  const choice = responsesToolChoice(body.tool_choice)
-  if (choice) out.tool_choice = choice
+  const search = chatWebSearchTool(body.web_search_options)
+  if (search?.tool) {
+    // Chat 联网搜索要求上游先检索：不能与函数工具或非 auto 的 tool_choice 同时使用（与 CPR 一致）
+    out.tools = [search.tool]
+    out.tool_choice = { type: 'web_search' }
+  } else {
+    const tools = toolsToCodex(body.tools)
+    if (tools) out.tools = tools
+    const choice = responsesToolChoice(body.tool_choice)
+    if (choice) out.tool_choice = choice
+  }
   if (body.reasoning) out.reasoning = body.reasoning
   if (body.reasoning_effort) out.reasoning_effort = body.reasoning_effort
   if (body.max_tokens || body.max_completion_tokens) {
@@ -345,9 +406,26 @@ function anthropicMessageToChat(message) {
   return messages
 }
 
+/**
+ * Anthropic 的推理强度 → Responses `reasoning.effort`（审计 P1-P4：此前 thinking / output_config.effort 被丢弃）。
+ * 显式 effort 优先；否则按 thinking.budget_tokens 档位；thinking 关闭或未给时不传，沿用上游默认。
+ */
+function anthropicReasoningEffort(body = {}) {
+  const explicit = body.output_config?.effort
+  if (typeof explicit === 'string' && explicit.trim()) return explicit
+  const thinking = body.thinking
+  if (!thinking || thinking.type === 'disabled') return ''
+  const budget = Number(thinking.budget_tokens)
+  if (!Number.isFinite(budget) || budget <= 0) return thinking.type === 'adaptive' ? 'medium' : ''
+  if (budget <= 4096) return 'low'
+  if (budget <= 16384) return 'medium'
+  return 'high'
+}
+
 export function anthropicToCodexResponses(body = {}) {
   const messages = Array.isArray(body.messages) ? body.messages.flatMap(anthropicMessageToChat) : []
   const system = body.system == null || body.system === '' ? [] : [{ role: 'system', content: body.system }]
+  const effort = anthropicReasoningEffort(body)
   return chatToCodexResponses({
     model: body.model,
     messages: [...system, ...messages],
@@ -355,7 +433,21 @@ export function anthropicToCodexResponses(body = {}) {
     tool_choice: body.tool_choice,
     stream: body.stream,
     max_tokens: body.max_tokens,
+    ...(effort ? { reasoning_effort: effort } : {}),
   })
+}
+
+/** web_search_options 的形状错误，或与函数工具 / 非 auto tool_choice 同时出现时拒绝（不静默丢弃调用方的工具）。 */
+function chatSearchConflict(body = {}) {
+  const search = chatWebSearchTool(body.web_search_options)
+  if (!search) return null
+  if (search.error) return { param: search.error, message: `Parameter \`${search.error}\` is not supported.` }
+  if (Array.isArray(body.tools) && body.tools.length)
+    return { param: 'tools', message: 'The requested `tools` is not supported with `web_search_options`.' }
+  const choice = body.tool_choice
+  if (choice != null && choice !== 'auto')
+    return { param: 'tool_choice', message: 'The requested `tool_choice` is not supported with `web_search_options`.' }
+  return null
 }
 
 export function toCodexResponses(protocol, body, convert = {}) {
@@ -371,6 +463,8 @@ export function toCodexResponses(protocol, body, convert = {}) {
     }
   }
   if (protocol === 'openai.chat' && convert.chat_to_codex !== false) {
+    const invalid = chatSearchConflict(normalized)
+    if (invalid) return { ok: false, code: 'unsupported_parameter', param: invalid.param, message: invalid.message }
     return { ok: true, body: stripUnsupportedCodexFields(chatToCodexResponses(normalized)), converted: true }
   }
   if (protocol === 'openai.completions' && convert.completions_to_codex !== false) {
@@ -477,11 +571,11 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
   }
   if (
     type === 'response.output_text.delta' ||
-    (typeof event.delta === 'string' && event.delta && type !== 'response.completed' && type !== 'response.done')
+    (typeof event.delta === 'string' && event.delta && !TERMINAL_TYPES.has(type))
   ) {
     return chatChunk(session.id, { content: event.delta || event.text || '' })
   }
-  if (type === 'response.completed' || type === 'response.done') {
+  if (TERMINAL_TYPES.has(type)) {
     const calls = []
     for (const [index, item] of (event.response?.output || []).entries()) {
       if (item?.type !== 'function_call' && item?.type !== 'custom_tool_call') continue
@@ -491,10 +585,33 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
     const usage = openaiChatUsageFromExtract(extractOpenaiUsage(event.response?.usage || event.usage))
     const repaired = calls.length ? chatChunk(session.id, { tool_calls: calls }) : ''
     session.finished = true
-    return `${repaired}${chatChunk(session.id, {}, session.sawTool ? 'tool_calls' : 'stop', usage ? { usage } : {})}data: [DONE]\n\n`
+    const finish = chatFinishReason(event.response, session.sawTool)
+    return `${repaired}${chatChunk(session.id, {}, finish, usage ? { usage } : {})}data: [DONE]\n\n`
   }
   return null
 }
+
+/** Responses 终态 → Anthropic stop_reason（审计 P2：incomplete 此前被当成正常结束）。 */
+function anthropicStopReason(response, sawTool) {
+  if (response?.status === 'incomplete') {
+    const reason = response?.incomplete_details?.reason
+    if (reason === 'max_output_tokens') return 'max_tokens'
+    if (reason === 'content_filter') return 'refusal'
+  }
+  return sawTool ? 'tool_use' : 'end_turn'
+}
+
+/** Responses 终态 → OpenAI Chat finish_reason。 */
+function chatFinishReason(response, sawTool) {
+  if (response?.status === 'incomplete') {
+    const reason = response?.incomplete_details?.reason
+    if (reason === 'max_output_tokens') return 'length'
+    if (reason === 'content_filter') return 'content_filter'
+  }
+  return sawTool ? 'tool_calls' : 'stop'
+}
+
+const TERMINAL_TYPES = new Set(['response.completed', 'response.done', 'response.incomplete'])
 
 function parseSseData(line) {
   const trimmed = String(line || '').trim()
@@ -670,7 +787,10 @@ export function responsesSseToAnthropicEvents(line, state = createAnthropicSseSt
     closeTool(slot)
     return frames.join('') || null
   }
-  if (type === 'response.output_text.delta' || (type.startsWith('response.reasoning_') && event.delta)) {
+  // 推理摘要不写进正文：此前与答案拼在同一个 text 块，下一轮还会作为 assistant 正文回传、逐轮累积（审计 P1-P3）。
+  // 也不转成 thinking 块：没有签名的 thinking 块在下一轮回放时会被拒
+  if (type.startsWith('response.reasoning_')) return null
+  if (type === 'response.output_text.delta') {
     const content = event.delta || event.text || ''
     if (!content) return null
     ensureStart()
@@ -686,14 +806,14 @@ export function responsesSseToAnthropicEvents(line, state = createAnthropicSseSt
     )
     return frames.join('')
   }
-  if (type === 'response.completed' || type === 'response.done' || parsed.done) {
+  if (TERMINAL_TYPES.has(type) || parsed.done) {
     ensureStart()
     for (const [index, item] of (event.response?.output || []).entries()) fullItem(item, index)
     for (const slot of new Set(state.tools.values())) closeTool(slot)
     if (state.textIndex != null) frames.push(anthropicEvent('content_block_stop', { index: state.textIndex }))
     frames.push(
       anthropicEvent('message_delta', {
-        delta: { stop_reason: state.sawTool ? 'tool_use' : 'end_turn' },
+        delta: { stop_reason: anthropicStopReason(event.response, state.sawTool) },
         usage: openaiAnthropicUsageFromExtract(extractOpenaiUsage(event.response?.usage || event.usage)),
       }),
     )
@@ -786,6 +906,42 @@ function toolUseInput(item) {
   throw error
 }
 
+/**
+ * Responses 正文里的 `url_citation` 投影为 Chat `message.annotations`（CPR 10e25ce2）。
+ * 偏移按 codexBodyToAnthropicMessage → fromClaudeToOpenAIChat 合并正文的同一顺序累加，
+ * 两侧索引都按码点计数；起止非法的引用丢弃，不让整个响应失败。
+ */
+export function withChatUrlCitations(chat, body = {}) {
+  const resp = body?.response && typeof body.response === 'object' ? body.response : body
+  const annotations = []
+  let offset = 0
+  for (const item of resp?.output || []) {
+    if (item?.type === 'function_call' || item?.type === 'custom_tool_call') continue
+    for (const block of item?.content || []) {
+      if (block?.type !== 'output_text' && block?.type !== 'text') continue
+      for (const note of Array.isArray(block.annotations) ? block.annotations : []) {
+        const start = Number(note?.start_index)
+        const end = Number(note?.end_index)
+        if (note?.type !== 'url_citation' || typeof note.url !== 'string') continue
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end) continue
+        annotations.push({
+          type: 'url_citation',
+          url_citation: {
+            url: note.url,
+            title: typeof note.title === 'string' ? note.title : '',
+            start_index: offset + start,
+            end_index: offset + end,
+          },
+        })
+      }
+      offset += [...String(block.text || '')].length
+    }
+  }
+  const message = chat?.choices?.[0]?.message
+  if (annotations.length && message) message.annotations = annotations
+  return chat
+}
+
 export function codexBodyToAnthropicMessage(body = {}, model = '') {
   const resp = body?.response && typeof body.response === 'object' ? body.response : body
   const content = []
@@ -806,7 +962,10 @@ export function codexBodyToAnthropicMessage(body = {}, model = '') {
     role: 'assistant',
     model: resp?.model || model || 'gpt',
     content,
-    stop_reason: content.some((block) => block.type === 'tool_use') ? 'tool_use' : 'end_turn',
+    stop_reason: anthropicStopReason(
+      resp,
+      content.some((block) => block.type === 'tool_use'),
+    ),
     usage: openaiAnthropicUsageFromExtract(extractOpenaiUsage(resp?.usage || body?.usage || {})),
   }
 }

@@ -1,5 +1,7 @@
 import { Children, isValidElement, type ReactNode } from 'react'
+import { i18n } from '@/i18n'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { beforeEach } from 'vitest'
 import { describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_PERSONA_TEMPLATES,
@@ -13,6 +15,10 @@ import {
   promptSourceBlocks,
   promptSourceText,
 } from './prompt-presentation'
+
+beforeEach(() => {
+  void i18n.changeLanguage('zh-CN')
+})
 
 function elements(
   node: ReactNode
@@ -43,7 +49,7 @@ describe('prompt fields', () => {
     expect(html).toContain('aria-label="system"')
     expect(html).toContain('核心提示词详情')
     expect(html).toContain('行为指引详情')
-    expect(html).toContain('调用方提示词详情')
+    expect(render('official_full')).toContain('调用方提示词详情')
     expect(html).toContain(
       'You are Claude Code, Anthropic&#x27;s official CLI for Claude.'
     )
@@ -52,7 +58,7 @@ describe('prompt fields', () => {
     expect(html).not.toContain('{{')
     expect(html).not.toContain('<textarea')
     expect(html).not.toContain('role=system')
-    expect(html).not.toContain('role="switch"')
+    expect(html).toContain('aria-label="加载行为指引"')
     for (const text of [
       '常驻约束内容',
       'usage 遮罩',
@@ -93,7 +99,7 @@ describe('prompt fields', () => {
     )
     expect(html).toContain('环境注入段已移除；其余 system 保留。')
     expect(html).toContain('不发送「模型附加句」段')
-    expect(html).toContain('system 末尾')
+    expect(html).toContain('随消息发送')
   })
 
   it('names the exact environment removal scope beside its switches', () => {
@@ -102,7 +108,7 @@ describe('prompt fields', () => {
       DEFAULT_PERSONA_TEMPLATES.official_full,
       undefined,
       'official_full'
-    ).findIndex((block) => block.id === 'env_official')
+    ).findIndex((block) => block.id === 'env')
     expect(html).toContain('关闭将移除环境注入段；其余 system 保留。')
     expect(html).toContain('关闭将移除「运行环境」段')
     expect(html).toContain('不发送「模型附加句」段')
@@ -294,6 +300,6 @@ describe('prompt fields', () => {
       />
     )
     expect(html).toContain('aria-label="环境注入"')
-    expect(html).toContain('SAVED_ENV')
+    expect(html).toContain('运行环境详情')
   })
 })

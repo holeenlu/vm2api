@@ -1,7 +1,6 @@
 package oauthcmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,11 +40,6 @@ type responseEnvelope struct {
 	OK      bool              `json:"ok"`
 	Status  int               `json:"status"`
 	Body    any               `json:"body"`
-	Headers map[string]string `json:"headers"`
-}
-
-type countTokensInput struct {
-	Body    json.RawMessage   `json:"body"`
 	Headers map[string]string `json:"headers"`
 }
 
@@ -106,10 +100,19 @@ func Run(args []string, stdin io.Reader, stdout io.Writer) int {
 	if err != nil {
 		return writeAndReturn(stdout, errorEnvelope(0, "config_failed", errorMessage("config_failed")), 0)
 	}
+	// 只有 refresh 子命令换票（审计 P1-C3）：usage/profile/models/reset-* 只读当前凭据，临期时报
+	// needs_refresh，由 Node 走带刷新锁与登录保护窗的 ensure 后重试，不在这里绕过它们自行轮换 RT。
+	current, statusErr := store.Status()
+	skew := cfg.RefreshSkew
+	if skew <= 0 {
+		skew = 5 * time.Minute // 与 Refresher 的默认提前量一致
+	}
+	if statusErr == nil && !current.IsAPIKey() && current.NeedsRefresh(time.Now(), skew) {
+		return writeAndReturn(stdout, errorEnvelope(http.StatusUnauthorized, "needs_refresh", errorMessage("needs_refresh")), 0)
+	}
 	client := &upstream.Client{
 		HTTP:          httpClient,
 		Store:         store,
-		Refresher:     refresher,
 		AnthropicBase: baseURL,
 	}
 	headers := requestHeaders(cfg, op)
@@ -121,15 +124,6 @@ func Run(args []string, stdin io.Reader, stdout io.Writer) int {
 		response, err = client.Get(ctx, "/api/oauth/profile", headers)
 	case "models":
 		response, err = client.Get(ctx, "/v1/models?limit=1000", headers)
-	case "count-tokens":
-		var input countTokensInput
-		if err = decodeCountTokens(stdin, &input); err == nil {
-			headers = mergeHeaders(headers, input.Headers)
-			headers["user-agent"] = userAgent(cfg)
-			response, err = client.CountTokens(ctx, input.Body, headers)
-		} else {
-			return writeAndReturn(stdout, errorEnvelope(0, "invalid_arguments", "invalid count-tokens input"), 2)
-		}
 	case "reset-status":
 		// cedar_ember hides grants unless the caller is the external CLI surface.
 		// The slot telemetry UA is claude-code/<ver>, which upstream answers as ineligible_reason=surface.
@@ -183,7 +177,7 @@ func parseArgs(args []string) (string, string, bool, bool) {
 
 func validateOperation(op string) error {
 	switch op {
-	case "refresh", "usage", "profile", "models", "count-tokens", "reset-status", "reset-redeem":
+	case "refresh", "usage", "profile", "models", "reset-status", "reset-redeem":
 		return nil
 	default:
 		return fmt.Errorf("unknown oauth operation %q", op)
@@ -222,37 +216,6 @@ func claudeResetUserAgent(cfg config.Config) string {
 		version = "2.1.293"
 	}
 	return "claude-cli/" + version + " (external, cli)"
-}
-
-func mergeHeaders(base, extra map[string]string) map[string]string {
-	merged := make(map[string]string, len(base)+len(extra))
-	for key, value := range base {
-		merged[strings.ToLower(strings.TrimSpace(key))] = value
-	}
-	for key, value := range extra {
-		merged[strings.ToLower(strings.TrimSpace(key))] = value
-	}
-	return merged
-}
-
-func decodeCountTokens(reader io.Reader, input *countTokensInput) error {
-	if reader == nil {
-		return errors.New("count-tokens input is required")
-	}
-	raw, err := io.ReadAll(io.LimitReader(reader, maxBodyBytes+1))
-	if err != nil {
-		return err
-	}
-	if len(raw) > maxBodyBytes {
-		return errors.New("count-tokens input is too large")
-	}
-	if err := json.Unmarshal(raw, input); err != nil {
-		return err
-	}
-	if len(input.Body) == 0 || bytes.Equal(bytes.TrimSpace(input.Body), []byte("null")) {
-		return errors.New("count-tokens body is required")
-	}
-	return nil
 }
 
 func decodeResetRedeem(reader io.Reader, input *resetRedeemInput) error {
@@ -389,6 +352,8 @@ func errorMessage(code string) string {
 		return "slot SOCKS5 is required"
 	case "refresh_failed":
 		return "OAuth refresh failed"
+	case "needs_refresh":
+		return "credential needs refresh"
 	case "credential_required":
 		return "credential is required"
 	case "upstream_transport_error":

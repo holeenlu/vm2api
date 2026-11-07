@@ -14,12 +14,17 @@ export function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(ba, bb)
 }
 
-export function redactSecrets(obj) {
-  const s = JSON.stringify(obj)
-  return s
-    .replace(/sk-ant-[a-z0-9-]{8,}/gi, (m) => m.slice(0, 14) + '***REDACTED***')
+/** Mask credential-shaped text. A Bearer sk-ant value runs to the quote/line end: corrupt tokens may hold spaces. */
+export function redactSecretText(text) {
+  return String(text)
+    .replace(/Bearer\s+sk-ant-[^'"\\\r\n]*/gi, 'Bearer ***REDACTED***')
+    .replace(/sk-ant-[\w-]{8,}/gi, (m) => m.slice(0, 14) + '***REDACTED***')
     .replace(/sk-(?:kin|vm)-[a-f0-9]{8,}/gi, (m) => m.slice(0, 10) + '***REDACTED***')
     .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer ***REDACTED***')
+}
+
+export function redactSecrets(obj) {
+  return redactSecretText(JSON.stringify(obj))
 }
 
 export function extractApiKey(req) {
@@ -69,17 +74,22 @@ export const HOP_BY_HOP = new Set([
 /** Panel admin credentials (env override) */
 export function getPanelAdmin() {
   return {
-    username: process.env.VM2API_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
-    password: process.env.VM2API_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
+    username: process.env.TAPMODELS_ADMIN_USER || process.env.KIN_ADMIN_USER || 'admin',
+    password: process.env.TAPMODELS_ADMIN_PASSWORD || process.env.KIN_ADMIN_PASSWORD || '',
   }
 }
 
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000
 const panelSessions = new Map() // sha256(token) -> { user, role, exp }
+const SESSION_RELOAD_INTERVAL_MS = 5000
+let lastSessionReloadAt = 0
 let _authenticateUser = null
 let _lookupRole = null
 
-/** Optional DB-backed panel users. Env admin remains a fallback. */
+/**
+ * Optional DB-backed panel users. Env admin remains a fallback.
+ * `lookupRole(username)` 可以返回 Promise（R6 B7a：经 DbClient 异步读取用户），verifyPanelSession 每次 await 它。
+ */
 export function attachPanelAuth({ authenticate, lookupRole } = {}) {
   _authenticateUser = typeof authenticate === 'function' ? authenticate : null
   _lookupRole = typeof lookupRole === 'function' ? lookupRole : null
@@ -148,7 +158,8 @@ export function createPanelSession(username, ttlMs = SESSION_TTL_MS, extra = {})
     ttlMs = extra.ttlMs || SESSION_TTL_MS
   }
   const token = 'kin-panel-' + crypto.randomBytes(24).toString('hex')
-  const role = extra.role || (_lookupRole && _lookupRole(username)) || 'admin'
+  // 角色不在这里查库（lookupRole 是 async）：接入了 lookupRole 时，verifyPanelSession 每次都按当前角色覆盖
+  const role = extra.role || 'super_admin'
   panelSessions.set(panelSessionKey(token), {
     user: username,
     role,
@@ -158,12 +169,14 @@ export function createPanelSession(username, ttlMs = SESSION_TTL_MS, extra = {})
   return token
 }
 
-export function verifyPanelSession(token) {
+/** async（R6 B7a）：调用方必须 await，漏掉 await 会把 Promise 当成有效会话。 */
+export async function verifyPanelSession(token) {
   if (!token || !token.startsWith('kin-panel-')) return null
   const key = panelSessionKey(token)
   let s = panelSessions.get(key)
-  if (!s) {
-    // reload from disk once (multi-process / restart)
+  if (!s && Date.now() - lastSessionReloadAt >= SESSION_RELOAD_INTERVAL_MS) {
+    // 未知令牌才回读磁盘（其他进程或重启前签发的会话），最多每 5 秒一次：随便伪造的令牌不能每次都触发一次同步读文件（审计阶段 1 W5）
+    lastSessionReloadAt = Date.now()
     loadSessions()
     s = panelSessions.get(key)
   }
@@ -173,12 +186,18 @@ export function verifyPanelSession(token) {
     saveSessions()
     return null
   }
-  if (!s.role && _lookupRole) {
-    s.role = _lookupRole(s.user) || null
+  if (_lookupRole) {
+    const role = await _lookupRole(s.user)
+    if (!role) {
+      panelSessions.delete(key)
+      saveSessions()
+      return null
+    }
+    s.role = role
   }
   if (!s.role) {
     const admin = getPanelAdmin()
-    s.role = admin.username && s.user === admin.username ? 'admin' : 'user'
+    s.role = admin.username && s.user === admin.username ? 'super_admin' : 'user'
   }
   const now = Date.now()
   const remaining = s.exp - now
@@ -213,18 +232,20 @@ export function revokePanelSessionsForUser(username, { exceptToken } = {}) {
 /**
  * @returns {{ username: string, role: string, id?: string } | null}
  */
-export function verifyPanelLogin(username, password) {
+export async function verifyPanelLogin(username, password) {
   if (_authenticateUser) {
-    const rec = _authenticateUser(username, password)
+    // 数据库用户校验是 async（R6 B6b：PanelUserStore.authenticate 经 DbClient 读写）
+    const rec = await _authenticateUser(username, password)
     if (rec) return { username: rec.username, role: rec.role || 'user', id: rec.id }
-    // Existing DB user (including disabled) must not fall through to env password.
-    if (_lookupRole && _lookupRole(username)) return null
+    // Once database authentication is attached, environment credentials cannot
+    // resurrect a disabled or deleted account (or bypass a changed password).
+    return null
   }
   const admin = getPanelAdmin()
   if (!admin.password) return null
   if (!timingSafeEqualStr(String(username || ''), admin.username)) return null
   if (!timingSafeEqualStr(String(password || ''), admin.password)) return null
-  return { username: admin.username, role: 'admin', id: null, source: 'env' }
+  return { username: admin.username, role: 'super_admin', id: null, source: 'env' }
 }
 
 function parseCookie(header) {

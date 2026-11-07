@@ -1,7 +1,8 @@
 /**
  * Anthropic cache_control ttl for unofficial OAuth.
- * Default 1h (2× input). Customers may request 5m (1.25× input);
- * billing must use the TTL we actually sent.
+ * Default 1h (2× input). Customers may request 5m (1.25× input).
+ * Account-side usage records the TTL we actually sent; the customer is billed
+ * by customerCacheIntent (protocol/customer-usage.mjs).
  */
 import fs from 'node:fs'
 import { isAnthropicServerTool } from './web-search.mjs'
@@ -79,6 +80,22 @@ export function resolveCacheTtl({ headers = {}, body, routing, routingFile } = {
   if (requested) return requested
   if (routing) return cacheTtlFromRouting(routing)
   return cacheTtlFromRoutingFile(routingFile)
+}
+
+/**
+ * 客户自己的缓存意图，决定缓存 token 按什么价格计费；网关为自身效率加的
+ * 断点、把无 ttl 标记补成 1h 都不改变它。必须在 fillMissingCacheTtl 与
+ * 断点注入之前读取。
+ * - 'none'：请求里没有任何 cache_control，也没有 x-kin-cache-ttl 头；
+ * - '5m'：用了 cache_control 但至少一个标记没写 ttl（官方默认 5m），或只写了 5m；
+ * - '1h'：每个标记都显式写了 ttl 且含 1h，或头里显式要求 1h。
+ */
+export function customerCacheIntent(body, headers = {}) {
+  const hdr = headers?.[CACHE_TTL_HEADER] || headers?.['X-Kin-Cache-Ttl']
+  if (hdr != null && String(hdr).trim()) return normalizeCacheTtl(hdr)
+  const markers = listCacheMarkers(body)
+  if (!markers.length) return 'none'
+  return markers.every((marker) => marker.ttl) && bodyRequestsHourCache(body) ? '1h' : '5m'
 }
 
 /** Native passthrough validates caller markers; it never repairs their budget or TTL. */
@@ -419,15 +436,6 @@ export function normalizeCacheBreakpoints(raw) {
 
 export function cacheBreakpointsFromRouting(routing = {}) {
   return normalizeCacheBreakpoints(routing?.compatibility?.cache_breakpoints)
-}
-
-export function cacheBreakpointsFromRoutingFile(filePath) {
-  if (!filePath) return normalizeCacheBreakpoints(null)
-  try {
-    return cacheBreakpointsFromRouting(JSON.parse(fs.readFileSync(filePath, 'utf8')))
-  } catch {
-    return normalizeCacheBreakpoints(null)
-  }
 }
 
 /**

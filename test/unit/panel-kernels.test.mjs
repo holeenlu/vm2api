@@ -1,4 +1,5 @@
 import test, { after, before } from 'node:test'
+import { GITHUB_REPO } from '../../src/lib/admin/release.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -67,7 +68,8 @@ async function route(root, method, endpoint, body, options = {}) {
     routingConfig: {},
     requireAuth(req) {
       req.panelUser = 'fixture'
-      req.panelRole = options.role || 'admin'
+      // tapmodels 的运维角色是 super_admin（上游为 admin）
+      req.panelRole = options.role || 'super_admin'
       req.panelUserId = 'owner-a'
       return true
     },
@@ -255,12 +257,12 @@ function releaseFetch() {
             {
               name: 'kin-kernel',
               size: payloads['1'].length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/1',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/1`,
             },
             {
               name: 'cli-node',
               size: payloads['2'].length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/2',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/2`,
             },
           ],
         }),

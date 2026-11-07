@@ -10,7 +10,6 @@ import {
   sanitizeAnthropicBodyForBetaTokens,
   ensureFastModeBeta,
   stripInvalidThinkingBlocks,
-  alignSamplingWithThinking,
   modelSupportsMidConversationSystem,
 } from './anthropic-policy.mjs'
 import { liftMidConversationSystemMessages, promoteContentToBlocks } from './sanitize.mjs'
@@ -43,7 +42,6 @@ import {
 } from '../identity/official-cc-system-2.1.241.mjs'
 import {
   applyCacheTtlToBody,
-  applyMessageBreakpoints,
   DEFAULT_CACHE_TTL,
   enforceCacheTtlOrder,
   normalizeCacheTtl,
@@ -165,7 +163,6 @@ function stabilizeMessageBudgets(body) {
   })
   return changed ? { ...body, messages } : body
 }
-const OFFICIAL_CACHE = Object.freeze({ type: 'ephemeral' })
 
 function textOf(block) {
   if (typeof block === 'string') return block
@@ -174,7 +171,7 @@ function textOf(block) {
 
 /**
  * Every cli-hop request leaves as the captured Claude Code shape: the identity
- * sentence, then the caller's own prompt. Both markers omit ttl. A request that
+ * sentence, then the caller's own prompt. Both markers carry the resolved TTL. A request that
  * already has that identity keeps its second block; anything else is joined
  * behind a fresh identity.
  */
@@ -194,8 +191,53 @@ export function officialSystemTemplate(system, ttl = DEFAULT_CACHE_TTL) {
  * and of the user turn before it (4+ messages). The second one sits on the
  * previous request's write, so a turn that grows past the 20-block lookback
  * still reads it instead of falling back to the system prefix.
+ *
+ * `keepCallerWithin` (#524) is the message-marker budget left after the system
+ * template. The caller's own message markers stay where they are when they fit
+ * beside our tail marker: a caller anchor on a stable old turn is what a fresh
+ * account's next request reads after a switch, and rewriting it away made every
+ * later turn write the whole history again. Our second marker only takes a slot
+ * that is still free. Kept markers take the request TTL, so the order stays legal.
+ * When the caller's markers do not fit, only ours remain, as before.
  */
-function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL, limit = 2) {
+function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL, limit = 2, { keepCallerWithin = 0 } = {}) {
+  if (!(keepCallerWithin > 0) || !Array.isArray(messages)) return officialMessageTails(messages, ttl, limit)
+  const callerAt = new Set()
+  for (const [i, message] of messages.entries()) {
+    if (!Array.isArray(message?.content)) continue
+    for (const [j, block] of message.content.entries()) {
+      if (!block?.cache_control || block.type === 'thinking' || block.type === 'redacted_thinking') continue
+      callerAt.add(`${i}:${j}`)
+    }
+  }
+  if (!callerAt.size) return officialMessageTails(messages, ttl, limit)
+  const tail = officialMessageTails(messages, ttl, 1)
+  const used = new Set([...callerAt, ...markedBlocks(tail)])
+  if (used.size > keepCallerWithin) return officialMessageTails(messages, ttl, limit)
+  const both = limit > 1 ? officialMessageTails(messages, ttl, limit) : tail
+  const stamped = new Set([...callerAt, ...markedBlocks(both)]).size <= keepCallerWithin ? both : tail
+  const marker = { type: 'ephemeral', ttl: normalizeCacheTtl(ttl) }
+  return stamped.map((message, i) => {
+    if (!Array.isArray(message?.content) || !message.content.some((_, j) => callerAt.has(`${i}:${j}`))) return message
+    return {
+      ...message,
+      content: message.content.map((block, j) =>
+        callerAt.has(`${i}:${j}`) ? { ...block, cache_control: { ...marker } } : block,
+      ),
+    }
+  })
+}
+
+function markedBlocks(messages) {
+  const at = []
+  for (const [i, message] of messages.entries()) {
+    if (!Array.isArray(message?.content)) continue
+    for (const [j, block] of message.content.entries()) if (block?.cache_control) at.push(`${i}:${j}`)
+  }
+  return at
+}
+
+function officialMessageTails(messages, ttl, limit) {
   if (!Array.isArray(messages) || messages.length === 0 || limit <= 0) return messages
   const next = messages.map((message) => {
     if (!message || typeof message !== 'object') return message
@@ -382,7 +424,9 @@ export function prepareCliHopBody(
   if (!requestContext) {
     if (!lean && !shaped && !preparedZero) {
       body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
-      body.messages = officialMessageMarker(body.messages, cacheTtl)
+      // Tools and the root marker are cleared on this path; the template owns 1–2 system markers.
+      const systemMarkers = body.system.filter((block) => block?.cache_control != null).length
+      body.messages = officialMessageMarker(body.messages, cacheTtl, 2, { keepCallerWithin: 4 - systemMarkers })
     }
     // Zero owns its system layout, but does not assemble message breakpoints.
     // Only supply a fallback when the caller has no explicit cache policy:

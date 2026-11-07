@@ -87,7 +87,7 @@ function fixture(t, overrides = {}) {
   return { root, args, events, plan }
 }
 
-test('migration input only permits remote KVM, enlargement and an explicit change', () => {
+test('migration input only permits remote KVM, enlargement and an explicit change', async () => {
   assert.deepEqual(migrationRequest(vm(), { target_node_id: 'node-b', memory: '4g' }, {}), {
     targetNodeId: 'node-b',
     memory: '4g',
@@ -103,7 +103,7 @@ test('migration input only permits remote KVM, enlargement and an explicit chang
   })
 })
 
-test('capacity includes allocations, KVM overhead, live availability and system reserve', () => {
+test('capacity includes allocations, KVM overhead, live availability and system reserve', async () => {
   assertMigrationCapacity({ total: 32 * G, available: 10 * G, reserved: 20 * G, current: 0, requested: 4.5 * G })
   for (const values of [
     { total: 8 * G, available: 7 * G, reserved: 4 * G, current: 0, requested: 4.5 * G },
@@ -113,7 +113,7 @@ test('capacity includes allocations, KVM overhead, live availability and system 
   assertMigrationCapacity({ total: 32 * G, available: 4 * G, reserved: 20 * G, current: 2.5 * G, requested: 4.5 * G })
 })
 
-test('node-local exits cannot silently change when switching machines', () => {
+test('node-local exits cannot silently change when switching machines', async () => {
   assertMigrationProxy(vm())
   for (const url of ['socks5://127.0.0.1:1080', 'socks5://localhost:1080'])
     assert.throws(() => assertMigrationProxy({ proxy: { url } }), { code: 'migration_node_local_proxy' })
@@ -237,7 +237,7 @@ test('serializes jobs and persists interrupted holds across restart without expo
   assert.equal('rollback' in saved, false)
   const raw = getVm(f.root, f.args.id)
   assert.equal(isKernelWatchdogTarget(raw), false)
-  const summary = summarizeVm(raw, f.root)
+  const summary = await summarizeVm(raw, f.root)
   assert.equal(isKernelWatchdogTarget(summary), false)
   let inspected = false
   await reviveDownSlots({
@@ -250,16 +250,17 @@ test('serializes jobs and persists interrupted holds across restart without expo
   assert.equal(inspected, false)
 })
 
-test('migration API is administrator-only, including job history', () => {
+test('migration API is administrator-only, including job history', async () => {
   for (const method of ['GET', 'POST']) {
-    for (const role of ['user', 'super'])
+    // tapmodels 的运维角色是 super_admin（上游为 admin）；admin 与 user 均拒绝
+    for (const role of ['user', 'admin'])
       assert.equal(authorizePanelRoute(method, '/api/panel/vms/vm-move/migration', role).ok, false)
-    assert.equal(authorizePanelRoute(method, '/api/panel/vms/vm-move/migration', 'admin').ok, true)
+    assert.equal(authorizePanelRoute(method, '/api/panel/vms/vm-move/migration', 'super_admin').ok, true)
   }
 })
 
 const helper = fileURLToPath(new URL('../../src/lib/cluster/slot-transfer.py', import.meta.url))
-test('SSH helper round-trips a sparse cold disk, credentials, metadata and normal links; excludes transient run data', (t) => {
+test('SSH helper round-trips a sparse cold disk, credentials, metadata and normal links; excludes transient run data', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slot-transfer-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const source = path.join(root, 'source'),
@@ -290,7 +291,7 @@ test('SSH helper round-trips a sparse cold disk, credentials, metadata and norma
   assert.equal(fs.existsSync(published), false)
 })
 
-test('ordinary interrupted transfer removes its own partial staging directory', (t) => {
+test('ordinary interrupted transfer removes its own partial staging directory', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slot-transfer-interrupted-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const target = path.join(root, 'partial')

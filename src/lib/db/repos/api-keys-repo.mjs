@@ -5,9 +5,15 @@
  * sub2api-shaped: user_id/group_id ownership, USD quota (quota/quota_used)
  * plus 5h/1d/7d USD rate-limit windows. The legacy request-count quota pair
  * is quota_requests / quota_requests_used. Soft delete via deleted_at.
+ *
+ * M6：USD 额度、窗口上限与用量的权威值是 `*_micros` 整数列；REAL 列（quota、usage_5h…）是镜像，
+ * 每次写入都由整数派生同时写。记录对象同时带两种字段，业务判断一律比较 `*_micros`。
  */
 
 import { getDb } from '../database.mjs'
+import { dbClient } from '../db-client.mjs'
+import { MAX_MONEY_MICROS, fromMicros, microsOf, rowMicros, toMicros } from '../../core/money.mjs'
+import { moneySql } from './money-sql.mjs'
 
 const COLUMNS = [
   'id',
@@ -31,12 +37,10 @@ const COLUMNS = [
   'key_prefix',
   'key_suffix',
   'category',
-  'group_type',
-  'allowed_vms',
-  'vm_pool_id',
   'key_secret',
   'user_id',
   'group_id',
+  'created_by_user_id',
   'quota',
   'quota_used',
   'rate_limit_5h',
@@ -51,20 +55,12 @@ const COLUMNS = [
   'ip_whitelist',
   'ip_blacklist',
   'deleted_at',
+  'peer_sharing',
+  'codex_client_profile',
 ]
 
-const WINDOWS = [
-  { usage: 'usage_5h', start: 'window_5h_start', ms: 5 * 3600 * 1000 },
-  { usage: 'usage_1d', start: 'window_1d_start', ms: 24 * 3600 * 1000 },
-  { usage: 'usage_7d', start: 'window_7d_start', ms: 7 * 24 * 3600 * 1000 },
-]
-
-const NUMERIC_DEFAULT_0 = new Set([
-  'quota_requests',
-  'quota_requests_used',
-  'requests',
-  'tokens_in',
-  'tokens_out',
+/** USD 金额列（REAL 镜像）；对应的 `<name>_micros` 是权威值。 */
+export const KEY_MONEY_COLUMNS = [
   'quota',
   'quota_used',
   'rate_limit_5h',
@@ -73,37 +69,75 @@ const NUMERIC_DEFAULT_0 = new Set([
   'usage_5h',
   'usage_1d',
   'usage_7d',
-])
+]
+const WRITE_COLUMNS = [...COLUMNS, ...KEY_MONEY_COLUMNS.map((c) => c + '_micros')]
+
+const WINDOWS = [
+  { usage: 'usage_5h', start: 'window_5h_start', ms: 5 * 3600 * 1000 },
+  { usage: 'usage_1d', start: 'window_1d_start', ms: 24 * 3600 * 1000 },
+  { usage: 'usage_7d', start: 'window_7d_start', ms: 7 * 24 * 3600 * 1000 },
+]
+
+const NUMERIC_DEFAULT_0 = new Set(['quota_requests', 'quota_requests_used', 'requests', 'tokens_in', 'tokens_out'])
 
 function rowToRec(row) {
   if (!row) return null
-  return { ...row }
+  const rec = Object.fromEntries(COLUMNS.map((c) => [c, row[c]]))
+  for (const c of KEY_MONEY_COLUMNS) {
+    // 整数列为 NULL 只会是只写 REAL 的旧写入方留下的行：按 REAL 派生（与 money-sql.mjs 同口径）
+    const micros = rowMicros(row, c) ?? 0
+    rec[c + '_micros'] = micros
+    rec[c] = fromMicros(micros)
+  }
+  return rec
+}
+
+/** 记录里的金额：有 `*_micros` 用它，否则（调用方只给了美元值）在这里换算一次。 */
+function moneyMicrosOf(rec, c) {
+  const micros = microsOf(rec[c + '_micros'])
+  if (micros != null) return micros
+  return Math.max(0, toMicros(rec[c]) ?? 0)
 }
 
 function toValue(rec, c) {
+  if (c.endsWith('_micros')) return moneyMicrosOf(rec, c.slice(0, -7))
+  if (KEY_MONEY_COLUMNS.includes(c)) return fromMicros(moneyMicrosOf(rec, c))
   const v = rec[c]
   if (v == null) {
     if (c === 'category') return 'oauth'
-    if (c === 'group_type') return 'all'
-    if (c === 'allowed_vms') return '[]'
+    if (c === 'peer_sharing') return '{}'
     return NUMERIC_DEFAULT_0.has(c) ? 0 : null
   }
   return v
 }
 
-export class ApiKeysRepo {
-  constructor(db = getDb()) {
-    this.db = db
-    this._list = db.prepare('SELECT * FROM api_keys WHERE deleted_at IS NULL ORDER BY created_at')
-    this._get = db.prepare('SELECT * FROM api_keys WHERE id = ? AND deleted_at IS NULL')
-    this._getByKey = db.prepare('SELECT * FROM api_keys WHERE key = ? AND deleted_at IS NULL')
-    this._getByHash = db.prepare('SELECT * FROM api_keys WHERE key_hash = ? AND deleted_at IS NULL')
-    this._insert = db.prepare(`
-      INSERT INTO api_keys (${COLUMNS.join(', ')})
-      VALUES (${COLUMNS.map(() => '?').join(', ')})
-    `)
-    this._delete = db.prepare('DELETE FROM api_keys WHERE id = ?')
-    this._recordUsage = db.prepare(`
+// 读取列：整数金额超出有效范围（|micros| > MAX_MONEY_MICROS，node:sqlite 读超过 2^53 的整数会整条语句抛错）时按 NULL 读，
+// rowToRec 再按 REAL 回退（同样越界时按 0，即“不限”）。正常数据不会越界（迁移 126 与写入方都已限制），这里保证认证不被拖垮。
+const SELECT_COLUMNS = [
+  ...COLUMNS,
+  ...KEY_MONEY_COLUMNS.map(
+    (c) =>
+      `CASE WHEN ${c}_micros BETWEEN -${MAX_MONEY_MICROS} AND ${MAX_MONEY_MICROS} THEN ${c}_micros END AS ${c}_micros`,
+  ),
+].join(', ')
+const LIST_SQL = `SELECT ${SELECT_COLUMNS} FROM api_keys WHERE deleted_at IS NULL ORDER BY created_at`
+const GET_SQL = `SELECT ${SELECT_COLUMNS} FROM api_keys WHERE id = ? AND deleted_at IS NULL`
+const GET_BY_KEY_SQL = `SELECT ${SELECT_COLUMNS} FROM api_keys WHERE key = ? AND deleted_at IS NULL`
+const GET_BY_HASH_SQL = `SELECT ${SELECT_COLUMNS} FROM api_keys WHERE key_hash = ? AND deleted_at IS NULL`
+// 残留明文 Key（早期 api-keys.json 导入、旧备份恢复）：含已软删除的行，哈希化后库里不再留明文
+const LIST_PLAINTEXT_KEYS_SQL = "SELECT id, key FROM api_keys WHERE key NOT LIKE 'hmac:%'"
+// 条件更新：只在 key 仍是读到的明文时改写，不整行写回覆盖并发修改的用量
+const HASH_PLAINTEXT_KEY_SQL =
+  'UPDATE api_keys SET key = ?, key_hash = ?, key_prefix = ?, key_suffix = ?, key_secret = ?, updated_at = ? WHERE id = ? AND key = ?'
+const INSERT_SQL = `
+      INSERT INTO api_keys (${WRITE_COLUMNS.join(', ')})
+      VALUES (${WRITE_COLUMNS.map(() => '?').join(', ')})
+    `
+const UPDATE_COLUMNS = WRITE_COLUMNS.filter((c) => c !== 'id')
+const UPDATE_SQL = `UPDATE api_keys SET ${UPDATE_COLUMNS.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`
+const DELETE_SQL =
+  "UPDATE api_keys SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),status='disabled' WHERE id=? AND deleted_at IS NULL"
+const RECORD_USAGE_SQL = `
       UPDATE api_keys SET
         requests = requests + 1,
         quota_requests_used = quota_requests_used + 1,
@@ -111,81 +145,112 @@ export class ApiKeysRepo {
         tokens_out = tokens_out + ?,
         cache_read_tokens = COALESCE(cache_read_tokens, 0) + ?,
         cache_creation_tokens = COALESCE(cache_creation_tokens, 0) + ?,
-        quota_used = quota_used + ?,
-        usage_5h = ?, window_5h_start = ?,
-        usage_1d = ?, window_1d_start = ?,
-        usage_7d = ?, window_7d_start = ?,
+        quota_used_micros = IFNULL(${moneySql('quota_used')}, 0) + ?,
+        quota_used = (IFNULL(${moneySql('quota_used')}, 0) + ?) / 1000000.0,
+        usage_5h_micros = ?, usage_5h = ?, window_5h_start = ?,
+        usage_1d_micros = ?, usage_1d = ?, window_1d_start = ?,
+        usage_7d_micros = ?, usage_7d = ?, window_7d_start = ?,
         last_used_at = ?,
         updated_at = ?
       WHERE id = ?
-    `)
+    `
+// 竞态 R8：额度用尽的状态翻转是条件更新，只在仍为 active 且已用额度达到上限时改状态，不整行写回覆盖并发修改的其他字段
+const MARK_QUOTA_EXHAUSTED_SQL = `UPDATE api_keys SET status='quota_exhausted', updated_at=? WHERE id=? AND deleted_at IS NULL AND status='active' AND ${moneySql('quota')}>0 AND ${moneySql('quota_used')}>=${moneySql('quota')}`
+
+/** 数据访问经 DbClient 异步执行（R6 B7a）。 */
+export class ApiKeysRepo {
+  constructor(db = getDb()) {
+    this.db = db
+    this.client = dbClient(db)
   }
 
-  list() {
-    return this._list.all().map(rowToRec)
+  async list() {
+    return (await this.client.many(LIST_SQL)).map(rowToRec)
   }
 
-  getById(id) {
-    return rowToRec(this._get.get(id))
+  async getById(id) {
+    return rowToRec(await this.client.one(GET_SQL, id))
   }
 
-  getByKey(key) {
-    return rowToRec(this._getByKey.get(key))
+  async getByKey(key) {
+    return rowToRec(await this.client.one(GET_BY_KEY_SQL, key))
   }
 
-  getByHash(hash) {
-    return rowToRec(this._getByHash.get(hash))
+  async getByHash(hash) {
+    return rowToRec(await this.client.one(GET_BY_HASH_SQL, hash))
   }
 
-  insert(rec) {
-    this._insert.run(...COLUMNS.map((c) => toValue(rec, c)))
+  /** 仍以明文存放的 Key：`{ id, key }`。 */
+  async listPlaintextKeys() {
+    return this.client.many(LIST_PLAINTEXT_KEYS_SQL)
+  }
+
+  /** 把一行明文 Key 改写成哈希形式；key 已被改过时不动，返回是否改写。 */
+  async hashPlaintextKey(id, plaintext, { key, keyHash, keyPrefix, keySuffix, keySecret, updatedAt }) {
+    return (
+      (
+        await this.client.run(
+          HASH_PLAINTEXT_KEY_SQL,
+          key,
+          keyHash,
+          keyPrefix,
+          keySuffix,
+          keySecret,
+          updatedAt,
+          id,
+          plaintext,
+        )
+      ).changes > 0
+    )
+  }
+
+  async insert(rec) {
+    await this.client.run(INSERT_SQL, ...WRITE_COLUMNS.map((c) => toValue(rec, c)))
     return this.getById(rec.id)
   }
 
   /** Full-row update from a record object (id immutable). */
-  update(rec) {
-    const cols = COLUMNS.filter((c) => c !== 'id')
-    const sql = `UPDATE api_keys SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`
-    this.db.prepare(sql).run(...cols.map((c) => toValue(rec, c)), rec.id)
+  async update(rec) {
+    await this.client.run(UPDATE_SQL, ...UPDATE_COLUMNS.map((c) => toValue(rec, c)), rec.id)
     return this.getById(rec.id)
   }
 
-  remove(id) {
-    const info = this._delete.run(id)
-    return info.changes > 0
+  async remove(id) {
+    return (await this.client.run(DELETE_SQL, id)).changes > 0
   }
 
   /**
    * Sub2api APIKey window semantics: a window opens at first spend; once
-   * now - start >= size the window resets (usage=cost, start=now).
+   * now - start >= size the window resets (usage=cost, start=now). 金额为整数微单位。
    */
-  _rollWindow(rec, key, cost, nowMs) {
+  _rollWindow(rec, key, costMicros, nowMs) {
     const start = rec[key.start] ? Date.parse(rec[key.start]) : NaN
     if (!Number.isFinite(start) || nowMs - start >= key.ms) {
-      return { usage: cost, start: new Date(nowMs).toISOString() }
+      return { usage: costMicros, start: new Date(nowMs).toISOString() }
     }
-    return { usage: (Number(rec[key.usage]) || 0) + cost, start: rec[key.start] }
+    return { usage: (rec[key.usage + '_micros'] || 0) + costMicros, start: rec[key.start] }
   }
 
-  recordUsage(id, { tokens_in = 0, tokens_out = 0, cache_read_tokens = 0, cache_creation_tokens = 0, cost = 0 } = {}) {
-    const rec = this.getById(id)
+  /** `cost_micros`：本次实际扣费（整数微单位）。 */
+  async recordUsage(
+    id,
+    { tokens_in = 0, tokens_out = 0, cache_read_tokens = 0, cache_creation_tokens = 0, cost_micros = 0 } = {},
+  ) {
+    const rec = await this.getById(id)
     if (!rec) return null
     const nowMs = Date.now()
     const now = new Date(nowMs).toISOString()
-    const usd = Number(cost) || 0
-    const w = WINDOWS.map((win) => this._rollWindow(rec, win, usd, nowMs))
-    this._recordUsage.run(
+    const micros = microsOf(cost_micros) || 0
+    const w = WINDOWS.map((win) => this._rollWindow(rec, win, micros, nowMs))
+    await this.client.run(
+      RECORD_USAGE_SQL,
       Number(tokens_in) || 0,
       Number(tokens_out) || 0,
       Number(cache_read_tokens) || 0,
       Number(cache_creation_tokens) || 0,
-      usd,
-      w[0].usage,
-      w[0].start,
-      w[1].usage,
-      w[1].start,
-      w[2].usage,
-      w[2].start,
+      micros,
+      micros,
+      ...w.flatMap((win) => [win.usage, fromMicros(win.usage), win.start]),
       now,
       now,
       id,
@@ -193,7 +258,12 @@ export class ApiKeysRepo {
     return this.getById(id)
   }
 
-  count() {
-    return this.db.prepare('SELECT COUNT(*) c FROM api_keys WHERE deleted_at IS NULL').get().c
+  /** 竞态 R8：USD 额度用尽时条件翻转为 quota_exhausted；返回是否改了状态。 */
+  async markQuotaExhausted(id, now = new Date().toISOString()) {
+    return (await this.client.run(MARK_QUOTA_EXHAUSTED_SQL, now, id)).changes > 0
+  }
+
+  async count() {
+    return (await this.client.one('SELECT COUNT(*) c FROM api_keys WHERE deleted_at IS NULL')).c
   }
 }

@@ -140,7 +140,8 @@ export { applyStructuredOutput, openaiResponseFormatToOutputConfig }
 export function claudeStopReasonToOpenAIFinish(stopReason) {
   const sr = String(stopReason || '')
   if (sr === 'tool_use') return 'tool_calls'
-  if (sr === 'max_tokens') return 'length'
+  // 上下文窗口耗尽同样是截断，不能报成正常结束（审计 P2）
+  if (sr === 'max_tokens' || sr === 'model_context_window_exceeded') return 'length'
   if (sr === 'refusal') return 'content_filter'
   return 'stop'
 }
@@ -761,6 +762,7 @@ export function claudeSSELineToOpenAIChatChunks(line, state) {
   }
 
   if (evt.type === 'message_start') {
+    if (evt.message?.usage && typeof evt.message.usage === 'object') state.startUsage = { ...evt.message.usage }
     chunks.push({
       ...base,
       choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
@@ -866,14 +868,25 @@ export function claudeSSELineToOpenAIChatChunks(line, state) {
 
   if (evt.type === 'message_delta') {
     const finish = claudeStopReasonToOpenAIFinish(evt.delta?.stop_reason)
+    // Anthropic 的输入与缓存计数在 message_start 里，message_delta 往往只有 output_tokens：
+    // 合并后再换算，否则 prompt_tokens 常为 0（审计 P2）
+    const usage = evt.usage ? { ...(state.startUsage || {}), ...withoutZeroInputs(evt.usage) } : null
     chunks.push({
       ...base,
       choices: [{ index: 0, delta: {}, finish_reason: finish }],
-      usage: evt.usage ? chatUsage(evt.usage) : undefined,
+      usage: usage ? chatUsage(usage) : undefined,
     })
   }
 
   return chunks
+}
+
+/** message_delta 里为 0 或缺失的输入类计数不覆盖 message_start 的值。 */
+function withoutZeroInputs(usage = {}) {
+  const out = { ...usage }
+  for (const key of ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'])
+    if (!(Number(out[key]) > 0)) delete out[key]
+  return out
 }
 
 // ---------- Streaming: Claude SSE → OpenAI Responses-like events ----------

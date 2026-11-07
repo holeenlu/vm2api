@@ -7,11 +7,12 @@ import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { authorizePanelRoute } from '../../src/lib/admin/panel-acl.mjs'
 import { readBody } from '../../src/lib/http/respond.mjs'
 
-function harness(manager) {
+function harness(manager, extra = {}) {
   const response = {}
   const routes = createClusterRoutes({
     manager,
     readBody,
+    ...extra,
     json(_res, status, body) {
       Object.assign(response, { status, body })
     },
@@ -62,6 +63,18 @@ test('editing probe uses the stored node while the add probe keeps its existing 
   ])
 })
 
+test('remote SSH authentication failures stay a node error instead of expiring the panel session', async () => {
+  const app = harness({
+    async probe() {
+      throw new ClusterError(403, 'auth_failed', 'SSH 认证失败（root@node.example）')
+    },
+  })
+  const res = await app.request('POST', '/api/panel/cluster/nodes/probe', { host: 'node.example' })
+  assert.equal(res.status, 403)
+  assert.equal(res.body.error.type, 'cluster')
+  assert.equal(res.body.error.code, 'auth_failed')
+})
+
 test('editing routes preserve actionable conflict and fingerprint errors', async () => {
   for (const code of ['node_edit_conflict', 'host_key_mismatch', 'node_in_use']) {
     for (const [method, suffix, handler] of [
@@ -95,8 +108,8 @@ test('node edit and probe cannot bypass panel admin permissions', async () => {
     ['POST', '/probe'],
   ]) {
     const pathname = `/api/panel/cluster/nodes/node-a${suffix}`
-    assert.equal(authorizePanelRoute(method, pathname, 'admin').ok, true)
-    for (const role of ['user', 'super']) {
+    assert.equal(authorizePanelRoute(method, pathname, 'super_admin').ok, true)
+    for (const role of ['user', 'admin']) {
       let response
       const panel = createPanelHandler({
         cfg: { paths: {} },
@@ -115,4 +128,30 @@ test('node edit and probe cannot bypass panel admin permissions', async () => {
       assert.equal(response.body.error.code, 'forbidden')
     }
   }
+})
+
+test('node terminal tickets are audited before the ticket is returned, without the ticket', async () => {
+  const audits = []
+  const app = harness(
+    { issueShellTicket: (id) => ({ ticket: `secret-ticket-${id}`, expires_in: 60 }) },
+    { auditSensitiveAction: async (...args) => audits.push(args) },
+  )
+  const res = await app.request('POST', '/api/panel/cluster/nodes/node-a/shell-ticket', {})
+  assert.equal(res.status, 200)
+  assert.equal(res.body.data.ticket, 'secret-ticket-node-a')
+  assert.equal(audits.length, 1)
+  assert.deepEqual(audits[0].slice(1), ['cluster.shell_ticket', 'node-a', { expires_in: 60 }])
+  assert.doesNotMatch(JSON.stringify(audits[0].slice(1)), /secret-ticket/)
+
+  const failing = harness(
+    { issueShellTicket: () => ({ ticket: 'secret-ticket', expires_in: 60 }) },
+    {
+      auditSensitiveAction: async () => {
+        throw new Error('audit unavailable')
+      },
+    },
+  )
+  const denied = await failing.request('POST', '/api/panel/cluster/nodes/node-a/shell-ticket', {})
+  assert.notEqual(denied.status, 200)
+  assert.doesNotMatch(JSON.stringify(denied.body || {}), /secret-ticket/)
 })

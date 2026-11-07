@@ -58,6 +58,7 @@ test('generated API key lists configured models and calls both protocols through
   let anthropicId
   try {
     gw = await startGateway({ readyMs: 60_000, env: { KIN_API_KERNEL_SOCK: socket } })
+    const endpointIds = {}
     for (const [protocol, model] of [
       ['anthropic', 'claude-fixture'],
       ['openai', 'gpt-fixture'],
@@ -79,6 +80,7 @@ test('generated API key lists configured models and calls both protocols through
       assert.equal(saved.status, 201, saved.text)
       assert.equal(saved.json.item.risk_review_enabled, false)
       if (protocol === 'anthropic') anthropicId = saved.json.item.id
+      endpointIds[protocol] = saved.json.item.id
       const checked = await api(gw, 'POST', '/api/panel/api/messages', {
         body: { model, message: 'hi', keys: [{ key_id: saved.json.item.api_key_entries[0].id }] },
       })
@@ -98,31 +100,42 @@ test('generated API key lists configured models and calls both protocols through
     const listed = await api(gw, 'GET', '/v1/models', { headers })
     assert.equal(listed.status, 200, listed.text)
     assert.deepEqual(listed.json.data.map((item) => item.id).sort(), ['claude-fixture', 'gpt-fixture'])
-    const antKey = await api(gw, 'POST', '/api/panel/api-keys', {
-      body: { name: 'API-anthropic', category: 'api', group_type: 'anthropic' },
-    })
-    assert.equal(antKey.status, 201, antKey.text)
-    const antListed = await api(gw, 'GET', '/v1/models', {
-      headers: { authorization: `Bearer ${antKey.json.item.key}` },
-    })
-    assert.equal(antListed.status, 200, antListed.text)
-    assert.deepEqual(
-      antListed.json.data.map((item) => item.id),
-      ['claude-fixture'],
-    )
+    // 上游 #907：Key 的协议范围只列出、只调度对应协议的端点。tapmodels 的 Key 不直接写 group_type，
+    // 协议范围来自所属分组的平台，所以用 anthropic / openai 平台分组创建 Key；分组内同时挂两个协议的端点，
+    // 验证协议过滤叠加在分组授权之上
+    const data = (r) => r.json?.data || r.json
+    const groupIds = {}
+    for (const platform of ['anthropic', 'openai']) {
+      const created = await api(gw, 'POST', '/api/panel/groups', {
+        body: { name: `API-${platform}`, platform, is_exclusive: true },
+      })
+      assert.equal(created.status, 201, created.text)
+      groupIds[platform] = data(created).item.id
+    }
+    for (const id of Object.values(endpointIds)) {
+      const assigned = await api(gw, 'PUT', `/api/panel/api-endpoints/${id}/groups`, {
+        body: { group_ids: Object.values(groupIds), expected_version: 0 },
+      })
+      assert.equal(assigned.status, 200, assigned.text)
+    }
+    for (const [platform, expected] of [
+      ['anthropic', 'claude-fixture'],
+      ['openai', 'gpt-fixture'],
+    ]) {
+      const scoped = await api(gw, 'POST', '/api/panel/api-keys', {
+        body: { name: `API-${platform}`, category: 'api', group_id: groupIds[platform] },
+      })
+      assert.equal(scoped.status, 201, scoped.text)
+      const scopedListed = await api(gw, 'GET', '/v1/models', {
+        headers: { authorization: `Bearer ${scoped.json.item.key}` },
+      })
+      assert.equal(scopedListed.status, 200, scopedListed.text)
+      assert.deepEqual(
+        scopedListed.json.data.map((item) => item.id),
+        [expected],
+      )
+    }
 
-    const oaiKey = await api(gw, 'POST', '/api/panel/api-keys', {
-      body: { name: 'API-openai', category: 'api', group_type: 'openai' },
-    })
-    assert.equal(oaiKey.status, 201, oaiKey.text)
-    const oaiListed = await api(gw, 'GET', '/v1/models', {
-      headers: { authorization: `Bearer ${oaiKey.json.item.key}` },
-    })
-    assert.equal(oaiListed.status, 200, oaiListed.text)
-    assert.deepEqual(
-      oaiListed.json.data.map((item) => item.id),
-      ['gpt-fixture'],
-    )
     for (const [url, body] of [
       ['/v1/messages', { model: 'claude-fixture', messages: [{ role: 'user', content: 'hi' }], max_tokens: 32 }],
       ['/v1/chat/completions', { model: 'gpt-fixture', messages: [{ role: 'user', content: 'hi' }], max_tokens: 32 }],
