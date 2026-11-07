@@ -5,6 +5,7 @@ import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import {
   normalizePolicy,
   loadModelPolicy,
+  warmModelPolicy,
   seedDefaultPolicy,
   normalizeThinkingByPolicy,
 } from '../../src/lib/protocol/model-policy.mjs'
@@ -22,8 +23,8 @@ test('seed Opus 5.5 uses the 2.1.280 id, medium effort, and 128k output', () => 
   assert.equal(model.params.default_effort, 'medium')
   assert.equal(model.params.on_enabled, 'convert_to_adaptive')
   assert.equal(model.betas.pass_context_1m, true)
-  assert.deepEqual(model.aliases, [legacy])
-  assert.equal(seed.aliases.opus, 'claude-opus-5')
+  assert.deepEqual(model.aliases, ['opus', legacy])
+  assert.equal(seed.aliases.opus, canonical)
   assert.equal(seed.aliases[legacy], canonical)
   assert.equal(seed.models[legacy], undefined)
 })
@@ -48,16 +49,17 @@ test('a saved dotted Opus 5.5 row keeps administrator overrides on the hyphen id
   assert.equal(migrated.aliases[legacy], canonical)
 })
 
-test('loading settings that predate Opus 5.5 appends the model without resetting Opus 5', () => {
+test('loading settings that predate Opus 5.5 appends the model without resetting Opus 5', async () => {
   openDatabase({ dbPath: ':memory:' })
   try {
     const repo = new SettingsRepo()
-    repo.set('model_policy', {
+    await repo.set('model_policy', {
       source: 'panel',
       models: { 'claude-opus-5': { enabled: false, display_name: 'kept' } },
       aliases: { opus: 'claude-opus-5' },
     })
-    loadModelPolicy({ force: true })
+    // 竞态 R21：迁移结果只在启动预热时写回 settings（运行期加载只读内存）
+    await warmModelPolicy()
     const stored = repo.get('model_policy')
     assert.equal(stored.models['claude-opus-5'].enabled, false)
     assert.equal(stored.models['claude-opus-5'].display_name, 'kept')
@@ -72,7 +74,7 @@ test('loading settings that predate Opus 5.5 appends the model without resetting
     assert.deepEqual(thinking.thinking, { type: 'adaptive' })
     assert.equal(thinking.thinking.budget_tokens, undefined)
   } finally {
-    closeDatabase()
+    await closeDatabase()
     clearModelsCache()
   }
 })

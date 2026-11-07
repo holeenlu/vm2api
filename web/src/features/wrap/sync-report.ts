@@ -1,3 +1,4 @@
+import { t } from '@/i18n'
 import { isApiError } from '@/lib/api'
 import type { WrapSyncReport } from './queries'
 
@@ -28,18 +29,27 @@ function itemReason(item: SyncItem): string {
 
 export function slotFailureLabel(item: SyncItem): string {
   const reason = itemReason(item)
-  return `${item.id || '?'}${reason ? `（${reason}）` : ''}`
+  const id = item.id || '?'
+  return reason ? t('wrap:slotFailure', { id, reason }) : id
 }
 
-/** 「3/5 槽成功；失败 vm-1（原因）、vm-2…」 */
+/** Summarize partial failures while preserving original slot IDs and error text. */
 export function syncReportSummary(report: WrapSyncReport, limit = 3): string {
   const items = report.items || []
-  const total = report.total ?? items.length
+  const count = report.total ?? items.length
   const failed = items.filter(syncItemFailed)
   const ok = report.ok_count ?? items.length - failed.length
-  const head = `${ok}/${total} 槽成功`
-  if (!failed.length) return head
-  const shown = failed.slice(0, limit).map(slotFailureLabel).join('、')
-  const more = failed.length > limit ? ` 等 ${failed.length} 台` : ''
-  return `${head}；失败 ${shown}${more}`
+  if (!failed.length) return t('wrap:syncSummary', { ok, count })
+  const failures = failed.slice(0, limit).map(slotFailureLabel).join(', ')
+  return t(
+    failed.length > limit
+      ? 'wrap:syncSummaryMoreFailed'
+      : 'wrap:syncSummaryFailed',
+    {
+      ok,
+      count,
+      failures,
+      failedCount: failed.length,
+    }
+  )
 }

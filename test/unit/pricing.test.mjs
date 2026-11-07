@@ -11,10 +11,10 @@ import {
 import { resolvePrice } from '../../src/lib/admin/price-catalog.mjs'
 
 test('official family aliases resolve to current list prices', () => {
-  assert.equal(resolvePrice('fable').id, 'claude-fable-5')
-  assert.equal(resolvePrice('opus').id, 'claude-opus-5')
+  assert.equal(resolvePrice('fable').id, 'claude-fable-5-1')
+  assert.equal(resolvePrice('opus').id, 'claude-opus-5-5')
   assert.equal(resolvePrice('sonnet').id, 'claude-sonnet-5-5')
-  assert.equal(resolvePrice('haiku').id, 'claude-haiku-4-5')
+  assert.equal(resolvePrice('haiku').id, 'claude-haiku-5-5')
   assert.equal(resolvePrice('mythos').id, 'claude-mythos-5')
 })
 
@@ -213,8 +213,10 @@ test('GPT-5.6-sol bills uncached input plus official cache_write_tokens', () => 
   assert.equal(c.input_cost, 0.00035)
   assert.equal(c.output_cost, 0.00015)
   assert.equal(c.cache_read_cost, 0.00001)
-  assert.equal(c.cache_creation_cost, 0.0000625)
-  assert.equal(c.total_cost, 0.0005725)
+  // M6 舍入差异：精确值 62.5 / 572.5 微单位，总额四舍五入一次得 573，最大余数法把多出的 1 分给缓存写入
+  assert.equal(c.cache_creation_cost, 0.000063)
+  assert.equal(c.total_cost, 0.000573)
+  assert.equal(c.total_cost_micros, 573)
 })
 
 test('GPT-5.6-sol bills uncached input plus official cache write', () => {
@@ -231,8 +233,10 @@ test('GPT-5.6-sol bills uncached input plus official cache write', () => {
   assert.equal(c.input_cost, 0.00035)
   assert.equal(c.output_cost, 0.00015)
   assert.equal(c.cache_read_cost, 0.00001)
-  assert.equal(c.cache_creation_cost, 0.0000625)
-  assert.equal(c.total_cost, 0.0005725)
+  // M6 舍入差异：精确值 62.5 / 572.5 微单位，总额四舍五入一次得 573，最大余数法把多出的 1 分给缓存写入
+  assert.equal(c.cache_creation_cost, 0.000063)
+  assert.equal(c.total_cost, 0.000573)
+  assert.equal(c.total_cost_micros, 573)
 })
 
 test('GPT-6 Sol and Luna use the official standard rates', () => {

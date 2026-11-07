@@ -67,12 +67,12 @@ export async function syncVmTimezoneFromProxy(
     // Already aligned, but re-stamp the source so the panel stops showing the
     // zone as hand-pinned once the operator opted back into following.
     if (persist && force && vm.timezone_source !== 'proxy_geo') {
-      persistVmTimezone(projectRoot, id, timezone, { source: 'proxy_geo' })
+      await persistVmTimezone(projectRoot, id, timezone, { source: 'proxy_geo' })
     }
     return { ok: true, applied: false, timezone, reason: 'already_current' }
   }
   if (!persist) return { ok: true, applied: true, timezone, reason: null }
-  const summary = persistVmTimezone(projectRoot, id, timezone, { source: 'proxy_geo' })
+  const summary = await persistVmTimezone(projectRoot, id, timezone, { source: 'proxy_geo' })
   if (!summary) return skip('persist_failed')
   return { ok: true, applied: true, timezone, reason: null }
 }

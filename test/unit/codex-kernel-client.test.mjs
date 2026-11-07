@@ -13,6 +13,9 @@ import {
 import fs from 'node:fs'
 import os from 'node:os'
 
+// Spawned test kernels log stderr (#684); keep those logs out of the repo's default data dir.
+process.env.KIN_CODEX_KERNEL_LOG_DIR ||= fs.mkdtempSync(path.join(os.tmpdir(), 'kin-test-kernel-logs-'))
+
 const PROXY_ENV_KEYS = [
   'HTTPS_PROXY',
   'https_proxy',

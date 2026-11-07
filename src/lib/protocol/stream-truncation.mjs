@@ -8,7 +8,7 @@
  * A thinking block cut mid-way cannot be closed (it needs a signature).
  */
 
-import { mapUpstreamError, rewritePoolErrorForClient } from '../core/errors.mjs'
+import { isKernelStreamOverflow, mapUpstreamError, rewritePoolErrorForClient } from '../core/errors.mjs'
 import { semanticStatusForStreamError } from './stream-error-status.mjs'
 
 const CLOSABLE_BLOCKS = new Set(['text', 'tool_use'])
@@ -24,14 +24,17 @@ export function buildAnthropicSseError(error = {}) {
     message: String(error.message || 'An error occurred while processing the request'),
   }
   if (error.code) body.code = String(error.code)
+  if (error.request_id) body.request_id = String(error.request_id)
   return sse('error', { type: 'error', error: body })
 }
 
 /**
  * Remap upstream `event: error` SSE data lines through mapUpstreamError so
  * streaming Anthropic clients see the same taxonomy as non-streaming responses.
+ * `requestId` (the gateway request id) fills a frame that carries none, so the
+ * caller can look the request up in the request logs (#689).
  */
-export function createAnthropicSseErrorRemapper({ headers = {} } = {}) {
+export function createAnthropicSseErrorRemapper({ headers = {}, requestId = null } = {}) {
   let pendingEvent = null
   return {
     remapLine(line) {
@@ -67,7 +70,7 @@ export function createAnthropicSseErrorRemapper({ headers = {} } = {}) {
           message: err.message,
           ...(err.code ? { code: err.code } : {}),
           ...(err.details && Object.keys(err.details).length ? { details: err.details } : {}),
-          ...(err.request_id ? { request_id: err.request_id } : {}),
+          ...(err.request_id || requestId ? { request_id: err.request_id || requestId } : {}),
         },
       })
       return `data: ${data}${suffix || '\n'}`
@@ -145,4 +148,52 @@ export function isRecoverableTruncation(result) {
   const error = result?.body?.error
   if (!error) return true
   return !/timeout/i.test(`${error.code || ''} ${error.type || ''} ${error.message || ''}`)
+}
+
+/**
+ * What already reached the client on this request (#689): bytes written and SSE
+ * `data:` frames, across every attempt of the request.
+ */
+export function createStreamForwardMeter() {
+  let bytes = 0
+  let frames = 0
+  return {
+    note(text) {
+      const chunk = String(text)
+      bytes += Buffer.byteLength(chunk)
+      for (let at = chunk.indexOf('data:'); at >= 0; at = chunk.indexOf('data:', at + 5)) {
+        if (at === 0 || chunk[at - 1] === '\n') frames += 1
+      }
+    },
+    snapshot() {
+      return { bytes, frames }
+    },
+  }
+}
+
+/**
+ * #689: one structured warning when the slot kernel ended a job with `job stream
+ * overflow` (its 256-frame / 2 MiB in-flight sink filled because nothing drained it).
+ * Returns the entry, or null when `result` is not that failure.
+ */
+export function reportKernelStreamOverflow(
+  result,
+  { requestId = null, protocol = null, model = null, forwarded = null } = {},
+) {
+  if (!isKernelStreamOverflow(result)) return null
+  const sent = forwarded?.snapshot?.() || forwarded || {}
+  const entry = {
+    event: 'kernel_stream_overflow',
+    request_id: requestId,
+    vm_id: result?.vmId || null,
+    account_id: result?.accountId || null,
+    protocol,
+    model,
+    attempt_count: result?.attemptCount ?? null,
+    committed: result?.committed === true,
+    forwarded_bytes: Number(sent.bytes) || 0,
+    forwarded_frames: Number(sent.frames) || 0,
+  }
+  console.warn(JSON.stringify(entry))
+  return entry
 }

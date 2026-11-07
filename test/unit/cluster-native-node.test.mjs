@@ -118,7 +118,7 @@ test('launchd kernel plist escapes slot paths and environment values', () => {
   assert.equal(p.claude, '/Users/o&b/.vm2api/vms/vm-07/claude')
   const vm = { id: 'vm-07', timezone: 'Asia/Tokyo', locale: 'ja_JP.UTF-8' }
   const plists = nativeServicePlists(vm, p)
-  assert.equal(plists.kernel.path, '/Users/o&b/.vm2api/vms/vm-07/launchd/com.vm2api.slot.vm-07.kernel.plist')
+  assert.equal(plists.kernel.path, '/Users/o&b/.vm2api/vms/vm-07/launchd/com.tapmodels.slot.vm-07.kernel.plist')
   const kernel = plists.kernel.body
   assert.match(kernel, /<string>\/Users\/o&amp;b\/\.vm2api\/native\/d1g3st\/kin-kernel<\/string>/)
   assert.match(kernel, /<string>--gateway-worker<\/string>/)
@@ -176,13 +176,13 @@ test('node platform comes from uname -s and the darwin host stats parse like /pr
   assert.equal(stats.containers_mem, 1048576)
 })
 
-test('platform is stored per node without touching the edit version', () => {
+test('platform is stored per node without touching the edit version', async () => {
   const db = new DatabaseSync(':memory:')
-  for (const name of ['026_cluster_nodes.sql', '040_cluster_node_platform.sql']) {
+  for (const name of ['026_cluster_nodes.sql', '046_cluster_node_platform.sql']) {
     db.exec(fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   }
   const repo = new ClusterNodesRepo(db)
-  const node = repo.insert({
+  const node = await repo.insert({
     id: 'node-m',
     label: 'mini',
     host: 'mini.example.test',
@@ -193,11 +193,11 @@ test('platform is stored per node without touching the edit version', () => {
     host_key_alg: 'ssh-ed25519',
     host_key_sha256: 'SHA256:x',
   })
-  assert.equal(repo.platform('node-m'), 'linux')
-  assert.equal(repo.setPlatform('node-m', 'darwin'), true)
-  assert.equal(repo.platform('node-m'), 'darwin')
-  assert.equal(repo.get('node-m').updated_at, node.updated_at)
-  assert.equal(repo.platform('node-gone'), null)
+  assert.equal(await repo.platform('node-m'), 'linux')
+  assert.equal(await repo.setPlatform('node-m', 'darwin'), true)
+  assert.equal(await repo.platform('node-m'), 'darwin')
+  assert.equal((await repo.get('node-m')).updated_at, node.updated_at)
+  assert.equal(await repo.platform('node-gone'), null)
   db.close()
 })
 

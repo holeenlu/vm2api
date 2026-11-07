@@ -1,3 +1,4 @@
+import { t as translate } from '@/i18n'
 import type { ClusterApiNode, ClusterLocalStatus } from '@/types/panel-cluster'
 import type { HostStats } from '@/types/panel-overview'
 import { fmtBytes } from '@/lib/format'
@@ -12,10 +13,10 @@ export type DetailRow = {
 
 function ago(ms: number): string {
   const min = Math.max(0, Math.floor(ms / 60_000))
-  if (min < 60) return `${min} 分钟`
+  if (min < 60) return translate('cluster:localDetail.minutes', { count: min })
   const hr = Math.floor(min / 60)
-  if (hr < 48) return `${hr} 小时`
-  return `${Math.floor(hr / 24)} 天`
+  if (hr < 48) return translate('cluster:localDetail.hours', { count: hr })
+  return translate('cluster:localDetail.days', { count: Math.floor(hr / 24) })
 }
 
 function ipv4Prefix24(ip: string): string | null {
@@ -38,49 +39,74 @@ export function internalAddresses(
 }
 
 function controlText(c: ClusterLocalStatus['control']): string {
-  const listen = `监听 ${c.listen_host ?? '—'}:${c.listen_port ?? '—'}`
-  if (c.mode === 'process') return `本机进程 · 宿主网络 · ${listen}`
-  const net = c.network_mode || '未知网络'
+  const listen = translate('cluster:localDetail.listen', {
+    value1: c.listen_host ?? '—',
+    value2: c.listen_port ?? '—',
+  })
+  if (c.mode === 'process')
+    return `${translate('cluster:localLink.process')} · ${listen}`
+  const net = c.network_mode || translate('cluster:localLink.unknownNetwork')
   const kind =
-    net === 'host' ? 'host 网络' : net === 'bridge' ? 'bridge（NAT）' : net
-  return `容器 ${c.container || ''} · ${kind} · ${listen}`
+    net === 'host'
+      ? translate('cluster:localLink.hostNetwork')
+      : net === 'bridge'
+        ? 'bridge（NAT）'
+        : net
+  return translate('cluster:localLink.container', {
+    value1: c.container || '',
+    value2: `${kind} · ${listen}`,
+  })
 }
 
 function inboundRow(s: ClusterLocalStatus): DetailRow {
   const { nat, control } = s
   const ip = nat.public_ip || '—'
   const via = nat.observed_via
-    ? `由 ${nat.observed_via.label} 回连测得`
+    ? translate('cluster:localDetail.observedVia', {
+        value1: nat.observed_via.label,
+      })
     : nat.note
   const natHint =
     nat.behind_nat === true
-      ? '在 NAT 后：只影响别人连进来，不影响接入节点'
+      ? translate('cluster:localDetail.behindNat')
       : undefined
-  const hint = [via, natHint].filter(Boolean).join('；') || undefined
+  const sep = translate('cluster:localDetail.hintSeparator')
+  const hint = [via, natHint].filter(Boolean).join(sep) || undefined
+  const label = translate('cluster:localDetail.public')
   switch (nat.inbound) {
     case 'closed':
       return {
-        label: '公网',
-        value: `${ip} · 外网连不进 ${control.listen_port}（正常）`,
+        label,
+        value: translate('cluster:localDetail.inboundClosed', {
+          value1: ip,
+          value2: control.listen_port,
+        }),
         tone: 'ok',
         hint,
       }
     case 'loopback':
       return {
-        label: '公网',
-        value: `${ip} · 面板只监听本机（正常）`,
+        label,
+        value: translate('cluster:localDetail.inboundLoopback', {
+          value1: ip,
+        }),
         tone: 'ok',
         hint,
       }
     case 'open':
       return {
-        label: '公网',
-        value: `${ip} · 外网能直接连 ${control.listen_port}`,
+        label,
+        value: translate('cluster:localDetail.inboundOpen', {
+          value1: ip,
+          value2: control.listen_port,
+        }),
         tone: 'caution',
-        hint: `建议只监听内网或加防火墙${hint ? `；${hint}` : ''}`,
+        hint: [translate('cluster:localDetail.openAdvice'), hint]
+          .filter(Boolean)
+          .join(sep),
       }
     default:
-      return { label: '公网', value: ip, hint }
+      return { label, value: ip, hint }
   }
 }
 
@@ -92,23 +118,36 @@ export function localDetailRows(input: {
   const { status, host, nodes } = input
   const { docker, kvm } = status
   const rows: DetailRow[] = [
-    { label: '控制面', value: controlText(status.control) },
+    {
+      label: translate('cluster:localLink.controlPlane'),
+      value: controlText(status.control),
+    },
     inboundRow(status),
   ]
   const internal = internalAddresses(status.nat.local_ips || [], nodes)
   if (internal.length) {
-    rows.push({ label: '内网', value: `${internal.join('、')}（连集群节点）` })
+    rows.push({
+      label: translate('cluster:localDetail.internal'),
+      value: translate('cluster:localDetail.internalValue', {
+        value1: internal.join(translate('cluster:localDetail.listSeparator')),
+      }),
+    })
   }
   rows.push(
     docker.ok
       ? {
           label: 'Docker',
-          value: `${docker.version ?? '—'} · ${docker.containers ?? '—'} 个容器，${docker.running ?? '—'} 个在跑，其中槽 ${docker.slots ?? '—'} 个`,
+          value: translate('cluster:localDetail.dockerValue', {
+            value1: docker.version ?? '—',
+            value2: docker.containers ?? '—',
+            value3: docker.running ?? '—',
+            value4: docker.slots ?? '—',
+          }),
           tone: 'ok',
         }
       : {
           label: 'Docker',
-          value: '不可用',
+          value: translate('cluster:unavailable'),
           tone: 'bad',
           hint: docker.error || undefined,
         }
@@ -116,12 +155,20 @@ export function localDetailRows(input: {
   if (kvm) {
     rows.push(
       kvm.ok && kvm.accel === 'kvm'
-        ? { label: 'KVM', value: '可用（硬件加速）', tone: 'ok' }
+        ? {
+            label: 'KVM',
+            value: translate('cluster:localDetail.kvmHardware'),
+            tone: 'ok',
+          }
         : kvm.ok
-          ? { label: 'KVM', value: '只有软件模拟（很慢）', tone: 'caution' }
+          ? {
+              label: 'KVM',
+              value: translate('cluster:localDetail.kvmSoftware'),
+              tone: 'caution',
+            }
           : {
               label: 'KVM',
-              value: '不可用',
+              value: translate('cluster:unavailable'),
               tone: 'bad',
               hint: kvm.error || undefined,
             }
@@ -130,15 +177,21 @@ export function localDetailRows(input: {
   if (host?.rss) {
     const up = Number(host.proc_uptime) || 0
     rows.push({
-      label: '控制面进程',
-      value: `内存 ${fmtBytes(host.rss)} · 已运行 ${ago(up * 1000)}`,
+      label: translate('cluster:localDetail.controlProcess'),
+      value: translate('cluster:localDetail.processValue', {
+        value1: fmtBytes(host.rss),
+        value2: ago(up * 1000),
+      }),
     })
   }
   const ready = nodes.filter((n) => n.link.state === 'ready').length
   if (nodes.length) {
     rows.push({
-      label: '集群出站',
-      value: `${ready} / ${nodes.length} 个节点已连上`,
+      label: translate('cluster:localLink.outbound'),
+      value: translate('cluster:localDetail.nodesConnected', {
+        value1: ready,
+        count: nodes.length,
+      }),
       tone: ready === nodes.length ? 'ok' : 'caution',
     })
   }
@@ -151,16 +204,28 @@ export function localDetailSummary(status: ClusterLocalStatus): string {
   const net = status.control.network_mode
   parts.push(
     status.control.mode === 'process'
-      ? '控制面本机进程'
-      : `控制面 ${net === 'host' ? 'host 网络' : net || '容器'}`
+      ? translate('cluster:localDetail.summaryProcess')
+      : translate('cluster:localDetail.summaryControl', {
+          value1:
+            net === 'host'
+              ? translate('cluster:localLink.hostNetwork')
+              : net || translate('cluster:localDetail.containerMode'),
+        })
   )
   if (status.nat.inbound === 'closed' || status.nat.inbound === 'loopback') {
-    parts.push('外网连不进')
-  } else if (status.nat.inbound === 'open') parts.push('外网能直接连')
-  parts.push(status.docker.ok ? 'Docker 正常' : 'Docker 不可用')
+    parts.push(translate('cluster:localDetail.summaryClosed'))
+  } else if (status.nat.inbound === 'open')
+    parts.push(translate('cluster:localDetail.summaryOpen'))
+  parts.push(
+    status.docker.ok
+      ? translate('cluster:localDetail.dockerOk')
+      : translate('cluster:localDetail.dockerDown')
+  )
   if (status.kvm)
     parts.push(
-      status.kvm.ok && status.kvm.accel === 'kvm' ? 'KVM 可用' : 'KVM 不可用'
+      status.kvm.ok && status.kvm.accel === 'kvm'
+        ? translate('cluster:localDetail.kvmOk')
+        : translate('cluster:localDetail.kvmDown')
     )
   return parts.join(' · ')
 }

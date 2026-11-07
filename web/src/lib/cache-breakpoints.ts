@@ -1,3 +1,6 @@
+import { t } from '@/i18n'
+import { localizedOption } from '@/lib/locale-format'
+
 /**
  * 缓存断点配置 —— 镜像 gateway `src/lib/protocol/cache-ttl.mjs`
  * 的 DEFAULT_CACHE_TTL / DEFAULT_CACHE_BREAKPOINTS / normalize*（工作区快照 @2026-09-20）。
@@ -33,20 +36,17 @@ export const DEFAULT_CACHE_BREAKPOINTS: CacheBreakpoints = {
 }
 
 export const MESSAGES_BREAKPOINT_OPTIONS: [MessagesBreakpointMode, string][] = [
-  ['fill', '补齐'],
-  ['rewrite', '重打'],
+  localizedOption('fill', 'cache.fill'),
+  localizedOption('rewrite', 'cache.rewrite'),
   ['cli-hop', 'cli-hop'],
-  ['off', '不动'],
+  localizedOption('off', 'cache.off'),
 ]
 
 export function messagesModeExplain(mode: MessagesBreakpointMode): string {
-  if (mode === 'off')
-    return '不碰 messages。调用方自己打的断点照旧生效，网关只管 system 和 tools。'
-  if (mode === 'rewrite')
-    return '先清掉调用方在 messages 里的全部断点，再打最后一条；messages≥4 时再打倒数第二个 user。'
-  if (mode === 'cli-hop')
-    return '剥光 messages 上的 cache_control。kernel 按 Claude Code 重打 conversation 断点。'
-  return '只在 messages 一个断点都没有时补齐。已经自己打过断点的客户端保持原样。'
+  if (mode === 'off') return t('lib:cache.explainOff')
+  if (mode === 'rewrite') return t('lib:cache.explainRewrite')
+  if (mode === 'cli-hop') return t('lib:cache.explainCliHop')
+  return t('lib:cache.explainFill')
 }
 
 export function normalizeCacheTtl(value: unknown): CacheTtl {

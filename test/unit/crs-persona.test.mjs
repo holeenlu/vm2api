@@ -74,6 +74,15 @@ function assertParkedStanding(out, userText) {
   assert.ok(content.includes(userText))
 }
 
+/** Template billing sits after the last system breakpoint; tests locate it instead of indexing system[0]. */
+function billingText(out) {
+  const system = out.system || []
+  const at = system.findIndex((block) => /^x-anthropic-billing-header:/.test(String(block?.text || '')))
+  assert.ok(at >= 0, 'billing block missing')
+  assert.ok(at > system.findLastIndex((block) => block?.cache_control), 'billing precedes a system breakpoint')
+  return system[at].text
+}
+
 function environmentSection(text) {
   return String(text || '').split('# Environment')[1] || ''
 }
@@ -159,11 +168,11 @@ test('forceConfigured rewrites official and proxied-official system onto the pre
     mode: 'official_full',
     forceConfigured: true,
   })
-  assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.equal(out.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(out.system[1].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[1].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[2].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.match(out.system[3].text, /^x-anthropic-billing-header:/)
   assert.equal(
     out.system.some((block) => String(block.text).startsWith('Write code that reads like the surrounding code')),
     false,
@@ -184,7 +193,7 @@ test('forceConfigured custom preset still writes billing and keeps caller system
     },
     { forceConfigured: true, mode: 'custom' },
   )
-  assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
+  assert.match(billingText(out), /^x-anthropic-billing-header:/)
   assert.equal(
     out.system.some((block) => String(block.text).includes('caller text')),
     false,
@@ -214,12 +223,13 @@ test('empty unofficial system writes billing, CLI identity, 303 harness and boun
   const messages = [{ role: 'user', content: 'ping' }]
   const out = applyCrsUnofficialPersona({ model: 'claude-opus-5-5', messages }, { officialClient: false })
   assert.equal(out.system.length, 4)
-  assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
-  assert.equal(out.system[0].cache_control, undefined)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.equal(out.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(out.system[1].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[1].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[2].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  // cch / cc_prompt_id 每轮都变，billing 必须在最后一个 system 断点和动态边界之后。
+  assert.match(out.system[3].text, /^x-anthropic-billing-header:/)
+  assert.equal(out.system[3].cache_control, undefined)
   assert.equal(
     out.system.some((block) => String(block.text).startsWith('Write code that reads like the surrounding code')),
     false,
@@ -486,8 +496,8 @@ test('fingerprint uses first user text, not discarded caller system', () => {
     system: 'keep this persona',
     messages: [{ role: 'user', content: firstUser }],
   })
-  assert.match(out.system[0].text, new RegExp(expectedFp(firstUser)))
-  assert.ok(!out.system[0].text.includes(expectedFp('[System Instructions]\nkeep this persona')))
+  assert.match(billingText(out), new RegExp(expectedFp(firstUser)))
+  assert.ok(!billingText(out).includes(expectedFp('[System Instructions]\nkeep this persona')))
 })
 
 test('billing attribution leaves caller-supplied billing unchanged', () => {
@@ -539,7 +549,7 @@ test('routing.json cc_entrypoint reaches the rendered template billing without a
       { messages: [{ role: 'user', content: 'ping' }] },
       { officialClient: false, routingFile: file },
     )
-    assert.match(out.system[0].text, /cc_entrypoint=cli;/)
+    assert.match(billingText(out), /cc_entrypoint=cli;/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -565,8 +575,8 @@ test('one routing read keeps billing, system identity and env on the same entryp
   }
   try {
     const cli = render('cli')
-    assert.match(cli.system[0].text, /cc_entrypoint=cli;/)
-    assert.equal(cli.system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
+    assert.match(billingText(cli), /cc_entrypoint=cli;/)
+    assert.equal(cli.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.")
     assert.equal(
       cli.system
         .map((block) => block.text)
@@ -575,8 +585,8 @@ test('one routing read keeps billing, system identity and env on the same entryp
       false,
     )
     const sdk = render('sdk-cli')
-    assert.match(sdk.system[0].text, /cc_entrypoint=sdk-cli;/)
-    assert.equal(sdk.system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
+    assert.match(billingText(sdk), /cc_entrypoint=sdk-cli;/)
+    assert.equal(sdk.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.")
     assert.doesNotMatch(sdk.system.map((block) => block.text).join('\n'), /! <command>/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -590,7 +600,7 @@ test('cliVersion can be parsed from a slot user-agent', () => {
     },
     { cliVersion: 'claude-cli/2.1.200 (external, cli)' },
   )
-  assert.match(out.system[0].text, /cc_version=2\.1\.200\.[0-9a-f]{3}/)
+  assert.match(billingText(out), /cc_version=2\.1\.200\.[0-9a-f]{3}/)
 })
 
 test('persona mode append attaches the official one-liner and keeps caller system', () => {
@@ -835,11 +845,11 @@ test('official_prompt keeps billing identity overlay, slot env, and skips inject
     { mode: 'official_prompt', park: true },
   )
   assert.equal(out.system.length, 4)
-  assert.match(out.system[0].text, /x-anthropic-billing-header:/)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
-  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.equal(out.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(out.system[1].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[1].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[2].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.match(out.system[3].text, /x-anthropic-billing-header:/)
   assert.ok(!out.system.some((b) => String(b?.text || '').includes(DEFAULT_AGENT_STANDING)))
   assert.ok(!out.system.some((b) => b?.text === CRS_AGENT_EXPANSION))
   assert.match(roleSystemText(out), /^# Environment\n/)
@@ -861,8 +871,8 @@ test('official_prompt drops the caller agent prompt and moves other caller syste
     park: false,
     sessionId: '11111111-2222-4333-8444-555555555555',
   })
-  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[1].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[1].cache_control, { type: 'ephemeral', scope: 'global' })
   assert.equal(
     out.system.some((block) => String(block.text).includes('你是一个高速收费员。')),
     false,
@@ -939,8 +949,9 @@ test('official_full with guidance enabled keeps guidance in system and the calle
       },
       { mode: 'official_full', park: false, routingFile },
     )
-    assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
-    assert.equal(out.system.at(-1).text, renderOfficial303Guidance())
+    assert.equal(out.system[2].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+    assert.equal(out.system.at(-2).text, renderOfficial303Guidance())
+    assert.match(billingText(out), /^x-anthropic-billing-header:/)
     assert.equal(
       out.system.some((block) => String(block.text).includes('你是一个高速收费员。')),
       false,
@@ -974,8 +985,8 @@ test('pi and omp harness prompts stay after the 303 system instead of replacing 
     assert.equal(texts.includes(CRS_REPORTING_OUTCOMES), false, mode)
     let caller
     if (mode === 'official_full') {
-      assert.equal(texts[1], CRS_OFFICIAL_CLI_SYSTEM, mode)
-      assert.equal(texts[2].startsWith('\nYou are an agent working with the user'), true, mode)
+      assert.equal(texts[0], CRS_OFFICIAL_CLI_SYSTEM, mode)
+      assert.equal(texts[1].startsWith('\nYou are an agent working with the user'), true, mode)
       assert.equal(texts.filter((text) => text.includes('Oh My Pi coding harness')).length, 0, mode)
       caller = firstUserContent(out)
       assert.ok(caller.startsWith('<system-reminder>\n'), mode)
@@ -1385,7 +1396,7 @@ test('harness environment uses the slot timezone and keeps cwd inside the client
         locale: 'en_US.UTF-8',
       },
     })
-    assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
+    assert.equal(out.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
     assert.equal(
       out.system.some((block) => String(block.text).includes('Oh My Pi coding harness')),
       false,

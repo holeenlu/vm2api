@@ -30,12 +30,12 @@ function closeServer(t, server) {
   })
 }
 
-function makePool(t) {
-  const pool = new ProxyPool({ db: openDatabase({ dbPath: ':memory:' }) })
+async function makePool(t) {
+  const pool = await ProxyPool.create({ db: openDatabase({ dbPath: ':memory:' }) })
   pool.updateConfig({ enabled: false })
-  t.after(() => {
+  t.after(async () => {
     pool.stopScheduler()
-    closeDatabase()
+    await closeDatabase()
   })
   return pool
 }
@@ -199,7 +199,7 @@ test('loopback rows classify as local forwarders, remote endpoints do not', () =
 })
 
 test('a forwarder whose upstream is dead fails the probe instead of reporting health', async (t) => {
-  const pool = makePool(t)
+  const pool = await makePool(t)
   const socks = await fakeSocks(t, { connect: () => CONNECT_REFUSED })
   const {
     items: [proxy],
@@ -218,7 +218,7 @@ test('a forwarder whose upstream is dead fails the probe instead of reporting he
 })
 
 test('a forwarder without a usable TLS tunnel falls back to DNS and reports tunnel latency', async (t) => {
-  const pool = makePool(t)
+  const pool = await makePool(t)
   const socks = await fakeSocks(t, { connect: () => CONNECT_OK })
   const {
     items: [proxy],
@@ -233,7 +233,7 @@ test('a forwarder without a usable TLS tunnel falls back to DNS and reports tunn
 })
 
 test('a forwarder that carries a real TLS handshake is healthy without DNS fallback', async (t) => {
-  const pool = makePool(t)
+  const pool = await makePool(t)
   const socks = await fakeTlsSocks(t)
   const {
     items: [proxy],
@@ -248,7 +248,7 @@ test('a forwarder that carries a real TLS handshake is healthy without DNS fallb
 })
 
 test('a lazy CONNECT success without tunnel data is not health', async (t) => {
-  const pool = makePool(t)
+  const pool = await makePool(t)
   pool.updateConfig({ probe_timeout_ms: 1000 })
   const socks = await fakeSocks(t, { tunnel: false })
   const {
@@ -264,7 +264,7 @@ test('a lazy CONNECT success without tunnel data is not health', async (t) => {
 })
 
 test('0xff is an auth mismatch, not health', async (t) => {
-  const pool = makePool(t)
+  const pool = await makePool(t)
   const socks = await fakeSocks(t, { greeting: [5, 0xff] })
   const {
     items: [proxy],
@@ -279,7 +279,7 @@ test('0xff is an auth mismatch, not health', async (t) => {
 })
 
 test('user/pass forwarders authenticate before the CONNECT verdict', async (t) => {
-  const pool = makePool(t)
+  const pool = await makePool(t)
   const socks = await fakeSocks(t, { greeting: [5, 2], connect: () => CONNECT_OK })
   const {
     items: [proxy],

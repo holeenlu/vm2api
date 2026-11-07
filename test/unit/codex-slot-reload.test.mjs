@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import http from 'node:http'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { codexKernelHealth } from '../../src/lib/transport/codex-kernel-client.mjs'
@@ -13,6 +14,9 @@ import {
   writeCodexKernelConfig,
 } from '../../src/lib/transport/codex-kernel-supervisor.mjs'
 import { reloadSlotReady } from '../../src/lib/vm/slot-runtime.mjs'
+
+// Spawned test kernels log stderr (#684); keep those logs out of the repo's default data dir.
+process.env.KIN_CODEX_KERNEL_LOG_DIR ||= fs.mkdtempSync(path.join(os.tmpdir(), 'kin-test-kernel-logs-'))
 
 async function fixture(t) {
   // Keep the Unix-socket path below macOS's length limit.

@@ -69,7 +69,7 @@ function fakeElf64Amd64(payload = 'host-kernel') {
   return buf
 }
 
-test('materializeWrapCli copies both CLIs into slot home', () => {
+test('materializeWrapCli copies both CLIs into slot home', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-'))
   try {
     seedTemplate(project)
@@ -88,7 +88,7 @@ test('materializeWrapCli copies both CLIs into slot home', () => {
   }
 })
 
-test('crag materialize copies the crag kernel and cc-node', () => {
+test('crag materialize copies the crag kernel and cc-node', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-cc-'))
   try {
     seedTemplate(project)
@@ -104,7 +104,7 @@ test('crag materialize copies the crag kernel and cc-node', () => {
     fs.rmSync(project, { recursive: true, force: true })
   }
 })
-test('crag inspection reports a change and sync marks the kernel for restart', () => {
+test('crag inspection reports a change and sync marks the kernel for restart', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-change-'))
   try {
     seedTemplate(project)
@@ -129,7 +129,7 @@ test('crag inspection reports a change and sync marks the kernel for restart', (
   }
 })
 
-test('materializeWrapCli does not recopy identical wrap files', () => {
+test('materializeWrapCli does not recopy identical wrap files', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-skip-'))
   try {
     seedTemplate(project)
@@ -146,7 +146,7 @@ test('materializeWrapCli does not recopy identical wrap files', () => {
   }
 })
 
-test('materializeWrapCli replaces same-size stale kernel payload', () => {
+test('materializeWrapCli replaces same-size stale kernel payload', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-kernel-update-'))
   try {
     const template = seedTemplate(project)
@@ -168,7 +168,7 @@ test('materializeWrapCli replaces same-size stale kernel payload', () => {
   }
 })
 
-test('kernel inspection reports a change without writing the slot', () => {
+test('kernel inspection reports a change without writing the slot', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-inspect-'))
   try {
     const template = seedTemplate(project)
@@ -187,7 +187,7 @@ test('kernel inspection reports a change without writing the slot', () => {
     fs.rmSync(project, { recursive: true, force: true })
   }
 })
-test('cli-node inspection reports a change without writing the slot', () => {
+test('cli-node inspection reports a change without writing the slot', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-node-'))
   try {
     const template = seedTemplate(project)
@@ -207,7 +207,7 @@ test('cli-node inspection reports a change without writing the slot', () => {
     fs.rmSync(project, { recursive: true, force: true })
   }
 })
-test('a failed kernel restart stays pending until the next sync', () => {
+test('a failed kernel restart stays pending until the next sync', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-pending-'))
   try {
     seedTemplate(project)
@@ -225,7 +225,7 @@ test('a failed kernel restart stays pending until the next sync', () => {
   }
 })
 
-test('materializeWrapCli installs glibc wrapper over kernel.bin', () => {
+test('materializeWrapCli installs glibc wrapper over kernel.bin', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-wrap-'))
   try {
     seedTemplate(project)
@@ -246,7 +246,7 @@ test('materializeWrapCli installs glibc wrapper over kernel.bin', () => {
   }
 })
 
-test('captureWrapSample promotes a proven slot into share/wrap-cli', () => {
+test('captureWrapSample promotes a proven slot into share/wrap-cli', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-promote-'))
   try {
     seedTemplate(project)
@@ -267,7 +267,7 @@ test('captureWrapSample promotes a proven slot into share/wrap-cli', () => {
   }
 })
 
-test('legacy VM ids are included in fleet wrap synchronization', () => {
+test('legacy VM ids are included in fleet wrap synchronization', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-legacy-vm-'))
   try {
     seedTemplate(project)
@@ -276,7 +276,7 @@ test('legacy VM ids are included in fleet wrap synchronization', () => {
     fs.writeFileSync(path.join(vmDir, 'active.json'), JSON.stringify({ active_vm: 'legacy-slot' }))
     fs.writeFileSync(path.join(vmDir, 'legacy-slot.json'), JSON.stringify({ id: 'legacy-slot', name: 'legacy-slot' }))
     fs.writeFileSync(path.join(vmDir, 'vm-01.json'), JSON.stringify({ id: 'vm-01', name: 'vm-01' }))
-    const synced = syncWrapSample(project, listVms(project))
+    const synced = syncWrapSample(project, await listVms(project))
     assert.equal(synced.ok, true)
     assert.deepEqual(synced.items.map((item) => item.id).sort(), ['legacy-slot', 'vm-01'])
     assert.equal(
@@ -288,7 +288,7 @@ test('legacy VM ids are included in fleet wrap synchronization', () => {
   }
 })
 
-test('materializeWrapCli replaces a busy dest via unlink', () => {
+test('materializeWrapCli replaces a busy dest via unlink', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-busy-'))
   try {
     seedTemplate(project)
@@ -310,7 +310,7 @@ test('materializeWrapCli replaces a busy dest via unlink', () => {
   }
 })
 
-test('makeWrapSample builds share/wrap-cli without a VM', () => {
+test('makeWrapSample builds share/wrap-cli without a VM', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-make-'))
   try {
     seedTemplate(project)
@@ -324,7 +324,7 @@ test('makeWrapSample builds share/wrap-cli without a VM', () => {
   }
 })
 
-test('materializeWrapCli fails when the template is missing', () => {
+test('materializeWrapCli fails when the template is missing', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-missing-'))
   try {
     const result = materializeWrapCli(project, { id: 'vm-01' })
@@ -336,7 +336,7 @@ test('materializeWrapCli fails when the template is missing', () => {
   }
 })
 
-test('inspectWrapCliDir requires kernel payload', () => {
+test('inspectWrapCliDir requires kernel payload', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-bad-'))
   try {
     fs.writeFileSync(path.join(dir, WRAP_CLI_BIN), 'x')
@@ -348,7 +348,7 @@ test('inspectWrapCliDir requires kernel payload', () => {
   }
 })
 
-test('wrapCliTemplateDir prefers KIN_WRAP_CLI_ROOT', () => {
+test('wrapCliTemplateDir prefers KIN_WRAP_CLI_ROOT', async () => {
   const prev = process.env.KIN_WRAP_CLI_ROOT
   process.env.KIN_WRAP_CLI_ROOT = '/opt/kin-gateway/share/wrap-cli'
   try {
@@ -359,7 +359,7 @@ test('wrapCliTemplateDir prefers KIN_WRAP_CLI_ROOT', () => {
   }
 })
 
-test('materializeWrapCli prefers KIN_KERNEL_BIN over sample kernel', () => {
+test('materializeWrapCli prefers KIN_KERNEL_BIN over sample kernel', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-configured-'))
   const prev = process.env.KIN_KERNEL_BIN
   try {
@@ -376,7 +376,7 @@ test('materializeWrapCli prefers KIN_KERNEL_BIN over sample kernel', () => {
   }
 })
 
-test('materializeWrapCli falls back to project bin/kin-kernel', () => {
+test('materializeWrapCli falls back to project bin/kin-kernel', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-bundled-'))
   try {
     seedTemplate(project)
@@ -392,7 +392,7 @@ test('materializeWrapCli falls back to project bin/kin-kernel', () => {
   }
 })
 
-test('makeWrapSample overlays configured kernel onto the sample', () => {
+test('makeWrapSample overlays configured kernel onto the sample', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-make-host-'))
   const prev = process.env.KIN_KERNEL_BIN
   try {
@@ -410,7 +410,7 @@ test('makeWrapSample overlays configured kernel onto the sample', () => {
   }
 })
 
-test('inspectLinuxAmd64Elf accepts linux amd64 ELF64', () => {
+test('inspectLinuxAmd64Elf accepts linux amd64 ELF64', async () => {
   assert.equal(inspectLinuxAmd64Elf(fakeElf64Amd64()).ok, true)
   assert.equal(inspectLinuxAmd64Elf(Buffer.from('not-elf')).ok, false)
   const wrongMachine = fakeElf64Amd64()
@@ -418,7 +418,7 @@ test('inspectLinuxAmd64Elf accepts linux amd64 ELF64', () => {
   assert.equal(inspectLinuxAmd64Elf(wrongMachine).code, 'kernel_not_amd64')
 })
 
-test('replaceKernelBinary writes sample and project bin kernel', () => {
+test('replaceKernelBinary writes sample and project bin kernel', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-upload-'))
   try {
     seedTemplate(project)
@@ -435,7 +435,7 @@ test('replaceKernelBinary writes sample and project bin kernel', () => {
   }
 })
 
-test('replaceKernelBinary rejects non-ELF payloads', () => {
+test('replaceKernelBinary rejects non-ELF payloads', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wrap-cli-bad-elf-'))
   try {
     seedTemplate(project)
@@ -458,7 +458,7 @@ function seedV2Package(project, options = {}) {
   return dir
 }
 
-test('omitted crag version stays on the legacy ELF even when a v2 package exists', () => {
+test('omitted crag version stays on the legacy ELF even when a v2 package exists', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-legacy-pin-'))
   const prev = process.env.KIN_CRAG_V2_ROOT
   try {
@@ -479,7 +479,7 @@ test('omitted crag version stays on the legacy ELF even when a v2 package exists
   }
 })
 
-test('one VM can switch cli-node to CRAG v2 and back without deleting cli-node', () => {
+test('one VM can switch cli-node to CRAG v2 and back without deleting cli-node', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-v2-switch-'))
   try {
     seedTemplate(project)
@@ -509,7 +509,7 @@ test('one VM can switch cli-node to CRAG v2 and back without deleting cli-node',
   }
 })
 
-test('CRAG v2 rejects a bad package and a non-local slot without replacing cli-node', () => {
+test('CRAG v2 rejects a bad package and a non-local slot without replacing cli-node', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-v2-reject-'))
   try {
     const dir = seedV2Package(project)
@@ -664,7 +664,7 @@ const invalidNativePackages = [
 ]
 
 for (const [label, code, mutate] of invalidNativePackages) {
-  test(`CRAG v2 rejects ${label} without changing an installed package`, () => {
+  test(`CRAG v2 rejects ${label} without changing an installed package`, async () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-native-integrity-'))
     try {
       const dir = seedV2Package(project)
@@ -690,7 +690,7 @@ for (const [label, code, mutate] of invalidNativePackages) {
   })
 }
 
-test('CRAG v2 revalidates staged bytes before replacing the installed package', () => {
+test('CRAG v2 revalidates staged bytes before replacing the installed package', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-native-stage-'))
   const copy = fs.cpSync
   try {
@@ -715,7 +715,7 @@ test('CRAG v2 revalidates staged bytes before replacing the installed package', 
   }
 })
 
-test('CRAG v2 rolls back the package and preserves the wrapper when publication fails', () => {
+test('CRAG v2 rolls back the package and preserves the wrapper when publication fails', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-native-rollback-'))
   const rename = fs.renameSync
   try {
@@ -750,7 +750,7 @@ test('CRAG v2 rolls back the package and preserves the wrapper when publication 
   }
 })
 
-test('CRAG v2 publishes complete upgrades, repairs damaged installs, and leaves no stage files', () => {
+test('CRAG v2 publishes complete upgrades, repairs damaged installs, and leaves no stage files', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-native-upgrade-'))
   try {
     const dir = seedV2Package(project)
@@ -785,7 +785,7 @@ test('CRAG v2 publishes complete upgrades, repairs damaged installs, and leaves 
   }
 })
 
-test('CRAG v2 restores the previous tree if staged directory promotion fails', () => {
+test('CRAG v2 restores the previous tree if staged directory promotion fails', async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-native-promotion-'))
   const rename = fs.renameSync
   try {

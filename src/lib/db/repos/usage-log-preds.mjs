@@ -22,6 +22,16 @@ export const PROMPT_TOKENS_SQL =
 export const TOTAL_TOKENS_SQL =
   'IFNULL(input_tokens, 0) + IFNULL(output_tokens, 0) + IFNULL(cache_read_tokens, 0) + IFNULL(cache_creation_tokens, 0)'
 
+// 119：主 token 列是客户计费口径；账号 / 上游口径（成本重算、账号成本汇总、额度预测、
+// 供应商结算）读 upstream_*，它只在两种口径不同时有值，NULL 即与主列相同。
+export function upstreamTokenSql(column, alias = '') {
+  const a = alias ? `${alias}.` : ''
+  if (column === 'output_tokens') return `${a}output_tokens`
+  return `COALESCE(${a}upstream_${column}, ${a}${column})`
+}
+export const UPSTREAM_PROMPT_TOKENS_SQL = `IFNULL(${upstreamTokenSql('input_tokens')}, 0) + IFNULL(${upstreamTokenSql('cache_read_tokens')}, 0) + IFNULL(${upstreamTokenSql('cache_creation_tokens')}, 0)`
+export const UPSTREAM_TOTAL_TOKENS_SQL = `${UPSTREAM_PROMPT_TOKENS_SQL} + IFNULL(output_tokens, 0)`
+
 export function totalTokens(row = {}) {
   return (
     (Number(row.input_tokens) || 0) +
@@ -31,12 +41,40 @@ export function totalTokens(row = {}) {
   )
 }
 
-/** Rows a panel `user` owns: own user_id, one of their live keys, or served by a slot they owned at the time. */
+export const ADMIN_DOMAIN_IDS_SQL = `
+  SELECT id FROM users WHERE admin_domain_id = ? AND role IN ('admin', 'user') AND deleted_at IS NULL
+`
+
+/** Customer visibility is the immutable authenticated caller snapshot. */
 export function ownerPred(ownerUserId) {
-  const id = String(ownerUserId || '').trim()
-  if (!id) return { sql: '', params: [] }
-  return {
-    sql: `(user_id = ? OR IFNULL(api_key_id, '') IN (SELECT id FROM api_keys WHERE user_id = ? AND deleted_at IS NULL) OR vm_owner_user_id = ?)`,
-    params: [id, id, id],
+  if (ownerUserId?.type === 'panel_key_creator') {
+    const id = String(ownerUserId.creatorId || '').trim()
+    return id
+      ? { sql: 'api_key_id IN (SELECT id FROM api_keys WHERE created_by_user_id = ?)', params: [id] }
+      : { sql: '1 = 0', params: [] }
   }
+  if (ownerUserId?.type === 'panel_admin_scope') {
+    const id = String(ownerUserId.adminId || '').trim()
+    const root = String(ownerUserId.scopeRootId || id).trim()
+    return id
+      ? {
+          sql: `(user_id IN (${ADMIN_DOMAIN_IDS_SQL}) OR api_key_id IN (
+            SELECT id FROM api_keys WHERE created_by_user_id IN (${ADMIN_DOMAIN_IDS_SQL})
+          ))`,
+          params: [root, root],
+        }
+      : { sql: '1 = 0', params: [] }
+  }
+  // Wallets/subscriptions have user_id, but no api_key_id. Keep their domain
+  // predicate separate from usage attributed to a key's creator.
+  if (ownerUserId?.type === 'panel_users') {
+    const root = String(ownerUserId.scopeRootId || '').trim()
+    if (!root) return { sql: '1 = 0', params: [] }
+    const sql = `user_id IN (${ADMIN_DOMAIN_IDS_SQL})`
+    return ownerUserId.userId
+      ? { sql: `(${sql} AND user_id = ?)`, params: [root, ownerUserId.userId] }
+      : { sql, params: [root] }
+  }
+  const id = String(ownerUserId || '').trim()
+  return id ? { sql: 'user_id = ?', params: [id] } : { sql: '', params: [] }
 }
