@@ -1,0 +1,153 @@
+{
+  "version": 2,
+  "scope": "codex",
+  "i18n_namespace": "settings",
+  "groups": [
+    { "id": "routing", "label": "executorSettings.routing.title", "help": "executorSettings.routing.help" },
+    { "id": "scheduling", "label": "codexScheduling.title", "help": "codexScheduling.help" },
+    { "id": "warmup", "label": "codexWarmup.title", "help": "codexWarmup.help" },
+    { "id": "reset_credit", "label": "codexResetCredit.title", "help": "codexResetCredit.help" },
+    { "id": "credit_overage", "label": "codexCreditOverage.title", "help": "codexCreditOverage.help" }
+  ],
+  "fields": [
+    {
+      "key": "gateway_worker.preference",
+      "group": "routing",
+      "type": "enum",
+      "values": ["auto", "vm", "gateway_worker"],
+      "default": "auto",
+      "label": "executorSettings.routing.preference",
+      "help": "executorSettings.routing.preferenceHelp",
+      "option_label": "executorSettings.routing.{value}"
+    },
+    {
+      "key": "scheduling.strategy",
+      "group": "scheduling",
+      "type": "enum",
+      "values": ["smart", "quota_reset_priority", "round_robin", "sticky"],
+      "default": "smart",
+      "label": "codexScheduling.strategy",
+      "option_label": "codexScheduling.{value}"
+    },
+    {
+      "key": "scheduling.affinity",
+      "group": "scheduling",
+      "type": "enum",
+      "values": ["strict", "preferred", "relaxed"],
+      "default": "preferred",
+      "label": "codexScheduling.affinity",
+      "help": "codexScheduling.affinityHelp",
+      "option_label": "codexScheduling.{value}"
+    },
+    {
+      "key": "scheduling.smart_weights.load",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 1,
+      "label": "codexScheduling.load",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.quota",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 0.8,
+      "label": "codexScheduling.quota",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.health",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 1,
+      "label": "codexScheduling.health",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.latency",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 0.5,
+      "label": "codexScheduling.latency",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    {
+      "key": "scheduling.smart_weights.reset",
+      "group": "scheduling",
+      "type": "number",
+      "min": 0,
+      "max": 10,
+      "step": 0.1,
+      "default": 0,
+      "label": "codexScheduling.reset",
+      "visible_when": { "key": "scheduling.strategy", "equals": "smart" }
+    },
+    { "key": "warmup.enabled", "group": "warmup", "type": "boolean", "default": false, "label": "codexWarmup.enabled" },
+    {
+      "key": "warmup.times",
+      "required_when": { "key": "warmup.enabled", "equals": true },
+      "group": "warmup",
+      "type": "string_list",
+      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+      "max_items": 24,
+      "default": [],
+      "label": "codexWarmup.times",
+      "help": "codexWarmup.timesHelp",
+      "invalid": "codexWarmup.invalidTimes",
+      "visible_when": { "key": "warmup.enabled", "equals": true }
+    },
+    {
+      "key": "warmup.model",
+      "required_when": { "key": "warmup.enabled", "equals": true },
+      "placeholder": "executorSettings.warmupModelPlaceholder",
+      "group": "warmup",
+      "type": "string",
+      "max_length": 128,
+      "default": "",
+      "label": "codexWarmup.model",
+      "visible_when": { "key": "warmup.enabled", "equals": true }
+    },
+    {
+      "key": "reset_credit.lead_minutes",
+      "group": "reset_credit",
+      "type": "integer",
+      "min": 1,
+      "max": 1440,
+      "default": 10,
+      "label": "codexResetCredit.lead",
+      "help": "codexResetCredit.leadHelp"
+    },
+    {
+      "key": "reset_credit.max_weekly_remaining_percent",
+      "group": "reset_credit",
+      "type": "integer",
+      "min": 0,
+      "max": 100,
+      "nullable": true,
+      "default": null,
+      "label": "codexResetCredit.weeklyCap",
+      "help": "codexResetCredit.weeklyCapHelp",
+      "placeholder": "codexResetCredit.weeklyCapNone"
+    },
+    {
+      "key": "credit_overage",
+      "group": "credit_overage",
+      "type": "boolean",
+      "default": false,
+      "label": "codexCreditOverage.toggle",
+      "help": "codexCreditOverage.toggleHelp"
+    }
+  ]
+}

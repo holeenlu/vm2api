@@ -24,6 +24,7 @@ import { credentialModeFromOauth, canOfficialCc } from './credential-mode.mjs'
 import { resolveAuthScheme } from './auth-scheme.mjs'
 import { flattenOauthIdentity, normalizeSubscriptionType } from './oauth-identity.mjs'
 import { persistOauthToVm } from './oauth-credentials.mjs'
+import { refreshAccountProfile } from './account-profile.mjs'
 import {
   officialCcUidGid,
   scheduleOfficialCcBootstrap,
@@ -38,14 +39,14 @@ export function createImportCommit(ctx) {
     return typeof ctx.getRoutingConfig === 'function' ? ctx.getRoutingConfig() : ctx.routingConfig
   }
 
-  function rebindOauthAccount(vm) {
+  async function rebindOauthAccount(vm) {
     const uuid = vm?.claude?.account_uuid
     if (!uuid || !vm?.id) return
-    ctx.accountQuota.rebindToVm(uuid, vm.id, { email: vm.claude?.email || null })
+    await ctx.accountQuota.rebindToVm(uuid, vm.id, { email: vm.claude?.email || null })
   }
 
-  function requireSlotProxy(existing, body = {}) {
-    const resolved = resolveImportProxy({
+  async function requireSlotProxy(existing, body = {}) {
+    const resolved = await resolveImportProxy({
       vm: existing,
       proxyPool: ctx.proxyPool,
       overrideUrl: body.proxy_url || null,
@@ -97,12 +98,14 @@ export function createImportCommit(ctx) {
         oauth.expires_at ||
         oauth.expiresAt ||
         (oauth.expires_in ? Math.floor(Date.now() / 1000) + Number(oauth.expires_in) : null),
-      email: identity.email || existing.claude?.email || null,
-      account_uuid: identity.account_uuid || existing.claude?.account_uuid || null,
-      org_uuid: identity.org_uuid || existing.claude?.org_uuid || null,
-      subscription_type:
-        identity.subscription_type || normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
-      account_tier: normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
+      email: identity.email,
+      account_uuid: identity.account_uuid,
+      org_uuid: identity.org_uuid,
+      subscription_type: identity.subscription_type,
+      ...(identity.rate_limit_tier ? { rate_limit_tier: identity.rate_limit_tier } : {}),
+      ...(identity.billing_type ? { billing_type: identity.billing_type } : {}),
+      ...(oauth.subscription_updated_at ? { subscription_updated_at: oauth.subscription_updated_at } : {}),
+      account_tier: identity.subscription_type || normalizeSubscriptionType(existing?.claude?.account_tier) || 'pro',
       scopes: Array.isArray(oauth.scopes)
         ? oauth.scopes
         : String(oauth.scope || '')
@@ -113,17 +116,17 @@ export function createImportCommit(ctx) {
   }
 
   function officialCcStatsHandler(vmId, accountUuid = null) {
-    return (stats) => {
+    return async (stats) => {
       const accountId = accountUuid || getVm(ctx.cfg.paths.project, vmId)?.claude?.account_uuid || vmId
       if (stats?.five_hour || stats?.seven_day || stats?.seven_day_oi || stats?.extra_usage) {
         try {
-          ctx.accountQuota.ingestOAuthUsage(accountId, { usage_status: 200, ok: true, ...stats })
+          await ctx.accountQuota.ingestOAuthUsage(accountId, { usage_status: 200, ok: true, ...stats })
         } catch {}
       }
       if ((stats?.account_tier === 'pro' || stats?.account_tier === 'max') && stats?.limits_present === true) {
         const source = 'usage'
         try {
-          ctx.accountQuota.setAccountTier(accountId, stats.account_tier, { source })
+          await ctx.accountQuota.setAccountTier(accountId, stats.account_tier, { source })
         } catch {}
         try {
           persistAccountTier(ctx.cfg.paths.project, vmId, stats.account_tier, { source })
@@ -137,7 +140,7 @@ export function createImportCommit(ctx) {
                 ?.max_concurrency ?? 2,
             )
             if (Number(vm.policy?.maxConcurrency) !== next) {
-              ctx.applyVmConcurrency(vmId, next, { override: false })
+              await ctx.applyVmConcurrency(vmId, next, { override: false })
             }
           }
         } catch {}
@@ -152,11 +155,11 @@ export function createImportCommit(ctx) {
       vm: existing,
       homeDir: path.join(ctx.cfg.paths.project, 'vms', vmId, 'cli-home'),
     }
-    const bound = ctx.proxyPool?.getProxyForVm?.(vmId)
+    const bound = await ctx.proxyPool?.getProxyForVm?.(vmId)
     if (bound) {
       // Re-bind even when the id already matches: a prior stale write may have
       // left proxy_cli_enabled=false on a bound slot (#332).
-      bindVmProxy(ctx.cfg.paths.project, vmId, bound)
+      await bindVmProxy(ctx.cfg.paths.project, vmId, bound)
       adoptVmProxyBinding(existing, getVm(ctx.cfg.paths.project, vmId))
     }
     if (process.env.KIN_CRS_MOCK !== '1') {
@@ -208,8 +211,8 @@ export function createImportCommit(ctx) {
         },
       }
     }
-    await withVmLock(vmPath, () => {
-      persistOauthToVm(
+    await withVmLock(vmPath, async () => {
+      await persistOauthToVm(
         vmPath,
         {
           ...importedCredential,
@@ -221,12 +224,12 @@ export function createImportCommit(ctx) {
       )
       try {
         const accountId = importedCredential.account_uuid || existing.claude?.account_uuid || vmId
-        ctx.accountQuota.clearGrantRevokeLeftover(accountId)
-        ctx.poolScheduler?.clearAuthCooldownFor?.(vmId, accountId)
-        ctx.poolScheduler?.clearGrantRevokeCooldownFor?.(vmId, accountId)
+        await ctx.accountQuota.clearGrantRevokeLeftover(accountId)
+        await ctx.poolScheduler?.clearAuthCooldownFor?.(vmId, accountId)
+        await ctx.poolScheduler?.clearGrantRevokeCooldownFor?.(vmId, accountId)
       } catch {}
       try {
-        rebindOauthAccount({ ...existing, ...JSON.parse(fs.readFileSync(vmPath, 'utf8')), id: vmId })
+        await rebindOauthAccount({ ...existing, ...JSON.parse(fs.readFileSync(vmPath, 'utf8')), id: vmId })
       } catch {}
       const refreshed = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
       if (name && refreshed.name !== name) {
@@ -236,6 +239,8 @@ export function createImportCommit(ctx) {
         Object.assign(existing, refreshed)
       }
     })
+    const profile = await (ctx.refreshAccountProfile || refreshAccountProfile)(ctx.cfg.paths.project, vmId)
+    if (profile.ok && profile.vm) Object.assign(existing, profile.vm)
     try {
       const ids = officialCcUidGid(vmId)
       materializeOfficialClaudeCredentials(workerExec.homeDir, ids)
@@ -269,7 +274,12 @@ export function createImportCommit(ctx) {
             email: importedCredential.email,
           },
         })
-    return { ok: true, existing, official_cc_bootstrap: officialCc }
+    return {
+      ok: true,
+      existing,
+      official_cc_bootstrap: officialCc,
+      subscription_profile: { ok: profile.ok, reason: profile.reason },
+    }
   }
   async function commitImportedOauth(options) {
     let result

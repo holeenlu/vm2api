@@ -83,7 +83,7 @@ export function createCliNodeGuard({
     inTick = true
     try {
       const tokens = liveTokens().filter(Boolean)
-      const vms = (listTargets?.() || []).filter(isCliNodeGuardTarget)
+      const vms = ((await listTargets?.()) || []).filter(isCliNodeGuardTarget)
       for (const vm of vms) {
         try {
           const host = slotHost(vm)

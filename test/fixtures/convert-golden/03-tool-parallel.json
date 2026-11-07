@@ -1,0 +1,303 @@
+{
+  "scenario": "03-tool-parallel",
+  "description": "Two parallel calls of the same tool, no text.",
+  "requests": {
+    "anthropic.messages": {
+      "max_tokens": 1024,
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Get current weather",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "Weather in Paris and Tokyo?"
+        }
+      ],
+      "stream": true
+    },
+    "openai.chat": {
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          }
+        }
+      ],
+      "parallel_tool_calls": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Weather in Paris and Tokyo?"
+        }
+      ],
+      "stream": true
+    },
+    "openai.responses": {
+      "tools": [
+        {
+          "type": "function",
+          "name": "get_weather",
+          "description": "Get current weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      ],
+      "parallel_tool_calls": true,
+      "input": "Weather in Paris and Tokyo?",
+      "stream": true
+    }
+  },
+  "upstream": {
+    "claude": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg_01",
+          "type": "message",
+          "role": "assistant",
+          "model": "claude-sonnet-4-5-20250929",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 1
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "tool_use",
+          "id": "toolu_01",
+          "name": "get_weather",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"city\":\"Paris\"}"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "toolu_02",
+          "name": "get_weather",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"city\":"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "\"Tokyo\"}"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use",
+          "stop_sequence": null
+        },
+        "usage": {
+          "output_tokens": 40
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "codex": [
+      {
+        "type": "response.created",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "in_progress",
+          "output": []
+        }
+      },
+      {
+        "type": "response.in_progress",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "in_progress",
+          "output": []
+        }
+      },
+      {
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+          "type": "function_call",
+          "id": "fc_01",
+          "call_id": "call_01",
+          "name": "get_weather",
+          "arguments": "",
+          "status": "in_progress"
+        }
+      },
+      {
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "item_id": "fc_01",
+        "delta": "{\"city\":\"Paris\"}"
+      },
+      {
+        "type": "response.function_call_arguments.done",
+        "output_index": 0,
+        "item_id": "fc_01",
+        "arguments": "{\"city\":\"Paris\"}"
+      },
+      {
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+          "type": "function_call",
+          "id": "fc_01",
+          "call_id": "call_01",
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Paris\"}",
+          "status": "completed"
+        }
+      },
+      {
+        "type": "response.output_item.added",
+        "output_index": 1,
+        "item": {
+          "type": "function_call",
+          "id": "fc_02",
+          "call_id": "call_02",
+          "name": "get_weather",
+          "arguments": "",
+          "status": "in_progress"
+        }
+      },
+      {
+        "type": "response.function_call_arguments.delta",
+        "output_index": 1,
+        "item_id": "fc_02",
+        "delta": "{\"city\":"
+      },
+      {
+        "type": "response.function_call_arguments.delta",
+        "output_index": 1,
+        "item_id": "fc_02",
+        "delta": "\"Tokyo\"}"
+      },
+      {
+        "type": "response.function_call_arguments.done",
+        "output_index": 1,
+        "item_id": "fc_02",
+        "arguments": "{\"city\":\"Tokyo\"}"
+      },
+      {
+        "type": "response.output_item.done",
+        "output_index": 1,
+        "item": {
+          "type": "function_call",
+          "id": "fc_02",
+          "call_id": "call_02",
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Tokyo\"}",
+          "status": "completed"
+        }
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "completed",
+          "output": [
+            {
+              "type": "function_call",
+              "id": "fc_01",
+              "call_id": "call_01",
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Paris\"}",
+              "status": "completed"
+            },
+            {
+              "type": "function_call",
+              "id": "fc_02",
+              "call_id": "call_02",
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Tokyo\"}",
+              "status": "completed"
+            }
+          ],
+          "usage": {
+            "input_tokens": 30,
+            "output_tokens": 40,
+            "total_tokens": 70
+          }
+        }
+      }
+    ]
+  }
+}

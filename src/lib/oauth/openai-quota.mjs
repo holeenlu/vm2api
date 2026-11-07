@@ -8,7 +8,7 @@ import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { readCodexAccounts, upsertCodexAccount, persistCodexQuotaSnapshot } from '../vm/codex-slot.mjs'
+import { readCodexAccounts, refreshCodexSlotAccess, persistCodexQuotaSnapshot } from '../vm/codex-slot.mjs'
 import {
   buildCodexUsageView,
   extraToCodexSnapshot,
@@ -21,6 +21,7 @@ import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
 export const CHATGPT_RESET_CONSUME_URL = `${CHATGPT_RESET_CREDITS_URL}/consume`
+export const CHATGPT_ACCOUNTS_CHECK_URL = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
 export const OPENAI_QUOTA_TIMEOUT_MS = 20_000
 const CODEX_BETA = 'codex-1'
 
@@ -99,17 +100,16 @@ export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
   const extra = {
     codex_usage_updated_at: new Date(now).toISOString(),
   }
-  if (primary) {
-    extra.codex_primary_used_percent = primary.used_percent
-    extra.codex_primary_reset_after_seconds = primary.reset_after_seconds
-    extra.codex_primary_window_minutes = primary.window_minutes
-    extra.codex_primary_reset_at = primary.reset_at
-  }
-  if (secondary) {
-    extra.codex_secondary_used_percent = secondary.used_percent
-    extra.codex_secondary_reset_after_seconds = secondary.reset_after_seconds
-    extra.codex_secondary_window_minutes = secondary.window_minutes
-    extra.codex_secondary_reset_at = secondary.reset_at
+  // WHAM is a complete snapshot. An absent window must clear earlier headers,
+  // unlike a partial inference response where missing headers mean no update.
+  for (const [role, window] of [
+    ['primary', primary],
+    ['secondary', secondary],
+  ]) {
+    extra[`codex_${role}_used_percent`] = window?.used_percent ?? null
+    extra[`codex_${role}_reset_after_seconds`] = window?.reset_after_seconds ?? null
+    extra[`codex_${role}_window_minutes`] = window?.window_minutes ?? null
+    extra[`codex_${role}_reset_at`] = window?.reset_at ?? null
   }
   const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
   extra.codex_5h_used_percent = limits.used_5h_percent
@@ -290,20 +290,48 @@ async function quotaFetch(url, { method = 'GET', headers, body, proxyUrl, fetchI
 
 async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
   if (!slot.refresh) return slot
-  const tok = await refreshCodexAccessToken({
-    refreshToken: slot.refresh,
-    proxyUrl: slot.proxyUrl,
-    fetchImpl,
-    timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
+  // 与搜索、生图共用按槽单飞的换票入口：内核或别处刚轮换过就直接采用文件里的新令牌（审计 P1-C4）
+  const tok = await refreshCodexSlotAccess(projectRoot, vmId, {
+    usedAccess: slot.access,
+    fallback: { access_token: slot.access, refresh_token: slot.refresh },
+    refresh: (refreshToken) =>
+      refreshCodexAccessToken({ refreshToken, proxyUrl: slot.proxyUrl, fetchImpl, timeoutMs: OPENAI_QUOTA_TIMEOUT_MS }),
   })
   if (!tok.ok) return { ...slot, rotateError: tok.error || 'refresh_failed' }
-  upsertCodexAccount(projectRoot, vmId, {
-    access_token: tok.access_token,
-    refresh_token: tok.refresh_token,
-    id_token: tok.id_token || slot.first.id_token,
-    expires_at: tok.expires_at || slot.first.expires_at,
-  })
   return { ...slot, access: tok.access_token, refresh: tok.refresh_token || slot.refresh }
+}
+
+/**
+ * Subscription facts from accounts/check for the slot's workspace: plan, end and
+ * renewal dates, payment channel. Ids, names and feature lists are not kept.
+ */
+export function parseChatgptSubscription(payload, accountId = '') {
+  const accounts = payload?.accounts && typeof payload.accounts === 'object' ? payload.accounts : null
+  if (!accounts) return null
+  const order = Array.isArray(payload.account_ordering) ? payload.account_ordering : []
+  const key = [accountId, ...order].find((id) => id && accounts[id]) || Object.keys(accounts)[0]
+  const row = accounts[key]
+  if (!row || typeof row !== 'object') return null
+  const entitlement = row.entitlement || {}
+  const last = row.last_active_subscription || {}
+  const account = row.account || {}
+  const text = (value) => (typeof value === 'string' && value.trim() ? value.trim() : null)
+  const flag = (value) => (typeof value === 'boolean' ? value : null)
+  return {
+    plan_type: text(account.plan_type),
+    subscription_plan: text(entitlement.subscription_plan),
+    has_active_subscription: flag(entitlement.has_active_subscription),
+    expires_at: text(entitlement.expires_at),
+    renews_at: text(entitlement.renews_at),
+    cancels_at: text(entitlement.cancels_at),
+    will_renew: flag(last.will_renew),
+    purchase_origin_platform: text(last.purchase_origin_platform),
+    billing_currency: text(entitlement.billing_currency),
+    billing_period: text(entitlement.billing_period),
+    is_delinquent: flag(entitlement.is_delinquent),
+    is_trial: flag(account.is_trial),
+    is_deactivated: flag(account.is_deactivated),
+  }
 }
 
 function publicUsage(extra, resetCredits, credits, usagePayload = {}) {
@@ -342,13 +370,12 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
         upstream_status: usage.status,
       })
     }
-    const details = await quotaFetch(CHATGPT_RESET_CREDITS_URL, {
-      headers: headersOf(access),
-      proxyUrl: current.proxyUrl,
-      fetchImpl,
-      direct: current.direct,
-    })
-    return { usage, details }
+    const [details, account] = await Promise.all(
+      [CHATGPT_RESET_CREDITS_URL, CHATGPT_ACCOUNTS_CHECK_URL].map((url) =>
+        quotaFetch(url, { headers: headersOf(access), proxyUrl: current.proxyUrl, fetchImpl, direct: current.direct }),
+      ),
+    )
+    return { usage, details, account }
   }
 
   let pack = await run(current.access)
@@ -382,10 +409,14 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   )
   const persistable = resetCredits.available_count <= 0 || resetCredits.credits.length > 0 ? resetCredits : null
   const credits = normalizeCodexCredits(pack.usage.payload?.credits)
-  persistCodexQuotaSnapshot(projectRoot, vmId, {
+  // Best effort: a failed account check keeps the last subscription snapshot.
+  const subscription = pack.account?.ok ? parseChatgptSubscription(pack.account.payload, current.accountId) : null
+  await persistCodexQuotaSnapshot(projectRoot, vmId, {
     extra,
     credits,
-    planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType,
+    planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType || subscription?.plan_type,
+    email: pack.usage.payload?.email,
+    subscription,
     ...(persistable ? { resetCredits: persistable } : {}),
   })
   syncCodexQuotaSchedule(projectRoot, getVm(projectRoot, vmId), {
@@ -447,13 +478,14 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     })
   }
 
+  const windowsReset = int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0
   const after = await queryUpstream(current, { fetchImpl, rotate: false, projectRoot, vmId, policy })
   if (!after.ok) {
     return {
       ok: true,
       warning: 'reset_credit_cache_refresh_failed',
       code: res.payload?.code || 'ok',
-      windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+      windows_reset: windowsReset,
       reset_credits: null,
       credits: null,
       usage: null,
@@ -464,7 +496,7 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
   return {
     ok: true,
     code: res.payload?.code || 'ok',
-    windows_reset: int(res.payload?.windows_reset ?? res.payload?.windowsReset) || 0,
+    windows_reset: windowsReset,
     ...after,
   }
 }

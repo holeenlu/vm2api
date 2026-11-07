@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ClusterApiNode } from '@/types/panel-cluster'
 import type { Vm } from '@/types/panel-vm'
+import { useTranslation } from 'react-i18next'
 import { api } from '@/lib/api'
+import { panelQueryKeys } from '@/lib/query-keys'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -16,6 +18,10 @@ import {
   migrationMemoryOptions,
   migrationPhase,
 } from '@/features/cluster/slot-migration'
+
+function migrationPath(id: string) {
+  return `/api/panel/vms/${encodeURIComponent(id)}/migration`
+}
 
 type MigrationJob = {
   id: string
@@ -36,6 +42,7 @@ export function MigrateSlotDialog({
   nodes: ClusterApiNode[]
   onClose: () => void
 }) {
+  const { t } = useTranslation('cluster')
   return (
     <Dialog
       open={!!vm}
@@ -45,10 +52,8 @@ export function MigrateSlotDialog({
     >
       <DialogContent className='sm:max-w-lg'>
         <DialogHeader>
-          <DialogTitle>迁移 / 扩容槽位</DialogTitle>
-          <DialogDescription>
-            保留原盘和账号数据；暂停调度并排空请求后，关机迁移，再验证服务。不是热迁移。
-          </DialogDescription>
+          <DialogTitle>{t('migration.title')}</DialogTitle>
+          <DialogDescription>{t('migration.description')}</DialogDescription>
         </DialogHeader>
         {vm ? <MigrationForm key={vm.id} vm={vm} nodes={nodes} /> : null}
       </DialogContent>
@@ -57,22 +62,22 @@ export function MigrateSlotDialog({
 }
 
 function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
+  const { t } = useTranslation('cluster')
   const qc = useQueryClient()
   const [target, setTarget] = useState(vm.node_id || '')
   const [memory, setMemory] = useState(vm.machine?.memory || '2g')
   const [confirmed, setConfirmed] = useState(false)
-  const path = `/api/panel/vms/${encodeURIComponent(vm.id)}/migration`
-  const key = ['panel', 'slot-migration', path] as const
+  const key = panelQueryKeys.vmMigration(vm.id)
   const job = useQuery({
     queryKey: key,
-    queryFn: () => api<MigrationJob | null>(path),
+    queryFn: () => api<MigrationJob | null>(migrationPath(vm.id)),
     refetchInterval: (q) => (q.state.data?.status === 'running' ? 3000 : false),
     refetchOnWindowFocus: true,
     retry: false,
   })
   const start = useMutation({
     mutationFn: () =>
-      api<MigrationJob>(path, {
+      api<MigrationJob>(migrationPath(vm.id), {
         method: 'POST',
         body: JSON.stringify({ target_node_id: target, memory }),
       }),
@@ -87,9 +92,9 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
     pending || status === 'needs_attention' || job.isPending || !!job.error
   useEffect(() => {
     if (!status || status === 'running') return
-    qc.invalidateQueries({ queryKey: ['panel', 'dashboard'] })
+    qc.invalidateQueries({ queryKey: panelQueryKeys.dashboard() })
     qc.invalidateQueries({ queryKey: CLUSTER_NODES_KEY })
-    qc.invalidateQueries({ queryKey: ['panel', 'vms'] })
+    qc.invalidateQueries({ queryKey: panelQueryKeys.vms() })
   }, [status, job.data?.id, qc])
   const eligible = nodes.filter(
     (n) => n.platform !== 'darwin' && n.link.state === 'ready'
@@ -99,9 +104,9 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
     <div className='space-y-4 text-sm'>
       <p className='font-medium'>{vm.name || vm.id}</p>
       <label className='grid gap-1.5'>
-        目标节点
+        {t('migration.targetNode')}
         <select
-          aria-label='目标节点'
+          aria-label={t('migration.targetNode')}
           className='h-9 rounded-md border bg-background px-2'
           value={target}
           disabled={blocked}
@@ -111,20 +116,21 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
           }}
         >
           <option value='' disabled>
-            选择已连接的 Linux 节点
+            {t('migration.selectNode')}
           </option>
           {eligible.map((n) => (
             <option key={n.id} value={n.id}>
-              {n.label || n.id}
-              {n.id === vm.node_id ? '（原节点，仅扩容）' : ''}
+              {n.id === vm.node_id
+                ? t('migration.sameNode', { name: n.label || n.id })
+                : n.label || n.id}
             </option>
           ))}
         </select>
       </label>
       <label className='grid gap-1.5'>
-        迁移后内存
+        {t('migration.memory')}
         <select
-          aria-label='迁移后内存'
+          aria-label={t('migration.memory')}
           className='h-9 rounded-md border bg-background px-2'
           value={memory}
           disabled={blocked}
@@ -141,8 +147,7 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
         </select>
       </label>
       <p className='text-xs leading-relaxed text-muted-foreground'>
-        仅支持运行中的远程 Linux Claude KVM（不含 crag）
-        槽和内存扩容。两端镜像须完全一致；跨节点的直连或回环出口会被拒绝。任务串行执行、限速传盘，可能需要数十分钟。原节点冷盘保留为回滚资料，不自动删除。
+        {t('migration.scopeHelp')}
       </p>
       <label className='flex items-start gap-2'>
         <input
@@ -152,14 +157,16 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
           disabled={blocked}
           onChange={(e) => setConfirmed(e.target.checked)}
         />
-        我确认短暂停机；如预检不通过，不会停止原槽。
+        {t('migration.confirm')}
       </label>
       {job.data ? (
         <div role='status' className='space-y-1 rounded-md border p-3'>
           <p>{migrationPhase(job.data.phase)}</p>
           {job.data.copied_bytes != null ? (
             <p className='text-xs text-muted-foreground'>
-              已校验复制 {(job.data.copied_bytes / 1024 ** 2).toFixed(1)} MiB
+              {t('migration.copied', {
+                size: (job.data.copied_bytes / 1024 ** 2).toFixed(1),
+              })}
             </p>
           ) : null}
           {job.data.error ? (
@@ -170,12 +177,12 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
           ) : null}
           {job.data.backup_directory ? (
             <p className='text-xs break-all text-muted-foreground'>
-              原节点冷盘：{job.data.backup_directory}
+              {t('migration.backup', { path: job.data.backup_directory })}
             </p>
           ) : null}
           {pending ? (
             <p className='text-xs text-muted-foreground'>
-              关闭窗口不会取消任务；可重新打开查看进度。
+              {t('migration.closeHint')}
             </p>
           ) : null}
         </div>
@@ -195,7 +202,7 @@ function MigrationForm({ vm, nodes }: { vm: Vm; nodes: ClusterApiNode[] }) {
         }
         onClick={() => start.mutate()}
       >
-        {pending ? '正在处理…' : '预检并执行'}
+        {pending ? t('migration.processing') : t('migration.run')}
       </Button>
     </div>
   )

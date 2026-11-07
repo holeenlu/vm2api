@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ApiEndpointsRepo } from '../db/repos/api-endpoints-repo.mjs'
@@ -62,7 +63,43 @@ function headersWithAuthScheme(headers = {}, scheme) {
   return next
 }
 
-export function publicEndpointView(ep, { reveal = false } = {}) {
+function safeEndpointUrl(value) {
+  try {
+    const url = new URL(value)
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+export function assertEndpointConnectionAccess(ep, patch, role, key = null, resolvedProxyUrl) {
+  if (role === 'super_admin') return
+  const view = publicEndpointView(ep)
+  const protectedValues = {
+    kind: view.kind,
+    protocol: view.protocol,
+    base_url: view.base_url,
+    headers: ep.headers || {},
+    auth_scheme: view.auth_scheme,
+    authScheme: view.auth_scheme,
+    proxy_id: key?.proxy_id || '',
+    proxy_url: key?.proxy_url || '',
+  }
+  const changed = Object.entries(protectedValues).some(
+    ([field, value]) => Object.hasOwn(patch, field) && !isDeepStrictEqual(patch[field], value),
+  )
+  if (changed || (resolvedProxyUrl !== undefined && resolvedProxyUrl !== (key?.proxy_url || '')))
+    throw Object.assign(new Error('只有管理员可以变更已保存凭据的连接地址、代理或认证配置'), {
+      status: 403,
+      code: 'endpoint_connection_forbidden',
+    })
+}
+
+export function publicEndpointView(ep, { reveal = false, role = 'super_admin' } = {}) {
   if (!ep) return null
   return {
     id: ep.id,
@@ -72,8 +109,14 @@ export function publicEndpointView(ep, { reveal = false } = {}) {
     kind: resolvePreset(ep.kind, ep).kind,
     protocol: resolvePreset(ep.kind, ep).protocol,
     risk_review_enabled: ep.risk_review_enabled === true,
-    base_url: resolvePreset(ep.kind, ep).base_url || ep.base_url,
-    headers: stripAuthSchemeHeader(ep.headers),
+    base_url:
+      role === 'super_admin'
+        ? resolvePreset(ep.kind, ep).base_url || ep.base_url
+        : safeEndpointUrl(resolvePreset(ep.kind, ep).base_url || ep.base_url),
+    headers: role === 'super_admin' ? stripAuthSchemeHeader(ep.headers) : {},
+    headers_configured: Object.keys(stripAuthSchemeHeader(ep.headers)).length > 0,
+    connection_editable:
+      role === 'super_admin' || !(ep.api_key_entries?.length || Object.keys(ep.headers || {}).length),
     auth_scheme: endpointAuthScheme(ep),
     disable_cooling: !!ep.disable_cooling,
     priority: Number(ep.priority) || 0,
@@ -81,11 +124,12 @@ export function publicEndpointView(ep, { reveal = false } = {}) {
     updated_at: ep.updated_at,
     api_key_entries: (ep.api_key_entries || []).map((k) => ({
       id: k.id,
-      proxy_url: k.proxy_url || '',
+      ...(role === 'super_admin' ? { proxy_url: k.proxy_url || '' } : {}),
+      has_proxy: !!(k.proxy_url || k.proxy_id),
       proxy_id: k.proxy_id || '',
       disabled: !!k.disabled,
       cooldown_until: k.cooldown_until || null,
-      api_key: reveal ? k.api_key : maskUpstreamKey(k.api_key),
+      api_key: reveal && role === 'super_admin' ? k.api_key : maskUpstreamKey(k.api_key),
       key_suffix: String(k.api_key || '').slice(-4),
     })),
     models: (ep.models || []).map((m) => ({
@@ -109,19 +153,19 @@ export class ApiEndpointStore {
     this.repo = new ApiEndpointsRepo(db)
   }
 
-  list({ reveal = false } = {}) {
-    return this.repo.listHydrated().map((ep) => publicEndpointView(ep, { reveal }))
+  async list({ reveal = false, role = 'super_admin' } = {}) {
+    return (await this.repo.listHydrated()).map((ep) => publicEndpointView(ep, { reveal, role }))
   }
 
-  listRaw() {
+  async listRaw() {
     return this.repo.listHydrated()
   }
 
-  getRaw(id) {
+  async getRaw(id) {
     return this.repo.getHydrated(id)
   }
 
-  create(input = {}) {
+  async create(input = {}) {
     const preset = resolvePreset(input.kind, input)
     const base_url = preset.base_url
     if (!/^https?:\/\//i.test(base_url)) {
@@ -148,16 +192,16 @@ export class ApiEndpointStore {
       created_at: nowIso(),
       updated_at: nowIso(),
     }
-    const stored = this.repo.insertEndpoint(rec)
+    const stored = await this.repo.insertEndpoint(rec)
     const models = Array.isArray(input.models) ? input.models : []
-    if (models.length) this.replaceModels(stored.id, models)
+    if (models.length) await this.replaceModels(stored.id, models)
     const keys = Array.isArray(input.api_key_entries) ? input.api_key_entries : []
-    for (const k of keys) this.addKey(stored.id, k)
+    for (const k of keys) await this.addKey(stored.id, k)
     return this.repo.getHydrated(stored.id)
   }
 
-  update(id, patch = {}) {
-    const rec = this.repo.getHydrated(id)
+  async update(id, patch = {}) {
+    const rec = await this.repo.getHydrated(id)
     if (!rec) return null
     if (patch.name != null) rec.name = String(patch.name).trim().slice(0, 80) || rec.name
     if (patch.disabled != null) rec.disabled = !!patch.disabled
@@ -183,17 +227,17 @@ export class ApiEndpointStore {
     if (patch.disable_cooling != null) rec.disable_cooling = !!patch.disable_cooling
     if (patch.priority != null) rec.priority = Number(patch.priority) || 0
     rec.updated_at = nowIso()
-    this.repo.updateEndpoint(rec)
-    if (Array.isArray(patch.models)) this.replaceModels(id, patch.models)
+    await this.repo.updateEndpoint(rec)
+    if (Array.isArray(patch.models)) await this.replaceModels(id, patch.models)
     return this.repo.getHydrated(id)
   }
 
-  remove(id) {
+  async remove(id) {
     return this.repo.removeEndpoint(id)
   }
 
-  addKey(endpointId, input = {}) {
-    const ep = this.repo.getHydrated(endpointId)
+  async addKey(endpointId, input = {}) {
+    const ep = await this.repo.getHydrated(endpointId)
     if (!ep) throw Object.assign(new Error('endpoint not found'), { code: 'endpoint_not_found' })
     const api_key = String(input.api_key || '').trim()
     if (api_key.length < 4) throw Object.assign(new Error('api_key too short'), { code: 'key_too_short' })
@@ -209,15 +253,15 @@ export class ApiEndpointStore {
     })
   }
 
-  removeKey(id) {
+  async removeKey(id) {
     return this.repo.removeKey(id)
   }
 
-  updateKey(id, patch = {}) {
+  async updateKey(id, patch = {}) {
     return this.repo.updateKey(id, patch)
   }
 
-  replaceModels(endpointId, models = []) {
+  async replaceModels(endpointId, models = []) {
     const rows = models
       .map((m, i) => ({
         id: m.id || nid('em_'),
@@ -231,12 +275,12 @@ export class ApiEndpointStore {
     return this.repo.replaceModels(endpointId, rows)
   }
 
-  setKeyCooldown(id, untilIso) {
-    this.repo.setKeyCooldown(id, untilIso)
+  async setKeyCooldown(id, untilIso) {
+    await this.repo.setKeyCooldown(id, untilIso)
   }
 
-  mergeFetchedModels(endpointId, fetched = []) {
-    const ep = this.repo.getHydrated(endpointId)
+  async mergeFetchedModels(endpointId, fetched = []) {
+    const ep = await this.repo.getHydrated(endpointId)
     if (!ep) return null
     return this.replaceModels(endpointId, mergeModelLists(ep.models, fetched))
   }

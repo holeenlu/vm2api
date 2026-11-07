@@ -1,0 +1,221 @@
+{
+  "scenario": "10-usage-cache",
+  "description": "Usage accounting with prompt-cache reads and writes.",
+  "requests": {
+    "anthropic.messages": {
+      "max_tokens": 1024,
+      "system": [
+        {
+          "type": "text",
+          "text": "Long shared policy text.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "Summarize the policy"
+        }
+      ],
+      "stream": true
+    },
+    "openai.chat": {
+      "prompt_cache_key": "pc-golden",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Long shared policy text."
+        },
+        {
+          "role": "user",
+          "content": "Summarize the policy"
+        }
+      ],
+      "stream": true
+    },
+    "openai.responses": {
+      "prompt_cache_key": "pc-golden",
+      "instructions": "Long shared policy text.",
+      "input": "Summarize the policy",
+      "stream": true
+    }
+  },
+  "upstream": {
+    "claude": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg_01",
+          "type": "message",
+          "role": "assistant",
+          "model": "claude-sonnet-4-5-20250929",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 50,
+            "cache_creation_input_tokens": 300,
+            "cache_read_input_tokens": 2000,
+            "output_tokens": 1
+          }
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "Be kind."
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn",
+          "stop_sequence": null
+        },
+        "usage": {
+          "output_tokens": 42
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "codex": [
+      {
+        "type": "response.created",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "in_progress",
+          "output": []
+        }
+      },
+      {
+        "type": "response.in_progress",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "in_progress",
+          "output": []
+        }
+      },
+      {
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+          "type": "message",
+          "id": "msg_c1",
+          "role": "assistant",
+          "status": "in_progress",
+          "content": []
+        }
+      },
+      {
+        "type": "response.content_part.added",
+        "output_index": 0,
+        "item_id": "msg_c1",
+        "content_index": 0,
+        "part": {
+          "type": "output_text",
+          "text": "",
+          "annotations": []
+        }
+      },
+      {
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "item_id": "msg_c1",
+        "content_index": 0,
+        "delta": "Be kind."
+      },
+      {
+        "type": "response.output_text.done",
+        "output_index": 0,
+        "item_id": "msg_c1",
+        "content_index": 0,
+        "text": "Be kind."
+      },
+      {
+        "type": "response.content_part.done",
+        "output_index": 0,
+        "item_id": "msg_c1",
+        "content_index": 0,
+        "part": {
+          "type": "output_text",
+          "text": "Be kind.",
+          "annotations": []
+        }
+      },
+      {
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+          "type": "message",
+          "id": "msg_c1",
+          "role": "assistant",
+          "status": "completed",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Be kind.",
+              "annotations": []
+            }
+          ]
+        }
+      },
+      {
+        "type": "response.completed",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "completed",
+          "output": [
+            {
+              "type": "message",
+              "id": "msg_c1",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Be kind.",
+                  "annotations": []
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "input_tokens": 2350,
+            "output_tokens": 42,
+            "total_tokens": 2392,
+            "input_tokens_details": {
+              "cached_tokens": 2000
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -16,6 +16,7 @@ import {
   clearRustHealthCache,
   rememberRustHealth,
   peekRustHealth,
+  resetForcedRefreshCooldown,
 } from '../../src/lib/transport/kernel-router.mjs'
 import { rustKernelBusy, rustKernelReachable } from '../../src/lib/transport/rust-kernel-client.mjs'
 import {
@@ -350,6 +351,72 @@ unixTest('failed Go credential ensure is not followed by a blind Rust retry', as
     else process.env.KIN_KERNEL_BIN = previous
   }
 })
+unixTest('upstream 401 forces at most one refresh per slot within the cooldown (audit P1-C1)', async () => {
+  const previous = process.env.KIN_KERNEL_BIN
+  process.env.KIN_KERNEL_BIN = '/bin/true'
+  resetForcedRefreshCooldown()
+  let hits = 0
+  const forces = []
+  const fx = await kernelFixture((_req, res) => {
+    hits += 1
+    res.writeHead(401, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid token' } }))
+  })
+  const call = () =>
+    dispatchCallInference({
+      exec: fx.exec,
+      body: { model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'hi' }] },
+      routing: { inference: { engine: 'rust' } },
+      ensureRust: async () => ({ ok: true }),
+      recycleWrap: () => {},
+      ensureCredential: async (_exec, opts = {}) => {
+        forces.push(opts.force)
+        return { ok: true, refreshed: opts.force === true }
+      },
+    })
+  try {
+    const first = await call()
+    assert.equal(first.credential_retried, true)
+    assert.equal(hits, 2)
+    const second = await call()
+    assert.deepEqual(forces, [true, false])
+    assert.equal(hits, 3, 'a fresh token rejected inside the cooldown is not resent')
+    assert.equal(second.status, 401)
+    assert.equal(second.forced_refresh_suppressed, true)
+  } finally {
+    resetForcedRefreshCooldown()
+    await fx.close()
+    if (previous == null) delete process.env.KIN_KERNEL_BIN
+    else process.env.KIN_KERNEL_BIN = previous
+  }
+})
+unixTest('a request the kernel already received is not resent after the connection drops (audit P1-R1)', async () => {
+  const previous = process.env.KIN_KERNEL_BIN
+  process.env.KIN_KERNEL_BIN = '/bin/true'
+  let hits = 0
+  const fx = await kernelFixture((req) => {
+    hits += 1
+    req.resume()
+    req.on('end', () => req.socket.destroy())
+  })
+  try {
+    const result = await dispatchStreamInference({
+      exec: fx.exec,
+      body: { model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'hi' }] },
+      routing: { inference: { engine: 'rust' } },
+      ensureRust: async () => ({ ok: true }),
+      recycleWrap: () => {},
+    })
+    assert.equal(result.transportError, true)
+    assert.notEqual(result.sendState, 'not_sent')
+    assert.equal(hits, 1, 'the kernel may already be generating; do not resend')
+    assert.equal(result.rust_transport_retried, undefined)
+  } finally {
+    await fx.close()
+    if (previous == null) delete process.env.KIN_KERNEL_BIN
+    else process.env.KIN_KERNEL_BIN = previous
+  }
+})
 unixTest('unhealthy rust does not fall back to go', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-fb-'))
   const slot = path.join(root, 'vm-01')
@@ -662,7 +729,7 @@ test('writeKernelConfig projects thinking display and preserves it only without 
   }
 })
 
-test('model effort changes rewrite kernel.json without a routing save or restart', () => {
+test('model effort changes rewrite kernel.json without a routing save or restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-effort-'))
   const routing = { compatibility: { persona_preset: 'official' } }
   const vm = { id: 'vm-09' }
@@ -672,13 +739,13 @@ test('model effort changes rewrite kernel.json without a routing save or restart
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   fs.writeFileSync(path.join(root, 'vms', 'vm-09.json'), JSON.stringify({ id: 'vm-09', status: 'running' }))
   try {
-    saveModelPolicy({
+    await saveModelPolicy({
       models: { 'claude-haiku-5-5': { params: { default_effort: 'high' } } },
     })
     writeKernelConfig(root, vm, { token: 'tok', routing })
     assert.equal(read().model_effort['claude-haiku-5-5'], 'high')
     const before = fs.statSync(configPath).mtimeMs
-    saveModelPolicy({
+    await saveModelPolicy({
       models: { 'claude-haiku-5-5': { params: { default_effort: 'off' } } },
     })
     const synced = syncClaudeKernelConfigs(root, routing)
@@ -686,8 +753,8 @@ test('model effort changes rewrite kernel.json without a routing save or restart
     assert.equal(read().model_effort['claude-haiku-5-5'], 'off')
     assert.ok(fs.statSync(configPath).mtimeMs >= before)
   } finally {
-    resetModelPolicy()
-    closeDatabase()
+    await resetModelPolicy()
+    await closeDatabase()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
@@ -890,7 +957,7 @@ test('writeKernelConfig uses identity when official_full has no persona_inject',
   assert.equal(overridden.system_layout, 'zero')
 })
 
-test('kernel.json rename keeps the control-plane gid while adopting the slot uid', () => {
+test('kernel.json rename preserves the slot owner and the non-root control-plane group', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-owner-'))
   const vm = { id: 'vm-10', inference_engine: 'rust' }
   const owner = slotRuntimeOwner(vm)
@@ -913,10 +980,10 @@ test('kernel.json rename keeps the control-plane gid while adopting the slot uid
     const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
     assert.equal(changed.changed, true)
     const published = kernelOwned()
-    const controlGid = process.getgid()
+    const expectedGid = process.getuid() === 0 ? owner.gid : process.getgid()
     assert.ok(published.length >= 1)
     assert.ok(
-      published.every((call) => call.uid === owner.uid && call.gid === controlGid),
+      published.every((call) => call.uid === owner.uid && call.gid === expectedGid),
       JSON.stringify(published),
     )
     assert.ok(
@@ -929,7 +996,9 @@ test('kernel.json rename keeps the control-plane gid while adopting the slot uid
     assert.equal(again.changed, false)
     assert.equal(fs.readFileSync(again.configPath, 'utf8').includes('"persona_preset": "official_full'), true)
     assert.ok(
-      kernelOwned().some((call) => call.file === again.configPath && call.uid === owner.uid && call.gid === controlGid),
+      kernelOwned().some(
+        (call) => call.file === again.configPath && call.uid === owner.uid && call.gid === expectedGid,
+      ),
     )
   } finally {
     chown.mock.restore()

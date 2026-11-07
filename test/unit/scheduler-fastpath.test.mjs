@@ -11,7 +11,7 @@ import { RequestAttemptsRepo } from '../../src/lib/db/repos/request-attempts-rep
 import { PoolScheduler } from '../../src/lib/pool/pool-scheduler.mjs'
 import { UnitCircuit } from '../../src/lib/pool/unit-circuit.mjs'
 
-function fixture(t, { concurrency = 2, workerHealth } = {}) {
+async function fixture(t, { concurrency = 2, workerHealth } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scheduler-fastpath-'))
   const db = createDatabase({ dataDir: path.join(root, 'data') })
   const sql = []
@@ -38,7 +38,7 @@ function fixture(t, { concurrency = 2, workerHealth } = {}) {
   for (const n of [1, 2]) {
     const id = `vm-0${n}`,
       accountId = `fast-account-${n}`
-    quota.ensure({ account_id: accountId, vm_id: id, max_concurrency: concurrency, concurrency_override: true })
+    await quota.ensure({ account_id: accountId, vm_id: id, max_concurrency: concurrency, concurrency_override: true })
     fs.writeFileSync(
       path.join(root, 'vms', `${id}.json`),
       JSON.stringify({
@@ -82,10 +82,10 @@ function fixture(t, { concurrency = 2, workerHealth } = {}) {
 }
 const options = { model: 'claude-sonnet-5-5', allowWait: false }
 
-test('scheduler reads account/runtime in one credential-free snapshot', (t) => {
-  const { runtime, sql } = fixture(t)
+test('scheduler reads account/runtime in one credential-free snapshot', async (t) => {
+  const { runtime, sql } = await fixture(t)
   sql.length = 0
-  const snapshots = runtime.schedulingSnapshot(['fast-account-1', 'fast-account-2'])
+  const snapshots = await runtime.schedulingSnapshot(['fast-account-1', 'fast-account-2'])
   assert.equal(sql.length, 1)
   assert.equal(snapshots.size, 2)
   assert.equal(snapshots.get('fast-account-1').account.max_concurrency, 2)
@@ -94,7 +94,7 @@ test('scheduler reads account/runtime in one credential-free snapshot', (t) => {
 })
 
 test('a held session uses two reads and checks only its home even with cold health', async (t) => {
-  const { pool, probes, sql } = fixture(t)
+  const { pool, probes, sql } = await fixture(t)
   const first = await pool.selectAndReserve({ ...options, seatKey: 'seat:sess:fast' })
   assert(first.ok)
   pool.healthCache.clear()
@@ -115,7 +115,7 @@ test('a held session uses two reads and checks only its home even with cold heal
 
 test('health singleflight survives caller cancellation and persists without touching account rows', async (t) => {
   let probes = 0
-  const { pool, runtime, sql } = fixture(t, {
+  const { pool, runtime, sql } = await fixture(t, {
     workerHealth: async () => {
       probes++
       await delay(30)
@@ -130,8 +130,8 @@ test('health singleflight survives caller cancellation and persists without touc
   await assert.rejects(cancelled, { code: 'selection_cancelled' })
   assert.equal((await surviving).ok, true)
   assert.equal(probes, 1)
-  assert.equal(runtime.get(exec.accountId).worker_heartbeat_at, null)
-  runtime.markCooldown(exec.accountId, {
+  assert.equal((await runtime.get(exec.accountId)).worker_heartbeat_at, null)
+  await runtime.markCooldown(exec.accountId, {
     vmId: exec.vmId,
     until: Date.now() + 60000,
     reason: 'test',
@@ -141,53 +141,54 @@ test('health singleflight survives caller cancellation and persists without touc
   await pool.flushHealthWrites()
   assert.equal(sql.length, 1)
   assert(sql[0].startsWith('INSERT INTO account_runtime'))
-  assert.equal(runtime.get(exec.accountId).model_states['claude-sonnet-5-5'].reason, 'test')
+  assert.equal((await runtime.get(exec.accountId)).model_states['claude-sonnet-5-5'].reason, 'test')
   pool.workerHealth = async () => ({ ok: true, healthy: true, marker: 'new-account' })
   assert.equal((await pool.getWorkerHealth({ ...exec, accountId: 'fast-account-2' })).marker, 'new-account')
 })
 
 test('admission rejects a new disable, cooldown or scope restriction after selection', async (t) => {
-  const { pool, runtime, db } = fixture(t)
+  const { pool, runtime, db } = await fixture(t)
   const candidate = (await pool.eligibleCandidates(options))[0]
   db.prepare("UPDATE accounts SET status='disabled' WHERE id=?").run(candidate.accountId)
-  assert.equal(pool.reserve(candidate), null)
+  assert.equal(await pool.reserve(candidate), null)
   db.prepare("UPDATE accounts SET status='active' WHERE id=?").run(candidate.accountId)
-  runtime.updateWindow(candidate.accountId, { vmId: candidate.vmId, overloadUntil: Date.now() + 60000 })
-  assert.equal(pool.reserve(candidate), null)
-  runtime.updateWindow(candidate.accountId, { vmId: candidate.vmId, overloadUntil: Date.now() - 1 })
-  assert.equal(pool.reserve({ ...candidate, keyScope: { group_type: 'anthropic', allowed_vms: [] } }), null)
-  const lease = pool.reserve(candidate)
+  await runtime.updateWindow(candidate.accountId, { vmId: candidate.vmId, overloadUntil: Date.now() + 60000 })
+  assert.equal(await pool.reserve(candidate), null)
+  await runtime.updateWindow(candidate.accountId, { vmId: candidate.vmId, overloadUntil: Date.now() - 1 })
+  assert.equal(await pool.reserve({ ...candidate, keyScope: { group_type: 'anthropic', allowed_vms: [] } }), null)
+  const lease = await pool.reserve(candidate)
   assert(lease)
   lease.release()
 })
 
 test('expired health cannot grant a queued stale candidate', async (t) => {
-  const { pool } = fixture(t)
+  const { pool } = await fixture(t)
   const candidate = (await pool.eligibleCandidates(options))[0]
   pool.healthCache.get(candidate.vmId).at = Date.now() - 60000
-  assert.equal(pool.reserve(candidate), null)
+  assert.equal(await pool.reserve(candidate), null)
   const fresh = (await pool.eligibleCandidates(options))[0]
-  const lease = pool.reserve(fresh)
+  const lease = await pool.reserve(fresh)
   assert(lease)
   lease.release()
 })
 
 test('capacity and RPM are checked on the fresh admission snapshot', async (t) => {
-  const { pool, quota } = fixture(t, { concurrency: 2 })
+  const { pool, quota } = await fixture(t, { concurrency: 2 })
   const candidate = (await pool.eligibleCandidates(options))[0]
-  const grants = Array.from({ length: 10 }, () => pool.reserve(candidate))
+  // R9：10 个并发 reserve 都先 await 读库，再各自在同步段里检查并预占，只放行上限内的 2 个
+  const grants = await Promise.all(Array.from({ length: 10 }, () => pool.reserve(candidate)))
   assert.equal(grants.filter(Boolean).length, 2)
   grants.forEach((lease) => lease?.release())
-  const account = quota.repo.get(candidate.accountId)
+  const account = await quota.repo.get(candidate.accountId)
   account.max_rpm = 2
   account.rpm_override = 1
-  quota.repo.save(account)
-  assert.equal(pool.reserve(candidate), null, 'releasing concurrency must not reset RPM')
+  await quota.repo.save(account)
+  assert.equal(await pool.reserve(candidate), null, 'releasing concurrency must not reset RPM')
   assert.equal(pool.inflight.size, 0)
 })
 
 test('capacity queue time is separate and cancellation frees its ticket', async (t) => {
-  const { pool } = fixture(t, { concurrency: 1 })
+  const { pool } = await fixture(t, { concurrency: 1 })
   const held = await pool.selectAndReserve({ ...options, seatKey: 'seat:sess:queue' })
   const queued = pool.selectAndReserve({ ...options, allowWait: true, seatKey: 'seat:sess:queue' })
   await delay(60)
@@ -213,9 +214,9 @@ test('capacity queue time is separate and cancellation frees its ticket', async 
 })
 
 test('late heartbeat and generic runtime updates cannot overwrite newer health or cooldowns', async (t) => {
-  const { pool, runtime } = fixture(t)
+  const { pool, runtime } = await fixture(t)
   const exec = { vmId: 'vm-01', accountId: 'fast-account-1' }
-  runtime.upsert({
+  await runtime.upsert({
     account_id: exec.accountId,
     vm_id: exec.vmId,
     status: 'disabled',
@@ -223,27 +224,27 @@ test('late heartbeat and generic runtime updates cannot overwrite newer health o
   })
   await pool.getWorkerHealth(exec)
   await pool.flushHealthWrites()
-  const first = runtime.get(exec.accountId)
+  const first = await runtime.get(exec.accountId)
   assert.equal(first.status, 'disabled')
-  runtime.upsert({ ...first, worker_heartbeat_at: first.worker_heartbeat_at - 1, worker_status: { ok: false } })
-  const after = runtime.get(exec.accountId)
+  await runtime.upsert({ ...first, worker_heartbeat_at: first.worker_heartbeat_at - 1, worker_status: { ok: false } })
+  const after = await runtime.get(exec.accountId)
   assert.equal(after.worker_status.ok, true)
   assert.equal(after.cooldown_reason, 'operator_disabled')
 })
 
-test('timing migration persists new measurements and does not invent historical queue times', (t) => {
-  const { db } = fixture(t)
+test('timing migration persists new measurements and does not invent historical queue times', async (t) => {
+  const { db } = await fixture(t)
   const repo = new RequestAttemptsRepo(db)
-  const current = repo.begin({ requestId: 'new', attemptNo: 1, waitMs: 250, queueWaitMs: 0, schedulingMs: 250 })
+  const current = await repo.begin({ requestId: 'new', attemptNo: 1, waitMs: 250, queueWaitMs: 0, schedulingMs: 250 })
   assert.equal(current.queue_wait_ms, 0)
   assert.equal(current.scheduling_ms, 250)
-  const historical = repo.begin({ requestId: 'old', attemptNo: 1, waitMs: 5500 })
+  const historical = await repo.begin({ requestId: 'old', attemptNo: 1, waitMs: 5500 })
   assert.equal(historical.queue_wait_ms, null)
   assert.equal(historical.scheduling_ms, null)
 })
 
 test('database errors do not reuse a prior candidate snapshot', async (t) => {
-  const { pool, runtime } = fixture(t)
+  const { pool, runtime } = await fixture(t)
   const held = await pool.selectAndReserve({ ...options, seatKey: 'seat:sess:db-error' })
   runtime.schedulingSnapshot = () => {
     throw Error('synthetic database failure')

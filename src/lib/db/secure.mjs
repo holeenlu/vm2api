@@ -2,7 +2,7 @@
  * Optional at-rest encryption for credential fields in the DB
  * (sub2api AESEncryptor counterpart, zero-dependency node:crypto).
  *
- * Enabled when VM2API_DB_SECRET (or KIN_DB_SECRET) is set: AES-256-GCM, key = SHA-256(secret).
+ * Enabled when TAPMODELS_DB_SECRET (or KIN_DB_SECRET) is set: AES-256-GCM, key = SHA-256(secret).
  * Format: enc:v1:<iv_b64>:<tag_b64>:<ciphertext_b64>
  * Without the secret, values are stored as-is (matching the previous
  * plaintext-file-with-0600 behavior).
@@ -13,7 +13,7 @@ import crypto from 'node:crypto'
 const PREFIX = 'enc:v1:'
 
 function dbSecret() {
-  return process.env.VM2API_DB_SECRET || process.env.KIN_DB_SECRET
+  return process.env.TAPMODELS_DB_SECRET || process.env.KIN_DB_SECRET
 }
 
 export function encryptionEnabled() {
@@ -50,10 +50,19 @@ export function isEncrypted(value) {
   return typeof value === 'string' && value.startsWith(PREFIX)
 }
 
+let plaintextWarned = false
 /** Encrypt when a secret is configured; otherwise return as-is. */
 export function maybeEncrypt(plain) {
   if (plain == null) return null
-  return encryptionEnabled() ? encryptString(plain) : String(plain)
+  if (encryptionEnabled()) return encryptString(plain)
+  // 生产缺 DB_SECRET 时密文字段会以明文落库（审计 P2）：拒绝写入，提示从 scripts/start-server.mjs 启动
+  if (process.env.NODE_ENV === 'production')
+    throw new Error('database secret missing: set TAPMODELS_DB_SECRET or start via scripts/start-server.mjs')
+  if (!plaintextWarned) {
+    plaintextWarned = true
+    console.warn('kin-secure: no database secret configured; secrets are stored unencrypted (development only)')
+  }
+  return String(plain)
 }
 
 /** Decrypt when the value carries the enc prefix; otherwise return as-is. */

@@ -1,0 +1,452 @@
+{
+  "claude": {
+    "anthropic.messages": {
+      "mode": "passthrough",
+      "outbound": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 1024,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Something disallowed"
+              }
+            ]
+          }
+        ],
+        "stream": true
+      },
+      "stream": "passthrough",
+      "nonStream": {
+        "id": "msg_01",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-5-20250929",
+        "content": [],
+        "stop_reason": "refusal",
+        "stop_sequence": null,
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 0
+        }
+      }
+    },
+    "openai.chat": {
+      "mode": "convert",
+      "outbound": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16384,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Something disallowed"
+              }
+            ]
+          }
+        ],
+        "stream": true
+      },
+      "stream": [
+        {
+          "id": "chatcmpl-i",
+          "object": "chat.completion.chunk",
+          "created": 1767225600,
+          "model": "claude-sonnet-4-5-20250929",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-i",
+          "object": "chat.completion.chunk",
+          "created": 1767225600,
+          "model": "claude-sonnet-4-5-20250929",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "content_filter"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 0,
+            "total_tokens": 12
+          }
+        }
+      ],
+      "nonStream": {
+        "id": "chatcmpl-msg_01",
+        "object": "chat.completion",
+        "created": 1767225600,
+        "model": "claude-sonnet-4-5-20250929",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "[content_filter]",
+              "refusal": "[content_filter]"
+            },
+            "finish_reason": "content_filter"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 12,
+          "completion_tokens": 0,
+          "total_tokens": 12
+        }
+      }
+    },
+    "openai.responses": {
+      "mode": "convert",
+      "outbound": {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 16384,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Something disallowed"
+              }
+            ]
+          }
+        ],
+        "stream": true
+      },
+      "stream": [
+        {
+          "type": "response.created",
+          "response": {
+            "id": "resp_i",
+            "object": "response",
+            "model": "claude-sonnet-4-5-20250929",
+            "status": "in_progress"
+          }
+        },
+        {
+          "type": "response.in_progress",
+          "response": {
+            "id": "resp_i",
+            "status": "in_progress"
+          }
+        },
+        {
+          "type": "response.incomplete",
+          "response": {
+            "id": "resp_i",
+            "object": "response",
+            "model": "claude-sonnet-4-5-20250929",
+            "status": "incomplete",
+            "incomplete_details": {
+              "reason": "content_filter"
+            },
+            "output": [
+              {
+                "type": "message",
+                "id": "msg_i",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": ""
+                  }
+                ]
+              }
+            ],
+            "output_text": ""
+          }
+        }
+      ],
+      "nonStream": {
+        "id": "resp_8",
+        "object": "response",
+        "created_at": 1767225600,
+        "status": "incomplete",
+        "incomplete_details": {
+          "reason": "content_filter"
+        },
+        "model": "claude-sonnet-4-5-20250929",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg_8",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": ""
+              }
+            ]
+          }
+        ],
+        "output_text": "",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 0,
+          "total_tokens": 12
+        }
+      }
+    }
+  },
+  "codex": {
+    "anthropic.messages": {
+      "outbound": {
+        "ok": true,
+        "body": {
+          "model": "gpt-5.4",
+          "input": [
+            {
+              "type": "message",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "Something disallowed"
+                }
+              ]
+            }
+          ],
+          "stream": true,
+          "store": false
+        },
+        "converted": true
+      },
+      "stream": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "resp_01",
+              "type": "message",
+              "role": "assistant",
+              "model": "gpt-5.4",
+              "content": [],
+              "stop_reason": null,
+              "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "refusal"
+            },
+            "usage": {
+              "input_tokens": 12,
+              "output_tokens": 0
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ],
+      "nonStream": {
+        "id": "resp_01",
+        "type": "message",
+        "role": "assistant",
+        "model": "gpt-5.4",
+        "content": [
+          {
+            "type": "text",
+            "text": ""
+          }
+        ],
+        "stop_reason": "refusal",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 0
+        }
+      }
+    },
+    "openai.chat": {
+      "outbound": {
+        "ok": true,
+        "body": {
+          "model": "gpt-5.4",
+          "input": [
+            {
+              "type": "message",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "Something disallowed"
+                }
+              ]
+            }
+          ],
+          "stream": true,
+          "store": false
+        },
+        "converted": true
+      },
+      "stream": [
+        {
+          "data": {
+            "id": "codex",
+            "object": "chat.completion.chunk",
+            "choices": [
+              {
+                "index": 0,
+                "delta": {},
+                "finish_reason": "content_filter"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 12,
+              "completion_tokens": 0,
+              "total_tokens": 12
+            }
+          }
+        },
+        {
+          "data": "[DONE]"
+        }
+      ],
+      "nonStream": {
+        "id": "chatcmpl-resp_01",
+        "object": "chat.completion",
+        "created": 1767225600,
+        "model": "gpt-5.4",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "[content_filter]",
+              "refusal": "[content_filter]"
+            },
+            "finish_reason": "content_filter"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 12,
+          "completion_tokens": 0,
+          "total_tokens": 12
+        }
+      }
+    },
+    "openai.responses": {
+      "outbound": {
+        "ok": true,
+        "body": {
+          "model": "gpt-5.4",
+          "input": [
+            {
+              "type": "message",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "Something disallowed"
+                }
+              ]
+            }
+          ],
+          "stream": true
+        },
+        "converted": true
+      },
+      "stream": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "response": {
+              "id": "resp_01",
+              "object": "response",
+              "model": "gpt-5.4",
+              "status": "in_progress",
+              "output": []
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "response": {
+              "id": "resp_01",
+              "object": "response",
+              "model": "gpt-5.4",
+              "status": "in_progress",
+              "output": []
+            }
+          }
+        },
+        {
+          "event": "response.incomplete",
+          "data": {
+            "type": "response.incomplete",
+            "response": {
+              "id": "resp_01",
+              "object": "response",
+              "model": "gpt-5.4",
+              "status": "incomplete",
+              "output": [],
+              "incomplete_details": {
+                "reason": "content_filter"
+              },
+              "usage": {
+                "input_tokens": 12,
+                "output_tokens": 0,
+                "total_tokens": 12
+              }
+            }
+          }
+        }
+      ],
+      "nonStream": {
+        "id": "resp_01",
+        "object": "response",
+        "model": "gpt-5.4",
+        "status": "incomplete",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": ""
+              }
+            ]
+          }
+        ],
+        "incomplete_details": {
+          "reason": "content_filter"
+        },
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 0,
+          "total_tokens": 12
+        }
+      }
+    }
+  }
+}

@@ -28,6 +28,35 @@ import {
 } from './rust-kernel-supervisor.mjs'
 
 const rustHealthCache = new Map()
+// 上游 401 触发的强制换票按槽限频（审计 P1-C1）：被吊销的账号不能让每个请求都去换一次票（刷新风暴、
+// 烧掉授权）；冷却期内只做普通检查（令牌临期才刷新），401 交给 failover 冷却换号。
+const FORCED_REFRESH_COOLDOWN_MS = 5 * 60_000
+const lastForcedRefresh = new Map()
+
+function claimForcedRefresh(exec, now = Date.now()) {
+  const key = String(exec?.homeDir || exec?.vmId || exec?.vm?.id || '')
+  if (!key) return true
+  const last = lastForcedRefresh.get(key) || 0
+  if (now - last < FORCED_REFRESH_COOLDOWN_MS) return false
+  lastForcedRefresh.set(key, now)
+  if (lastForcedRefresh.size > 4096) {
+    for (const [k, at] of lastForcedRefresh) if (now - at >= FORCED_REFRESH_COOLDOWN_MS) lastForcedRefresh.delete(k)
+  }
+  return true
+}
+
+// 只有请求确实没送到内核时才隐式重发（审计 P1-R1）：写入后首字节超时、连接被重置都可能已在上游生成，
+// 重发会重复消耗额度且第一次不计量，交给 failover 按 sendState 判定。
+const UNDELIVERED_TRANSPORT_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'EACCES'])
+function transportResendSafe(result) {
+  if (result?.sendState === 'not_sent') return true
+  return UNDELIVERED_TRANSPORT_CODES.has(String(result?.body?.error?.code || ''))
+}
+
+/** 测试用：清空强制换票的限频记录。 */
+export function resetForcedRefreshCooldown() {
+  lastForcedRefresh.clear()
+}
 const DEFAULT_SLOT_WAIT_MS = 30_000
 const DEFAULT_SLOT_POLL_MS = 200
 
@@ -270,26 +299,33 @@ async function runHop({ mode, opts }) {
     }
   }
   const send = mode === 'stream' ? streamRustKernel : callRustKernel
+  const onSendState = opts.onSendState
   beginWrapHop(opts.exec)
   let result
   try {
-    result = await send(opts)
+    result = await send({ ...opts, onSendState })
     noteWrapHop(opts.exec)
     if (opts.signal?.aborted || isClientCancelledResult(result)) {
       result = clientCancelledResult(result)
-    } else if (result.transportError === true && result.committed !== true) {
-      result = await send(opts)
+    } else if (result.transportError === true && result.committed !== true && transportResendSafe(result)) {
+      result = await send({ ...opts, onSendState })
       result = { ...result, rust_transport_retried: true }
       noteWrapHop(opts.exec)
     }
     if (!isClientCancelledResult(result) && isNeedsRefreshResult(result)) {
       const ensure = opts.ensureCredential || ensureWorkerCredential
-      const ensured = await ensure(opts.exec, { force: true })
+      // kernel 明确报 needs_refresh（本地判定临期）照常强制；上游拒票引起的强制换票按槽限频
+      const explicit = String(result?.body?.error?.code || result?.error?.code || '') === 'needs_refresh'
+      const force = explicit || claimForcedRefresh(opts.exec)
+      const ensured = await ensure(opts.exec, { force })
       if (ensured?.ok !== true) result = credentialEnsureFailure(result, ensured)
-      else {
+      else if (!force && ensured?.refreshed !== true) {
+        // 冷却期内且令牌未临期：不重发，原样交回 401 由 failover 处理
+        result = { ...result, forced_refresh_suppressed: true }
+      } else {
         // The CLI invalidates its OAuth cache from the shared credential file
         // before creating each API client. Recycling here kills sibling hops.
-        result = await send(opts)
+        result = await send({ ...opts, onSendState })
         result = { ...result, credential_retried: true }
         noteWrapHop(opts.exec)
       }

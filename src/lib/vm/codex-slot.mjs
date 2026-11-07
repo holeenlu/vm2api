@@ -12,6 +12,7 @@ import {
   hasSpendableCodexCredits,
 } from '../protocol/codex-usage.mjs'
 import { openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
+import { codexUsageWindows, recordQuotaObservations } from '../usage/quota-observations.mjs'
 
 export { isCodexVm }
 
@@ -34,7 +35,7 @@ export function writeCodexAccounts(projectRoot, vmId, accounts) {
   atomicWriteJson(
     codexCredentialPath(projectRoot, vmId),
     { accounts: Array.isArray(accounts) ? accounts.map(enrichCodexAccountIdentity) : [] },
-    { mode: 0o600 },
+    { mode: 0o600, durable: true },
   )
 }
 
@@ -304,6 +305,44 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
   return cur
 }
 
+const slotRefreshes = new Map()
+
+/**
+ * 控制面对 Codex 槽换票的唯一入口（审计 P1-C4）：槽内内核会自己轮换同一个刷新令牌，控制面再各自换票就会
+ * 拿旧 RT 撞上已轮换的 RT（refresh_token_reused）。这里按槽单飞，换票前重读凭据文件：
+ * 调用方用过的 access 已被换掉、或文件里的刷新令牌已变（内核或别处刚轮换过），直接采用文件里的新令牌，不再换票。
+ * `refresh(refreshToken)` 返回 `{ ok, access_token, refresh_token?, id_token?, expires_at? }`。
+ */
+export function refreshCodexSlotAccess(projectRoot, vmId, { usedAccess = '', fallback = {}, refresh } = {}) {
+  const firstOf = () => readCodexAccounts(projectRoot, vmId)[0] || {}
+  const seen = firstOf()
+  const seenAccess = String(seen.access_token || fallback.access_token || '').trim()
+  const seenRefresh = String(seen.refresh_token || fallback.refresh_token || '').trim()
+  if (seenAccess && usedAccess && seenAccess !== usedAccess)
+    return Promise.resolve({ ok: true, adopted: true, access_token: seenAccess, refresh_token: seenRefresh })
+  if (!seenRefresh) return Promise.resolve({ ok: false, error: 'no_refresh_token' })
+  let pending = slotRefreshes.get(vmId)
+  if (!pending) {
+    pending = (async () => {
+      const latest = firstOf()
+      const latestRefresh = String(latest.refresh_token || '').trim()
+      if (latestRefresh && latestRefresh !== seenRefresh && latest.access_token)
+        return { ok: true, adopted: true, access_token: latest.access_token, refresh_token: latestRefresh }
+      const tok = await refresh(latestRefresh || seenRefresh)
+      if (!tok?.ok || !tok.access_token) return { ok: false, error: tok?.error || 'refresh_failed' }
+      upsertCodexAccount(projectRoot, vmId, {
+        access_token: tok.access_token,
+        refresh_token: tok.refresh_token || latestRefresh || seenRefresh,
+        id_token: tok.id_token || latest.id_token,
+        expires_at: tok.expires_at || latest.expires_at,
+      })
+      return { ...tok, refresh_token: tok.refresh_token || latestRefresh || seenRefresh }
+    })().finally(() => slotRefreshes.delete(vmId))
+    slotRefreshes.set(vmId, pending)
+  }
+  return pending
+}
+
 /** Drop stale manual parks when window caps no longer apply; same contract as persistCodexUsage. */
 function reconcileCodexLimitedUntil(vm, now = Date.now()) {
   if (!vm.codex?.extra || typeof vm.codex.extra !== 'object') return
@@ -315,7 +354,12 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
   else delete vm.codex.extra.codex_limited_until
 }
 
-export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredits, credits, planType } = {}) {
+/** Writes the record synchronously when called; the observation history after it (async, R6 B7c). */
+export async function persistCodexQuotaSnapshot(
+  projectRoot,
+  vmId,
+  { extra, resetCredits, credits, planType, email, subscription } = {},
+) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   let vm
@@ -339,6 +383,11 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   }
   const plan = String(planType || '').trim()
   if (plan) vm.codex.plan_type = plan
+  const mail = String(email || '').trim()
+  if (mail) vm.codex.email = mail
+  if (subscription && typeof subscription === 'object') {
+    vm.codex.subscription = { ...subscription, fetched_at: new Date().toISOString() }
+  }
   if (resetCredits && typeof resetCredits === 'object') {
     vm.codex.reset_credits = {
       available_count: Math.max(0, Number(resetCredits.available_count) || 0),
@@ -352,7 +401,18 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   }
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(file, vm, { mode: 0o600 })
+  if (extra && typeof extra === 'object') await recordQuotaObservations(vmId, codexUsageWindows(vm.codex.usage))
   return vm
+}
+
+/** accounts/check purchase origin as the panel's billing channel key. */
+export function codexBillingType(origin) {
+  const value = String(origin || '').toLowerCase()
+  if (!value) return null
+  if (/ios|apple/.test(value)) return 'apple_subscription'
+  if (/android|google/.test(value)) return 'google_subscription'
+  if (/web|stripe/.test(value)) return 'stripe_subscription'
+  return value
 }
 
 export function summarizeCodexSlot(projectRoot, vm = {}) {
@@ -363,6 +423,8 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
   const usage = buildCodexUsageView(Object.keys(extra).length ? extraToCodexSnapshot(extra) : vm.codex?.usage || {})
   const hasAccess = !!(first.access_token || vm.codex?.has_access)
   const hasRefresh = !!(first.refresh_token || vm.codex?.has_refresh)
+  const subscription =
+    vm.codex?.subscription && typeof vm.codex.subscription === 'object' ? vm.codex.subscription : null
   return {
     platform: 'openai',
     family: 'codex',
@@ -371,8 +433,13 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     email: first.email || vm.codex?.email || vm.email || null,
     expires_at: first.expires_at || vm.codex?.expires_at || null,
     chatgpt_account_id: first.chatgpt_account_id || vm.codex?.chatgpt_account_id || null,
-    chatgpt_subscription_active_until: first.chatgpt_subscription_active_until || null,
+    // The live account check outranks the id_token claim, which is frozen at login.
+    chatgpt_subscription_active_until:
+      subscription?.renews_at || subscription?.expires_at || first.chatgpt_subscription_active_until || null,
     chatgpt_plan_type: first.chatgpt_plan_type || null,
+    subscription,
+    billing_type: codexBillingType(subscription?.purchase_origin_platform),
+    subscription_updated_at: subscription?.fetched_at || null,
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,

@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "description": "Codex 失败重放判定契约（审计阶段 2 W13）。每条用例给出上游失败（发送状态、HTTP 状态、响应体），以及两个执行器当前的判定：codex_vm（控制面 Node：src/lib/pool/codex-replay.mjs canReplayCodex、src/lib/protocol/handle-codex.mjs isRetryableSameCodexAccount）与 gateway_worker（Go：worker/internal/codexgateway/classify.go classifyHTTPFailure → replaySafe / rotatesAccount / sameAccountRetryDelay）。replay=允许再次发出（同号或换号），switch=换号，same_account_retry=同号重试。两个执行器的差异如实记录在 divergence 中：Gateway 对齐 codex-proxy-rs（同号退避、按类别判定），VM 路径沿用上游 vm2api 按状态码判定。改任一执行器的判定时同步改这里，两边的契约测试都会读本文件。",
+  "cases": [
+    {
+      "id": "429_rate_limit",
+      "send_state": "sent",
+      "status": 429,
+      "body": "{\"error\":{\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"}}",
+      "codex_vm": { "replay": true, "same_account_retry": false },
+      "gateway_worker": { "category": "rate_limited", "replay": true, "switch": true, "same_account_retry": false }
+    },
+    {
+      "id": "429_usage_limit",
+      "send_state": "sent",
+      "status": 429,
+      "body": "{\"error\":{\"type\":\"usage_limit_reached\",\"code\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\"}}",
+      "codex_vm": { "replay": true, "same_account_retry": false },
+      "gateway_worker": { "category": "usage_limit_exhausted", "replay": true, "switch": true, "same_account_retry": false }
+    },
+    {
+      "id": "401_token_expired",
+      "send_state": "sent",
+      "status": 401,
+      "body": "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"token_expired\",\"message\":\"Provided authentication token is expired.\"}}",
+      "codex_vm": { "replay": true, "same_account_retry": false },
+      "gateway_worker": { "category": "credential_expired", "replay": true, "switch": true, "same_account_retry": false }
+    },
+    {
+      "id": "403_forbidden",
+      "send_state": "sent",
+      "status": 403,
+      "body": "{\"error\":{\"message\":\"Forbidden\"}}",
+      "codex_vm": { "replay": true, "same_account_retry": false },
+      "gateway_worker": { "category": "permission_denied", "replay": false, "switch": false, "same_account_retry": false },
+      "divergence": "VM 把任何已发出的 403 视为上游明确拒绝、换号；Gateway 按 CPR 只对能识别的 403（Cloudflare、封号、身份校验）换号，未识别的 permission_denied 交付错误"
+    },
+    {
+      "id": "403_cloudflare_challenge",
+      "send_state": "sent",
+      "status": 403,
+      "header": { "Cf-Mitigated": "challenge" },
+      "body": "<html><title>Just a moment...</title>cf-chl</html>",
+      "codex_vm": { "replay": true, "same_account_retry": false },
+      "gateway_worker": { "category": "cloudflare_challenge", "replay": true, "switch": true, "same_account_retry": false }
+    },
+    {
+      "id": "503_server_error",
+      "send_state": "sent",
+      "status": 503,
+      "body": "{\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"An error occurred\"}}",
+      "codex_vm": { "replay": false, "same_account_retry": false },
+      "gateway_worker": { "category": "unavailable", "replay": true, "switch": false, "same_account_retry": true },
+      "divergence": "Gateway 按 CPR 在原账号退避重试 5 次后交付错误、不换号；VM 不重放已发出的请求（上游可能已执行，避免重复执行与重复计费）"
+    },
+    {
+      "id": "503_server_is_overloaded",
+      "send_state": "sent",
+      "status": 503,
+      "body": "{\"error\":{\"type\":\"server_error\",\"code\":\"server_is_overloaded\",\"message\":\"overloaded\"}}",
+      "codex_vm": { "replay": true, "same_account_retry": false },
+      "gateway_worker": { "category": "capacity_unavailable", "replay": true, "switch": true, "same_account_retry": true },
+      "divergence": "Gateway 按 CPR RetryThenRotateAccount 先同号退避 3 次再换号（保留 prompt 缓存、上游过载多为全局短时）；VM 直接换号（容量信号视为槽位或供应方容量问题）"
+    },
+    {
+      "id": "500_no_code",
+      "send_state": "sent",
+      "status": 500,
+      "body": "{\"error\":{\"message\":\"internal\"}}",
+      "codex_vm": { "replay": false, "same_account_retry": false },
+      "gateway_worker": { "category": "unavailable", "replay": false, "switch": false, "same_account_retry": false }
+    },
+    {
+      "id": "502_plain_text",
+      "send_state": "sent",
+      "status": 502,
+      "body": "bad gateway",
+      "codex_vm": { "replay": false, "same_account_retry": false },
+      "gateway_worker": { "category": "unavailable", "replay": false, "switch": false, "same_account_retry": false }
+    },
+    {
+      "id": "400_invalid_request",
+      "send_state": "sent",
+      "status": 400,
+      "body": "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"invalid_request_error\",\"message\":\"bad param\"}}",
+      "codex_vm": { "replay": false, "same_account_retry": false },
+      "gateway_worker": { "category": "invalid_request", "replay": false, "switch": false, "same_account_retry": false }
+    },
+    {
+      "id": "400_content_policy",
+      "send_state": "sent",
+      "status": 400,
+      "body": "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"content_policy_violation\",\"message\":\"policy\"}}",
+      "codex_vm": { "replay": false, "same_account_retry": false },
+      "gateway_worker": { "category": "invalid_request", "replay": false, "switch": false, "same_account_retry": false }
+    },
+    {
+      "id": "404_model_not_found",
+      "send_state": "sent",
+      "status": 404,
+      "body": "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"message\":\"The model does not exist\"}}",
+      "codex_vm": { "replay": false, "same_account_retry": false },
+      "gateway_worker": { "category": "model_unsupported", "replay": true, "switch": true, "same_account_retry": false },
+      "divergence": "Gateway 按账号记录模型不可用并换号（各账号可用模型不同，CPR 同口径）；VM 交付错误（槽位选号前已按分组模型白名单过滤）"
+    },
+    {
+      "id": "not_sent_transport",
+      "send_state": "not_sent",
+      "status": 0,
+      "transport_error": true,
+      "body": "{\"error\":{\"code\":\"transport\"}}",
+      "codex_vm": { "replay": true, "same_account_retry": true },
+      "gateway_worker": null,
+      "divergence": "Gateway 的建连失败不经 classify，由 connectRetryDelay 预算处理（最多 4 次建连），不在本表"
+    }
+  ]
+}

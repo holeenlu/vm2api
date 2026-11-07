@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
-import { initVmDbSync, reconcileVms } from '../../src/lib/vm/vm-db-sync.mjs'
+import { flushVmMirror, initVmDbSync, reconcileVms } from '../../src/lib/vm/vm-db-sync.mjs'
 import { setVmWriteHook } from '../../src/lib/vm/vm-file.mjs'
 import { getActiveVmId, setActiveVm } from '../../src/lib/vm/vm-registry.mjs'
 import { reloadActiveVm } from '../../src/lib/core/config.mjs'
@@ -16,7 +16,7 @@ let cfg
 let response
 let handle
 
-beforeEach(() => {
+beforeEach(async () => {
   project = fs.mkdtempSync(path.join(os.tmpdir(), 'vm-deactivate-'))
   fs.mkdirSync(path.join(project, 'vms'))
   for (const id of ['vm-01', 'vm-02']) {
@@ -32,8 +32,10 @@ beforeEach(() => {
     )
   }
   openDatabase({ dataDir: path.join(project, 'data') })
-  initVmDbSync(project, { watch: false })
+  await initVmDbSync(project, { watch: false })
   setActiveVm(project, 'vm-01')
+  // vm.json / active.json 的数据库镜像是异步队列（R6 B8）：读表前先等它写完
+  await flushVmMirror()
   cfg = { paths: { project }, vm: { id: null } }
   reloadActiveVm(cfg)
   response = {}
@@ -52,9 +54,9 @@ beforeEach(() => {
   })
 })
 
-afterEach(() => {
+afterEach(async () => {
   setVmWriteHook(null)
-  closeDatabase()
+  await closeDatabase()
   // Keep test cleanup recoverable, matching the workspace deletion policy.
   // The OS owns the temporary directory's eventual cleanup.
 })
@@ -75,7 +77,7 @@ for (const prefix of ['/api/panel', '/admin']) {
     assert.equal(cfg.vm.id, null)
     assert.equal(new VmsRepo().getActiveVmId(), null)
     assert.equal(fs.readFileSync(file, 'utf8'), before)
-    reconcileVms(project)
+    await reconcileVms(project)
     reloadActiveVm(cfg)
     assert.equal(getActiveVmId(project), null)
     assert.equal(cfg.vm.id, null)

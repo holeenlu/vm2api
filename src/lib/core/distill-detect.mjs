@@ -1,6 +1,6 @@
 /**
  * Distill harvest detector.
- * Runs in handleProtocol and count_tokens before any credential / slot hop.
+ * Runs in handleProtocol before any credential / slot hop.
  * OpenAI platform models (detectInboundPlatform === openai) always pass.
  * Match layers: hard harvest needles, hard distill/CoT regex, fingerprint, prompt needles, contest structure.
  */
@@ -246,10 +246,14 @@ function matchNeedles(text, needles) {
   }
   return ''
 }
+// 否定词只看命中点之前的一小段：对整段前缀跑无锚正则是 O(N·M)，1 MB 级请求会冻结主线程数十秒（审计 P0-5）
+const NEGATION_WINDOW = 64
 export function isNegatedExtraction(text, index) {
   // A ban on disclosing reasoning is not itself a request to extract it.
   // Only ignore a directly negated match; another match later in the prompt still blocks.
-  return /\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s+$/i.test(text.slice(0, index))
+  return /\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s+$/i.test(
+    text.slice(Math.max(0, index - NEGATION_WINDOW), index),
+  )
 }
 
 function matchPatterns(text, patterns) {

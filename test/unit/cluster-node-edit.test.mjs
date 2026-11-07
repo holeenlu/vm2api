@@ -11,7 +11,7 @@ import { dockerPing, sshDocker } from '../../src/lib/cluster/docker-remote.mjs'
 import { ClusterNodesRepo } from '../../src/lib/db/repos/cluster-nodes-repo.mjs'
 
 const { Server, utils } = ssh2
-const schema = ['026_cluster_nodes.sql', '039_cluster_node_direct_links.sql']
+const schema = ['026_cluster_nodes.sql', '045_cluster_node_direct_links.sql']
   .map((name) => fs.readFileSync(new URL(`../../src/lib/db/migrations/${name}`, import.meta.url), 'utf8'))
   .join('\n')
 const key = () => utils.generateKeyPairSync('ecdsa', { bits: 256 })
@@ -112,7 +112,7 @@ async function fixture(t, opts = {}) {
   const db = new DatabaseSync(':memory:')
   db.exec(schema)
   const repo = new ClusterNodesRepo(db)
-  repo.insert(
+  await repo.insert(
     {
       id: 'node-a',
       label: 'A',
@@ -148,14 +148,18 @@ async function fixture(t, opts = {}) {
     manager,
     link,
     vms,
-    patch: (change) => ({ expected_updated_at: repo.get('node-a').updated_at, ...change }),
+    // 同步读当前版本（仓储已 async，R6 B6c）：patch() 在大量 update/probeUpdate 调用里直接内联
+    patch: (change) => ({
+      expected_updated_at: db.prepare('SELECT updated_at FROM cluster_nodes WHERE id = ?').get('node-a').updated_at,
+      ...change,
+    }),
   }
 }
 
 function slot(remote, runtime = 'docker') {
   const id = 'vm-a'
   const cid = 'container-a'
-  const dir = '/home/u/.vm2api/vms/vm-a'
+  const dir = '/home/u/.tapmodels/vms/vm-a'
   const vm = {
     id,
     node_id: 'node-a',
@@ -163,7 +167,7 @@ function slot(remote, runtime = 'docker') {
   }
   remote.state.containers.set(cid, {
     Id: cid,
-    Config: { Labels: { 'kin.vm.id': id, 'vm2api.cluster': '1' } },
+    Config: { Labels: { 'kin.vm.id': id, 'tapmodels.cluster': '1' } },
     Mounts: [
       { Type: 'bind', Source: `${dir}/run`, Destination: runtime === 'kvm' ? '/slot/run' : '/run/kin' },
       { Type: 'bind', Source: `${dir}/cli-home`, Destination: runtime === 'kvm' ? '/slot/home' : '/home/kincli' },
@@ -175,10 +179,10 @@ function slot(remote, runtime = 'docker') {
 
 test('existing get/list and join probe keep their public read contract without an edit body', async (t) => {
   const f = await fixture(t)
-  assert.equal(f.manager.get('node-a').label, 'A')
-  assert.deepEqual(f.manager.list(), [f.manager.get('node-a')])
-  assert.equal(JSON.stringify(f.manager.get('node-a')).includes('old-password'), false)
-  assert.throws(() => f.manager.get('absent'), { code: 'node_not_found' })
+  assert.equal((await f.manager.get('node-a')).label, 'A')
+  assert.deepEqual(await f.manager.list(), [await f.manager.get('node-a')])
+  assert.equal(JSON.stringify(await f.manager.get('node-a')).includes('old-password'), false)
+  await assert.rejects(f.manager.get('absent'), { code: 'node_not_found' })
   const result = await f.manager.probe({
     host: '127.0.0.1',
     port: f.port,
@@ -198,10 +202,16 @@ test('rename changes only metadata, even when the node has VMs or jump dependent
     },
   })
   slot(f)
-  f.repo.insert({ ...f.repo.get('node-a'), id: 'node-b', port: f.port + 1, jump_node_id: 'node-a', password: 'pw' })
+  await f.repo.insert({
+    ...(await f.repo.get('node-a')),
+    id: 'node-b',
+    port: f.port + 1,
+    jump_node_id: 'node-a',
+    password: 'pw',
+  })
   const client = f.link.client
   const authCount = f.state.auth.length
-  const before = f.repo.get('node-a')
+  const before = await f.repo.get('node-a')
   const getSecrets = f.repo.getSecrets.bind(f.repo)
   f.repo.getSecrets = () => {
     throw new Error('stored credentials cannot be decrypted')
@@ -217,7 +227,7 @@ test('rename changes only metadata, even when the node has VMs or jump dependent
   assert.equal(f.state.auth.length, authCount)
   assert.deepEqual(f.state.requests, [])
   assert.equal(JSON.stringify(result).includes('old-password'), false)
-  assert.equal(getSecrets('node-a').password, 'old-password')
+  assert.equal((await getSecrets('node-a')).password, 'old-password')
 })
 
 test('successful credential rotation revalidates on save, reuses the link and clears old shell tickets', async (t) => {
@@ -236,7 +246,7 @@ test('successful credential rotation revalidates on save, reuses the link and cl
   assert.ok(f.state.auth.length > authCount, 'save opens its own verified candidate')
   assert.equal(f.manager.links.get('node-a'), f.link)
   assert.notEqual(relayClient(), client)
-  assert.equal(f.repo.getSecrets('node-a').password, 'new-password')
+  assert.equal((await f.repo.getSecrets('node-a')).password, 'new-password')
   assert.equal(result.link.state, 'ready')
   assert.equal(f.manager.consumeShellTicket(ticket, 'node-a'), false)
   assert.equal(await dockerPing(sshDocker(relayClient())), true)
@@ -251,7 +261,7 @@ test('a successful preview is not a credential authorization for a later save', 
   const client = f.link.client
   await assert.rejects(f.manager.update('node-a', patch), { code: 'auth_failed' })
   assert.equal(f.link.client, client)
-  assert.equal(f.repo.getSecrets('node-a').password, 'old-password')
+  assert.equal((await f.repo.getSecrets('node-a')).password, 'old-password')
 })
 
 test('resubmitted saved credentials or equivalent endpoints are authenticated instead of trusting cached health', async (t) => {
@@ -262,14 +272,14 @@ test('resubmitted saved credentials or equivalent endpoints are authenticated in
       f.state.passwords.delete('old-password')
       // A previously successful observation must not authorize a new request.
       f.manager.health.set('node-a', { docker: { ok: true, error: null } })
-      const before = f.repo.get('node-a')
+      const before = await f.repo.get('node-a')
       const client = f.link.client
       for (const change of [{ password: 'old-password' }, { host: ' 127.0.0.1 ' }, { port: String(f.port) }]) {
         const count = f.state.auth.length
         await assert.rejects(f.manager.probeUpdate('node-a', f.patch(change)), { code: 'auth_failed' })
         await assert.rejects(f.manager.update('node-a', f.patch(change)), { code: 'auth_failed' })
         assert.ok(f.state.auth.length > count)
-        assert.deepEqual(f.repo.get('node-a'), before)
+        assert.deepEqual(await f.repo.get('node-a'), before)
         assert.equal(f.link.client, client)
       }
     })
@@ -281,19 +291,19 @@ test('password to key rotation clears the saved password and remains usable', as
   const userKey = key()
   f.state.publicKey = Buffer.from(userKey.public.split(' ')[1], 'base64')
   await f.manager.update('node-a', f.patch({ auth_type: 'key', private_key: userKey.private }))
-  assert.equal(f.repo.get('node-a').auth_type, 'key')
-  assert.equal(f.repo.getSecrets('node-a').password, null)
-  assert.equal(f.repo.getSecrets('node-a').privateKey, userKey.private.trim())
+  assert.equal((await f.repo.get('node-a')).auth_type, 'key')
+  assert.equal((await f.repo.getSecrets('node-a')).password, null)
+  assert.equal((await f.repo.getSecrets('node-a')).privateKey, userKey.private.trim())
   assert.equal(f.link.state, 'ready')
 })
 
 test('candidate authentication failure leaves saved credentials and old connection intact', async (t) => {
   const f = await fixture(t)
-  const before = f.repo.get('node-a')
+  const before = await f.repo.get('node-a')
   const client = f.link.client
   await assert.rejects(f.manager.update('node-a', f.patch({ password: 'wrong' })), { code: 'auth_failed' })
-  assert.deepEqual(f.repo.get('node-a'), before)
-  assert.equal(f.repo.getSecrets('node-a').password, 'old-password')
+  assert.deepEqual(await f.repo.get('node-a'), before)
+  assert.equal((await f.repo.getSecrets('node-a')).password, 'old-password')
   assert.equal(f.link.client, client)
   await dockerPing(sshDocker(client))
 })
@@ -304,11 +314,11 @@ test('changed endpoints must have the saved host key before credentials are offe
   const client = f.link.client
   await assert.rejects(f.manager.update('node-a', f.patch({ port: impostor.port })), { code: 'host_key_mismatch' })
   assert.deepEqual(impostor.state.auth, [])
-  assert.equal(f.repo.get('node-a').port, f.port)
+  assert.equal((await f.repo.get('node-a')).port, f.port)
   assert.equal(f.link.client, client)
   const sameHost = await sshHost(t, { hostKey: f.hostKey })
   await f.manager.update('node-a', f.patch({ port: sameHost.port }))
-  assert.equal(f.repo.get('node-a').port, sameHost.port)
+  assert.equal((await f.repo.get('node-a')).port, sameHost.port)
 })
 
 test('empty nodes can change username and save without Docker, but existing slots require Docker', async (t) => {
@@ -319,7 +329,7 @@ test('empty nodes can change username and save without Docker, but existing slot
   const probe = await f.manager.probeUpdate('node-a', patch)
   assert.equal(probe.docker.ok, false)
   await f.manager.update('node-a', patch)
-  assert.equal(f.repo.get('node-a').username, 'nextuser')
+  assert.equal((await f.repo.get('node-a')).username, 'nextuser')
   slot(f)
   const client = f.link.client
   await assert.rejects(f.manager.update('node-a', f.patch({ password: 'new-password' })), {
@@ -360,12 +370,12 @@ test('changed HOME, UID/GID, missing container or directories reject an attached
       if (change === 'gid') f.state.gid = 999
       if (change === 'container') f.state.containers.clear()
       if (change === 'directories') f.state.directories = false
-      const before = f.repo.get('node-a')
+      const before = await f.repo.get('node-a')
       const client = f.link.client
       await assert.rejects(f.manager.update('node-a', f.patch({ password: 'new-password' })), {
         code: 'node_runtime_mismatch',
       })
-      assert.deepEqual(f.repo.get('node-a'), before)
+      assert.deepEqual(await f.repo.get('node-a'), before)
       assert.equal(f.link.client, client)
     })
   }
@@ -376,17 +386,17 @@ test('a disconnected node can recover using its pinned identity and recorded run
   slot(f)
   await f.manager.update('node-a', f.patch({ password: 'new-password' }))
   assert.equal(f.link.state, 'ready')
-  assert.equal(f.repo.getSecrets('node-a').password, 'new-password')
+  assert.equal((await f.repo.getSecrets('node-a')).password, 'new-password')
 })
 
 test('connection updates reject jump dependents, duplicate endpoints and busy installs before connecting', async (t) => {
   const f = await fixture(t)
-  const next = { ...f.repo.get('node-a'), id: 'node-b', port: f.port + 1, password: 'pw' }
-  f.repo.insert({ ...next, jump_node_id: 'node-a' })
+  const next = { ...(await f.repo.get('node-a')), id: 'node-b', port: f.port + 1, password: 'pw' }
+  await f.repo.insert({ ...next, jump_node_id: 'node-a' })
   const count = f.state.auth.length
   await assert.rejects(f.manager.update('node-a', f.patch({ password: 'new-password' })), { code: 'node_in_use' })
-  f.repo.remove('node-b')
-  f.repo.insert(next)
+  await f.repo.remove('node-b')
+  await f.repo.insert(next)
   await assert.rejects(f.manager.update('node-a', f.patch({ port: next.port })), { code: 'node_exists' })
   f.manager.installs.set('node-a', { status: 'running' })
   await assert.rejects(f.manager.update('node-a', f.patch({ password: 'new-password' })), { code: 'node_busy' })
@@ -400,12 +410,12 @@ test('stale edits and database failures do not replace a working link', async (t
   await assert.rejects(f.manager.probeUpdate('node-a', stale), { code: 'node_edit_conflict' })
   await assert.rejects(f.manager.update('node-a', stale), { code: 'node_edit_conflict' })
   const client = f.link.client
-  const before = f.repo.get('node-a')
+  const before = await f.repo.get('node-a')
   f.repo.update = () => {
     throw new Error('write failed')
   }
   await assert.rejects(f.manager.update('node-a', f.patch({ password: 'new-password' })), /write failed/)
-  assert.deepEqual(f.repo.get('node-a'), before)
+  assert.deepEqual(await f.repo.get('node-a'), before)
   assert.equal(f.link.client, client)
   await dockerPing(sshDocker(client))
 })
@@ -431,7 +441,7 @@ test('the final guard rejects a node that becomes busy while its candidate is ch
   release.resolve()
   await rejected
   assert.equal(f.link.client, client)
-  assert.equal(f.repo.getSecrets('node-a').password, 'old-password')
+  assert.equal((await f.repo.getSecrets('node-a')).password, 'old-password')
 })
 
 test('reconnect, removal and another save during verification cannot resurrect stale configuration', async (t) => {
@@ -447,14 +457,14 @@ test('reconnect, removal and another save during verification cannot resurrect s
       const pending = f.manager.update('node-a', f.patch({ password: 'new-password' }))
       const rejected = assert.rejects(pending, { code: action === 'remove' ? 'node_not_found' : 'node_edit_conflict' })
       await entered.promise
-      if (action === 'reconnect') f.manager.reconnect('node-a')
+      if (action === 'reconnect') await f.manager.reconnect('node-a')
       if (action === 'remove') await f.manager.remove('node-a')
       if (action === 'rename') await f.manager.update('node-a', f.patch({ label: 'concurrent' }))
       if (action === 'placement') f.vms.push({ id: 'new-vm' })
       release.resolve()
       await rejected
-      if (action !== 'remove') assert.equal(f.repo.getSecrets('node-a').password, 'old-password')
-      else assert.equal(f.repo.get('node-a'), null)
+      if (action !== 'remove') assert.equal((await f.repo.getSecrets('node-a')).password, 'old-password')
+      else assert.equal(await f.repo.get('node-a'), null)
     })
   }
 })

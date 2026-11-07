@@ -9,6 +9,24 @@ import {
 import { isGptSeriesId } from '../protocol/gpt-ids.mjs'
 
 /**
+ * 端点过滤选项：本地分组授权的端点白名单（数组或 { allowed }）叠加上游的密钥协议范围（{ groupType }，上游 1.4.048 #907）。
+ * 兼容旧的数组写法；null / 省略表示不限。
+ */
+function endpointFilter(options) {
+  const opts = Array.isArray(options) || options == null ? { allowed: options ?? null } : options
+  const allowed = Array.isArray(opts.allowed) ? opts.allowed : null
+  const targetGroup = String(opts.groupType || 'all').toLowerCase()
+  return (ep) => {
+    if (ep.disabled) return false
+    if (allowed && !allowed.includes(ep.id)) return false
+    const proto = normalizeProtocol(ep.protocol, ep.kind)
+    if (targetGroup === 'anthropic' && proto !== 'anthropic') return false
+    if (targetGroup === 'openai' && proto !== 'openai') return false
+    return true
+  }
+}
+
+/**
  * CLIProxy-shaped picker: grouped round-robin by endpoint then key.
  * Same alias across endpoints shares a model id; prefix/alias pins an endpoint.
  */
@@ -140,15 +158,12 @@ export class ApiScheduler {
     this.endpoints = Array.isArray(endpoints) ? endpoints : []
   }
 
-  catalog({ groupType = 'all' } = {}) {
+  catalog(options = null) {
+    const usable = endpointFilter(options)
     const data = []
     const seen = new Set()
-    const targetGroup = String(groupType || 'all').toLowerCase()
     for (const ep of this.endpoints) {
-      if (ep.disabled) continue
-      const proto = normalizeProtocol(ep.protocol, ep.kind)
-      if (targetGroup === 'anthropic' && proto !== 'anthropic') continue
-      if (targetGroup === 'openai' && proto !== 'openai') continue
+      if (!usable(ep)) continue
       for (const id of modelIdsForEndpoint(ep, { forcePrefix: this.forcePrefix })) {
         const k = lower(id)
         if (seen.has(k)) continue
@@ -165,16 +180,10 @@ export class ApiScheduler {
     return { object: 'list', data, source: 'api-endpoints' }
   }
 
-  pick(requestedModel, now = Date.now(), { groupType = 'all' } = {}) {
-    const targetGroup = String(groupType || 'all').toLowerCase()
+  pick(requestedModel, now = Date.now(), options = null) {
+    const usable = endpointFilter(options)
     const parents = this.endpoints
-      .filter((ep) => {
-        if (ep.disabled) return false
-        const proto = normalizeProtocol(ep.protocol, ep.kind)
-        if (targetGroup === 'anthropic' && proto !== 'anthropic') return false
-        if (targetGroup === 'openai' && proto !== 'openai') return false
-        return endpointMatchesModel(ep, requestedModel)
-      })
+      .filter((ep) => usable(ep) && endpointMatchesModel(ep, requestedModel))
       .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))
     if (!parents.length) {
       return { ok: false, code: 'model_not_found', message: `no api endpoint serves ${requestedModel}` }

@@ -1,14 +1,15 @@
 /**
- * Client-facing usage rewrite for unofficial (non-Claude-Code) requests.
- * Hide the rewritten official 4-block and any gateway-injected tools.
- * Keep the caller's prompt, the caller's own tools, and the caller's
- * `--system` / `--append-system-prompt` leftover.
- * Official cache is wiped so the display matches a no-system request.
- * Zero-inject hides billing + timezone env. Caller leftover is kept.
- * Injected server tools (web_search) are hidden at their upstream schema
- * cost, not at the size of the `{type,name}` stub we put on the wire.
- * Official Claude Code traffic is not rewritten and not hidden.
- * Upstream / logs keep real Anthropic counts.
+ * Estimate the tokens the gateway injects into an unofficial (non-Claude-Code)
+ * request: the official persona blocks (billing / identity / Environment), any
+ * other template or overlay text the caller did not send (harness, standing,
+ * parked reminder), and gateway-injected tools.
+ * The caller's prompt, the caller's own tools and the caller's
+ * `--system` / `--append-system-prompt` leftover are never counted.
+ * Injected server tools (web_search) count at their upstream schema cost, not
+ * at the size of the `{type,name}` stub we put on the wire.
+ * Official Claude Code passthrough is not rewritten and injects nothing.
+ * The count drives both billing and the usage returned to the customer
+ * (see protocol/customer-usage.mjs); usage_logs keep real Anthropic counts.
  */
 import {
   CRS_AGENT_EXPANSION,
@@ -17,7 +18,6 @@ import {
   CRS_OFFICIAL_AGENT_PROMPT,
   CRS_SYSTEM_EXPANSION,
   callerSystemBlocksWithoutBilling,
-  normalizePersonaMode,
 } from './crs-persona.mjs'
 import { CRS_OFFICIAL_CONTINUATION } from './official-cc-system-2.1.241.mjs'
 
@@ -183,28 +183,11 @@ function callerOfficialTexts(system) {
   return new Set([...officialPersonaTexts(system), ...officialPersonaTexts(callerSystemBlocksWithoutBilling(system))])
 }
 
-function officialHideTokens(before, after) {
+function officialInjectedTokens(before, after) {
   if (!after || before === after) return 0
   const callerTexts = callerOfficialTexts(before?.system)
   const added = officialPersonaTexts(after.system).filter((text) => !callerTexts.has(text))
   return estimateClaudeInputTokens(added.join(''))
-}
-
-function officialUncachedText(system, callerTexts) {
-  if (!system) return ''
-  if (!Array.isArray(system)) {
-    return officialPersonaTexts(system)
-      .filter((text) => !callerTexts.has(text))
-      .join('')
-  }
-  const parts = []
-  for (const block of system) {
-    const text = typeof block === 'string' ? block : block?.text || ''
-    if (!text || !isOfficialPersonaText(text) || callerTexts.has(text)) continue
-    if (block && typeof block === 'object' && block.cache_control) continue
-    parts.push(text)
-  }
-  return parts.join('')
 }
 
 function toolKey(tool) {
@@ -250,7 +233,7 @@ export function injectedToolsPayload(before, after) {
 }
 
 /** Injected server tools bill their upstream schema, not the outbound stub. */
-export function injectedToolsHideTokens(before, after) {
+export function injectedToolTokens(before, after) {
   const extra = injectedTools(before, after)
   if (!extra.length) return 0
   const stubs = []
@@ -262,48 +245,6 @@ export function injectedToolsHideTokens(before, after) {
   }
   if (stubs.length) total += estimateClaudeInputTokens(JSON.stringify(stubs))
   return total
-}
-
-function officialUncachedTokens(before, after) {
-  if (!after || before === after) return 0
-  // Retained caller text is never an injected cost, even if its headings look
-  // official or its cache marker changed during request preparation.
-  const callerTexts = callerOfficialTexts(before?.system)
-  const afterText = officialUncachedText(after.system, callerTexts)
-  return estimateClaudeInputTokens(afterText)
-}
-
-export function personaHideBreakdown(before, after) {
-  const official = officialHideTokens(before, after)
-  const uncached = officialUncachedTokens(before, after)
-  const overlay = estimateClaudeInputTokens(injectedOverlayText(before, after))
-  const tools = injectedToolsHideTokens(before, after)
-  return {
-    official,
-    uncached,
-    overlay,
-    tools,
-    wipeCache: false,
-  }
-}
-
-function boxHideTokens({ official, uncached, overlay, tools, wipeCache }) {
-  const inputHide = uncached + overlay + tools
-  const total = official + overlay + tools
-  if (!total && !wipeCache) return 0
-  const boxed = new Number(total)
-  boxed.official = official
-  boxed.uncached = uncached
-  boxed.overlay = overlay
-  boxed.tools = tools
-  boxed.wipeCache = !!wipeCache
-  boxed.inputHide = inputHide
-  return boxed
-}
-
-/** Tokens to subtract from client usage. 0 when we did not inject official blocks or overlay. */
-export function personaHideInputTokens(before, after) {
-  return boxHideTokens(personaHideBreakdown(before, after))
 }
 
 function stripParkedReminderFromMessages(messages) {
@@ -331,182 +272,61 @@ export function callerUsageBaseline(body) {
   }
 }
 
-/** Standing constraints the persona put into system that the caller did not send. */
-function injectedStandingTokens(before, after, text) {
-  const standing = String(text || '').trim()
-  if (!standing) return 0
-  if (!extractSystemTexts(after?.system).some((t) => t.includes(standing))) return 0
-  if (extractSystemTexts(before?.system).some((t) => t.includes(standing))) return 0
-  return estimateClaudeInputTokens(standing)
-}
-
 /**
- * Hide rewrite for every unofficial /v1 body (messages / chat / completions / responses).
- * Official 4-block is hidden. Caller leftover / tools stay in client usage.
- *
- * `hides` comes from the persona template (any block with hide:true). When it is
- * absent we fall back to the legacy per-mode rule so callers that predate
- * templates keep their behaviour.
- *
- * `standing` ({text, hide}) is the panel standing-constraint mask. It is its own
- * switch: masked even when the template hides nothing, shown even when it does.
+ * Gateway-injected tokens by origin, against the caller-visible baseline.
+ * `official` = official persona blocks the caller did not send; `overlay` =
+ * every other system / role=system / parked-reminder text we added; `tools` =
+ * tools the caller did not declare. The three never overlap.
  */
-export function personaHideForUnofficial(inbound, outbound, { officialClient = false, mode, hides, standing } = {}) {
-  if (officialClient || !outbound || inbound === outbound) return 0
+export function gatewayInjectedBreakdown(inbound, outbound) {
+  if (!outbound) return { official: 0, overlay: 0, tools: 0 }
   const baseline = callerUsageBaseline(inbound)
-  const personaHidden = hides !== false && !(hides == null && normalizePersonaMode(mode) === 'official_prompt')
-  const standingTokens = injectedStandingTokens(baseline, outbound, standing?.text)
-  const standingHidden = standing?.hide !== false
-  // `hides` only governs the persona blocks. Tools we injected were never
-  // declared by the caller, so their upstream schema is hidden in every mode.
-  if (!personaHidden) {
-    return boxHideTokens({
-      official: 0,
-      uncached: 0,
-      overlay: standingHidden ? standingTokens : 0,
-      tools: injectedToolsHideTokens(baseline, outbound),
-      wipeCache: false,
-    })
+  return {
+    official: officialInjectedTokens(baseline, outbound),
+    overlay: estimateClaudeInputTokens(injectedOverlayText(baseline, outbound)),
+    tools: injectedToolTokens(baseline, outbound),
   }
-  const breakdown = personaHideBreakdown(baseline, outbound)
-  if (!standingHidden) breakdown.overlay = Math.max(0, breakdown.overlay - standingTokens)
-  return boxHideTokens(breakdown)
 }
 
-/** Wrap CLI `system_layout=zero` always appends billing + `# Environment`. */
-export function zeroCliEnvText(timezone = 'America/New_York') {
-  return `# Environment\n - Timezone: ${String(timezone || 'America/New_York').trim() || 'America/New_York'}`
+/** Total tokens the customer must not pay for. 0 for official passthrough. */
+export function gatewayInjectedTokens(inbound, outbound, { officialClient = false } = {}) {
+  if (officialClient || !outbound || inbound === outbound) return 0
+  const { official, overlay, tools } = gatewayInjectedBreakdown(inbound, outbound)
+  return official + overlay + tools
 }
 
 /**
- * Billing header is billed far below char/3. No-tool wrap vs Portunex 09-06
- * was +18 on 01/04/05/06; env for America/New_York is ~15 at char/3, rest is billing.
+ * English prose runs ~4 chars per token, code and JSON fewer, CJK far fewer;
+ * so chars/4 rarely exceeds the caller's real count.
  */
-export const ZERO_CLI_BILLING_INPUT_TOKENS = 3
+export const CALLER_FLOOR_CHAR_DIVISOR = 4
 
-export function zeroCliLayoutHideTokens({ timezone } = {}) {
-  return ZERO_CLI_BILLING_INPUT_TOKENS + estimateClaudeInputTokens(zeroCliEnvText(timezone))
+function callerBlockText(block) {
+  if (typeof block === 'string') return block
+  if (!block || typeof block !== 'object') return ''
+  if (block.type === 'text') return block.text || ''
+  if (block.type === 'tool_use') return JSON.stringify(block.input ?? '')
+  if (block.type === 'tool_result') {
+    if (typeof block.content === 'string') return block.content
+    return Array.isArray(block.content) ? block.content.map(callerBlockText).join('') : ''
+  }
+  // Images, documents and thinking are not text the floor can price; leave them out.
+  return ''
 }
 
 /**
- * Unofficial wrap 0-inject: hide CLI billing + env, keep leftover, hide injected tools.
- * `overlay` is the gateway text Node already put in the leftover (agent standing).
- * `hides: false` is the panel whole-preset mask off: billing + env count as usage.
+ * Lower bound of the caller's own prompt tokens. chars/3 overestimates the
+ * English persona (official_full: ~2.7k chars measured ~640 tokens, estimated
+ * ~910), so on a short prompt the injected estimate alone would bill the
+ * caller zero input. Billing never deducts below this floor.
  */
-export function personaHideForCliZero(
-  inbound,
-  outbound,
-  { officialClient = false, timezone, overlay = 0, hides } = {},
-) {
-  if (officialClient) return 0
-  const official = hides === false ? 0 : zeroCliLayoutHideTokens({ timezone })
-  return boxHideTokens({
-    official,
-    uncached: official,
-    overlay: Math.max(0, Math.floor(Number(overlay) || 0)),
-    tools: injectedToolsHideTokens(callerUsageBaseline(inbound), outbound),
-    wipeCache: false,
-  })
-}
-
-function num(value) {
-  return Number(value) || 0
-}
-
-function parseHideTokens(hideTokens) {
-  if (hideTokens && typeof hideTokens === 'object') {
-    const official = Math.max(0, Math.floor(num(hideTokens.official)))
-    const overlay = Math.max(0, Math.floor(num(hideTokens.overlay)))
-    const tools = Math.max(0, Math.floor(num(hideTokens.tools)))
-    const wipeCache = hideTokens.wipeCache != null ? !!hideTokens.wipeCache : false
-    const uncached = hideTokens.uncached != null ? Math.max(0, Math.floor(num(hideTokens.uncached))) : 0
-    const inputHide =
-      hideTokens.inputHide != null ? Math.max(0, Math.floor(num(hideTokens.inputHide))) : uncached + overlay + tools
-    if (official || overlay || tools || wipeCache || inputHide) {
-      return { official, overlay, tools, uncached, wipeCache, inputHide }
-    }
+export function callerPromptTokenFloor(inbound) {
+  const baseline = callerUsageBaseline(inbound)
+  let chars = extractSystemTexts(baseline.system).join('').length
+  for (const message of Array.isArray(baseline.messages) ? baseline.messages : []) {
+    const content = message?.content
+    chars += Array.isArray(content) ? content.map(callerBlockText).join('').length : String(content ?? '').length
   }
-  const official = Math.max(0, Math.floor(num(hideTokens)))
-  return { official, overlay: 0, tools: 0, uncached: official, wipeCache: false, inputHide: official }
-}
-
-function wipeOfficialCache(out) {
-  if (out.cache_read_input_tokens != null) out.cache_read_input_tokens = 0
-  if (out.cache_read_tokens != null) out.cache_read_tokens = 0
-  if (out.cache_creation_input_tokens != null) out.cache_creation_input_tokens = 0
-  if (out.cache_creation_tokens != null) out.cache_creation_tokens = 0
-  if (out.cache_creation && typeof out.cache_creation === 'object') {
-    out.cache_creation = { ...out.cache_creation }
-    if (out.cache_creation.ephemeral_5m_input_tokens != null) out.cache_creation.ephemeral_5m_input_tokens = 0
-    if (out.cache_creation.ephemeral_1h_input_tokens != null) out.cache_creation.ephemeral_1h_input_tokens = 0
-  }
-  if (out.prompt_tokens_details && typeof out.prompt_tokens_details === 'object') {
-    out.prompt_tokens_details = { ...out.prompt_tokens_details, cached_tokens: 0, cache_creation_tokens: 0 }
-  }
-  if (out.input_tokens_details && typeof out.input_tokens_details === 'object') {
-    out.input_tokens_details = { ...out.input_tokens_details, cached_tokens: 0, cache_write_tokens: 0 }
-  }
-}
-
-export function hidePersonaUsage(usage, hideTokens = 0, cacheTtl = '1h') {
-  if (!usage || typeof usage !== 'object') return usage
-  const parsed = parseHideTokens(hideTokens)
-  const { official, overlay, tools, wipeCache, inputHide } = parsed
-  if (!official && !overlay && !tools && !wipeCache && !inputHide) return usage
-  const out = { ...usage }
-  if (usage.cache_creation && typeof usage.cache_creation === 'object') {
-    out.cache_creation = { ...usage.cache_creation }
-  }
-  const inputKey =
-    out.input_tokens != null ? 'input_tokens' : out.prompt_tokens != null ? 'prompt_tokens' : 'input_tokens'
-  if (wipeCache) wipeOfficialCache(out)
-  if (inputHide > 0) {
-    const take = Math.min(num(out[inputKey]), inputHide)
-    if (take > 0) {
-      out[inputKey] = num(out[inputKey]) - take
-      if (inputKey === 'input_tokens' && out.prompt_tokens != null) {
-        out.prompt_tokens = Math.max(0, num(out.prompt_tokens) - take)
-      }
-    }
-  }
-  const input = out.input_tokens != null ? num(out.input_tokens) : null
-  const prompt = out.prompt_tokens != null ? num(out.prompt_tokens) : null
-  const output =
-    out.output_tokens != null
-      ? num(out.output_tokens)
-      : out.completion_tokens != null
-        ? num(out.completion_tokens)
-        : null
-  if (out.total_tokens != null && (input != null || prompt != null) && output != null) {
-    out.total_tokens = (input ?? prompt) + output
-  }
-  return out
-}
-
-export function hidePersonaUsageInEvent(event, hideTokens = 0, cacheTtl = '1h') {
-  if (!event || typeof event !== 'object' || !hideTokens) return event
-  const out = { ...event }
-  if (out.usage) out.usage = hidePersonaUsage(out.usage, hideTokens, cacheTtl)
-  if (out.message && typeof out.message === 'object' && out.message.usage) {
-    out.message = { ...out.message, usage: hidePersonaUsage(out.message.usage, hideTokens, cacheTtl) }
-  }
-  return out
-}
-
-export function hidePersonaUsageInSseLine(line, hideTokens = 0, cacheTtl = '1h') {
-  if (!hideTokens || line == null) return line
-  const raw = String(line)
-  const m = raw.match(/^(data:\s*)(.*)$/)
-  if (!m || !m[2] || m[2] === '[DONE]') return raw
-  try {
-    const evt = JSON.parse(m[2])
-    return m[1] + JSON.stringify(hidePersonaUsageInEvent(evt, hideTokens, cacheTtl))
-  } catch {
-    return raw
-  }
-}
-
-export function hidePersonaUsageOnMessage(body, hideTokens = 0, cacheTtl = '1h') {
-  if (!body || typeof body !== 'object' || !hideTokens || !body.usage) return body
-  return { ...body, usage: hidePersonaUsage(body.usage, hideTokens, cacheTtl) }
+  if (Array.isArray(baseline.tools) && baseline.tools.length) chars += JSON.stringify(baseline.tools).length
+  return Math.floor(chars / CALLER_FLOOR_CHAR_DIVISOR)
 }

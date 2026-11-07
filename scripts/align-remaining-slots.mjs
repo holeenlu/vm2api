@@ -18,9 +18,7 @@ const SKIP = new Set(
     .map((s) => s.trim())
     .filter(Boolean),
 )
-const targets = listVms(ROOT)
-  .map((row) => getVm(ROOT, row.id))
-  .filter((vm) => vm?.id && !SKIP.has(vm.id))
+const targets = (await listVms(ROOT)).map((row) => getVm(ROOT, row.id)).filter((vm) => vm?.id && !SKIP.has(vm.id))
 const supported = targets.filter((vm) => normalizeVmKind(vm).platform === 'anthropic' && !slotHost(vm).native)
 
 if (DRY) {

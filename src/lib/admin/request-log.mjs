@@ -17,14 +17,27 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { redactSecrets } from '../core/security.mjs'
+import { redactSecretText, redactSecrets } from '../core/security.mjs'
 import { resolveStoreDb } from '../db/database.mjs'
-import { enqueueWrite, writeBehindArmed } from '../db/write-behind.mjs'
+import { enqueueWrite, recordBillingWriteFailure, writeBehindArmed, WRITE_KIND } from '../db/write-behind.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
+import { RequestAttemptsRepo } from '../db/repos/request-attempts-repo.mjs'
+import { pruneGatewayWorkerHistory } from '../gateway-worker/repos/retention-repo.mjs'
+import { dbClient, transactionOutcome } from '../db/db-client.mjs'
+import { findSupplierRuntimeVm } from '../vendor/repos/resources-repo.mjs'
+import { UsageStatsWorker } from './usage-stats-worker.mjs'
+import { liveAccountStats } from './live-account-stats.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
-import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
+import { COST_COLUMN_KEYS, costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
+import { applyRate, fromMicros, microsOf, toMicros } from '../core/money.mjs'
 import { disjointOpenaiUsage } from '../protocol/openai-usage.mjs'
-import { REASONING_EFFORTS, sessionIdForLog } from '../protocol/log-fields.mjs'
+import {
+  REASONING_EFFORTS,
+  sessionIdForLog,
+  responseModelForLog,
+  transportForLog,
+  upstreamPathForLog,
+} from '../protocol/log-fields.mjs'
 
 /** Persist the token a client actually sent — only for failed ingress auth. */
 export function presentedApiKeyForLog(token) {
@@ -129,6 +142,36 @@ function cacheCreationBreakdown(usage) {
   return { cache_creation_5m_tokens: five, cache_creation_1h_tokens: hour }
 }
 
+const BILLED_TOKEN_COLUMNS = Object.freeze([
+  'input_tokens',
+  'cache_read_tokens',
+  'cache_creation_tokens',
+  'cache_creation_5m_tokens',
+  'cache_creation_1h_tokens',
+])
+
+/**
+ * 客户计费口径（protocol/customer-usage.mjs 的结果）写进主 token 列，全平台展示同一口径；
+ * 与上游原始值不同时，原始值保留到 upstream_*（账号成本、额度预测、供应商结算读它）。
+ * output_tokens 两种口径相同，不需要单独保留。
+ */
+export function applyBilledTokens(summary, customerUsage) {
+  if (!summary || !customerUsage || typeof customerUsage !== 'object') return summary
+  const usage = normalizeUsage(disjointOpenaiUsage(customerUsage) || {})
+  const billed = {
+    input_tokens: usage.input_tokens ?? null,
+    cache_read_tokens: usage.cache_read_tokens ?? usage.cache_read_input_tokens ?? null,
+    cache_creation_tokens: usage.cache_creation_tokens ?? usage.cache_creation_input_tokens ?? null,
+    ...cacheCreationBreakdown(usage),
+  }
+  if (BILLED_TOKEN_COLUMNS.every((c) => (Number(summary[c]) || 0) === (Number(billed[c]) || 0))) return summary
+  for (const c of BILLED_TOKEN_COLUMNS) {
+    summary[`upstream_${c}`] = summary[c] ?? null
+    summary[c] = billed[c]
+  }
+  return summary
+}
+
 function imageTokenCount(v) {
   return Number.isSafeInteger(v) && v > 0 ? v : 0
 }
@@ -138,21 +181,7 @@ function webSearchRequestsOf(usage) {
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0
 }
 
-const PRICED_COLUMN_KEYS = [
-  'input_cost',
-  'output_cost',
-  'cache_read_cost',
-  'cache_creation_cost',
-  'web_search_cost',
-  'image_cost',
-  'total_cost',
-  'pricing_model',
-  'price_source',
-  'price_version',
-  'service_tier',
-  'speed',
-  'long_context',
-]
+const PRICED_COLUMN_KEYS = ['pricing_model', 'price_source', 'price_version', 'service_tier', 'speed', 'long_context']
 
 /** Image generation usage on this row; an Images endpoint row (`openai.images`) bills it alone. */
 function imageForLog(extra) {
@@ -161,21 +190,31 @@ function imageForLog(extra) {
   return { usage: extra.image_usage || null, model: extra.image_model || null, only }
 }
 
+/** 调用方已定价时沿用它的金额：整数列为权威值；只给了美元值的（旧写法）在这里换算一次，REAL 由整数派生。 */
+function pricedMoney(extra) {
+  const out = {}
+  for (const key of COST_COLUMN_KEYS) {
+    const micros = microsOf(extra[key + '_micros']) ?? toMicros(extra[key])
+    out[key + '_micros'] = micros
+    out[key] = fromMicros(micros)
+  }
+  return out
+}
+
 function costColumnsForLog(usage, model, extra = {}) {
   if (extra.pricing_model != null) {
-    const out = {}
+    const out = pricedMoney(extra)
     for (const key of PRICED_COLUMN_KEYS) out[key] = extra[key] ?? null
     return out
   }
   const priced = costColumnsFromUsage(usage, model, imageForLog(extra))
+  const money = {}
+  for (const key of COST_COLUMN_KEYS) {
+    money[key + '_micros'] = priced[key + '_micros'] ?? null
+    money[key] = priced[key] ?? null
+  }
   return {
-    input_cost: priced.input_cost ?? null,
-    output_cost: priced.output_cost ?? null,
-    cache_read_cost: priced.cache_read_cost ?? null,
-    cache_creation_cost: priced.cache_creation_cost ?? null,
-    web_search_cost: priced.web_search_cost ?? null,
-    image_cost: priced.image_cost ?? null,
-    total_cost: priced.total_cost ?? null,
+    ...money,
     pricing_model: priced.pricing_model ?? null,
     price_source: priced.price_source ?? null,
     price_version: priced.price_version ?? null,
@@ -358,12 +397,15 @@ function debugResponse(captured) {
   }
 }
 
+// x-kin-log / x-kin-debug 只对主 Key 生效（审计 P2）：普通 Key 的调用方不能关闭自己的使用记录，也不能强开调试明细
 export function resolveLogMode(envMode, req) {
-  const hdr = String(req?.headers?.['x-kin-log'] || '')
-    .trim()
-    .toLowerCase()
-  if (MODES.has(hdr)) return hdr
-  if (String(req?.headers?.['x-kin-debug'] || '') === '1') return 'debug'
+  if (req?.apiKeyKind === 'master') {
+    const hdr = String(req?.headers?.['x-kin-log'] || '')
+      .trim()
+      .toLowerCase()
+    if (MODES.has(hdr)) return hdr
+    if (String(req?.headers?.['x-kin-debug'] || '') === '1') return 'debug'
+  }
   const base = String(envMode || 'normal')
     .trim()
     .toLowerCase()
@@ -371,10 +413,23 @@ export function resolveLogMode(envMode, req) {
 }
 
 export function newRequestId(req) {
-  const incoming = String(req?.headers?.['x-request-id'] || '').trim()
-  if (incoming && incoming.length <= 128) return incoming
+  // Server-owned identity prevents caller collisions across accounting and diagnostics.
   return crypto.randomUUID()
 }
+
+const UPSTREAM_ERROR_FIELDS = ['code', 'type', 'message', 'param', 'close_reason', 'last_event_type']
+
+/** 上游错误对象的受控投影：只保留声明的字符串字段（各 1KiB），都缺失时为 null。 */
+function diagnosticJson(value) {
+  if (!value || typeof value !== 'object') return null
+  const out = {}
+  for (const key of UPSTREAM_ERROR_FIELDS)
+    if (typeof value[key] === 'string' && value[key].trim()) out[key] = value[key].trim().slice(0, 1024)
+  return Object.keys(out).length ? JSON.stringify(out) : null
+}
+
+/** 使用记录落库失败时追加的待补写文件（位于 request-logs 目录），由 `scripts/replay-failed-usage-logs.mjs` 补写。 */
+export const FAILED_USAGE_LOGS_FILE = 'failed-usage-logs.jsonl'
 
 export class RequestLogStore {
   constructor({
@@ -390,6 +445,8 @@ export class RequestLogStore {
     this.dataDir = dataDir || path.join(process.cwd(), 'data')
     this.db = resolveStoreDb({ db, dataDir: this.dataDir })
     this.repo = new UsageLogsRepo(this.db)
+    this._statistics = null
+    this._statisticsPaused = false
     this.root = path.join(this.dataDir, 'request-logs')
     this.mode = MODES.has(String(mode).toLowerCase()) ? String(mode).toLowerCase() : 'normal'
     this.maxDebugBodyChars = Number.isFinite(maxDebugBodyChars) ? maxDebugBodyChars : 200000
@@ -403,6 +460,7 @@ export class RequestLogStore {
     this._mem = [] // recent normal summaries for panel hot path
     this._memMax = 200
     this._cleanupTimer = null
+    this._cleanupRunning = null
   }
 
   setConfig({ mode, retainDays, debugRetainDays, maxMb, mutedErrorClasses } = {}) {
@@ -436,6 +494,8 @@ export class RequestLogStore {
 
   /** Re-bind to a fresh DB connection (after backup restore). */
   rebind(db) {
+    void this._statistics?.close()
+    this._statistics = null
     this.db = db
     this.repo = new UsageLogsRepo(db)
     this._mem = []
@@ -456,6 +516,8 @@ export class RequestLogStore {
       method: req.method || 'POST',
       ip: safeIp(req),
       user_agent: String(req.headers?.['user-agent'] || '').slice(0, 512),
+      // Responses WebSocket 把每个 response.create 改写成 POST 交给协议层，这里保留原入站方式
+      inbound_transport: req.inboundTransport === 'websocket' ? 'websocket' : 'http',
       headers: mode === 'debug' ? redactHeaders(req.headers) : null,
       // Outbound bodies carry the gateway's rewrite (persona / overlay) and are
       // readable by the owning tenant; only the operator's configured mode may
@@ -513,10 +575,37 @@ export class RequestLogStore {
   /**
    * Write normal summary always (unless off).
    * Write debug full record when mode===debug.
+   *
+   * async（R6 B7a）：只有关闭日志且带 vm_id 时才 await 一次供应商 VM 判定，其余路径在调用时同步执行完。
+   * 落库 persist 仍是同步闭包（写回队列 write-behind 批事务同步执行，见 docs/data-access/R6_PROGRESS.md B2 / B8）。
+   *
+   * opts（M3 复审 P1-3 / P2-4，推理收口用）：now 为原始完成时刻（ts 与 duration_ms 按它算）；onSummary(summary) 在摘要生成后
+   * 立即回调（收口失败时交给重试）；persist: false 只生成摘要并计入实时指标，不落库（收口事务没跑到这里时生成补写数据）。
    */
-  finish(ctx, extra = {}) {
-    if (!ctx || ctx.mode === 'off') return null
-    const duration_ms = Math.max(0, Date.now() - (ctx.t0 || Date.now()))
+  async finish(ctx, extra = {}, opts = {}) {
+    if (!ctx) return null
+    const finishedAt = Number.isFinite(opts.now) ? opts.now : Date.now()
+    if (ctx.mode === 'off') {
+      const supplier = extra.vm_id && (await findSupplierRuntimeVm(this.db, extra.vm_id))
+      if (!supplier) {
+        // 关闭日志时仍计入账号实时指标（只在内存）
+        const usage = normalizeUsage(disjointOpenaiUsage(extra.usage || {}) || {})
+        liveAccountStats.record({
+          vm_id: extra.vm_id,
+          status: extra.status,
+          duration_ms: Math.max(0, finishedAt - (ctx.t0 || finishedAt)),
+          first_token_ms: extra.first_token_ms,
+          input_tokens: extra.input_tokens ?? usage.input_tokens,
+          output_tokens: extra.output_tokens ?? usage.output_tokens,
+          cache_read_tokens: extra.cache_read_tokens ?? usage.cache_read_tokens ?? usage.cache_read_input_tokens,
+          cache_creation_tokens:
+            extra.cache_creation_tokens ?? usage.cache_creation_tokens ?? usage.cache_creation_input_tokens,
+        })
+        return null
+      }
+      ctx = { ...ctx, mode: 'normal', capture_outbound: false, headers: null }
+    }
+    const duration_ms = Math.max(0, finishedAt - (ctx.t0 || finishedAt))
     const usage = normalizeUsage(disjointOpenaiUsage(extra.usage || {}) || {})
     const breakdown = cacheCreationBreakdown(usage)
     const webSearch = extra.web_search_requests ?? webSearchRequestsOf(usage)
@@ -541,7 +630,11 @@ export class RequestLogStore {
     const summary = {
       id: 'log_' + crypto.randomBytes(6).toString('hex'),
       request_id: ctx.request_id,
-      ts: new Date().toISOString(),
+      config_revision:
+        Number.isSafeInteger(Number(extra.config_revision)) && Number(extra.config_revision) > 0
+          ? Number(extra.config_revision)
+          : null,
+      ts: new Date(finishedAt).toISOString(),
       log_mode: ctx.mode,
       method: ctx.method,
       path: extra.path || ctx.path,
@@ -558,7 +651,7 @@ export class RequestLogStore {
       input_tokens: extra.input_tokens ?? usage.input_tokens ?? null,
       output_tokens: extra.output_tokens ?? usage.output_tokens ?? null,
       error_code: extra.error_code || null,
-      error_message: extra.error_message ? String(extra.error_message).slice(0, 300) : null,
+      error_message: extra.error_message ? redactSecretText(extra.error_message).slice(0, 300) : null,
       user_agent: ctx.user_agent,
       ip: ctx.ip,
       api_key_presented: extra.api_key_presented ? presentedApiKeyForLog(extra.api_key_presented) : null,
@@ -571,7 +664,8 @@ export class RequestLogStore {
       web_search_requests: webSearch,
       requested_model: extra.requested_model || extra.model || null,
       upstream_model: extra.upstream_model || null,
-      model_mismatch: modelMismatch(extra.requested_model || extra.model, extra.upstream_model),
+      response_model: responseModelForLog(extra),
+      model_mismatch: modelMismatch(extra.requested_model || extra.model, responseModelForLog(extra)),
       first_token_ms: extra.first_token_ms ?? null,
       first_byte_ms: extra.first_byte_ms ?? null,
       generation_ms: extra.generation_ms ?? null,
@@ -591,26 +685,82 @@ export class RequestLogStore {
       image_usage: extra.image_usage ? JSON.stringify(extra.image_usage) : null,
       image_input_tokens: imageTokenCount(extra.image_usage?.input_tokens),
       image_output_tokens: imageTokenCount(extra.image_usage?.output_tokens),
+      execution_kind: extra.execution_kind || null,
+      account_resource_id: extra.account_resource_id || null,
+      gateway_instance_id: extra.gateway_instance_id || null,
+      dispatch_id: extra.dispatch_id || null,
+      receipt_id: extra.receipt_id || null,
+      usage_confidence: extra.usage_confidence || null,
       // sub2api ownership + billing columns
       user_id: extra.user_id ?? null,
+      billing_status: extra.billing_status || 'unmetered',
+      billing_group_id: extra.billing_group_id ?? extra.group_id ?? null,
+      subscription_id: extra.subscription_id || null,
+      api_key_name: extra.api_key_name || null,
+      source: extra.api_key_kind === 'master' ? 'platform' : 'protocol',
       vm_owner_user_id: null,
       group_id: extra.group_id ?? 1,
       rate_multiplier: Number.isFinite(Number(extra.rate_multiplier)) ? Number(extra.rate_multiplier) : 1,
       ...costColumnsForLog(billedUsage, extra.upstream_model || extra.model || extra.requested_model, extra),
       upstream_service_tier: extra.upstream_service_tier || null,
+      // Gateway 请求诊断（092）：只存上游声明与网关已知事实，超长文本截断
+      error_kind: extra.error_kind ? String(extra.error_kind).slice(0, 64) : null,
+      // 端点与传输方式（099）：上游路径由执行路径在发出请求时写入，未发往上游为空
+      inbound_transport: transportForLog(ctx.inbound_transport),
+      upstream_path: upstreamPathForLog(extra.upstream_path),
+      upstream_transport: transportForLog(extra.upstream_transport),
+      upstream_error_json: diagnosticJson(extra.upstream_error),
+      websocket_close_code: Number.isInteger(extra.websocket_close_code) ? extra.websocket_close_code : null,
+      continuation_unavailable_reason: extra.continuation_unavailable_reason
+        ? String(extra.continuation_unavailable_reason).slice(0, 64)
+        : null,
+      upstream_connection_exit_reason: extra.upstream_connection_exit_reason
+        ? String(extra.upstream_connection_exit_reason).slice(0, 64)
+        : null,
+      retry_after_ms:
+        Number.isFinite(extra.retry_after_ms) && extra.retry_after_ms >= 0 ? Math.round(extra.retry_after_ms) : null,
     }
-    // sub2api actual_cost: official cost × group rate multiplier (0 is a valid rate)
-    if (summary.total_cost != null) {
-      summary.actual_cost = extra.actual_cost ?? summary.total_cost * summary.rate_multiplier
+    // sub2api actual_cost: official cost × group rate multiplier (0 is a valid rate)。
+    // 整数微单位（M6）：结算给出的实际扣费优先，否则 round(官方价 × 倍率)；REAL 镜像由整数派生
+    if (summary.total_cost_micros != null) {
+      summary.actual_cost_micros = Object.hasOwn(extra, 'actual_cost_micros')
+        ? microsOf(extra.actual_cost_micros)
+        : Object.hasOwn(extra, 'actual_cost')
+          ? toMicros(extra.actual_cost)
+          : applyRate(summary.total_cost_micros, summary.rate_multiplier)
+      summary.actual_cost = fromMicros(summary.actual_cost_micros)
     }
     const classified = classifyRequestError(summary)
     if (classified?.error_class) summary.error_class = classified.error_class
+    // 账号实时指标按上游原始消耗统计，在改写主列之前记录
+    liveAccountStats.record(summary)
+    applyBilledTokens(summary, extra.customer_usage)
+    opts.onSummary?.(summary)
+    if (opts.persist === false) {
+      this._mem.push(summary)
+      if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
+      return summary
+    }
+    // 在收口事务里调用时记下该事务（M3 复审 P2-4）：写回队列晚于它执行，事务已回滚时不写“已结算”的使用记录，
+    // 由收口重试连同结算一起补写
+    const client = dbClient(this.db)
+    const origin = client.transaction()
+    const rolledBack = (tx) => !!tx && transactionOutcome(tx) === 'rolledback'
 
-    const persist = () => {
-      summary.vm_owner_user_id = this.repo.vmOwnerOf(extra.vm_id)
+    // 落库闭包（R6 B8 改 async）：写回队列启用时在写回批事务里按顺序 await，否则 finish 直接 await；只有数据库操作与同步文件追加，
+    // 不等待真实 I/O（批事务不能跨事件循环）
+    const persist = async () => {
+      if (rolledBack(origin)) return
+      summary.vm_owner_user_id = await this.repo.vmOwnerOf(extra.vm_id)
       try {
-        this.repo.insertSummaryIfAbsent(summary)
-      } catch {}
+        await this.repo.insertSummaryIfAbsent(summary)
+      } catch (error) {
+        // SQLite 已回滚当前事务（磁盘满等，M3 复审 P1-1）：结算也一并撤销了，向上抛给收口重试 / 写回队列重排
+        if (rolledBack(client.transaction())) throw error
+        // 使用记录没写进去（结算可能已提交）：不再静默吞掉（M5 复审 P1-3）。计数、告警，并把这一行追加到
+        // 失败记录文件，供 `scripts/replay-failed-usage-logs.mjs` 补写；不向上抛，以免连带回滚已完成的结算
+        this._recordPersistFailure(summary, error)
+      }
       if (this.jsonlMirror) this._appendJsonl(summary)
       if (ctx.mode !== 'debug') return
       const debugRec = {
@@ -644,17 +794,42 @@ export class RequestLogStore {
         response: ctx.response ? debugResponse(ctx.response) : null,
       }
       try {
-        this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
+        await this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
       } catch {}
     }
     this._mem.push(summary)
     if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
-    if (writeBehindArmed()) enqueueWrite(persist)
-    else persist()
+    // 写回队列未启用时（测试、工具进程）直接写完再返回，与原同步版本一样 finish 返回时行已落库。
+    // 使用记录是计费相关写入：队列已满时不丢弃，改为直接写库（技术债 M5，write-behind.mjs 有界队列）
+    // 停机时仍没写进去（降级中关库，M3 复审 P2-7）：落到失败记录文件待补写
+    const spill = () => {
+      if (!rolledBack(origin))
+        this._recordPersistFailure(summary, new Error('write-behind queue discarded at shutdown'))
+    }
+    if (!writeBehindArmed() || !enqueueWrite(persist, { kind: WRITE_KIND.BILLING, spill })) await persist()
     return summary
   }
 
   /** Optional legacy JSONL mirror for external log collectors. */
+  _recordPersistFailure(summary, error) {
+    recordBillingWriteFailure()
+    const now = Date.now()
+    if (now - (this._persistFailWarnAt || 0) >= 60_000) {
+      this._persistFailWarnAt = now
+      console.error(
+        `[request-log] usage log write failed for ${summary.request_id || summary.id}: ${error?.message || error}; queued for replay in failed-usage-logs.jsonl`,
+      )
+    }
+    try {
+      fs.mkdirSync(this.root, { recursive: true })
+      fs.appendFileSync(
+        path.join(this.root, FAILED_USAGE_LOGS_FILE),
+        `${JSON.stringify({ at: new Date(now).toISOString(), error: String(error?.message || error).slice(0, 300), summary })}\n`,
+        { mode: 0o600 },
+      )
+    } catch {}
+  }
+
   _appendJsonl(summary) {
     try {
       fs.mkdirSync(this.root, { recursive: true })
@@ -683,70 +858,78 @@ export class RequestLogStore {
     return (items || []).filter((row) => !row.error_class || !blocked.has(row.error_class))
   }
 
-  listNormal({ limit = 50, ...filters } = {}) {
-    return this.queryNormal({ limit, ...filters }).items
+  async listNormal({ limit = 50, ...filters } = {}) {
+    return (await this.queryNormal({ limit, ...filters })).items
   }
 
-  /** Filtered + paginated query with total (panel). Default hides muted classes. */
-  queryNormal(opts = {}) {
-    const exclude = this._mutedExclude(opts)
-    const result = this.repo.query({ ...opts, exclude_error_class: exclude })
-    result.items = this._dropMuted(result.items, exclude)
-    return result
-  }
-
-  exportRows(opts = {}) {
-    const limit = Math.max(1, Math.min(5000, Number(opts.limit) || 2000))
-    return this.queryNormal({ ...opts, limit, offset: 0, maxLimit: 5000 })
+  /**
+   * Filtered keyset page (panel `/request-logs` normal mode): `{ items, next_cursor, has_more }`, no total.
+   * Default hides muted classes; the repo drops them while scanning so pages stay full.
+   */
+  async queryNormal(opts = {}) {
+    return this.repo.query({ ...opts, exclude_error_class: this._mutedExclude(opts) })
   }
 
   /** Aggregated stats for charts. */
-  aggregate(opts = {}) {
+  async aggregate(opts = {}) {
     return this.repo.aggregate(opts)
   }
 
-  totals() {
+  async totals() {
     return this.repo.totals()
   }
 
-  hasSuccessfulRequest(opts = {}) {
+  async hasSuccessfulRequest(opts = {}) {
     return this.repo.hasSuccessfulRequest(opts)
   }
 
-  billingStats(opts = {}) {
-    return this.repo.billingStats(opts)
+  async billingStats(opts = {}) {
+    if (this._statisticsPaused) throw new Error('billing statistics are paused')
+    this._statistics ??= new UsageStatsWorker(this.db)
+    return this._statistics.billingStats(opts)
   }
 
-  ownerBilling(opts = {}) {
+  async pauseStatistics() {
+    this._statisticsPaused = true
+    const statistics = this._statistics
+    this._statistics = null
+    await statistics?.close()
+  }
+
+  resumeStatistics() {
+    this._statisticsPaused = false
+  }
+
+  async ownerBilling(opts = {}) {
     return this.repo.ownerBilling(opts)
   }
 
-  costByModel(opts = {}) {
+  async costByModel(opts = {}) {
     return this.repo.costByModel(opts)
   }
 
-  vmUsageStats(opts = {}) {
+  async vmUsageStats(opts = {}) {
     return this.repo.vmUsageStats(opts)
   }
 
-  costBetween(opts = {}) {
+  async costBetween(opts = {}) {
     return this.repo.costBetween(opts)
   }
 
-  keyUsageStats(opts = {}) {
+  async keyUsageStats(opts = {}) {
     return this.repo.keyUsageStats(opts)
   }
 
   /** Windowed SLA / QPS / TTFT snapshot for overview + log analysis. */
-  windowStats(opts = {}) {
+  async windowStats(opts = {}) {
     return this.repo.windowStats(opts)
   }
 
-  protocolEntryStats(opts = {}) {
+  async protocolEntryStats(opts = {}) {
     return this.repo.protocolEntryStats(opts)
   }
 
-  listDebug({
+  async listDebug({
     limit = 20,
     exclude_error_class = null,
     include_muted = false,
@@ -755,20 +938,24 @@ export class RequestLogStore {
   } = {}) {
     const exclude = this._mutedExclude({ exclude_error_class, include_muted, error_class })
     const n = Math.max(1, Math.min(100, Number(limit) || 20))
-    const pool = this.repo.listDebug({ limit: exclude ? Math.min(200, n * 15) : n, owner_user_id })
+    const pool = await this.repo.listDebug({ limit: exclude ? Math.min(200, n * 15) : n, owner_user_id })
     const items = error_class ? pool.filter((row) => row.error_class === error_class) : this._dropMuted(pool, exclude)
     return items.slice(0, n)
   }
 
-  getDebug(requestId, { owner_user_id = null } = {}) {
+  async getDebug(requestId, { owner_user_id = null } = {}) {
     if (!requestId) return null
-    const rec = this.repo.getDebug(requestId) || this.repo.getByRequestId(requestId)
+    const rec = (await this.repo.getDebug(requestId)) || (await this.repo.getByRequestId(requestId))
     if (!rec) return null
-    if (owner_user_id && !this.repo.belongsToOwner(requestId, owner_user_id)) return null
+    if (owner_user_id && !(await this.repo.belongsToOwner(requestId, owner_user_id))) return null
     return rec
   }
 
-  snapshot() {
+  async snapshot() {
+    let totalRows = null
+    try {
+      totalRows = await this.repo.count()
+    } catch {}
     return {
       mode: this.mode,
       retain_days: this.retainDays,
@@ -778,24 +965,36 @@ export class RequestLogStore {
       recent_normal: this._mem.length,
       backend: 'sqlite',
       jsonl_mirror: this.jsonlMirror,
-      total_rows: (() => {
-        try {
-          return this.repo.count()
-        } catch {
-          return null
-        }
-      })(),
+      total_rows: totalRows,
     }
   }
 
-  /** Retention: delete rows older than retain windows, then enforce max_mb. */
+  /**
+   * Retention: delete rows older than retain windows, then enforce max_mb.
+   * 同一周期还清理请求尝试（与使用记录同一保留天数）和 Gateway Worker 历史（retention-repo，保留清单见
+   * docs/data-retention.md）。各项分批删除、批间让出事件循环；上一轮还没跑完时本轮跳过，不叠加。
+   */
   cleanup() {
+    if (this._cleanupRunning) return this._cleanupRunning
+    this._cleanupRunning = this._runCleanup().finally(() => {
+      this._cleanupRunning = null
+    })
+    return this._cleanupRunning
+  }
+
+  async _runCleanup() {
     try {
-      this.repo.cleanup({
+      await this.repo.cleanup({
         retainDays: this.retainDays,
         debugRetainDays: this.debugRetainDays,
         maxBytes: this.maxMb > 0 ? this.maxMb * 1024 * 1024 : 0,
       })
+    } catch {}
+    try {
+      await new RequestAttemptsRepo(this.db).cleanup(this.retainDays)
+    } catch {}
+    try {
+      await pruneGatewayWorkerHistory(this.db)
     } catch {}
     this._cleanupLegacyFiles(this.retainDays, this.root)
     this._cleanupLegacyFiles(this.debugRetainDays, path.join(this.root, 'debug'))
@@ -805,9 +1004,7 @@ export class RequestLogStore {
     this.stopCleanupScheduler()
     const ms = Math.max(60_000, Number(intervalMs) || CLEANUP_INTERVAL_MS)
     const run = () => {
-      try {
-        this.cleanup()
-      } catch {}
+      this.cleanup().catch(() => {})
     }
     this._cleanupTimer = setInterval(run, ms)
     if (typeof this._cleanupTimer.unref === 'function') this._cleanupTimer.unref()

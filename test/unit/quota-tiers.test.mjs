@@ -61,11 +61,13 @@ test('mergeTierMaps only overlays provided keys', () => {
   assert.equal(merged.max.max_concurrency, 8)
 })
 
-test('buildRouting returns tiers so the panel can re-render a save', () => {
-  const data = buildRouting({
-    routingConfig: { sticky: {}, quota: {}, concurrency: {} },
-    stickyRouter: { stats: () => ({ active_sessions: 0 }) },
-  }).data
+test('buildRouting returns tiers so the panel can re-render a save', async () => {
+  const data = (
+    await buildRouting({
+      routingConfig: { sticky: {}, quota: {}, concurrency: {} },
+      stickyRouter: { activeCount: () => 0, stats: () => ({ active_sessions: 0 }) },
+    })
+  ).data
   assert.ok(data.tiers.pro)
   assert.equal(data.tiers.pro.max_concurrency, 2)
   assert.equal(data.tiers.pro.limit_5h, 0.85)
@@ -74,42 +76,50 @@ test('buildRouting returns tiers so the panel can re-render a save', () => {
   assert.equal(data.tiers.max.max_concurrency, 4)
 })
 
-test('buildRouting returns normalized vm defaults', () => {
-  const data = buildRouting({
-    routingConfig: { sticky: {}, quota: {}, concurrency: {} },
-    stickyRouter: { stats: () => ({ active_sessions: 0 }) },
-  }).data
+test('buildRouting returns normalized vm defaults', async () => {
+  const data = (
+    await buildRouting({
+      routingConfig: { sticky: {}, quota: {}, concurrency: {} },
+      stickyRouter: { activeCount: () => 0, stats: () => ({ active_sessions: 0 }) },
+    })
+  ).data
   assert.equal(data.vm.default_runtime, 'docker')
-  assert.equal(data.vm.memory, '512m')
-  assert.equal(data.vm.vcpus, 2)
+  assert.equal(data.vm.memory, '4g')
+  assert.equal(data.vm.vcpus, 4)
   assert.equal(data.vm.disk_gb, 20)
   assert.equal(data.vm.allow_tcg, false)
 })
 
-test('buildRouting defaults a missing thinking display to summarized', () => {
-  const data = buildRouting({
-    routingConfig: { sticky: {}, quota: {}, concurrency: {} },
-    stickyRouter: { stats: () => ({ active_sessions: 0 }) },
-  }).data
+test('buildRouting defaults a missing thinking display to summarized', async () => {
+  const data = (
+    await buildRouting({
+      routingConfig: { sticky: {}, quota: {}, concurrency: {} },
+      stickyRouter: { activeCount: () => 0, stats: () => ({ active_sessions: 0 }) },
+    })
+  ).data
   assert.equal(data.compatibility.thinking_display, 'summarized')
-  const pinned = buildRouting({
-    routingConfig: { compatibility: { thinking_display: 'passthrough' } },
-    stickyRouter: { stats: () => ({ active_sessions: 0 }) },
-  }).data
+  const pinned = (
+    await buildRouting({
+      routingConfig: { compatibility: { thinking_display: 'passthrough' } },
+      stickyRouter: { activeCount: () => 0, stats: () => ({ active_sessions: 0 }) },
+    })
+  ).data
   assert.equal(pinned.compatibility.thinking_display, 'passthrough')
 })
 
-test('buildRouting exposes effective Codex routing to the panel', () => {
-  const data = buildRouting({
-    routingConfig: { codex: { clients: { official_codex: 'allow' } } },
-    stickyRouter: { stats: () => ({ active_sessions: 0 }) },
-  }).data
+test('buildRouting exposes effective Codex routing to the panel', async () => {
+  const data = (
+    await buildRouting({
+      routingConfig: { codex: { clients: { official_codex: 'allow' } } },
+      stickyRouter: { activeCount: () => 0, stats: () => ({ active_sessions: 0 }) },
+    })
+  ).data
   assert.equal(data.codex.clients.official_codex, 'allow')
   assert.equal(data.codex.clients.openai_compatible, 'allow')
   assert.equal(data.codex.protocols['openai.responses'].enabled, true)
 })
 
-test('canAccept uses per-tier 5h and weekly lines', () => {
+test('canAccept uses per-tier 5h and weekly lines', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: {
@@ -121,39 +131,39 @@ test('canAccept uses per-tier 5h and weekly lines', () => {
       },
     },
   })
-  q.ensure({ account_id: 'pro-1' })
-  q.setAccountTier('pro-1', 'pro')
-  q.ingestHeaders('pro-1', { 'anthropic-ratelimit-unified-5h-utilization': '0.86' })
-  assert.equal(q.canAccept('pro-1').reason, 'quota_5h_safety')
+  await q.ensure({ account_id: 'pro-1' })
+  await q.setAccountTier('pro-1', 'pro')
+  await q.ingestHeaders('pro-1', { 'anthropic-ratelimit-unified-5h-utilization': '0.86' })
+  assert.equal((await q.canAccept('pro-1')).reason, 'quota_5h_safety')
 
-  q.ensure({ account_id: 'max-1' })
-  q.setAccountTier('max-1', 'max')
-  q.ingestHeaders('max-1', {
+  await q.ensure({ account_id: 'max-1' })
+  await q.setAccountTier('max-1', 'max')
+  await q.ingestHeaders('max-1', {
     'anthropic-ratelimit-unified-5h-utilization': '0.86',
     'anthropic-ratelimit-unified-7d-utilization': '0.90',
   })
-  assert.equal(q.canAccept('max-1').ok, true, 'Max 5h/7d stay under 95%')
+  assert.equal((await q.canAccept('max-1')).ok, true, 'Max 5h/7d stay under 95%')
 
-  q.ingestHeaders('max-1', { 'anthropic-ratelimit-unified-7d-utilization': '0.96' })
-  assert.equal(q.canAccept('max-1').reason, 'quota_7d_safety')
+  await q.ingestHeaders('max-1', { 'anthropic-ratelimit-unified-7d-utilization': '0.96' })
+  assert.equal((await q.canAccept('max-1')).reason, 'quota_7d_safety')
 })
 
-test('reloadConfig picks up saved weekly line without process restart shape', () => {
+test('reloadConfig picks up saved weekly line without process restart shape', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'p' })
-  q.setAccountTier('p', 'pro')
+  await q.ensure({ account_id: 'p' })
+  await q.setAccountTier('p', 'pro')
   // Pro default 7d line 0.80 + default 0.05 overshoot.
-  q.ingestHeaders('p', { 'anthropic-ratelimit-unified-7d-utilization': '0.86' })
-  assert.equal(q.canAccept('p').reason, 'quota_7d_safety')
+  await q.ingestHeaders('p', { 'anthropic-ratelimit-unified-7d-utilization': '0.86' })
+  assert.equal((await q.canAccept('p')).reason, 'quota_7d_safety')
   q.reloadConfig({
     quota: { block_on_5h: true, block_on_7d: true },
     tiers: { pro: { max_concurrency: 2, safety_ratio: 0.85, weekly_safety_ratio: 0.9, warn_ratio: 0.75 } },
   })
-  assert.equal(q.canAccept('p').ok, true)
+  assert.equal((await q.canAccept('p')).ok, true)
 })
 
-test('applyTierConcurrency writes only the matching tier', () => {
-  const q = new AccountQuota({
+test('applyTierConcurrency writes only the matching tier', async () => {
+  const q = await AccountQuota.create({
     dataDir: tmpDir(),
     config: { concurrency: { default_max_per_account: 20 } },
     accounts: [
@@ -161,19 +171,19 @@ test('applyTierConcurrency writes only the matching tier', () => {
       { account_id: 'a-max', vm_id: 'vm-2', max_concurrency: 20 },
     ],
   })
-  q.setAccountTier('a-pro', 'pro')
-  q.setAccountTier('a-max', 'max')
-  q.applyTierConcurrency({
+  await q.setAccountTier('a-pro', 'pro')
+  await q.setAccountTier('a-max', 'max')
+  await q.applyTierConcurrency({
     default: { max_concurrency: 2 },
     pro: { max_concurrency: 2 },
     max: { max_concurrency: 4 },
   })
-  assert.equal(q.repo.get('a-pro').max_concurrency, 2)
-  assert.equal(q.repo.get('a-max').max_concurrency, 4)
+  assert.equal((await q.repo.get('a-pro')).max_concurrency, 2)
+  assert.equal((await q.repo.get('a-max')).max_concurrency, 4)
 })
 
-test('applyTierRpm writes only the matching tier and skips override', () => {
-  const q = new AccountQuota({
+test('applyTierRpm writes only the matching tier and skips override', async () => {
+  const q = await AccountQuota.create({
     dataDir: tmpDir(),
     config: {},
     accounts: [
@@ -182,17 +192,17 @@ test('applyTierRpm writes only the matching tier and skips override', () => {
       { account_id: 'r-pin', vm_id: 'vm-3', max_rpm: 99 },
     ],
   })
-  q.setAccountTier('r-pro', 'pro')
-  q.setAccountTier('r-max', 'max')
-  q.setMaxRpm('r-pin', 99, { override: true })
-  q.applyTierRpm({
+  await q.setAccountTier('r-pro', 'pro')
+  await q.setAccountTier('r-max', 'max')
+  await q.setMaxRpm('r-pin', 99, { override: true })
+  await q.applyTierRpm({
     default: { max_rpm: 10 },
     pro: { max_rpm: 15 },
     max: { max_rpm: 30 },
   })
-  assert.equal(q.repo.get('r-pro').max_rpm, 15)
-  assert.equal(q.repo.get('r-max').max_rpm, 30)
-  assert.equal(q.repo.get('r-pin').max_rpm, 99)
+  assert.equal((await q.repo.get('r-pro')).max_rpm, 15)
+  assert.equal((await q.repo.get('r-max')).max_rpm, 30)
+  assert.equal((await q.repo.get('r-pin')).max_rpm, 99)
 })
 
 test('resolveTierPolicy reads live config', () => {
@@ -207,7 +217,7 @@ test('resolveTierPolicy reads live config', () => {
   assert.equal(p.weekly_safety_ratio, 0.7)
 })
 
-test('saving Pro 5h=80% lands on policyFor limit_5h', () => {
+test('saving Pro 5h=80% lands on policyFor limit_5h', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: {
@@ -217,14 +227,14 @@ test('saving Pro 5h=80% lands on policyFor limit_5h', () => {
       }),
     },
   })
-  q.ensure({ account_id: 'pro-80' })
-  q.setAccountTier('pro-80', 'pro')
-  assert.equal(q.policyFor(q.repo.get('pro-80')).limit_5h, 0.8)
-  q.ingestHeaders('pro-80', { 'anthropic-ratelimit-unified-5h-utilization': '0.81' })
-  assert.equal(q.canAccept('pro-80').reason, 'quota_5h_safety')
+  await q.ensure({ account_id: 'pro-80' })
+  await q.setAccountTier('pro-80', 'pro')
+  assert.equal(q.policyFor(await q.repo.get('pro-80')).limit_5h, 0.8)
+  await q.ingestHeaders('pro-80', { 'anthropic-ratelimit-unified-5h-utilization': '0.81' })
+  assert.equal((await q.canAccept('pro-80')).reason, 'quota_5h_safety')
 })
 
-test('Pro 95% runs one call at a time from 90% and blocks at line + overshoot', () => {
+test('Pro 95% runs one call at a time from 90% and blocks at line + overshoot', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: {
@@ -234,29 +244,29 @@ test('Pro 95% runs one call at a time from 90% and blocks at line + overshoot', 
       }),
     },
   })
-  q.ensure({ account_id: 'pro-95' })
-  q.setAccountTier('pro-95', 'pro')
-  q.ingestHeaders('pro-95', {
+  await q.ensure({ account_id: 'pro-95' })
+  await q.setAccountTier('pro-95', 'pro')
+  await q.ingestHeaders('pro-95', {
     'anthropic-ratelimit-unified-5h-utilization': '0.9',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  assert.equal(q.canAccept('pro-95').ok, true)
+  assert.equal((await q.canAccept('pro-95')).ok, true)
   q.inflight.set('pro-95', 1)
-  assert.equal(q.canAccept('pro-95').reason, 'quota_band_inflight')
+  assert.equal((await q.canAccept('pro-95')).reason, 'quota_band_inflight')
   q.inflight.set('pro-95', 0)
-  q.ingestHeaders('pro-95', {
+  await q.ingestHeaders('pro-95', {
     'anthropic-ratelimit-unified-5h-utilization': '0.96',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  assert.equal(q.canAccept('pro-95').ok, true, 'past the line but inside the 5% overshoot')
-  q.ingestHeaders('pro-95', {
+  assert.equal((await q.canAccept('pro-95')).ok, true, 'past the line but inside the 5% overshoot')
+  await q.ingestHeaders('pro-95', {
     'anthropic-ratelimit-unified-5h-utilization': '1',
     'anthropic-ratelimit-unified-5h-status': 'allowed',
   })
-  assert.equal(q.canAccept('pro-95').reason, 'quota_5h_safety')
+  assert.equal((await q.canAccept('pro-95')).reason, 'quota_5h_safety')
 })
 
-test('reloadConfig applies conc and rpm without rewriting account rows', () => {
+test('reloadConfig applies conc and rpm without rewriting account rows', async () => {
   const q = new AccountQuota({
     dataDir: tmpDir(),
     config: {
@@ -264,27 +274,27 @@ test('reloadConfig applies conc and rpm without rewriting account rows', () => {
       tiers: { default: { max_concurrency: 2, max_rpm: 0 } },
     },
   })
-  q.ensure({ account_id: 'live' })
-  const acc = q.repo.get('live')
+  await q.ensure({ account_id: 'live' })
+  const acc = await q.repo.get('live')
   assert.equal(q.limitFor(acc), 2)
   assert.equal(q.rpmLimitFor(acc), 0)
   q.reloadConfig({
     quota: { block_on_5h: true, block_on_7d: true },
     tiers: { default: { max_concurrency: 8, max_rpm: 12 } },
   })
-  assert.equal(q.limitFor(q.repo.get('live')), 8)
-  assert.equal(q.rpmLimitFor(q.repo.get('live')), 12)
+  assert.equal(q.limitFor(await q.repo.get('live')), 8)
+  assert.equal(q.rpmLimitFor(await q.repo.get('live')), 12)
 })
 
-test('manual conc and rpm pins ignore live tier', () => {
+test('manual conc and rpm pins ignore live tier', async () => {
   const q = new AccountQuota({ dataDir: tmpDir(), config: {} })
-  q.ensure({ account_id: 'pin' })
-  q.setMaxConcurrency('pin', 1, { override: true })
-  q.setMaxRpm('pin', 2, { override: true })
+  await q.ensure({ account_id: 'pin' })
+  await q.setMaxConcurrency('pin', 1, { override: true })
+  await q.setMaxRpm('pin', 2, { override: true })
   q.reloadConfig({
     quota: { block_on_5h: true, block_on_7d: true },
     tiers: { default: { max_concurrency: 8, max_rpm: 60 } },
   })
-  assert.equal(q.limitFor(q.repo.get('pin')), 1)
-  assert.equal(q.rpmLimitFor(q.repo.get('pin')), 2)
+  assert.equal(q.limitFor(await q.repo.get('pin')), 1)
+  assert.equal(q.rpmLimitFor(await q.repo.get('pin')), 2)
 })

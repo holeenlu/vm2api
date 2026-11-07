@@ -1,3 +1,6 @@
+import { createUsageEvidence, hasCompleteUsage } from '../protocol/usage-evidence.mjs'
+import { createStreamTiming } from '../protocol/stream-timing.mjs'
+import { mergeUsage } from '../protocol/openai-usage.mjs'
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -25,6 +28,7 @@ import {
 } from '../oauth/oauth-credentials.mjs'
 import { isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { runSlotOauth } from './slot-oauth.mjs'
+import { mirrorClaudeSlotCredential } from '../oauth/claude-slot-vault.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { applyClaudeSSELineToMessage, createClaudeMessageAssembler } from '../protocol/convert.mjs'
 import {
@@ -34,12 +38,25 @@ import {
   isWrapConnectionError,
 } from '../core/errors.mjs'
 import { extraHeadersFromLimitError } from '../pool/quota-window.mjs'
-import { createStreamTiming } from '../protocol/stream-timing.mjs'
-import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
 
 const MAX_BODY = 64 * 1024 * 1024
 const credentialRefreshTail = new Map()
+const SEND_STATE_RANK = Object.freeze({ not_sent: 0, ambiguous: 1, sent: 2 })
+
+function mergeSendState(current, next) {
+  const value = String(next || '').trim()
+  if (!(value in SEND_STATE_RANK)) return current || 'not_sent'
+  const previous = current && current in SEND_STATE_RANK ? current : 'not_sent'
+  return SEND_STATE_RANK[value] >= SEND_STATE_RANK[previous] ? value : previous
+}
+
+function reportSendState(onSendState, state) {
+  if (typeof onSendState !== 'function') return
+  try {
+    onSendState(state)
+  } catch {}
+}
 
 function withCredentialRefreshLock(key, fn) {
   const prev = credentialRefreshTail.get(key) || Promise.resolve()
@@ -95,6 +112,7 @@ function workerRequest(
     timeoutMode = 'overall',
     headers = {},
     maxRequestBytes = 0,
+    onSendState = null,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -104,7 +122,6 @@ function workerRequest(
       return
     }
     const payload = body == null ? null : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
-    // Include the headers, session metadata and request_id added around the caller's body.
     if (maxRequestBytes > 0 && payload?.length > maxRequestBytes) {
       reject(
         Object.assign(new Error(`Request envelope exceeds ${maxRequestBytes} bytes`), {
@@ -150,14 +167,17 @@ function workerRequest(
       },
       (res) => {
         if (timeoutMode === 'first-byte') clearTimer()
+        reportSendState(onSendState, 'sent')
         resolve(res)
       },
     )
     arm(timeoutMs, `slot worker timeout after ${timeoutMs}ms`)
     req.once('close', clearTimer)
     req.once('error', reject)
+    reportSendState(onSendState, 'not_sent')
     if (payload) req.write(payload)
     req.end()
+    reportSendState(onSendState, 'ambiguous')
   })
 }
 
@@ -204,7 +224,7 @@ function parseJson(buffer, status = 0) {
   try {
     return JSON.parse(String(buffer || ''))
   } catch {
-    if (status === 413) {
+    if (status === 413)
       return {
         type: 'error',
         error: {
@@ -214,7 +234,6 @@ function parseJson(buffer, status = 0) {
           details: { retryable: false },
         },
       }
-    }
     return {
       type: 'error',
       error: { type: 'worker_error', code: 'worker_invalid_json', message: String(buffer || '').slice(0, 400) },
@@ -581,6 +600,7 @@ export async function callGoWorker({
   cliHop = false,
   repaired = false,
   onEnvelope = null,
+  onSendState = null,
   redactionPrincipal = '',
   redactionSession = '',
 } = {}) {
@@ -604,12 +624,19 @@ export async function callGoWorker({
       via: 'go-worker-mock',
       terminalState: mock.ok ? 'verified' : 'error',
       usage: mock.body?.usage || null,
+      usageComplete: !!mock.ok && hasCompleteUsage(mock.body?.usage),
       model: mock.body?.model || null,
       stopReason: mock.body?.stop_reason || null,
+      sendState: 'sent',
     }
   }
   const requestId = randomUUID()
   const stopCancel = cancelOnAbort(exec, signal, requestId)
+  let sendState = 'not_sent'
+  const observeSendState = (state) => {
+    sendState = mergeSendState(sendState, state)
+    reportSendState(onSendState, state)
+  }
   try {
     const redaction = await redactionContext({ routing, exec, redactionPrincipal, redactionSession })
     const prepared = envelope
@@ -635,9 +662,10 @@ export async function callGoWorker({
       method: 'POST',
       requestPath,
       body: { ...prepared.envelope, request_id: requestId },
-      maxRequestBytes,
       signal,
       timeoutMs,
+      maxRequestBytes,
+      onSendState: observeSendState,
     })
     const data = await readAll(response)
     const parsedRaw = parseJson(data, response.statusCode)
@@ -651,11 +679,13 @@ export async function callGoWorker({
       body: parsed,
       headers,
       usage: parsed?.usage || null,
+      usageComplete: !!parsed?.stop_reason && hasCompleteUsage(parsed?.usage),
       model: parsed?.model || null,
       stopReason: parsed?.stop_reason || null,
       terminalState: headers['x-terminal-state'] || null,
       transportError: false,
       threadBetas: prepared.thread,
+      sendState,
     })
   } catch (error) {
     const blocked = redactionResult(error)
@@ -676,6 +706,7 @@ export async function callGoWorker({
       headers: {},
       terminalState: error.status === 413 ? 'rejected' : 'transport_error',
       transportError: error.status !== 413,
+      sendState,
     }
   } finally {
     stopCancel()
@@ -705,10 +736,14 @@ export async function streamGoWorker({
   repaired = false,
   onEnvelope = null,
   onOutboundHeaders = null,
+  onSendState = null,
   redactionPrincipal = '',
   redactionSession = '',
 } = {}) {
   if (isCrsMock()) {
+    reportSendState(onSendState, 'not_sent')
+    reportSendState(onSendState, 'ambiguous')
+    reportSendState(onSendState, 'sent')
     const { body: outboundBody, headers } = finalizeWorkerPayload({
       body,
       reqHeaders,
@@ -724,6 +759,7 @@ export async function streamGoWorker({
     writeCrsTrace({ body: outboundBody, headers, stream: true })
     const scenario = mockScenario(exec)
     const mockStartedAt = Date.now()
+    const mockTiming = createStreamTiming(mockStartedAt)
     if (scenario === 'incomplete_stream') {
       if (deliveryMode === 'verified') {
         return {
@@ -734,6 +770,7 @@ export async function streamGoWorker({
           headers: {},
           terminalState: 'incomplete',
           committed: false,
+          sendState: 'sent',
         }
       }
       if (typeof onCommit === 'function') onCommit()
@@ -756,6 +793,36 @@ export async function streamGoWorker({
         headers: {},
         terminalState: 'incomplete',
         committed: true,
+        sendState: 'sent',
+      }
+    }
+    if (scenario === 'job_stream_overflow') {
+      // #689: the slot kernel's own terminal frame when its job sink overflows mid-stream.
+      const overflow = {
+        type: 'error',
+        error: { type: 'api_error', code: 'kernel_error', message: 'job stream overflow' },
+      }
+      if (typeof onCommit === 'function') onCommit()
+      if (onEvent) {
+        await onEvent('event: message_start')
+        await onEvent('data: {"type":"message_start","message":{"content":[]}}')
+        await onEvent('')
+        await onEvent('event: content_block_delta')
+        await onEvent('data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}')
+        await onEvent('')
+        await onEvent('event: error')
+        await onEvent(`data: ${JSON.stringify(overflow)}`)
+        await onEvent('')
+      }
+      return {
+        ok: false,
+        status: 502,
+        via: 'go-worker-mock-stream',
+        body: overflow,
+        headers: {},
+        terminalState: 'error',
+        committed: true,
+        sendState: 'sent',
       }
     }
     const payload = mockCrsPayload({ scenario })
@@ -765,9 +832,9 @@ export async function streamGoWorker({
         via: 'go-worker-mock-stream',
         terminalState: 'rejected',
         committed: false,
+        sendState: 'sent',
       }
     }
-    const mockTiming = createStreamTiming(mockStartedAt)
     await emitMockSse(async (line) => {
       if (line.startsWith('data:')) {
         try {
@@ -783,12 +850,21 @@ export async function streamGoWorker({
       terminalState: payload.ok ? 'verified' : 'error',
       committed: !!payload.ok,
       usage: payload.body?.usage || null,
+      usageComplete: !!payload.ok && hasCompleteUsage(payload.body?.usage),
       model: payload.body?.model || null,
       stopReason: payload.body?.stop_reason || null,
       ...mockTiming.snapshot(),
+      sendState: 'sent',
     }
   }
   let committed = false
+  let terminalEventSeen = false
+  let sendState = 'not_sent'
+  const observeSendState = (state) => {
+    sendState = mergeSendState(sendState, state)
+    reportSendState(onSendState, state)
+  }
+  const evidence = createUsageEvidence()
   const timing = createStreamTiming()
   const requestId = randomUUID()
   const stopCancel = cancelOnAbort(exec, signal, requestId)
@@ -818,11 +894,12 @@ export async function streamGoWorker({
       method: 'POST',
       requestPath,
       body: { ...prepared.envelope, request_id: requestId },
-      maxRequestBytes,
       signal,
       timeoutMs,
       timeoutMode: 'first-byte',
       headers: { te: 'trailers' },
+      maxRequestBytes,
+      onSendState: observeSendState,
     })
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
@@ -837,6 +914,7 @@ export async function streamGoWorker({
         terminalState: headers['x-terminal-state'] || 'error',
         transportError: false,
         threadBetas: prepared.thread,
+        sendState,
       })
     }
     let buffer = ''
@@ -876,11 +954,27 @@ export async function streamGoWorker({
     }
     const observeSseEvent = (event) => {
       if (!event) return event
+      if (
+        ['error', 'response.failed', 'response.completed', 'response.done', 'response.incomplete'].includes(event.type)
+      )
+        terminalEventSeen = true
+      evidence.observe(event)
       timing.observe(event, receivedAt)
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
       if (event.type === 'error') lastError = event
+      if (event.type === 'response.failed') {
+        lastError = {
+          type: 'error',
+          status: event.status,
+          error: {
+            ...event.response?.error,
+            code: event.response?.error?.code || 'response_failed',
+            message: event.response?.error?.message || 'Upstream response failed',
+          },
+        }
+      }
       if (event.type === 'message_stop') sawMessageStop = true
       if (event.type === 'message_start') rememberThreadTurn(event.message?.id, prepared.thread)
       const evUsage = usageFromSseEvent(event)
@@ -914,9 +1008,11 @@ export async function streamGoWorker({
       // job_done and its trailers afterward. Keep reading until the worker
       // closes the response so a normal completion is not mistaken for cancel.
       const sseRestorer = prepared.redaction ? createSseRestorer(prepared.redaction) : null
+      // 流式解码：多字节字符跨块时按块 toString 会切成乱码（审计 P1-P1）
+      const decoder = new TextDecoder()
       for await (const chunk of response) {
         receivedAt = Date.now()
-        buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+        buffer += Buffer.isBuffer(chunk) ? decoder.decode(chunk, { stream: true }) : String(chunk)
         let newline
         while ((newline = buffer.indexOf('\n')) >= 0) {
           let line = buffer.slice(0, newline).replace(/\r$/, '')
@@ -972,6 +1068,7 @@ export async function streamGoWorker({
         }
         if (sawChunk && !outboundHeadersFrame && buffer) lastChunkAt = Date.now()
       }
+      buffer += decoder.decode()
       if (buffer && !outboundHeadersFrame) {
         applyClaudeSSELineToMessage(buffer, assembler)
         if (buffer.startsWith('data:')) {
@@ -1002,10 +1099,13 @@ export async function streamGoWorker({
         via: 'go-worker-stream',
 
         body: lastError || assembled || { type: 'message', role: 'assistant', content: [] },
+        explicitFailure: !!lastError,
+        terminalEventSeen,
         headers: rateHeaders,
         // Trailer stays authoritative, but it may carry totals only (Codex/Responses hops).
         // Merge so SSE `input_tokens_details` / cache breakdown survives instead of being short-circuited.
         usage: mergeUsage(mergeUsage(assembled?.usage || null, sseUsage), meta.usage),
+        usageComplete: evidence.snapshot().usageComplete,
         model: meta.model || sseModel || assembled?.model || null,
         stopReason,
         sawMessageStop,
@@ -1014,6 +1114,7 @@ export async function streamGoWorker({
         terminalState,
         transportError: false,
         threadBetas: prepared.thread,
+        sendState,
       })
     } finally {
       if (idleTimer) clearInterval(idleTimer)
@@ -1025,13 +1126,16 @@ export async function streamGoWorker({
       return clientCancelledResult({
         via: 'go-worker-stream',
         ...timing.snapshot(),
+        ...evidence.snapshot(),
         committed,
+        sendState,
       })
     }
     return {
       ok: false,
       status: error.status === 413 ? 413 : 0,
       via: 'go-worker-stream',
+      ...evidence.snapshot(),
       body: {
         type: 'error',
         error: {
@@ -1044,8 +1148,10 @@ export async function streamGoWorker({
       headers: {},
       ...timing.snapshot(),
       committed,
+      terminalEventSeen,
       terminalState: committed ? 'incomplete' : error.status === 413 ? 'rejected' : 'transport_error',
       transportError: error.status !== 413,
+      sendState,
     }
   } finally {
     stopCancel()
@@ -1086,6 +1192,23 @@ export async function workerHealth(exec, { timeoutMs = 3000, signal } = {}) {
       code: error.code || 'worker_unavailable',
     }
   }
+}
+
+/**
+ * 槽内 Go 的 usage/profile/models/reset-* 只读凭据，临期时报 needs_refresh（审计 P1-C3）：
+ * 先经本进程的刷新锁与登录保护窗 ensure，再重试一次。换票只走 `oauth refresh` 一个入口。
+ */
+export async function runSlotOauthEnsured(
+  exec,
+  op,
+  opts = {},
+  { ensure = ensureWorkerCredential, run = runSlotOauth } = {},
+) {
+  const first = await run(exec, op, opts)
+  if (first?.body?.error?.code !== 'needs_refresh') return first
+  const ensured = await ensure(exec)
+  if (ensured?.ok !== true) return first
+  return run(exec, op, opts)
 }
 
 export async function ensureWorkerCredential(exec, { force = false } = {}) {
@@ -1173,6 +1296,8 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
     const result = await runSlotOauth(exec, 'refresh', { force: !!force })
     const body = result?.body || {}
     const refreshedCredential = readWorkerCredentialFile(exec.homeDir)
+    // 换票成功后把新凭据写进凭据库副本（审计 P1-C9；尽力而为，不阻塞、不影响结果）
+    if (result?.ok && body.refreshed) void mirrorClaudeSlotCredential(exec.vmId || exec.vm?.id, exec.homeDir)
     const mapped = {
       ok: !!result?.ok,
       status: result?.status || 0,
@@ -1216,6 +1341,7 @@ export async function importWorkerCredential(exec, credential, { timeoutMs = 600
     writeWorkerCredentialFile(exec.homeDir, credential)
     // Import is the one case where the control plane's credential replaces the slot's copy.
     await slotHost(exec.vm).onImport(exec.vm, path.dirname(exec.homeDir))
+    void mirrorClaudeSlotCredential(exec.vmId || exec.vm?.id, exec.homeDir)
   } catch (error) {
     return {
       ok: false,
@@ -1328,10 +1454,10 @@ export async function callWorkerGet(exec, requestPath, { timeoutMs = 30000, sign
     }
   }
   if (requestPath === '/internal/v1/models') {
-    return runSlotOauth(exec, 'models', { timeoutMs })
+    return runSlotOauthEnsured(exec, 'models', { timeoutMs })
   }
   if (requestPath === '/internal/oauth/usage') {
-    return runSlotOauth(exec, 'usage', { timeoutMs })
+    return runSlotOauthEnsured(exec, 'usage', { timeoutMs })
   }
   try {
     const response = await workerRequest(exec, { requestPath, timeoutMs, signal })
@@ -1355,11 +1481,4 @@ export async function callWorkerGet(exec, requestPath, { timeoutMs = 30000, sign
       transportError: true,
     }
   }
-}
-
-export async function countTokensViaWorker(exec, { body, headers = {}, timeoutMs = 45000 } = {}) {
-  if (isCrsMock()) {
-    return { ok: true, status: 200, body: { input_tokens: 8 }, headers: {}, via: 'go-worker-mock' }
-  }
-  return runSlotOauth(exec, 'count-tokens', { body, headers, timeoutMs })
 }

@@ -8,7 +8,7 @@ import { slotExecArgv } from '../vm/slot-exec.mjs'
 
 const WORKER_CONFIG = '/run/kin/worker.json'
 const WORKER_BIN = '/usr/local/bin/kin-worker'
-const OPS = new Set(['refresh', 'usage', 'profile', 'models', 'count-tokens', 'reset-status', 'reset-redeem'])
+const OPS = new Set(['refresh', 'usage', 'profile', 'models', 'reset-status', 'reset-redeem'])
 
 function failure(code, message = undefined) {
   const error = { code }
@@ -115,7 +115,6 @@ export async function runSlotOauth(
   op,
   {
     body,
-    headers,
     force = false,
     timeoutMs = 45000,
     runDocker = runSlotProcess,
@@ -131,12 +130,7 @@ export async function runSlotOauth(
   const argv = slotExecArgv(vm, [WORKER_BIN, 'oauth', op, '--config', WORKER_CONFIG], { interactive: true, user })
   if (force) argv.push('--force')
 
-  const stdin =
-    op === 'count-tokens'
-      ? JSON.stringify({ body: body || {}, headers: headers || {} })
-      : op === 'reset-redeem'
-        ? JSON.stringify(body || {})
-        : ''
+  const stdin = op === 'reset-redeem' ? JSON.stringify(body || {}) : ''
   // Only the unique guest RT writer can prove an attempt happened: cache hits,
   // waiters and polls emit no notification. Preserve order without blocking stdout.
   let telemetry = Promise.resolve()

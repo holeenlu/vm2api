@@ -1,15 +1,30 @@
+import { randomUUID, createHash } from 'node:crypto'
+import { isDbOpen, getDb } from '../db/database.mjs'
+import { RequestAttemptsRepo } from '../db/repos/request-attempts-repo.mjs'
+import { codexResponseOwners, codexClientScope, codexAccountIdentity } from '../db/repos/codex-response-owners-repo.mjs'
+import { CodexAccountProtection } from '../pool/codex-account-protection.mjs'
+import { canReplayCodex, codexSendState, codexFeedbackKind } from '../pool/codex-replay.mjs'
+import { setTimeout as delay } from 'node:timers/promises'
+
+function credentialGeneration(projectRoot, vmId) {
+  const accounts = readCodexAccounts(projectRoot, vmId)
+  const tokens = accounts.map((a) => a.access_token || '').join('\0')
+  return parseInt(createHash('sha256').update(tokens).digest('hex').slice(0, 12), 16)
+}
 /**
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
+import { hasCompleteUsage } from './usage-evidence.mjs'
+import { semanticStatusForStreamError } from './stream-error-status.mjs'
 import path from 'node:path'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { isClientStream, fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions } from './convert.mjs'
-import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
-import { isValidVmId, listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
+import { getVm, listVms, markUnschedulable, persistCodexUsage } from '../vm/vm-registry.mjs'
+import { isValidVmId } from '../vm/vm-file.mjs'
+import { requestCodexQuotaSweep } from '../pool/codex-quota-sweep.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
-import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { keyAllowsVm, keyAllowsModel, keyScopeFromRequest, groupScopeDenial } from '../admin/key-scope.mjs'
 import { ownerScopeFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
-import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { restrictCodexClient } from './codex-restriction.mjs'
 import {
   responsesSseToChatChunk,
@@ -18,9 +33,12 @@ import {
   createResponsesSseEventNamer,
   assembleCodexBodyFromSse,
   codexBodyToAnthropicMessage,
+  withChatUrlCitations,
   isToolArgumentsError,
   toCodexResponses,
 } from './codex-convert.mjs'
+import { dispatchCodexGateway, gatewayFallbackCode, recordGatewayDiagnostics } from './handle-codex-gateway.mjs'
+import { commitCodexDelivery, normalizeServiceTier, sessionFrom } from './codex-hop-shared.mjs'
 import {
   extraFromCodexHeaders,
   codexCreditsFromHeaders,
@@ -38,7 +56,7 @@ import {
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { readCodexAccounts, upsertCodexAccount } from '../vm/codex-slot.mjs'
+import { readCodexAccounts, refreshCodexSlotAccess } from '../vm/codex-slot.mjs'
 import { scopeAccountFromVm } from './jev-intercept.mjs'
 import {
   CODEX_APP_VERSION,
@@ -50,11 +68,21 @@ import {
   makeProxyFetch,
   refreshCodexAccessToken,
 } from './codex-models.mjs'
-import { orderCodexSessionSlots, codexSlotAllowsModel, isCodexFailoverError } from '../pool/codex-slot-pool.mjs'
+import {
+  orderCodexSessionSlots,
+  codexRevokedCredential,
+  codexSlotAllowsModel,
+  hasServiceableCodexSlot,
+  isCodexFailoverError,
+  isCodexOverloadError,
+} from '../pool/codex-slot-pool.mjs'
 import {
   holdOpenAIAccount,
+  openAIOverloadOutlierHold,
+  openAIPoolOverloaded,
   reportOpenAIAttempt,
   tryAcquireOpenAISlot,
+  tryConsumeOpenAIRpm,
   waitForOpenAICapacity,
   wakeOpenAIWaiter,
 } from '../pool/openai-account-runtime.mjs'
@@ -62,7 +90,13 @@ import { CLIENT_POOL_BUSY_MESSAGE, CLIENT_POOL_UNAVAILABLE_MESSAGE, ErrorCode } 
 import { applyOpenaiWashLog } from './openai-wash.mjs'
 import { canonicalImageToolModel, imageGenerationTools } from './image-tool-models.mjs'
 import { isImageToolModelEnabled } from './gpt-model-policy.mjs'
-import { sessionIdForLog } from './log-fields.mjs'
+import {
+  CODEX_RESPONSES_PATH,
+  applyGatewayUpstream,
+  reasoningEffortOf,
+  sessionIdForLog,
+  upstreamPathForLog,
+} from './log-fields.mjs'
 import { redactHeaders } from '../admin/request-log.mjs'
 import {
   extractCallerSession,
@@ -72,6 +106,18 @@ import {
   resolveOutboundSessionId,
 } from '../identity/identity-rewrite.mjs'
 import { clientIp } from '../pool/sticky-router.mjs'
+import { createRequestFacts } from './request-facts.mjs'
+import { advanceAttemptFacts, createAttemptFacts } from './attempt-facts.mjs'
+import { compactCodexInput } from './codex-context-budget.mjs'
+import { runtimeMetrics } from '../core/runtime-metrics.mjs'
+
+// While the whole pool sheds load, each extra account switch costs another
+// multi-second overloaded attempt and adds to the upstream pressure. One switch,
+// then hand the client a Retry-After.
+const CODEX_POOL_OVERLOAD_MAX_SWITCHES = 1
+const CODEX_POOL_OVERLOAD_RETRY_AFTER_SEC = 3
+import { codexSettings, codexSettingsSnapshot } from '../executor/settings-store.mjs'
+import { GATEWAY_SSE_KEEPALIVE_MS } from './gateway-keepalive.mjs'
 
 // Official Codex client headers for ChatGPT Responses. Auth is attached by the kernel.
 const CODEX_KERNEL_HEADER_ALLOWLIST = Object.freeze([
@@ -96,6 +142,40 @@ function headerString(headers, name) {
   return typeof value === 'string' && value.trim() ? value : ''
 }
 
+function initCodexFacts(req, protocol, body, requestId, routing) {
+  req.requestFacts = createRequestFacts({
+    request_id: requestId,
+    protocol,
+    method: req.method,
+    path: req.url,
+    model: body?.model,
+    api_key_id: req.apiKeyRecord?.id,
+    owner_user_id: req.apiKeyRecord?.user_id,
+    client_request_id: req.headers?.['x-request-id'] || req.headers?.['x-client-request-id'],
+    stream: body?.stream === true,
+  })
+  req.deliveryCommit ||= 'pending'
+  req.attemptFacts = createAttemptFacts({ request_id: requestId })
+}
+
+function beginCodexAttempt(req, { attemptNo, vmId, accountId, model }) {
+  req.attemptFacts = advanceAttemptFacts(req.attemptFacts, {
+    attempt_no: attemptNo,
+    vm_id: vmId,
+    account_id: accountId,
+    model,
+    send_state: 'ambiguous',
+  })
+}
+
+function finishCodexAttempt(req, result) {
+  req.attemptFacts = advanceAttemptFacts(req.attemptFacts, {
+    send_state: 'sent',
+    upstream_status: Number.isSafeInteger(result?.status) ? result.status : null,
+    terminal_state: result?.status >= 200 && result.status < 300 ? 'verified' : 'upstream_error',
+  })
+}
+
 function codexKernelHeaders(reqHeaders = {}, body = {}, session = null) {
   const headers = {}
   for (const name of CODEX_KERNEL_HEADER_ALLOWLIST) {
@@ -114,20 +194,6 @@ function codexKernelHeaders(reqHeaders = {}, body = {}, session = null) {
         : `model=${model}`
   }
   return headers
-}
-
-function sessionFrom(req, body) {
-  const headers = req.headers || {}
-  return {
-    session_id:
-      headers['x-session-id'] ||
-      headers['session-id'] ||
-      headers['x-conversation-id'] ||
-      body?.conversation_id ||
-      body?.session_id ||
-      null,
-    previous_response_id: body?.previous_response_id || null,
-  }
 }
 
 /** Session seed identity: first non-empty input item, first non-reminder block (firstUserIdentityText). */
@@ -165,12 +231,17 @@ export function codexFailoverBudget(routing = {}) {
   }
 }
 
-/** Same-account retries are only useful for transient failures; auth and quota errors switch seats. */
+/**
+ * Same-account retries are only useful for transient failures; auth, quota and
+ * provider overloads switch seats. An overload is a seat/provider capacity
+ * signal, so replaying it on the same slot only adds latency and duplicate
+ * 503 attempts before the outer failover can pick another slot.
+ */
 export function isRetryableSameCodexAccount(
   result,
   { headersSent = false, conversionError = null, signal = null } = {},
 ) {
-  if (!result || result.ok === true || result.committed === true || headersSent || conversionError) return false
+  if (!canReplayCodex(result) || headersSent || conversionError) return false
   if (signal?.aborted) return false
   const status = Number(result.status) || 0
   const code = String(result.body?.error?.code || result.error_code || '')
@@ -181,11 +252,14 @@ export function isRetryableSameCodexAccount(
     )
   )
     return false
+  if (isCodexOverloadError(result)) return false
   if (result.transportError === true || status === 0) return true
   if (status === 408) return true
   if (status === 500 || status === 502 || status === 503 || status === 504) {
     return (
-      code === '' || /server_error|provider_error|upstream_error|overloaded_error|internal_error|transport/i.test(code)
+      isCodexOverloadError(result) ||
+      code === '' ||
+      /server_error|provider_error|upstream_error|overloaded_error|internal_error|transport/i.test(code)
     )
   }
   return false
@@ -212,17 +286,64 @@ function pinnedVmId(req) {
  * A request that continues a stored response (`previous_response_id`) can
  * only run where that response lives.
  */
-export function pickCodexCandidates(
+/** 本请求的 Key 与分组范围内是否有能接单的 Codex 槽位（Gateway 回退 VM 的前提）；只读，不同步额度。 */
+export async function codexVmFallbackReady(projectRoot, req, model, routing = {}) {
+  try {
+    const scope = await keyScopeFromRequest(req)
+    if (!keyAllowsModel(scope, model) || groupScopeDenial(scope) || scope.group_type === 'anthropic') return false
+    const owner = await ownerScopeFromRequest(req)
+    const quota = normalizeCodexRouting(routing.codex || routing).quota
+    const vms = (await listVms(projectRoot, { codex: { quota } })).filter(
+      (vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm),
+    )
+    return hasServiceableCodexSlot(vms, { model })
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Every database read admission needs happens here, awaited (R6 B7c): key scope, owner scope, the stored
+ * response owner, the sticky binding, the VM summaries and the account-protection freezes. The ordering
+ * itself (orderCodexSessionSlots) is synchronous, and admitCodexCandidate() claims a seat with the
+ * synchronous in-memory tryAcquireOpenAISlot right after (R13: fresh candidates + one synchronous claim).
+ */
+export async function pickCodexCandidates(
   projectRoot,
   req,
-  { stickyRouter = null, sessions = null, body = null, excluded = null, routing = {}, ownerScope = null } = {},
+  {
+    stickyRouter = null,
+    sessions = null,
+    body = null,
+    excluded = null,
+    routing = {},
+    ownerScope = null,
+    continuationOwner = null,
+    protection = null,
+  } = {},
 ) {
   const pin = pinnedVmId(req)
-  const owner = ownerScope || ownerScopeFromRequest(req)
+  protection ||= isDbOpen() ? new CodexAccountProtection(getDb()) : null
+  if (body?.previous_response_id) {
+    const owner =
+      continuationOwner ||
+      (isDbOpen() ? await codexResponseOwners().resolve(codexClientScope(req), body.previous_response_id) : null)
+    if (
+      !owner ||
+      (pin && pin !== owner.vm_id) ||
+      owner.identity_hash !== codexAccountIdentity(readCodexAccounts(projectRoot, owner.vm_id))
+    ) {
+      return { error: 'response_not_portable', ids: [], candidates: [] }
+    }
+    continuationOwner = owner
+  }
+  const owner = ownerScope || (await ownerScopeFromRequest(req))
   const model = body?.model || null
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
-  const scope = keyScopeFromRequest(req)
-  const poolDenial = vmPoolDenial(scope)
+  const scope = await keyScopeFromRequest(req)
+  if (!keyAllowsModel(scope, model))
+    return { error: 'group_unavailable', message: '当前分组无权调用该模型', ids: [], candidates: [] }
+  const poolDenial = groupScopeDenial(scope)
   if (poolDenial) return { error: 'vm_pool_unavailable', message: poolDenial.message, ids: [], candidates: [] }
   if (scope.group_type === 'anthropic') return { error: 'key_group_mismatch', ids: [], candidates: [] }
   if (pin) {
@@ -237,51 +358,55 @@ export function pickCodexCandidates(
     })
     return { ...ordered, pin, sticky: false, sessionKey: null, stickyKeys: [] }
   }
-  // Quota sync only needs the raw records; the summarized list is built once, after it.
-  const vmDir = path.join(projectRoot, 'vms')
-  for (const file of listVmRecordFiles(vmDir)) {
-    let vm
-    try {
-      vm = readJsonCached(path.join(vmDir, file))
-    } catch {
-      continue
-    }
-    if (!vm?.id || !isCodexVm(vm)) continue
-    syncCodexQuotaSchedule(projectRoot, vm, { policy: routingPolicy })
-  }
+  // Ordering derives quota parks live from each record; the persisted restriction is
+  // panel state only, written back off the request at most once per gap (#737).
+  requestCodexQuotaSweep(projectRoot, routingPolicy)
   const stickyKeys = stickyRouter?.collectPoolKeys?.(req, body || {}, { platform: 'openai' }) || []
-  const sessionKey = stickyRouter?.extractPoolKey?.(req, body || {}, { platform: 'openai' }) || stickyKeys[0] || null
-  const bound = sessionKey ? stickyRouter?.resolve?.(sessionKey) : null
-  const vms = listVms(projectRoot, { codex: { quota: routingPolicy } }).filter(
+  const sessionKey =
+    (await stickyRouter?.extractPoolKey?.(req, body || {}, { platform: 'openai' })) || stickyKeys[0] || null
+  const bound = sessionKey ? await stickyRouter?.resolve?.(sessionKey) : null
+  const vms = (await listVms(projectRoot, { codex: { quota: routingPolicy } })).filter(
     (vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm),
   )
-  const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
-  if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
-    return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
-  }
-  const ordered = orderCodexSessionSlots(continuesResponse ? vms.filter((vm) => vm.id === bound.vmId) : vms, {
-    boundVmId: bound?.vmId || null,
+  const continuesResponse = !!body?.previous_response_id
+  const ownerVm = continuationOwner?.vm_id || null
+  const scheduling = codexSettings().scheduling
+  const pool = continuesResponse ? vms.filter((vm) => vm.id === ownerVm) : vms
+  // Freezes are read before the synchronous ordering (its protectionUntil callback cannot await).
+  const frozen = protection
+    ? await protection.frozenUntil(
+        pool.filter((vm) => isCodexVm(vm) && !excluded?.has(vm.id)).map((vm) => vm.id),
+        (id) => credentialGeneration(projectRoot, id),
+      )
+    : null
+  const ordered = orderCodexSessionSlots(pool, {
+    boundVmId: continuesResponse ? ownerVm : bound?.vmId || null,
     sessionKey,
     sessionLimit: sessions,
     model,
     excluded,
     quotaPolicy: routingPolicy,
+    resourcePriorities: scope.resource_priorities || null,
+    strategy: scheduling.strategy,
+    affinity: scheduling.affinity,
+    smartWeights: scheduling.smart_weights,
+    protectionUntil: frozen ? (id) => frozen.get(id) || 0 : null,
   })
   // A resting home migrates the conversation like a gone one: the next slot rebinds it.
   const boundLeft = ordered.boundState === 'gone' || ordered.boundState === 'resting'
   if (bound?.vmId && sessionKey && boundLeft) {
-    for (const key of stickyKeys.length ? stickyKeys : [sessionKey]) stickyRouter?.unbind?.(key)
+    for (const key of stickyKeys.length ? stickyKeys : [sessionKey]) await stickyRouter?.unbind?.(key)
     try {
       sessions?.drop?.(bound.vmId, sessionKey)
     } catch {}
   }
-  if (continuesResponse && (boundLeft || ordered.error === 'candidates_exhausted')) {
-    return { error: 'response_not_portable', ids: [], sessionKey, stickyKeys, boundVmId: bound.vmId }
+  if (continuesResponse && (boundLeft || (ordered.error && ordered.error !== 'capacity_unavailable'))) {
+    return { error: 'response_not_portable', ids: [], sessionKey, stickyKeys, boundVmId: ownerVm }
   }
   return { ...ordered, sessionKey, stickyKeys }
 }
 
-function ingestCodexHop(projectRoot, vmId, result, now = Date.now(), policy = null) {
+async function ingestCodexHop(projectRoot, vmId, result, now = Date.now(), policy = null) {
   const headers = result?.headers || {}
   const extra = extraFromCodexHeaders(headers, now)
   let limitedUntil = null
@@ -307,8 +432,7 @@ function execFor(projectRoot, vm) {
 }
 
 export function isRetryableCodexTransport(result) {
-  if (!result || result.ok === true) return false
-  if (result.committed === true) return false
+  if (!canReplayCodex(result)) return false
   const code = String(result.body?.error?.code || result.error_code || '')
   const msg = String(result.body?.error?.message || result.error || '')
   const status = Number(result.status) || 0
@@ -319,13 +443,35 @@ export function isRetryableCodexTransport(result) {
 }
 
 /**
+ * #684: a 403 the kernel can only describe as `upstream status 403: ` (empty upstream
+ * body) or as a bare status / generic code says nothing about the account. In production
+ * the same credential served again within seconds; the native kernel itself cools such a
+ * credential for ~30 s. Hold it as long as a 5xx (30 s), not as a ban (5 min).
+ */
+export const CODEX_UNEXPLAINED_403_HOLD_MS = 30_000
+const GENERIC_403_CODES = new Set(['', 'upstream_auth', 'upstream_error', 'codex_upstream', 'forbidden', 'http_403'])
+const BARE_403_MESSAGE = /^\s*(?:(?:upstream\s+)?(?:status|http)\s*403\s*:?|403(?:\s+forbidden)?|forbidden)?\s*$/i
+
+/** True when a 403 carries no account detail beyond its status (#684). */
+export function isUnexplainedCodex403(result) {
+  if (Number(result?.status) !== 403) return false
+  const error = result?.body?.error || result?.body?.response?.error
+  const code = String(error?.code || result?.error_code || '')
+    .trim()
+    .toLowerCase()
+  const message =
+    typeof error?.message === 'string' ? error.message : typeof result?.error === 'string' ? result.error : ''
+  return GENERIC_403_CODES.has(code) && BARE_403_MESSAGE.test(message)
+}
+
+/**
  * Short process-local hold for an account that just failed upstream. This is
  * not the operator scheduling switch: it expires by itself and keeps the next
  * request from spending another turn on the same dead 401 / rate-limited
  * account. Committed streams and request-shaped errors are never parked.
  */
 export function codexFailureHold(result, now = Date.now()) {
-  if (!result || result.ok === true || result.committed === true) return null
+  if (!result || result.ok === true || result.committed === true || !codexFeedbackKind(result)) return null
   const status = Number(result.status) || 0
   const code = String(result.body?.error?.code || result.error_code || '')
   const message = String(result.body?.error?.message || result.error || '')
@@ -337,21 +483,77 @@ export function codexFailureHold(result, now = Date.now()) {
   )
     return null
   if (status === 401) return { until: now + 5 * 60_000, reason: 'oauth_401' }
+  if (status === 403 && isUnexplainedCodex403(result))
+    return { until: now + CODEX_UNEXPLAINED_403_HOLD_MS, reason: 'upstream_403_no_detail' }
   if (status === 403) return { until: now + 5 * 60_000, reason: 'permission_denied' }
   if (status === 429) return { until: now + 60_000, reason: 'rate_limited' }
+  // One overload says little about the account: at peak upstream sheds load on
+  // every account at once. Only a pool outlier is parked (openAIOverloadOutlierHold).
+  if (isCodexOverloadError(result)) return null
   if (status === 408 || status >= 500) return { until: now + 30_000, reason: 'upstream_5xx' }
   if (result.transportError === true || status === 0) return { until: now + 30_000, reason: 'transport_error' }
   return null
 }
 
-/** Idle SOCKS / first hop 502 is retryable only before any SSE byte is committed. */
-/** Lowercased tier; empty, oversized or control-character values are not a tier. */
-function normalizeServiceTier(raw) {
-  if (typeof raw !== 'string') return null
-  const tier = raw.trim().toLowerCase()
-  return tier && tier.length <= 64 && !/[\x00-\x1f\x7f]/.test(tier) ? tier : null
+/**
+ * Upstream revoked the slot's OAuth grant: park it as 不可调度 · 凭证吊销 so the
+ * pool and the panel both stop treating it as healthy. Only re-import or an
+ * operator action reopens it. A credential written while the hop ran is not
+ * the one upstream refused, so a changed generation leaves the slot alone.
+ */
+async function parkRevokedCodexCredential(projectRoot, vmId, result, generation) {
+  if (!codexRevokedCredential(result)) return false
+  if (generation !== credentialGeneration(projectRoot, vmId)) return false
+  await markUnschedulable(projectRoot, vmId, 'oauth_revoked', {
+    code: 'token_revoked',
+    message: '上游已吊销该 GPT OAuth 凭证，请重新授权导入',
+  })
+  return true
 }
 
+/** Summary only: do not copy upstream bodies or credential-bearing diagnostics into normal logs. */
+function recordCodexFailure(logBag, result, { committed = false, usage = result?.usage } = {}) {
+  const error = result?.body?.error || result?.body?.response?.error
+  const cancelled = result?.clientCancelled === true || result?.terminalState === 'cancelled'
+  const code = typeof error?.code === 'string' && error.code ? error.code : 'codex_upstream'
+  const raw =
+    typeof error?.message === 'string' ? error.message : typeof result?.error === 'string' ? result.error : code
+  logBag.error_code = code
+  logBag.error_message = raw
+    .replace(/[\r\n][\s\S]*/, '')
+    .replace(/[\[{][\s\S]*/, '[details omitted]')
+    .replace(
+      /\b(?:request[ _-]*body|payload|messages|input|prompt)\b["']?\s*[:=][\s\S]*/gi,
+      '[request content omitted]',
+    )
+    .replace(/[a-z][\w+.-]*:\/\/[^\s"'<>]+/gi, '[url]')
+    .replace(/\b(?:authorization|cookie|set-cookie)\s*[:=][\s\S]*/gi, '[REDACTED]')
+    .replace(/\b(Bearer|Basic)\s+[^\s,;"']+/gi, '$1 [REDACTED]')
+    .replace(
+      /(["']?(?:[\w-]*token|api[_-]?key|secret|password|passwd|cookie|session[_-]?key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      '$1[REDACTED]',
+    )
+    .replace(/\bsk-[\w-]+/gi, '[REDACTED]')
+    .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+\b/g, '[REDACTED]')
+    .slice(0, 300)
+  logBag.final_state = cancelled
+    ? 'cancelled'
+    : committed || result?.committed
+      ? 'incomplete'
+      : result?.explicitFailure
+        ? 'rejected'
+        : result?.terminalState || (Number(result?.status) >= 400 ? 'rejected' : 'error')
+  logBag.account_id = logBag.vm_id || null
+  logBag.final_account_id = logBag.account_id
+  logBag.upstream_status = result?.status || 0
+  if (usage && !cancelled) {
+    logBag.usage = disjointOpenaiUsage(usage)
+    logBag.usage_complete = result?.usageComplete === true && hasCompleteUsage(logBag.usage)
+  }
+}
+
+/** Idle SOCKS / first hop 502 is retryable only before any SSE byte is committed. */
+/** Lowercased tier; empty, oversized or control-character values are not a tier. */
 /** `response.service_tier` from a Responses SSE data line, if present. */
 export function serviceTierFromSseLine(line) {
   if (typeof line !== 'string' || !line.startsWith('data:') || !line.includes('service_tier')) return null
@@ -421,6 +623,21 @@ function codexWaitTimeoutMs(routing) {
   return Math.min(WAIT_TIMEOUT_MAX_MS, Math.max(WAIT_TIMEOUT_MIN_MS, n))
 }
 
+// Worker 内选号沿用 Codex 调度设置（控制面设置存储，P4.2）与 VM 路径相同的等待预算，按请求冻结下发
+export function codexGatewayScheduling(routing) {
+  // 同一请求只取一次设置快照：信封里的设置值与 settings_revision 来自同一版本（R4 审查 P1-2）
+  const snapshot = codexSettingsSnapshot()
+  const codex = snapshot.values
+  const { strategy, affinity, smart_weights: smartWeights } = codex.scheduling
+  return {
+    strategy,
+    affinity,
+    smart_weights: smartWeights,
+    wait_timeout_ms: codexWaitTimeoutMs(routing),
+    settings_revision: snapshot.revision,
+  }
+}
+
 function clientGoneSignal(req, res) {
   const controller = new AbortController()
   const onGone = () => controller.abort()
@@ -443,108 +660,96 @@ function clientGoneSignal(req, res) {
  */
 async function admitCodexCandidate(projectRoot, req, opts, { deadline, signal }) {
   let woken = null
-  for (;;) {
-    const picked = pickCodexCandidates(projectRoot, req, opts)
-    const livePolicy = normalizeCodexRouting(opts.routing?.codex || opts.routing).quota
-    if (picked.error && picked.error !== 'capacity_unavailable') return { picked }
-    for (const candidate of picked.candidates || []) {
-      const lease = tryAcquireOpenAISlot(candidate.id, {
-        concurrency: candidate.concurrency,
-        maxRpm: candidate.maxRpm,
-        quotaPolicy: livePolicy,
-      })
-      if (lease) return { picked, vmId: candidate.id, lease }
+  try {
+    for (;;) {
+      if (signal?.aborted) return { picked: { error: 'client_cancelled', ids: [] } }
+      const picked = await pickCodexCandidates(projectRoot, req, opts)
+      const livePolicy = normalizeCodexRouting(opts.routing?.codex || opts.routing).quota
+      if (picked.error && picked.error !== 'capacity_unavailable') return { picked }
+      for (const candidate of picked.candidates || []) {
+        const lease = tryAcquireOpenAISlot(candidate.id, {
+          concurrency: candidate.concurrency,
+          maxRpm: candidate.maxRpm,
+          quotaPolicy: livePolicy,
+          ticket: woken?.ticket,
+        })
+        if (lease) return { picked, vmId: candidate.id, lease }
+      }
+      const waitIds = picked.candidates?.length ? picked.candidates.map((candidate) => candidate.id) : picked.waitIds
+      // A woken waiter that missed a seat it can use lost it to a newer request;
+      // passing the wake on would only re-run selection for every waiter behind
+      // it. Hand it on only when the freed account is not one this request takes.
+      if (woken && (woken.accountId == null || !waitIds?.includes(woken.accountId))) {
+        wakeOpenAIWaiter(woken.accountId)
+      }
+      const now = Date.now()
+      if (now >= deadline) return { picked: { ...picked, error: 'capacity_unavailable', ids: [] } }
+      const retryAt = Number(picked.retryAt)
+      // No seat is busy, every slot is held or spent: a release cannot come, so
+      // waiting past the earliest return only ends in a misleading "busy" 429.
+      if (picked.unavailable && !(Number.isFinite(retryAt) && retryAt <= deadline))
+        return { picked: { ...picked, error: 'pool_unavailable', ids: [] } }
+      const sliceDeadline = Number.isFinite(retryAt) && retryAt > now ? Math.min(deadline, retryAt) : deadline
+      let waited
+      woken?.ticket?.releaseTurn(false)
+      try {
+        waited = await waitForOpenAICapacity({
+          deadline: sliceDeadline,
+          signal,
+          accounts: Array.isArray(waitIds) ? waitIds : null,
+          front: !!woken,
+        })
+      } catch (error) {
+        if (error?.code === 'pool_wait_queue_full') return { picked: { error: 'pool_wait_queue_full', ids: [] } }
+        throw error
+      }
+      if (waited.aborted) return { picked: { error: 'client_cancelled', ids: [] } }
+      woken = waited.woken ? waited : null
     }
-    const waitIds = picked.candidates?.length ? picked.candidates.map((candidate) => candidate.id) : picked.waitIds
-    // A woken waiter that missed a seat it can use lost it to a newer request;
-    // passing the wake on would only re-run selection for every waiter behind
-    // it. Hand it on only when the freed account is not one this request takes.
-    if (woken && (woken.accountId == null || !waitIds?.includes(woken.accountId))) {
-      wakeOpenAIWaiter(woken.accountId)
-    }
-    const now = Date.now()
-    if (now >= deadline) return { picked: { ...picked, error: 'capacity_unavailable', ids: [] } }
-    const retryAt = Number(picked.retryAt)
-    const sliceDeadline = Number.isFinite(retryAt) && retryAt > now ? Math.min(deadline, retryAt) : deadline
-    let waited
-    try {
-      waited = await waitForOpenAICapacity({
-        deadline: sliceDeadline,
-        signal,
-        accounts: Array.isArray(waitIds) ? waitIds : null,
-        front: !!woken,
-      })
-    } catch (error) {
-      if (error?.code === 'pool_wait_queue_full') return { picked: { error: 'pool_wait_queue_full', ids: [] } }
-      throw error
-    }
-    if (waited.aborted) return { picked: { error: 'client_cancelled', ids: [] } }
-    woken = waited.woken ? { accountId: waited.accountId ?? null } : null
+  } finally {
+    woken?.ticket?.releaseTurn()
   }
 }
 
-// Observed with gpt-6-astra + Responses Lite, not a documented upstream limit.
-// Keep the model gate tight until another Lite model shows the same 128 KiB failure.
-// Retry only a failed full-history attempt, keeping the newest reasoning suffix.
-export function reasoningHistoryFallback(args, result) {
-  if (process.env.KIN_CODEX_REASONING_HISTORY_FALLBACK === '0') return null
-  const body = args.body
-  const error = result?.body?.error || result?.body?.response?.error
-  if (result?.ok || result?.committed || result?.transportError || args.signal?.aborted) return null
-  if (![500, 502].includes(Number(result?.status)) || error?.code !== 'server_error') return null
-  if (body?.model !== 'gpt-6-astra' || body?.reasoning?.context !== 'all_turns' || !Array.isArray(body.input))
-    return null
-  if (String(args.envelope?.headers?.['x-openai-internal-codex-responses-lite']).toLowerCase() !== 'true') return null
-  if (body.previous_response_id || args.envelope?.session?.previous_response_id) return null
-  const encrypted = (item) =>
-    item?.type === 'reasoning' && typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0
-  const history = body.input.filter(encrypted)
-  const originalBytes = Buffer.byteLength(JSON.stringify(history.map((item) => item.encrypted_content)))
-  if (originalBytes <= 128 * 1024) return null
-  let retainedBytes = 2
-  const keep = new Set()
-  for (let i = body.input.length - 1; i >= 0; i--) {
-    const item = body.input[i]
-    if (!encrypted(item)) continue
-    const bytes = Buffer.byteLength(JSON.stringify(item.encrypted_content)) + (keep.size ? 1 : 0)
-    if (retainedBytes + bytes > 120 * 1024) break
-    retainedBytes += bytes
-    keep.add(i)
-  }
-  if (!keep.size || keep.size === history.length) return null
-  const nextBody = { ...body, input: body.input.filter((item, i) => !encrypted(item) || keep.has(i)) }
-  return {
-    args: { ...args, body: nextBody, envelope: { ...args.envelope, body: nextBody } },
-    info: {
-      original_array_bytes: originalBytes,
-      retained_array_bytes: retainedBytes,
-      original_items: history.length,
-      retained_items: keep.size,
-      omitted_items: history.length - keep.size,
-    },
-  }
-}
-
-export async function runCodexKernelHop({ hop, args = {}, onEvent, onReasoningFallback } = {}) {
+export async function runCodexKernelHop({
+  hop,
+  args = {},
+  onEvent,
+  maxRetries = 1,
+  retryDelayMs = 0,
+  deadline = Infinity,
+  shouldRetry = isRetryableCodexTransport,
+  canAttempt = () => true,
+} = {}) {
   let emitted = false
   const wrapped = async (line) => {
     emitted = true
     if (onEvent) await onEvent(line)
   }
-  let result = await hop({ ...args, onEvent: wrapped })
-  if (!result?.ok && !emitted && isRetryableCodexTransport(result)) {
-    result = { ...(await hop({ ...args, onEvent: wrapped })), transport_retried: true }
-  }
-  const fallback = !emitted && !result?.transport_retried ? reasoningHistoryFallback(args, result) : null
-  if (fallback) {
-    if (onReasoningFallback)
-      await onReasoningFallback({ originalResult: result, body: fallback.args.body, ...fallback.info })
-    if (args.signal?.aborted) return result
-    result = {
-      ...(await hop({ ...fallback.args, onEvent: wrapped })),
-      reasoning_history_retried: true,
-      reasoning_history_fallback: fallback.info,
+  let result
+  for (let retry = 0; retry <= maxRetries; retry++) {
+    if (!canAttempt() || args.signal?.aborted || Date.now() >= deadline)
+      return (
+        result || {
+          ok: false,
+          status: 504,
+          sendState: 'not_sent',
+          terminalState: 'cancelled',
+          body: { error: { code: 'codex_retry_deadline' } },
+        }
+      )
+    if (retry) {
+      try {
+        await delay(Math.min(retryDelayMs, Math.max(0, deadline - Date.now())), undefined, { signal: args.signal })
+      } catch {
+        return result
+      }
+      if (args.signal?.aborted || Date.now() >= deadline) return result
     }
+    result = await hop({ ...args, onEvent: wrapped })
+    if (retry) result = { ...result, same_account_retries: retry, transport_retried: true }
+    if (emitted || !canReplayCodex(result) || args.signal?.aborted || !canAttempt()) break
+    if (retry >= maxRetries || !canAttempt() || !shouldRetry(result)) break
   }
   return result
 }
@@ -570,7 +775,12 @@ export async function handleCodexProtocol({
   accountGate = null,
   ownerScope = null,
   cfg = null,
+  gatewayWorker = null,
+  gatewayKeepaliveMs = GATEWAY_SSE_KEEPALIVE_MS,
+  // 测试注入：覆盖“是否有能接单的 Codex 槽位”的判定
+  codexVmReady = null,
 }) {
+  routing = structuredClone(routing)
   const codex = normalizeCodexRouting(routing.codex)
   const allowed = isCodexProtocolAllowed(protocol, { codex })
   if (!allowed.ok) {
@@ -594,7 +804,14 @@ export async function handleCodexProtocol({
       error: { type: 'permission_error', code: restriction.code, message: restriction.message },
     })
   }
-  const converted = toCodexResponses(protocol, ctx.body, codex.convert)
+  // Capture client-facing fields before conversion/rewrite. The outer request
+  // log can already contain the mapped billing model or a default effort; for
+  // Codex records these two fields must always describe what the client sent.
+  const clientModel = String(inbound?.model || ctx.body?.model || '').trim()
+  const clientReasoningEffort = reasoningEffortOf(inbound) || reasoningEffortOf(ctx.body)
+  const converted = runtimeMetrics.measure(req, 'codex_convert', () =>
+    toCodexResponses(protocol, ctx.body, codex.convert),
+  )
   if (!converted.ok) {
     stats.errors++
     logBag.via = 'codex-kernel'
@@ -608,16 +825,58 @@ export async function handleCodexProtocol({
       error: {
         type: 'invalid_request_error',
         code: converted.code,
-        message: 'request could not be converted to Codex Responses',
+        message: converted.message || 'request could not be converted to Codex Responses',
+        ...(converted.param ? { param: converted.param } : {}),
       },
     })
   }
+  // The normal HTTP boundary records the raw inbound fields. Codex Responses
+  // and WebSocket/compatibility paths can enter here with a sparse outer log
+  // object, so preserve the client-facing request model before any routing or
+  // billing model is selected. Never use the mapped outbound model as the
+  // request-model value when the raw inbound model is available.
+  if (clientModel) logBag.requested_model = clientModel
+  if (!logBag.model && clientModel) logBag.model = clientModel
+  if (clientReasoningEffort) logBag.reasoning_effort = clientReasoningEffort
   applyOpenaiWashLog(logBag, {
     inboundPath: ctx.path,
     inboundProtocol: protocol,
     converted: converted.converted,
     outboundBody: converted.body,
   })
+  const gatewayPreviousOwner =
+    converted.body?.previous_response_id && isDbOpen()
+      ? await codexResponseOwners(getDb()).resolve(codexClientScope(req), converted.body.previous_response_id)
+      : null
+  const gatewayContinuationEligible =
+    !converted.body?.previous_response_id || gatewayPreviousOwner?.execution_kind === 'gateway_worker'
+  // Gateway 未发出请求（无可用实例或账号）且分组也绑定了 VM 时改走 VM，记录回退原因
+  let gatewayFallback = null
+  if ((await gatewayWorker?.shouldUse?.(req, routing)) && gatewayContinuationEligible) {
+    const outcome = await dispatchCodexGateway({
+      req,
+      res,
+      protocol,
+      ctx,
+      inbound,
+      logBag,
+      stats,
+      json,
+      writeSSEHeaders,
+      routing,
+      codex,
+      converted,
+      gatewayWorker,
+      gatewayKeepaliveMs,
+      requestStartedAt,
+      gatewayPreviousOwner,
+      scheduling: codexGatewayScheduling(routing),
+      vmFallbackReady: () =>
+        codexVmReady ? codexVmReady(req) : codexVmFallbackReady(projectRoot, req, converted.body?.model, routing),
+    })
+    gatewayFallback = gatewayFallbackCode(outcome)
+    if (!gatewayFallback) return outcome
+  }
   const disabledImage = disabledImageTool(converted.body, logBag)
   if (disabledImage) {
     stats.errors++
@@ -627,7 +886,7 @@ export async function handleCodexProtocol({
       error: {
         type: 'invalid_request_error',
         code: 'model_disabled',
-        message: `image_generation model '${disabledImage}' is disabled by gateway GPT model policy`,
+        message: `image_generation model '${disabledImage}' is disabled by the model service policy`,
       },
     })
   }
@@ -651,6 +910,36 @@ export async function handleCodexProtocol({
     protocol === 'openai.chat' || protocol === 'openai.completions'
       ? { id: 'codex', seq: 0, tools: new Map(), sawTool: false }
       : null
+  const requestId = res._kinRequestId || randomUUID()
+  initCodexFacts(req, protocol, converted.body, requestId, routing)
+  const db = isDbOpen() ? getDb() : null
+  const attemptsRepo = ops.attemptsRepo || (db ? new RequestAttemptsRepo(db) : null)
+  const responseOwners = ops.responseOwners || (db ? codexResponseOwners(db) : null)
+  const protection = ops.accountProtection || (db ? new CodexAccountProtection(db) : null)
+  // 诊断写入（请求尝试、账号保护、响应归属）经 async 仓储，调用方 await；失败只记日志，不影响请求（R6 B7c）
+  const recordDiagnostic = async (fn) => {
+    try {
+      return await fn()
+    } catch {
+      console.warn('[codex] diagnostic persistence failed', requestId)
+      return null
+    }
+  }
+  const rememberOwner = (...args) => recordDiagnostic(() => responseOwners?.remember(...args))
+  const clientScope = codexClientScope(req)
+  const continuationOwner = converted.body?.previous_response_id
+    ? await responseOwners?.resolve(clientScope, converted.body.previous_response_id)
+    : null
+  if (converted.body?.previous_response_id && !continuationOwner) {
+    return rejectCodexAdmission({
+      res,
+      json,
+      stats,
+      logBag,
+      picked: { error: 'response_not_portable' },
+      model: converted.body.model,
+    })
+  }
   const pickOpts = {
     stickyRouter,
     sessions,
@@ -658,23 +947,41 @@ export async function handleCodexProtocol({
     excluded: new Set(),
     routing,
     ownerScope,
+    continuationOwner,
+    protection,
   }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
+  // The retry budget covers scheduling and upstream attempts. Ingress (body
+  // upload, parsing) is already spent and must not starve the first attempt.
+  const retryDeadline = Date.now() + Math.max(1, Number(routing.failover?.total_retry_deadline_ms) || 120_000)
   const gone = clientGoneSignal(req, res)
   const failoverBudget = codexFailoverBudget(routing)
   const sameRetryDelay = Number(routing?.failover?.same_account_retry_delay_ms)
   const sameRetryDelayMs =
     Number.isFinite(sameRetryDelay) && sameRetryDelay >= 0 ? Math.min(10_000, sameRetryDelay) : 100
-  logBag.via = 'codex-kernel'
+  logBag.via = gatewayFallback ? 'codex-kernel-fallback' : 'codex-kernel'
+  if (gatewayFallback) logBag.gateway_fallback = gatewayFallback
   logBag.attempt_count = 0
   let last = null
   let hops = 0
   let attempts = 0
   let switches = 0
+  let overloadSwitches = 0
+  let poolOverloadStop = false
   let counted = false
   try {
     for (;;) {
-      const admitted = await admitCodexCandidate(projectRoot, req, pickOpts, { deadline, signal: gone.signal })
+      if (gone.signal.aborted || Date.now() >= retryDeadline || attempts >= failoverBudget.maxAttempts) {
+        last ||= {
+          status: 504,
+          body: { error: { code: 'codex_retry_deadline', message: 'Codex retry budget exhausted' } },
+        }
+        break
+      }
+      const admitted = await admitCodexCandidate(projectRoot, req, pickOpts, {
+        deadline: Math.min(deadline, retryDeadline),
+        signal: gone.signal,
+      })
       const picked = admitted.picked
       if (!admitted.lease) {
         if (picked.error === 'client_cancelled') {
@@ -692,8 +999,7 @@ export async function handleCodexProtocol({
         pickOpts.excluded.add(admitted.vmId)
         continue
       }
-      attempts += 1
-      if (attempts > failoverBudget.maxAttempts) {
+      if (attempts >= failoverBudget.maxAttempts) {
         lease.release()
         break
       }
@@ -704,16 +1010,23 @@ export async function handleCodexProtocol({
       }
       // The slot is known here, so an account scope can be applied. `true`
       // means the 403 is already written.
-      if (accountGate) {
-        logBag.vm_id = vm.id
-        const blocked = await accountGate(scopeAccountFromVm(vm))
-        if (blocked) {
-          lease.release()
-          return
-        }
-      }
       const stickyKeys = picked.stickyKeys?.length ? picked.stickyKeys : picked.sessionKey ? [picked.sessionKey] : []
-      const stickyBound = picked.sessionKey ? stickyRouter?.resolve?.(picked.sessionKey) : null
+      let stickyBound = null
+      // 座位已占：进入下面 try/finally 之前的等待抛错也要归还，否则座位永久泄漏（审计 P1-R3）
+      try {
+        if (accountGate) {
+          logBag.vm_id = vm.id
+          const blocked = await accountGate(scopeAccountFromVm(vm))
+          if (blocked) {
+            lease.release()
+            return
+          }
+        }
+        stickyBound = picked.sessionKey ? await stickyRouter?.resolve?.(picked.sessionKey) : null
+      } catch (error) {
+        lease.release()
+        throw error
+      }
       // The home (or first placement) owns the conversation window; a borrowed
       // seat elsewhere takes only this request's execution lease.
       const claimsWindow = !!picked.sessionKey && (!picked.home || picked.home === vm.id)
@@ -724,21 +1037,22 @@ export async function handleCodexProtocol({
         } catch {}
       }
       const ownsPin = !!stickyBound?.vmId && stickyBound.vmId === vm.id
-      const bindSticky = (sessionId = null) => {
+      // 条件写（R13）：同一会话的并发请求先绑的 VM 胜出，后到的按 nextBinding 锁定在胜者
+      const bindSticky = async (sessionId = null) => {
         if (!picked.sessionKey || !stickyRouter?.bind) return
         const payload = { accountId: vm.id, vmId: vm.id }
         if (sessionId) payload.sessionId = sessionId
-        for (const key of stickyKeys) stickyRouter.bind(key, payload)
+        for (const key of stickyKeys) await stickyRouter.bind(key, payload)
       }
-      const leaveSticky = () => {
+      const leaveSticky = async () => {
         if (!ownsPin || !picked.sessionKey) return
         try {
           sessions?.drop?.(vm.id, picked.sessionKey)
         } catch {}
-        for (const key of stickyKeys) stickyRouter?.unbind?.(key)
+        for (const key of stickyKeys) await stickyRouter?.unbind?.(key)
       }
-      let attemptKind = 'failed'
       try {
+        logBag.vm_id = vm.id
         const localExit = isLocalEgressProxy(vm.proxy)
         const written = writeCfg(projectRoot, vm, {
           // Same rule as slot start: a node on local egress must leave through
@@ -769,12 +1083,10 @@ export async function handleCodexProtocol({
             continue
           }
           stats.errors++
-          logBag.error_code = 'codex_kernel_unavailable'
+          recordCodexFailure(logBag, last)
           return json(res, 503, last.body)
         }
-        hops += 1
-        logBag.vm_id = vm.id
-        logBag.attempt_count = hops
+        logBag.response_model = null
         const chunks = []
         const nameSseEvent = createResponsesSseEventNamer()
         let responseServiceTier = null
@@ -783,8 +1095,8 @@ export async function handleCodexProtocol({
         let conversionError = null
         const attemptStartedAt = Date.now()
         const sessionOptions = {
-          boundSessionId: stickyBound?.sessionId || '',
-          boundVmId: stickyBound?.vmId || '',
+          boundSessionId: continuationOwner?.session_id || stickyBound?.sessionId || '',
+          boundVmId: continuationOwner?.vm_id || stickyBound?.vmId || '',
           vmId: vm.id,
           accountId: vm.id,
           firstUserIdentity,
@@ -795,23 +1107,170 @@ export async function handleCodexProtocol({
         // passthrough forwards an explicit inbound session verbatim; without
         // one it still derives the deterministic seed instead of sending null.
         const outboundSessionId =
-          sessionMode === 'passthrough'
+          continuationOwner?.session_id ||
+          (sessionMode === 'passthrough'
             ? inboundSession.session_id ||
               resolveOutboundSessionId(callerSession, { ...sessionOptions, mode: 'passthrough', officialClient: true })
-            : resolveOutboundSessionId(callerSession, { ...sessionOptions, mode: sessionMode })
+            : resolveOutboundSessionId(callerSession, { ...sessionOptions, mode: sessionMode }))
         const session = {
           session_id: outboundSessionId,
           previous_response_id: inboundSession.previous_response_id,
         }
         logBag.outbound_session_id = sessionIdForLog(outboundSessionId)
-        const outboundBody = applyCodexRebuildBody({ ...converted.body, stream: true }, outboundSessionId, sessionMode)
+        let outboundBody = applyCodexRebuildBody({ ...converted.body, stream: true }, outboundSessionId, sessionMode)
+        const preflightCompaction = runtimeMetrics.measure(req, 'context_preflight', () =>
+          compactCodexInput(outboundBody),
+        )
+        if (preflightCompaction) {
+          outboundBody = preflightCompaction.body
+          logBag.codex_context_preflight = preflightCompaction.info
+        }
         const outboundHeaders = codexKernelHeaders(req.headers, outboundBody, session)
         if (captureOutbound) logBag.outbound_body = outboundBody
         logBag.outbound_headers = redactHeaders(outboundHeaders)
         let hopEmitted = false
+        let physicalOnVm = 0
+        const hopGeneration = credentialGeneration(projectRoot, vm.id)
         const runHop = () =>
           runCodexKernelHop({
-            hop,
+            canAttempt: () => attempts < failoverBudget.maxAttempts,
+            maxRetries: failoverBudget.maxSameAccountRetries,
+            retryDelayMs: sameRetryDelayMs,
+            deadline: retryDeadline,
+            shouldRetry: (result) => !converted.body?.previous_response_id && isRetryableSameCodexAccount(result),
+            hop: async (args) => {
+              const live = await keyScopeFromRequest(req)
+              if (
+                !keyAllowsModel(live, pickOpts.body?.model || inbound?.model || converted.body.model) ||
+                !keyAllowsVm(live, vm)
+              )
+                return {
+                  ok: false,
+                  status: 403,
+                  body: { error: { code: 'group_unavailable', message: '当前授权已失效' } },
+                }
+              if (attempts >= failoverBudget.maxAttempts || Date.now() >= retryDeadline || gone.signal.aborted)
+                return {
+                  ok: false,
+                  status: 504,
+                  sendState: 'not_sent',
+                  body: { error: { code: 'codex_retry_deadline' } },
+                }
+              const identity = codexAccountIdentity(readCodexAccounts(projectRoot, vm.id))
+              if (continuationOwner && continuationOwner.identity_hash !== identity)
+                return {
+                  ok: false,
+                  status: 409,
+                  sendState: 'not_sent',
+                  body: { error: { code: 'response_not_portable' } },
+                }
+              const generation = credentialGeneration(projectRoot, vm.id)
+              const guard = await protection?.capture(vm.id, generation)
+              if ((await protection?.until(vm.id, generation)) > Date.now())
+                return {
+                  ok: false,
+                  status: 429,
+                  sendState: 'not_sent',
+                  body: { error: { code: 'account_error_protected' } },
+                }
+              const candidateRpm = picked.candidates?.find((item) => item.id === vm.id)?.maxRpm || 0
+              if (physicalOnVm > 0 && !tryConsumeOpenAIRpm(vm.id, candidateRpm))
+                return {
+                  ok: false,
+                  status: 429,
+                  sendState: 'not_sent',
+                  body: { error: { code: 'codex_account_rpm_limit' } },
+                }
+              physicalOnVm += 1
+              attempts += 1
+              hops = attempts
+              logBag.attempt_count = attempts
+              // 经 Codex 内核发往 Responses；内核按路由选 WS/HTTP，传输方式这里不可知
+              logBag.upstream_path = CODEX_RESPONSES_PATH
+              const attemptNo = attempts
+              beginCodexAttempt(req, {
+                attemptNo,
+                vmId: vm.id,
+                accountId: vm.id,
+                model: outboundBody.model,
+              })
+              const started = Date.now()
+              let sendState = 'not_sent'
+              let sendObserved = false
+              const observe = (next) => {
+                const ranks = { not_sent: 0, ambiguous: 1, sent: 2 }
+                if (!Object.hasOwn(ranks, next)) return
+                sendObserved = true
+                if (ranks[next] > ranks[sendState]) sendState = next
+              }
+              await recordDiagnostic(() =>
+                attemptsRepo?.begin({
+                  requestId,
+                  attemptNo,
+                  vmId: vm.id,
+                  accountId: vm.id,
+                  model: outboundBody.model,
+                  selectionReason: picked.sticky ? 'sticky' : codexSettings().scheduling.strategy,
+                }),
+              )
+              let physical
+              let terminalVerified = false
+              try {
+                physical = await hop({
+                  ...args,
+                  onSendState: observe,
+                  onEvent: async (line) => {
+                    if (typeof line === 'string' && line.startsWith('data:')) {
+                      try {
+                        const event = JSON.parse(line.slice(5))
+                        if (event.type === 'response.completed' && event.response?.status === 'completed')
+                          terminalVerified = true
+                      } catch {}
+                    }
+                    await args.onEvent?.(line)
+                  },
+                })
+                observe(codexSendState(physical))
+                finishCodexAttempt(req, physical)
+                physical = {
+                  ...physical,
+                  sendState,
+                  ...(terminalVerified && !physical.transportError && !physical.explicitFailure
+                    ? { ok: true, terminalState: 'verified' }
+                    : {}),
+                }
+                const kind = codexFeedbackKind(physical)
+                if (kind) reportOpenAIAttempt(vm.id, kind, physical.ttftMs)
+                if (generation === credentialGeneration(projectRoot, vm.id))
+                  await recordDiagnostic(() => protection?.observe(vm.id, physical, guard))
+                return physical
+              } catch (error) {
+                if (!sendObserved) sendState = 'ambiguous'
+                physical = {
+                  ok: false,
+                  status: 0,
+                  sendState,
+                  transportError: true,
+                  terminalState: gone.signal.aborted ? 'cancelled' : 'transport_error',
+                  body: {
+                    error: { code: error.code || 'codex_transport_error', message: String(error.message || error) },
+                  },
+                }
+                finishCodexAttempt(req, physical)
+                return physical
+              } finally {
+                await recordDiagnostic(() =>
+                  attemptsRepo?.complete(requestId, attemptNo, {
+                    upstreamStatus: physical?.status,
+                    downstreamCommitted: stream && res.headersSent,
+                    terminalState: physical?.terminalState || (physical?.ok ? 'verified' : 'error'),
+                    usage: physical?.usage || physical?.body?.usage,
+                    ttftMs: physical?.ttftMs,
+                    latencyMs: Date.now() - started,
+                  }),
+                )
+              }
+            },
             args: {
               exec: execFor(projectRoot, vm),
               signal: gone.signal,
@@ -829,11 +1288,23 @@ export async function handleCodexProtocol({
                 options: { ...codexKernelRequestOptions(routing), installation_id: written?.installationId },
               },
             },
-            onReasoningFallback: ({ body: retryBody }) => {
-              if (captureOutbound) logBag.outbound_body = retryBody
-            },
             onEvent: async (line) => {
               hopEmitted = true
+              if (typeof line === 'string' && line.startsWith('data:')) {
+                try {
+                  const event = JSON.parse(line.slice(5))
+                  const responseModel = event?.response?.model
+                  if (typeof responseModel === 'string' && responseModel.trim())
+                    logBag.response_model = responseModel.trim()
+                  const id = event?.response?.id
+                  if (id && event.type?.startsWith('response.'))
+                    await rememberOwner(clientScope, id, {
+                      vmId: vm.id,
+                      identity: codexAccountIdentity(readCodexAccounts(projectRoot, vm.id)),
+                      sessionId: outboundSessionId,
+                    })
+                } catch {}
+              }
               if (conversionError) return
               const tier = serviceTierFromSseLine(line)
               if (tier) responseServiceTier = tier
@@ -868,28 +1339,26 @@ export async function handleCodexProtocol({
               if (named) res.write(named)
             },
           })
-        let result = await runHop()
-        // A transient seat-local failure gets the same account up to N retries
-        // before the request spends a switch. 401/403/429 are never retried here:
-        // they are credential/account state and must move to another seat.
-        let sameAccountRetries = result?.transport_retried || result?.reasoning_history_retried ? 1 : 0
-        while (
-          sameAccountRetries < failoverBudget.maxSameAccountRetries &&
-          attempts < failoverBudget.maxAttempts &&
-          isRetryableSameCodexAccount(result, {
-            headersSent: res.headersSent || hopEmitted,
-            conversionError,
-            signal: gone.signal,
-          })
-        ) {
-          sameAccountRetries += 1
-          attempts += 1
-          hops += 1
-          logBag.attempt_count = hops
-          logBag.codex_same_account_retried = sameAccountRetries
-          await new Promise((resolve) => setTimeout(resolve, sameRetryDelayMs))
-          hopEmitted = false
-          result = await runHop()
+        const result = await runHop()
+        const responseModel = result?.body?.model || result?.body?.response?.model
+        if (typeof responseModel === 'string' && responseModel.trim()) logBag.response_model = responseModel.trim()
+        if (result?.same_account_retries) logBag.codex_same_account_retried = result.same_account_retries
+        if (gone.signal.aborted) {
+          // 客户端读到终态就断开（Codex CLI 的常态）时上游已交付：照常计费，不当作取消（审计 P0-2）。
+          // 没见终态也没有用量的中途断开才记 cancelled。
+          const abortedUsage = preferUsage(
+            result?.usage || result?.body?.usage || result?.body?.response?.usage || null,
+            streamedUsage,
+          )
+          const deliveredBeforeAbort =
+            !conversionError &&
+            !result?.explicitFailure &&
+            (result?.terminalState === 'verified' || usageTokens(abortedUsage) > 0)
+          if (!deliveredBeforeAbort) {
+            logBag.final_state = 'cancelled'
+            return res.end()
+          }
+          logBag.client_disconnected_after_delivery = true
         }
         // The log and total duration share ingress time; pool scoring keeps hop TTFT.
         logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
@@ -905,28 +1374,27 @@ export async function handleCodexProtocol({
           result.terminalState = 'incomplete'
           result.body = { error: conversionError }
         }
-        ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota)
+        await ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota)
         if (result?.transport_retried) logBag.transport_retried = true
-        if (result?.reasoning_history_retried) {
-          logBag.attempt_count += 1
-          logBag.reasoning_history_retried = true
-        }
         last = result
         const hopUsage = result.usage || result.body?.usage || result.body?.response?.usage || null
         const preferredUsage = preferUsage(hopUsage, streamedUsage)
         const usage = mergeUsage(preferredUsage === hopUsage ? streamedUsage : hopUsage, preferredUsage)
         // Responses SSE is not a Claude assistant message, so the stream client
         // reports ok:false / incomplete. A 200 hop that carried tokens still billed.
-        const delivered = !conversionError && (result?.ok || (Number(result?.status) === 200 && usageTokens(usage) > 0))
+        const delivered =
+          !conversionError &&
+          !result?.explicitFailure &&
+          (result?.ok || (Number(result?.status) === 200 && usageTokens(usage) > 0))
         if (delivered) {
-          attemptKind = 'succeeded'
-          bindSticky(outboundSessionId)
+          await bindSticky(outboundSessionId)
           // Billing follows the tier actually sent (codex-proxy-rs contract). The upstream
           // echo is kept apart: `priority` answered with `default` is a Fast downgrade (#777).
           const serviceTier = normalizeServiceTier(outboundBody.service_tier)
           logBag.upstream_service_tier = responseServiceTier
           const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
           logBag.usage = logged
+          logBag.usage_complete = hasCompleteUsage(logged)
           const imageUsage =
             result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
           if (imageUsage) logBag.image_usage = imageUsage
@@ -934,7 +1402,12 @@ export async function handleCodexProtocol({
           logBag.output_tokens = logged?.output_tokens ?? null
           logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
           logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
-          reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
+          if (result?.body?.id)
+            await rememberOwner(clientScope, result.body.id, {
+              vmId: vm.id,
+              identity: codexAccountIdentity(readCodexAccounts(projectRoot, vm.id)),
+              sessionId: outboundSessionId,
+            })
           logBag.final_state = result?.ok ? result.terminalState || 'verified' : 'verified'
           logBag.upstream_model = converted.body.model
           if (hops > 1) logBag.codex_failed_over = true
@@ -947,7 +1420,7 @@ export async function handleCodexProtocol({
                 const message = codexBodyToAnthropicMessage(assembled, converted.body.model)
                 body =
                   protocol === 'openai.chat'
-                    ? fromClaudeToOpenAIChat(message, converted.body.model)
+                    ? withChatUrlCitations(fromClaudeToOpenAIChat(message, converted.body.model), assembled)
                     : protocol === 'openai.completions'
                       ? fromClaudeToOpenAICompletions(message, converted.body.model)
                       : message
@@ -961,25 +1434,59 @@ export async function handleCodexProtocol({
                 error: { type: 'upstream_protocol_error', code: error.code, message: error.message },
               })
             }
+            commitCodexDelivery(req)
             return json(res, 200, body)
           }
           if (!res.headersSent) writeSSEHeaders(res)
           return res.end()
         }
-        reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
-        const failureHold = codexFailureHold(result)
+        const failureHold =
+          codexFailureHold(result) || (isCodexOverloadError(result) ? openAIOverloadOutlierHold(vm.id) : null)
         if (failureHold) holdOpenAIAccount(vm.id, failureHold)
+        if (!result?.committed) await parkRevokedCodexCredential(projectRoot, vm.id, result, hopGeneration)
         if (res.headersSent || hopEmitted) {
           stats.errors++
-          logBag.error_code = result?.body?.error?.code || 'codex_upstream'
-          logBag.upstream_status = result?.status || 0
+          recordCodexFailure(logBag, result, { committed: true, usage })
+          if (logBag.final_state === 'cancelled') return res.end()
+          if (!stream && !res.headersSent) {
+            const status = Number(result?.status) >= 400 ? result.status : semanticStatusForStreamError(result?.body)
+            return json(
+              res,
+              status,
+              result?.body || { error: { code: logBag.error_code, message: logBag.error_message } },
+            )
+          }
+          if (
+            (!result?.terminalEventSeen || (protocol !== 'openai.responses' && result?.explicitFailure)) &&
+            !conversionError &&
+            !res.writableEnded &&
+            !res.destroyed
+          ) {
+            const error = {
+              type: protocol === 'anthropic.messages' ? 'api_error' : 'server_error',
+              code: logBag.error_code,
+              message: logBag.error_message,
+            }
+            res.write(
+              protocol === 'openai.responses' || protocol === 'anthropic.messages'
+                ? `event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`
+                : `data: ${JSON.stringify({ error })}\n\n`,
+            )
+          }
           return res.end()
         }
         if (isCodexFailoverError(result)) {
           pickOpts.excluded.add(vm.id)
-          leaveSticky()
+          await leaveSticky()
           switches += 1
           if (switches > failoverBudget.maxSwitches || attempts >= failoverBudget.maxAttempts) break
+          if (isCodexOverloadError(result)) {
+            overloadSwitches += 1
+            if (overloadSwitches > CODEX_POOL_OVERLOAD_MAX_SWITCHES && openAIPoolOverloaded()) {
+              poolOverloadStop = true
+              break
+            }
+          }
           continue
         }
         break
@@ -995,9 +1502,13 @@ export async function handleCodexProtocol({
   } finally {
     gone.settle()
   }
+  if (poolOverloadStop) {
+    logBag.codex_pool_overload_stop = true
+    res.setHeader?.('retry-after', String(CODEX_POOL_OVERLOAD_RETRY_AFTER_SEC))
+  }
   stats.errors++
-  logBag.error_code = last?.body?.error?.code || 'codex_upstream'
-  logBag.upstream_status = last?.status || 0
+  recordCodexFailure(logBag, last)
+  commitCodexDelivery(req)
   return json(res, last?.status || 502, last?.body || { error: { type: 'api_error', code: 'codex_upstream' } })
 }
 
@@ -1082,6 +1593,19 @@ function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
       },
     })
   }
+  if (picked.error === 'pool_unavailable') {
+    // Nothing to wait for: say so now instead of a late "busy" 429 the client keeps retrying.
+    const waitMs = Number(picked.retryAt) - Date.now()
+    if (waitMs > 0) res.setHeader?.('retry-after', String(Math.ceil(waitMs / 1000)))
+    return json(res, 503, {
+      error: {
+        type: 'api_error',
+        code: ErrorCode.POOL_UNAVAILABLE,
+        message: CLIENT_POOL_UNAVAILABLE_MESSAGE,
+        details: { reason: 'accounts_unavailable' },
+      },
+    })
+  }
   if (picked.error === 'quota_exhausted') {
     return json(res, 503, {
       error: { type: 'api_error', code: 'quota_exhausted', message: 'OpenAI 号池额度已耗尽' },
@@ -1098,7 +1622,6 @@ function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
 const CODEX_SEARCH_TIMEOUT_MS = 120000
 // The backend answers "Unknown parameter" for these.
 const CODEX_SEARCH_DROP_FIELDS = Object.freeze(['prompt_cache_key', 'prompt_cache_retention', 'store'])
-const searchRefreshes = new Map()
 
 function searchCredentials(projectRoot, vm) {
   const first = readCodexAccounts(projectRoot, vm.id)[0] || {}
@@ -1111,30 +1634,18 @@ function searchCredentials(projectRoot, vm) {
 }
 
 /**
- * Access token to retry with after a 401/403. The kernel refreshes the same rotating
- * refresh token on its own, so first adopt a token it wrote meanwhile; otherwise refresh
- * once per slot, shared by concurrent callers.
+ * Access token to retry with after a 401. The kernel refreshes the same rotating refresh
+ * token on its own; `refreshCodexSlotAccess` adopts a token it wrote meanwhile and otherwise
+ * refreshes once per slot, shared with every other control-plane refresher (audit P1-C4).
  */
-function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl, refresh }) {
-  const now = searchCredentials(projectRoot, vm)
-  if (now.access && now.access !== usedAccess) return now.access
-  if (!now.refresh) return ''
-  let pending = searchRefreshes.get(vm.id)
-  if (!pending) {
-    pending = (async () => {
-      const tok = await refresh({ refreshToken: now.refresh, proxyUrl, fetchImpl })
-      if (!tok?.ok || !tok.access_token) return ''
-      upsertCodexAccount(projectRoot, vm.id, {
-        access_token: tok.access_token,
-        refresh_token: tok.refresh_token || now.refresh,
-        id_token: tok.id_token || now.first.id_token,
-        expires_at: tok.expires_at || now.first.expires_at,
-      })
-      return tok.access_token
-    })().finally(() => searchRefreshes.delete(vm.id))
-    searchRefreshes.set(vm.id, pending)
-  }
-  return pending
+async function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl, refresh }) {
+  const fallback = { access_token: vm.codex?.access_token, refresh_token: vm.codex?.refresh_token }
+  const tok = await refreshCodexSlotAccess(projectRoot, vm.id, {
+    usedAccess,
+    fallback,
+    refresh: (refreshToken) => refresh({ refreshToken, proxyUrl, fetchImpl }),
+  })
+  return tok?.ok ? tok.access_token : ''
 }
 
 function plainHeaders(headers) {
@@ -1183,7 +1694,8 @@ async function postCodexJson({
   }
   if (!creds.access && !creds.refresh) return { status: 0, error: 'no_oauth_token' }
   let out = creds.access ? await send(creds.access) : { status: 401 }
-  if (out.status === 401 || out.status === 403) {
+  // 只在 401（令牌失效）时换票；403 是权限或风控拒绝，换票只会多轮换一次刷新令牌（审计 P1-C4）
+  if (out.status === 401) {
     const access = await refreshSearchAccess(projectRoot, vm, creds.access, { proxyUrl, fetchImpl, refresh })
     if (access) out = await send(access)
   }
@@ -1199,12 +1711,30 @@ function isSearchFailover(out) {
   return status === 0 || status === 401 || status === 402 || status === 403 || status === 429 || status >= 500
 }
 
+// 生图不幂等且单次可达数分钟：只在上游明确拒绝（未执行）或请求根本没发出时换号；超时、传输中断与 5xx
+// 可能已生成并计费，不再换号重发。尝试次数与客户端断开另有上限（审计 P1-R2）。
+const IMAGE_MAX_ATTEMPTS = 4
+const IMAGE_NOT_SENT_ERRORS = new Set(['proxy_required', 'no_oauth_token'])
+function isImageFailover(out) {
+  const status = Number(out?.status) || 0
+  if (status === 0) return IMAGE_NOT_SENT_ERRORS.has(out?.error)
+  return status === 401 || status === 402 || status === 403 || status === 429
+}
+
 function parseJson(text) {
   try {
     return JSON.parse(text)
   } catch {
     return undefined
   }
+}
+
+// Gateway 的 Search / Images 失败：与 VM 路径一样计错误并记录错误码，同时保存 Worker 分类与上游错误对象
+function recordGatewayJsonFailure(logBag, stats, result, payload) {
+  stats.errors++
+  recordGatewayDiagnostics(logBag, result.headers || {}, payload)
+  logBag.error_code =
+    payload?.error?.code || result.headers?.['x-kin-gateway-error-category'] || `upstream_${result.status || 503}`
 }
 
 /**
@@ -1224,8 +1754,10 @@ export async function handleCodexSearch({
   stickyRouter = null,
   ops = {},
   ownerScope = null,
+  gatewayWorker = null,
 }) {
   logBag.via = 'codex-search'
+  initCodexFacts(req, 'openai.search', body, res._kinRequestId || randomUUID(), routing)
   const reject = (status, type, code, message) => {
     stats.errors++
     logBag.error_code = code
@@ -1240,6 +1772,69 @@ export async function handleCodexSearch({
   }
   const outbound = { ...body }
   for (const key of CODEX_SEARCH_DROP_FIELDS) delete outbound[key]
+  if (await gatewayWorker?.shouldUse?.(req, routing)) {
+    const gatewayRequestId = res._kinRequestId || randomUUID()
+    let result
+    try {
+      result = await gatewayWorker.execute({
+        req,
+        scheduling: codexGatewayScheduling(routing),
+        protocol: 'openai.search',
+        operation: 'search',
+        model: outbound.model,
+        body: outbound,
+        headers: req.headers,
+        requestId: gatewayRequestId,
+        attemptId: `${gatewayRequestId}:gateway:1`,
+        scope: {
+          group_ids: req.apiKeyRecord?.group_id ? [Number(req.apiKeyRecord.group_id)] : [],
+          ...(body?.session_id ? { session_id: String(body.session_id) } : {}),
+        },
+      })
+    } catch (error) {
+      result = {
+        ok: false,
+        status: error?.status || 503,
+        body: {
+          error: {
+            code: error?.code || 'gateway_worker_unavailable',
+            message: error?.message || 'Gateway Worker unavailable',
+          },
+        },
+      }
+    }
+    logBag.via = 'gateway-worker'
+    logBag.execution_kind = 'gateway_worker'
+    logBag.gateway_instance_id = result.instance_id || null
+    logBag.dispatch_id = result.dispatch_id || null
+    const searchRuntimeAccount = result.headers?.['x-kin-gateway-account'] || null
+    const searchBinding =
+      searchRuntimeAccount && result.instance_id
+        ? await gatewayWorker.repo.findAccountByRuntime(result.instance_id, searchRuntimeAccount)
+        : null
+    logBag.account_id = searchRuntimeAccount
+    applyGatewayUpstream(logBag, result.headers)
+    logBag.account_resource_id = searchBinding?.account_resource_id || null
+    if (searchBinding?.account_resource_id) logBag.vm_id = `gateway:${searchBinding.account_resource_id}`
+    logBag.upstream_status = result.status || 0
+    const payload = result.body || {}
+    for (const [key, value] of Object.entries(result.headers || {}))
+      if (/^(x-ratelimit-|x-request-id$|openai-)/i.test(key)) res.setHeader(key, value)
+    if (payload?.usage && typeof payload.usage === 'object') {
+      logBag.usage = payload.usage
+      logBag.usage_confidence = 'complete'
+    } else logBag.usage_confidence = 'unknown'
+    // 网页搜索按次计费：成功交付一次即计一次（上游不返回 token 用量）
+    if (result.ok) {
+      logBag.usage = { ...(logBag.usage || {}), web_search_calls: 1 }
+      logBag.web_search_requests = 1
+    }
+    logBag.final_state = result.ok ? 'verified' : 'upstream_error'
+    if (result.ok) commitCodexDelivery(req)
+    else recordGatewayJsonFailure(logBag, stats, result, payload)
+    return json(res, result.status || (result.ok ? 200 : 503), payload)
+  }
+  const turnMetadata = headerString(req.headers, 'x-codex-turn-metadata')
   const redactionState = await ensureRedaction(routing, { projectRoot })
   const redaction = redactionState.enabled
     ? {
@@ -1274,9 +1869,13 @@ export async function handleCodexSearch({
           stats.by_route['openai.search'] = (stats.by_route['openai.search'] || 0) + 1
         }
         attempts += 1
+        beginCodexAttempt(req, { attemptNo: attempts, vmId: vm.id, accountId: vm.id, model: outbound.model })
         logBag.vm_id = vm.id
         logBag.account_id = vm.id
         logBag.attempt_count = attempts
+        logBag.upstream_path = upstreamPathForLog(CODEX_SEARCH_URL)
+        logBag.upstream_transport = 'http'
+        const generation = credentialGeneration(projectRoot, vm.id)
         last = await post({
           projectRoot,
           vm,
@@ -1285,13 +1884,20 @@ export async function handleCodexSearch({
           fetchImpl: ops.fetchImpl,
           refresh: ops.refresh,
         })
+        finishCodexAttempt(req, last)
         logBag.upstream_status = last.status || null
-        ingestCodexHop(projectRoot, vm.id, {
+        await ingestCodexHop(projectRoot, vm.id, {
           ok: last.status >= 200 && last.status < 300,
           status: last.status,
           headers: last.headers || {},
           body: parseJson(last.text),
         })
+        await parkRevokedCodexCredential(
+          projectRoot,
+          vm.id,
+          { ok: false, status: last.status, text: last.text },
+          generation,
+        )
         if (!isSearchFailover(last)) break
       } finally {
         admitted.lease.release()
@@ -1318,7 +1924,11 @@ export async function handleCodexSearch({
   if (last.status >= 400) {
     stats.errors++
     logBag.error_code = payload?.error?.code || `upstream_${last.status}`
+  } else {
+    logBag.usage = { ...(logBag.usage || {}), web_search_calls: 1 }
+    logBag.web_search_requests = 1
   }
+  commitCodexDelivery(req)
   const responseBody = redaction ? await restoreJsonValue(payload, redaction) : payload
   return json(res, last.status, responseBody)
 }
@@ -1355,8 +1965,10 @@ export async function handleCodexImages({
   stickyRouter = null,
   ops = {},
   ownerScope = null,
+  gatewayWorker = null,
 }) {
   logBag.via = 'codex-images'
+  initCodexFacts(req, 'openai.images', body, res._kinRequestId || randomUUID(), routing)
   const reject = (status, type, code, message) => {
     stats.errors++
     logBag.error_code = code
@@ -1377,13 +1989,72 @@ export async function handleCodexImages({
         400,
         'invalid_request_error',
         'model_disabled',
-        `image model '${model}' is disabled by gateway GPT model policy`,
+        `image model '${model}' is disabled by the model service policy`,
       )
     }
   }
+  if (await gatewayWorker?.shouldUse?.(req, routing)) {
+    const gatewayRequestId = res._kinRequestId || randomUUID()
+    let result
+    try {
+      result = await gatewayWorker.execute({
+        req,
+        scheduling: codexGatewayScheduling(routing),
+        protocol: 'openai.images',
+        operation: `images.${kind === 'edits' ? 'edits' : 'generations'}`,
+        model,
+        body,
+        headers: req.headers,
+        requestId: gatewayRequestId,
+        attemptId: `${gatewayRequestId}:gateway:1`,
+        scope: {
+          group_ids: req.apiKeyRecord?.group_id ? [Number(req.apiKeyRecord.group_id)] : [],
+          ...(body?.session_id ? { session_id: String(body.session_id) } : {}),
+        },
+      })
+    } catch (error) {
+      result = {
+        ok: false,
+        status: error?.status || 503,
+        body: {
+          error: {
+            code: error?.code || 'gateway_worker_unavailable',
+            message: error?.message || 'Gateway Worker unavailable',
+          },
+        },
+      }
+    }
+    logBag.via = 'gateway-worker'
+    logBag.execution_kind = 'gateway_worker'
+    logBag.gateway_instance_id = result.instance_id || null
+    logBag.dispatch_id = result.dispatch_id || null
+    const imageRuntimeAccount = result.headers?.['x-kin-gateway-account'] || null
+    const imageBinding =
+      imageRuntimeAccount && result.instance_id
+        ? await gatewayWorker.repo.findAccountByRuntime(result.instance_id, imageRuntimeAccount)
+        : null
+    logBag.account_id = imageRuntimeAccount
+    applyGatewayUpstream(logBag, result.headers)
+    logBag.account_resource_id = imageBinding?.account_resource_id || null
+    if (imageBinding?.account_resource_id) logBag.vm_id = `gateway:${imageBinding.account_resource_id}`
+    logBag.upstream_status = result.status || 0
+    const payload = result.body || {}
+    for (const [key, value] of Object.entries(result.headers || {}))
+      if (/^(x-ratelimit-|x-request-id$|openai-)/i.test(key)) res.setHeader(key, value)
+    if (payload?.usage && typeof payload.usage === 'object') {
+      logBag.image_usage = payload.usage
+      logBag.usage = payload.usage
+      logBag.usage_confidence = 'complete'
+    } else logBag.usage_confidence = 'unknown'
+    if (result.ok && Array.isArray(payload?.data)) logBag.image_count = payload.data.length
+    logBag.final_state = result.ok ? 'verified' : 'upstream_error'
+    if (result.ok) commitCodexDelivery(req)
+    else recordGatewayJsonFailure(logBag, stats, result, payload)
+    return json(res, result.status || (result.ok ? 200 : 503), payload)
+  }
   const excluded = new Set()
   let usable = 0
-  for (const item of listVms(projectRoot)) {
+  for (const item of await listVms(projectRoot)) {
     if (!isCodexVm(item)) continue
     if (isFreePlanSlot(projectRoot, getVm(projectRoot, item.id) || item)) excluded.add(item.id)
     else usable += 1
@@ -1435,9 +2106,13 @@ export async function handleCodexImages({
           stats.by_route['openai.images'] = (stats.by_route['openai.images'] || 0) + 1
         }
         attempts += 1
+        beginCodexAttempt(req, { attemptNo: attempts, vmId: vm.id, accountId: vm.id, model })
         logBag.vm_id = vm.id
         logBag.account_id = vm.id
         logBag.attempt_count = attempts
+        logBag.upstream_path = upstreamPathForLog(CODEX_IMAGES_URLS[kind] || CODEX_IMAGE_GENERATIONS_URL)
+        logBag.upstream_transport = 'http'
+        const generation = credentialGeneration(projectRoot, vm.id)
         last = await post({
           url: CODEX_IMAGES_URLS[kind] || CODEX_IMAGE_GENERATIONS_URL,
           timeoutMs: CODEX_IMAGES_TIMEOUT_MS,
@@ -1449,17 +2124,25 @@ export async function handleCodexImages({
           fetchImpl: ops.fetchImpl,
           refresh: ops.refresh,
         })
+        finishCodexAttempt(req, last)
         logBag.upstream_status = last.status || null
-        ingestCodexHop(projectRoot, vm.id, {
+        await ingestCodexHop(projectRoot, vm.id, {
           ok: last.status >= 200 && last.status < 300,
           status: last.status,
           headers: last.headers || {},
           body: parseJson(last.text),
         })
+        await parkRevokedCodexCredential(
+          projectRoot,
+          vm.id,
+          { ok: false, status: last.status, text: last.text },
+          generation,
+        )
         if (last.status >= 200 && last.status < 300 && stickyRouter?.bind) {
-          for (const key of admitted.picked.stickyKeys || []) stickyRouter.bind(key, { accountId: vm.id, vmId: vm.id })
+          for (const key of admitted.picked.stickyKeys || [])
+            await stickyRouter.bind(key, { accountId: vm.id, vmId: vm.id })
         }
-        if (!isSearchFailover(last)) break
+        if (!isImageFailover(last) || attempts >= IMAGE_MAX_ATTEMPTS || gone.signal.aborted) break
       } finally {
         admitted.lease.release()
       }
@@ -1485,9 +2168,14 @@ export async function handleCodexImages({
   if (last.status >= 400) {
     stats.errors++
     logBag.error_code = payload?.error?.code || `upstream_${last.status}`
-  } else if (payload?.usage && typeof payload.usage === 'object') {
-    logBag.image_usage = payload.usage
+  } else {
+    if (Array.isArray(payload?.data)) logBag.image_count = payload.data.length
+    if (payload?.usage && typeof payload.usage === 'object') {
+      logBag.image_usage = payload.usage
+      logBag.usage_complete = hasCompleteUsage(payload.usage)
+    }
   }
+  commitCodexDelivery(req)
   const responseBody = redaction ? await restoreJsonValue(payload, redaction) : payload
   return json(res, last.status, responseBody)
 }
