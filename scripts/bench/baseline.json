@@ -1,0 +1,99 @@
+{
+  "version": 2,
+  "baseline_commit": "6372a24996b1dfb6ff2cb7d0778010ed37c321c8",
+  "rule": {
+    "margin": 0.15,
+    "slack": {
+      "elu_mean": 0.01,
+      "p99": 5
+    },
+    "noise_limit": 0.2,
+    "basis": "门槛比的是同一个 job 里基线提交与当前代码交替跑出来的两组数字，不再跟存档的绝对值比。理由（2026-11-07 实测）：同一份代码 bfd81ecf 在两台 GitHub runner 上记到的基线相差三成（EPYC 9V74 tiny ELU 0.100 / long 0.132，9V45 0.077 / 0.098）；src 完全相同的 f28540cd 与 6372a249 相隔 8 分钟跑出 tiny ELU 0.127 与 0.117，都远高于存档的 0.077——先跑的那次更差却因没有该机型基线被放过，后跑的那次更好反而被判回退。ELU 是利用率，4 核共享 runner 上邻居负载直接抬高它；轮间 MAD 只能看出一次运行内部稳不稳，看不出两次运行之间机器快慢不同。margin 15%：本机交替 A/B 实测同一负载两版的 ELU、p50、p99 中位数相差 0-4%，各轮相对 MAD（中位数绝对偏差/中位数）ELU 0.03-0.05、p99 0.07-0.12，15% 高于这个漂移又能抓住主线程开销增长——long 模式（30 rps）ELU 上限约为基线 +0.011，相当于每个长请求主线程多 0.37ms（缓存前缀多一遍全量哈希的量级）；tiny（60 rps）约每请求多 0.17ms。slack（ELU 0.01、p99 5ms）防止基线很小时抖动被比例放大。noise_limit 0.2：MAD 超过中位数 20% 视为测量不稳定，只告警。网关返回 HTTP 错误（如 529）的轮次直接失败（此前 1/20 轮的“等满 45 秒后 529”是调度器漏唤醒，W16 续已修）；只有客户端连接失败（状态 0）的轮次排除，超过一半被排除也失败。baseline_commit 是刻意选定的参照点（最近一次确认过性能的 main），只在决定重记基线时更新；准备不出基线树（依赖不同、拉不到该提交、基线就是 HEAD）时退回 profiles 的存档数字并只告警。profiles 只作参考，用 --write-baseline 记录，前两条 linux 画像取自 bfd81ecf 的两次手动运行（首轮冷启动 p99 偏高，tiny 各有 1 轮因上述 529 被排除）；EPYC 7763 画像取自 0bcabc06 推送后那次 A/B 运行里当前代码一侧的五轮中位数（同一次运行里基线代码一侧 tiny ELU 0.113 / p99 11.5、long 0.146 / 28.5，四项全部通过），所以它与前两条不同，记的是修复后的代码。"
+  },
+  "modes": {
+    "tiny": {
+      "rate": 60,
+      "seconds": 10,
+      "warmup": 3
+    },
+    "long": {
+      "rate": 30,
+      "seconds": 10,
+      "warmup": 3
+    }
+  },
+  "profiles": {
+    "darwin-arm64-apple-m5-10c-node22": {
+      "recorded_at": "2026-11-07T11:15:05.461Z",
+      "rounds": 5,
+      "tiny": {
+        "elu_mean": 0.06,
+        "p99": 8.7,
+        "cpu_ms_per_req": 4.8,
+        "p50": 5.5,
+        "rounds": 5
+      },
+      "long": {
+        "elu_mean": 0.07,
+        "p99": 15.6,
+        "cpu_ms_per_req": 14.467,
+        "p50": 11.9,
+        "rounds": 5
+      }
+    },
+    "linux-x64-amd-epyc-9v74-80-core-4c-node22": {
+      "recorded_at": "2026-11-07T12:43:20.482Z",
+      "rounds": 5,
+      "tiny": {
+        "elu_mean": 0.1,
+        "p99": 76.7,
+        "cpu_ms_per_req": 6.667,
+        "p50": 5.3,
+        "rounds": 4
+      },
+      "long": {
+        "elu_mean": 0.132,
+        "p99": 29.5,
+        "cpu_ms_per_req": 20,
+        "p50": 16.4,
+        "rounds": 5
+      }
+    },
+    "linux-x64-amd-epyc-9v45-96-core-4c-node22": {
+      "recorded_at": "2026-11-07T12:47:09.779Z",
+      "rounds": 5,
+      "tiny": {
+        "elu_mean": 0.077,
+        "p99": 19,
+        "cpu_ms_per_req": 5,
+        "p50": 3.8,
+        "rounds": 4
+      },
+      "long": {
+        "elu_mean": 0.098,
+        "p99": 26.2,
+        "cpu_ms_per_req": 16.667,
+        "p50": 11.3,
+        "rounds": 5
+      }
+    },
+    "linux-x64-amd-epyc-7763-64-core-4c-node22": {
+      "recorded_at": "2026-11-07T15:30:24.873Z",
+      "rounds": 5,
+      "tiny": {
+        "elu_mean": 0.111,
+        "p99": 11.7,
+        "cpu_ms_per_req": 10,
+        "p50": 6.1,
+        "rounds": 5
+      },
+      "long": {
+        "elu_mean": 0.148,
+        "p99": 29.7,
+        "cpu_ms_per_req": 23.333,
+        "p50": 19.7,
+        "rounds": 5
+      }
+    }
+  }
+}

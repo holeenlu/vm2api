@@ -5,8 +5,8 @@
  *             timezone env). No official continuation / auto memory.
  *             Caller tools / tool_choice are kept. Gateway must not rewrite them.
  *             Console label: 默认.
- *   official_prompt — billing + identity + leftover + overlay. No environment,
- *             no client usage hide. Web search is not added because the latest
+ *   official_prompt — billing + identity + leftover + overlay. No environment.
+ *             Web search is not added because the latest
  *             user text contains 搜索 / search.
  *             Agent is not injected.
  *             If the caller already sent an agent prompt, that text occupies
@@ -31,7 +31,7 @@
  */
 import { createHash } from 'node:crypto'
 import { resolveWorkstationProfile } from './workstation-profile.mjs'
-import fs from 'node:fs'
+import { readFileCached } from '../vm/vm-file.mjs'
 import { uuidFromSeed } from './identity-rewrite.mjs'
 import { OFFICIAL_CLI_VERSION } from './vm-identity.mjs'
 import { CCH_PLACEHOLDER } from './cch.mjs'
@@ -64,14 +64,12 @@ import {
   presetFlagEnabled,
   normalizeOverlayPreset,
   normalizePersonaPreset,
-  parsePersonaHides,
   personaPresetFromLegacyMode,
   renderOverlayTemplate,
   renderPersonaTemplate,
   resolveOverlayTemplate,
   resolvePersonaTemplate,
   selectedTemplateBlocks,
-  templateHidesAnything,
   templatePresetFor,
   OFFICIAL_303_PRESET,
 } from './persona-template.mjs'
@@ -964,7 +962,7 @@ export function personaPreviewVars({ timezone = 'UTC', model = 'claude-sonnet-5'
     cli_version: vars.cli_version,
     main_prompt_303: vars.main_prompt_303(),
     harness_303: vars.harness_303,
-    guidance_303: vars.guidance_303(),
+    guidance_303: renderOfficial303Guidance(),
     env_303: vars.env_303(),
     env_instructions_303: OFFICIAL_303_ENV_INSTRUCTIONS,
     env_timezone: ` - Timezone: ${timezone}`,
@@ -1186,6 +1184,29 @@ export function forcesCustomTool(body, extraNames = []) {
   return !isOfficialLookingTool(listed || { name }, extraNames)
 }
 
+/**
+ * routing.json as parsed by every *FromRoutingFile reader. The file is still consulted on each call
+ * (panel saves and scp edits apply without a restart): readFileCached revalidates mtime/size/inode,
+ * and the parsed document is reused while the text is unchanged instead of read + JSON.parse three
+ * times per persona render. Frozen, so no caller can change what the next request reads. Missing or
+ * corrupt files throw like the direct read did; callers fall back to defaults.
+ */
+let routingFileDoc = null
+function readRoutingFile(filePath) {
+  const text = readFileCached(filePath)
+  if (text == null) throw Object.assign(new Error(`routing file not found: ${filePath}`), { code: 'ENOENT' })
+  if (routingFileDoc?.filePath === filePath && routingFileDoc.text === text) return routingFileDoc.doc
+  const doc = deepFreeze(JSON.parse(text))
+  routingFileDoc = { filePath, text, doc }
+  return doc
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
 export function personaExpansionFromRouting(routing = {}) {
   return normalizePersonaExpansion(routing?.compatibility?.persona_expansion)
 }
@@ -1200,7 +1221,7 @@ export function personaExpansionToolsFromRouting(routing = {}) {
 export function personaExpansionFromRoutingFile(filePath) {
   if (!filePath) return { mode: DEFAULT_PERSONA_EXPANSION, extraNames: [] }
   try {
-    const routing = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    const routing = readRoutingFile(filePath)
     return {
       mode: personaExpansionFromRouting(routing),
       extraNames: personaExpansionToolsFromRouting(routing),
@@ -1220,7 +1241,7 @@ export const PERSONA_STANDING_MAX = 800
 export function standingConstraintFromRoutingFile(filePath) {
   if (filePath) {
     try {
-      const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'))?.compatibility?.persona_standing
+      const raw = readRoutingFile(filePath)?.compatibility?.persona_standing
       const text = String(raw ?? '').trim()
       if (text) return text.slice(0, PERSONA_STANDING_MAX)
     } catch {
@@ -1325,21 +1346,28 @@ function insertOfficialCallerAgent(system, callerAgent, cacheControl = OFFICIAL_
   return [...system.slice(0, at), block, ...system.slice(at)]
 }
 
-/** cch is sealed from the whole body, so it changes every turn. Keep that block after the last cache breakpoint or the 1h prefix never hits. */
+/**
+ * cch is sealed from the whole final body (cli-node seals it on cli-hop), and cc_prompt_id
+ * follows the outbound session, so this block changes every turn and whenever any byte of
+ * the body changes. Keep it after the last system breakpoint, and after the dynamic boundary
+ * the CLI splits on, or the cached prefix (tools + system up to that breakpoint) never repeats.
+ */
 export function parkBillingAfterCacheBoundary(system) {
   if (!Array.isArray(system) || system.length < 2) return system
   let billingAt = -1
-  let lastCacheAt = -1
+  let anchorAt = -1
   for (let i = 0; i < system.length; i++) {
     const block = system[i]
     const text = String(block?.text || '')
-    if (billingAt < 0 && /x-anthropic-billing-header:/i.test(text)) billingAt = i
-    if (block?.cache_control && i !== billingAt) lastCacheAt = i
+    if (billingAt < 0 && /^\s*x-anthropic-billing-header:/i.test(text)) {
+      billingAt = i
+      continue
+    }
+    if (block?.cache_control || text.trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__') anchorAt = i
   }
-  if (billingAt < 0 || lastCacheAt < 0 || billingAt > lastCacheAt) return system
+  if (billingAt < 0 || anchorAt < 0 || billingAt > anchorAt) return system
   const next = system.slice(0, billingAt).concat(system.slice(billingAt + 1))
-  const cacheAt = lastCacheAt - (billingAt < lastCacheAt ? 1 : 0)
-  next.splice(cacheAt + 1, 0, system[billingAt])
+  next.splice(anchorAt, 0, system[billingAt])
   return next
 }
 
@@ -1430,7 +1458,7 @@ export function personaOptionsFromRoutingFile(filePath) {
     return { mode: DEFAULT_PERSONA_MODE, park: DEFAULT_PERSONA_PARK, agent: DEFAULT_PERSONA_AGENT }
   }
   try {
-    return personaOptionsFromRouting(JSON.parse(fs.readFileSync(filePath, 'utf8')))
+    return personaOptionsFromRouting(readRoutingFile(filePath))
   } catch {
     return { mode: DEFAULT_PERSONA_MODE, park: DEFAULT_PERSONA_PARK, agent: DEFAULT_PERSONA_AGENT }
   }
@@ -1454,7 +1482,6 @@ function personaTemplateSettingsFallback() {
     templates: null,
     overlayPreset: DEFAULT_PERSONA_PARK ? 'official' : DEFAULT_OVERLAY_PRESET,
     overlayTemplates: null,
-    hides: null,
     switches: {},
   }
 }
@@ -1476,13 +1503,10 @@ export function personaTemplateSettingsFromRouting(routing = {}) {
     templates: compat.persona_templates || null,
     overlayPreset: overlayPresetFromCompat(compat),
     overlayTemplates: compat.overlay_templates || null,
-    hides: parsePersonaHides(compat.persona_hides),
     switches: {
       agent_standing: compat.agent_standing,
       agent_standing_presets: compat.agent_standing_presets,
-      agent_standing_hide_presets: compat.agent_standing_hide_presets,
       persona_env_presets: compat.persona_env_presets,
-      persona_hide_presets: compat.persona_hide_presets,
       persona_block_presets: compat.persona_block_presets,
       model_env_extra: compat.model_env_extra,
       model_env_extra_presets: compat.model_env_extra_presets,
@@ -1498,7 +1522,7 @@ export function personaTemplateSettingsFromRouting(routing = {}) {
 export function personaTemplateSettingsFromRoutingFile(filePath) {
   if (!filePath) return personaTemplateSettingsFallback()
   try {
-    return personaTemplateSettingsFromRouting(JSON.parse(fs.readFileSync(filePath, 'utf8')))
+    return personaTemplateSettingsFromRouting(readRoutingFile(filePath))
   } catch {
     return personaTemplateSettingsFallback()
   }
@@ -1544,37 +1568,6 @@ export function personaPresetFromHopMode(mode) {
   if (raw === 'custom' || raw === 'diy' || raw === 'manual') return 'custom'
   if (raw === OFFICIAL_303_PRESET || raw === '303' || raw === 'official-303') return 'official_full'
   return null
-}
-
-/**
- * Whether the persona for this call masks its injected blocks from client usage.
- * Order: panel per-preset `persona_hide_presets[preset]`, then the legacy global
- * `persona_hides`, then the template hide flags. `mode` is the slot hop override.
- * null means "not template-driven" — the caller should fall back to its mode rule.
- */
-export function personaHidesUsageFromRoutingFile(filePath, mode) {
-  const settings = personaTemplateSettingsFromRoutingFile(filePath)
-  const hopPreset = mode != null ? personaPresetFromHopMode(mode) : null
-  const preset = templatePresetFor(hopPreset || settings.preset)
-  const map = settings.switches.persona_hide_presets
-  if (map && typeof map === 'object' && typeof map[preset] === 'boolean') return map[preset]
-  if (typeof settings.hides === 'boolean') return settings.hides
-  if (!hopPreset && !personaUsesTemplate(settings)) return null
-  return preset === 'zero' || templateHidesAnything(resolvePersonaTemplate(preset, settings.templates))
-}
-
-/**
- * Standing text the template persona writes for this call, and whether the panel
- * masks it from client usage (agent_standing_hide_presets, default on). `mode` is
- * the slot hop override; without it the stored preset applies.
- */
-export function standingUsageFromRoutingFile(filePath, mode) {
-  const settings = personaTemplateSettingsFromRoutingFile(filePath)
-  const preset = templatePresetFor((mode != null && personaPresetFromHopMode(mode)) || settings.preset)
-  return {
-    text: agentStandingVar(settings.switches, preset).trim(),
-    hide: presetFlagEnabled(settings.switches, 'agent_standing_hide_presets', preset),
-  }
 }
 
 const LEGACY_OFFICIAL_USER_ID_RE = /^user_([a-fA-F0-9]{64})_account_([a-fA-F0-9-]*)_session_([a-fA-F0-9-]{36})$/
@@ -1720,15 +1713,6 @@ export function isProxiedOfficialClaudeCode(body = {}, headers = {}) {
  */
 export function detectProxiedOfficialCcFromRouting(routing = {}) {
   return routing?.compatibility?.detect_proxied_official_cc !== false
-}
-
-export function detectProxiedOfficialCcFromRoutingFile(filePath) {
-  if (!filePath) return true
-  try {
-    return detectProxiedOfficialCcFromRouting(JSON.parse(fs.readFileSync(filePath, 'utf8')))
-  } catch {
-    return true
-  }
 }
 
 /** Off unless the protocol tab turns it on. Official family then keeps its inbound system. */
@@ -2180,6 +2164,8 @@ function applyTemplatePersona(
   let assembled = { ...body, system, messages: outMessages }
   if (zero && renderOptions.usedCallerCache.size) assembled = deferReorderedCallerCache(assembled, body, templateOwned)
   assembled = mergeTemplateCache(assembled, templateOwned, zero ? normalizeCacheTtl(cacheTtl) : cacheTtl)
+  // zero 的 billing 带 prompt_version 身份句，是 cli-node zero 布局的锚点，位置不动。
+  if (!zero) assembled = { ...assembled, system: parkBillingAfterCacheBoundary(assembled.system) }
   const overlayBlocks = zero ? [] : resolveOverlayTemplate(overlayPreset, overlayTemplates)
   if (!overlayBlocks.length) return assembled
   const overlay = renderOverlayTemplate(overlayBlocks, collectOverlayParts(routingFile))
@@ -2217,7 +2203,7 @@ export function applyCrsUnofficialPersona(
   const fileSettings = personaTemplateSettingsFromRoutingFile(routingFile)
   let routing = null
   try {
-    routing = routingFile ? JSON.parse(fs.readFileSync(routingFile, 'utf8')) : null
+    routing = routingFile ? readRoutingFile(routingFile) : null
   } catch {
     routing = null
   }

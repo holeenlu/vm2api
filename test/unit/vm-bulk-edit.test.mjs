@@ -1,0 +1,278 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { createDatabase } from '../../src/lib/db/database.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
+import { getVm, patchVmRecord } from '../../src/lib/vm/vm-registry.mjs'
+import { atomicWriteJson } from '../../src/lib/vm/vm-file.mjs'
+import { createVmBulkEditService } from '../../src/lib/admin/vm-bulk-edit.mjs'
+import { createPanelVmBulkRoutes } from '../../src/lib/admin/panel-vm-bulk-routes.mjs'
+import { createRoutingRuntime } from '../../src/lib/admin/routing-runtime.mjs'
+import { authorizePanelRoute } from '../../src/lib/admin/capability-policy.mjs'
+
+async function setup(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm-bulk-test-'))
+  const db = createDatabase({ dataDir: root })
+  t.after(() => {
+    db.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  fs.mkdirSync(path.join(root, 'vms'))
+  for (const [id, platform] of [
+    ['gpt-1', 'openai'],
+    ['gpt-2', 'openai'],
+    ['claude-1', 'anthropic'],
+  ])
+    atomicWriteJson(path.join(root, 'vms', `${id}.json`), {
+      id,
+      name: id,
+      platform,
+      status: 'running',
+      policy: {},
+      schedule_off: false,
+    })
+  const calls = []
+  const runtime = createRoutingRuntime({
+    cfg: { paths: { project: root } },
+    routingConfig: { codex: { quota: { max_concurrency: 2, max_rpm: 0 } } },
+    accountQuota: {
+      setMaxConcurrency: (...x) => calls.push(x),
+      setMaxRpm: (...x) => calls.push(x),
+      repo: { get: () => null },
+    },
+  })
+  const options = { db, project: root, ...runtime }
+  const svc = createVmBulkEditService(options)
+  const groups = new GroupsRepo(db),
+    group = await groups.create({ name: 'OpenAI bulk', platform: 'openai' })
+  const command = async (patch, ids = ['gpt-1', 'gpt-2']) => ({
+    operation_id: randomUUID(),
+    items: (await svc.snapshot(ids)).items,
+    patch,
+  })
+  return { root, db, svc, groups, group, command, options, calls }
+}
+test('mixed platform updates persist, omit unchecked fields and retain receipts across reopen', async (t) => {
+  const { root, db, svc, command, options } = await setup(t)
+  const cmd = await command({ max_concurrency: 4, max_rpm: 60, weight: 7, schedule_level: 3 }, ['gpt-1', 'claude-1'])
+  const result = await svc.save(cmd, 'admin')
+  assert.equal(result.status, 'complete')
+  assert.equal(result.items[0].fields.schedule_level.status, 'not_applicable')
+  assert.equal(result.items[1].fields.weight.status, 'not_applicable')
+  assert.equal(getVm(root, 'gpt-1').policy.weight, 7)
+  assert.equal(getVm(root, 'claude-1').policy.priority, 3)
+  assert.equal(getVm(root, 'gpt-2').policy.maxConcurrency, undefined)
+  assert.equal((await createVmBulkEditService(options).get(cmd.operation_id, 'admin')).status, 'complete')
+  const other = createDatabase({ dataDir: root })
+  assert.equal(JSON.parse(other.prepare('SELECT report_json FROM vm_bulk_edits').get().report_json).status, 'complete')
+  other.close()
+  assert.ok(db.prepare("SELECT COUNT(*) AS n FROM operation_audit WHERE action='vm.bulk_edit'").get().n >= 6)
+})
+test('replay does not overwrite subsequent edits; operation IDs and actors cannot be reused', async (t) => {
+  const { root, svc, command } = await setup(t),
+    cmd = await command({ weight: 8 })
+  await svc.save(cmd, 'admin')
+  patchVmRecord(root, 'gpt-1', (v) => ({ policy: { ...v.policy, weight: 9 } }))
+  assert.equal((await svc.save(cmd, 'admin')).status, 'complete')
+  assert.equal(getVm(root, 'gpt-1').policy.weight, 9)
+  await assert.rejects(() => svc.save({ ...cmd, patch: { weight: 4 } }, 'admin'), { code: 'operation_conflict' })
+  await assert.rejects(() => svc.get(cmd.operation_id, 'other'), { code: 'forbidden' })
+})
+test('field conflicts block the entire batch; unrelated telemetry does not', async (t) => {
+  const { root, svc, command } = await setup(t),
+    cmd = await command({ weight: 8 })
+  patchVmRecord(root, 'gpt-2', (v) => ({ policy: { ...v.policy, weight: 2 } }))
+  await assert.rejects(() => svc.save(cmd, 'admin'), { code: 'version_conflict' })
+  assert.equal(getVm(root, 'gpt-1').policy.weight, undefined)
+  const fresh = await command({ weight: 8 })
+  patchVmRecord(root, 'gpt-1', { last_seen: 'later' })
+  assert.equal((await svc.save(fresh, 'admin')).status, 'complete')
+})
+test('group add/remove/replace reuse transactional membership and skip no-op version bumps', async (t) => {
+  const { svc, command, groups, group } = await setup(t)
+  await svc.save(await command({ groups: { operation: 'add', ids: [group.id] } }), 'admin')
+  const version = await groups.resourceVersion('vm', 'gpt-1')
+  await svc.save(await command({ groups: { operation: 'add', ids: [group.id] } }), 'admin')
+  assert.equal(await groups.resourceVersion('vm', 'gpt-1'), version)
+  const replace = await command({ groups: { operation: 'replace', ids: [] } })
+  await assert.rejects(() => svc.save(replace, 'admin'), { code: 'empty_groups_confirmation' })
+  assert.equal((await svc.save({ ...replace, confirm_empty_groups: true }, 'admin')).status, 'complete')
+  assert.deepEqual(await groups.forResource('vm', 'gpt-1'), [])
+  await svc.save(await command({ groups: { operation: 'add', ids: [group.id] } }), 'admin')
+  const remove = await command({ groups: { operation: 'remove', ids: [group.id] } })
+  await assert.rejects(() => svc.save(remove, 'admin'), { code: 'empty_groups_confirmation' })
+  await svc.save({ ...remove, confirm_empty_groups: true }, 'admin')
+  assert.deepEqual(await groups.forResource('vm', 'gpt-2'), [])
+})
+test('group/platform/version preflight failures do not write other fields', async (t) => {
+  const { svc, command, groups, group, root } = await setup(t)
+  await assert.rejects(
+    async () =>
+      svc.save(
+        await command({ groups: { operation: 'add', ids: [group.id] }, max_concurrency: 5 }, ['claude-1']),
+        'admin',
+      ),
+    { code: 'group_platform_mismatch' },
+  )
+  await assert.rejects(
+    async () =>
+      svc.save(await command({ groups: { operation: 'add', ids: [group.id] } }, ['gpt-1', 'claude-1']), 'admin'),
+    { code: 'group_platform_mismatch' },
+  )
+  const cmd = await command({ groups: { operation: 'add', ids: [group.id] }, weight: 8 })
+  await groups.assignResource('vm', 'gpt-2', [group.id], 0, 'other')
+  await assert.rejects(() => svc.save(cmd, 'admin'), { code: 'version_conflict' })
+  assert.equal(getVm(root, 'gpt-1').policy.weight, undefined)
+  assert.deepEqual(await groups.forResource('vm', 'gpt-1'), [])
+})
+test('SQLite failure in the second group write rolls back the first, with no policy writes', async (t) => {
+  const { svc, db, command, group, groups, root } = await setup(t)
+  db.exec(
+    "CREATE TRIGGER reject_second BEFORE INSERT ON group_resources WHEN NEW.resource_id='gpt-2' BEGIN SELECT RAISE(ABORT, 'disk simulation'); END",
+  )
+  const cmd = await command({ groups: { operation: 'add', ids: [group.id] }, weight: 9 })
+  assert.equal((await svc.save(cmd, 'admin')).status, 'incomplete')
+  assert.deepEqual(await groups.forResource('vm', 'gpt-1'), [])
+  assert.equal(getVm(root, 'gpt-1').policy.weight, undefined)
+  assert.equal((await svc.get(cmd.operation_id, 'admin')).items[0].fields.groups.status, 'pending')
+  db.exec('DROP TRIGGER reject_second')
+  assert.equal((await svc.save(cmd, 'admin')).status, 'complete')
+})
+test('a file write followed by runtime failure is reconciled; completed fields are not replayed', async (t) => {
+  const { root, options, command } = await setup(t)
+  let fail = true,
+    calls = 0
+  const svc = createVmBulkEditService({
+    ...options,
+    applyVmRpm: (...args) => {
+      calls++
+      const result = options.applyVmRpm(...args)
+      if (fail) throw new Error('runtime interrupted')
+      return result
+    },
+  })
+  const cmd = await command({ max_concurrency: 4, max_rpm: 50 }, ['gpt-1'])
+  const first = await svc.save(cmd, 'admin')
+  assert.equal(first.status, 'incomplete')
+  assert.equal(first.items[0].fields.max_concurrency.status, 'saved')
+  assert.equal(first.items[0].fields.max_rpm.status, 'writing')
+  // A completed field changed independently must not be replayed during retry.
+  options.applyVmConcurrency('gpt-1', 6, { override: true })
+  fail = false
+  assert.equal((await svc.save(cmd, 'admin')).status, 'complete')
+  assert.equal(calls, 2)
+  assert.equal(getVm(root, 'gpt-1').policy.maxConcurrency, 6)
+})
+test('unconfirmed writes refuse to clobber an independent third value', async (t) => {
+  const { root, options, command } = await setup(t)
+  const svc = createVmBulkEditService({
+    ...options,
+    applyVmRpm: (...args) => {
+      options.applyVmRpm(...args)
+      throw new Error('crash')
+    },
+  })
+  const cmd = await command({ max_rpm: 50 }, ['gpt-1'])
+  await svc.save(cmd, 'admin')
+  options.applyVmRpm('gpt-1', 75, { override: true })
+  await assert.rejects(() => svc.save(cmd, 'admin'), { code: 'version_conflict' })
+  assert.equal(getVm(root, 'gpt-1').policy.maxRpm, 75)
+})
+test('inheritance clears pins and uses the current platform defaults', async (t) => {
+  const { svc, command, root } = await setup(t)
+  await svc.save(await command({ max_concurrency: 7, max_rpm: 80, weight: 5 }), 'admin')
+  assert.equal(
+    (await svc.save(await command({ max_concurrency: null, max_rpm: null, weight: null }), 'admin')).status,
+    'complete',
+  )
+  const v = getVm(root, 'gpt-1')
+  assert.equal(v.policy.maxConcurrency, 2)
+  assert.equal(v.policy.concurrencyOverride, false)
+  assert.equal(v.policy.rpmOverride, false)
+  assert.equal(v.policy.weight, 1)
+})
+test('manual scheduling changes preserve restrictions and block archived/revoked supply', async (t) => {
+  const { svc, command, root } = await setup(t)
+  patchVmRecord(root, 'gpt-1', {
+    schedule_off: true,
+    unschedulable: { reason: 'no_credential' },
+    schedule_hold: { reason: 'maintenance' },
+    cooldown_until: 9999999999999,
+  })
+  assert.equal((await svc.save(await command({ schedulable: true }, ['gpt-1']), 'admin')).status, 'complete')
+  const v = getVm(root, 'gpt-1')
+  assert.equal(v.unschedulable.reason, 'no_credential')
+  assert.equal(v.schedule_hold.reason, 'maintenance')
+  assert.equal(v.cooldown_until, 9999999999999)
+  patchVmRecord(root, 'gpt-2', { schedule_off: true, claude: { refresh_error: 'oauth_revoked' } })
+  await assert.rejects(async () => svc.save(await command({ schedulable: true }, ['gpt-2']), 'admin'), {
+    code: 'credential_unavailable',
+  })
+  patchVmRecord(root, 'gpt-2', { vendor_account_resource_id: 'missing' })
+  await assert.rejects(() => svc.snapshot(['gpt-2']), { code: 'resource_archived' })
+})
+test('unsafe IDs, bad values, missing snapshots and too many targets are rejected', async (t) => {
+  const { svc, command } = await setup(t)
+  for (const ids of [['../vms/x'], [], ['gpt-1', 'gpt-1'], Array.from({ length: 501 }, (_, i) => `x-${i}`)])
+    await assert.rejects(() => svc.snapshot(ids))
+  for (const patch of [
+    { weight: 0 },
+    { weight: '3' },
+    { max_concurrency: 257 },
+    { max_rpm: -1 },
+    { schedulable: 1 },
+    { unknown: 1 },
+    { groups: null },
+    {},
+  ])
+    await assert.rejects(async () => svc.save(await command(patch), 'admin'))
+  const cmd = await command({ weight: 7 })
+  delete cmd.items[0].versions
+  await assert.rejects(() => svc.save(cmd, 'admin'), { code: 'snapshot_required' })
+})
+test('all bulk routes deny admin, user and vendor identities before reading a body', async (t) => {
+  const { options } = await setup(t)
+  for (const role of ['admin', 'user', 'vendor'])
+    for (const [method, route] of [
+      ['POST', ''],
+      ['POST', '/snapshot'],
+      ['GET', '/operations/0000000000000000'],
+    ]) {
+      const url = new URL(`http://localhost/api/panel/vms/bulk-edit${route}`)
+      assert.equal(authorizePanelRoute(method, url.pathname, role).ok, false)
+      let result
+      const handler = createPanelVmBulkRoutes({
+        ...options,
+        cfg: { paths: { project: options.project } },
+        json: (_, status, body) => {
+          result = { status, body }
+        },
+        readBody: () => {
+          throw new Error('must not read')
+        },
+      })
+      assert.equal(await handler({ method, panelRole: role }, {}, url), true)
+      assert.equal(result.status, 403)
+    }
+})
+test('schema upgrades an existing database and preserves earlier rows', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bulk-upgrade-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const dir = path.join(root, 'migrations')
+  fs.mkdirSync(dir)
+  const source = new URL('../../src/lib/db/migrations/', import.meta.url)
+  // 旧库 = 迁移前缀（076 之前），再用全套迁移升级：真实升级总是按序补齐，
+  // 不会出现「应用了后续迁移却缺中间一个」的状态（134 会按表名改写时间列，依赖此前的建表）
+  for (const file of fs.readdirSync(source).filter((f) => f.endsWith('.sql') && f < '076_'))
+    fs.copyFileSync(new URL(file, source), path.join(dir, file))
+  let db = createDatabase({ dataDir: root, migrationsDir: dir })
+  const before = db.prepare('SELECT COUNT(*) AS n FROM groups').get().n
+  db.close()
+  db = createDatabase({ dataDir: root })
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM groups').get().n, before)
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM vm_bulk_edits').get().n, 0)
+  db.close()
+})

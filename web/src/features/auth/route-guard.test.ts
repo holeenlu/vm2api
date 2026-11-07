@@ -1,5 +1,6 @@
 import { QueryClient } from '@tanstack/react-query'
 import { isRedirect } from '@tanstack/react-router'
+import { i18n } from '@/i18n'
 import type { MeResponse } from '@/types/panel-auth'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/lib/api'
@@ -12,17 +13,22 @@ vi.mock('sonner', () => ({ toast: { error: toastError } }))
 const TENANT: MeResponse = {
   user: 'tenant',
   role: 'user',
-  views: ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'],
+  views: ['profile', 'keys', 'subscriptions', 'billing', 'logs', 'statistics'],
+}
+const ADMIN: MeResponse = {
+  user: 'ops',
+  role: 'admin',
+  views: ['profile', 'users', 'keys', 'billing', 'logs', 'statistics'],
 }
 const SUPER: MeResponse = {
-  user: 'ops',
-  role: 'super',
-  views: ['overview', 'cluster', 'logs', 'statistics', 'vm'],
+  user: 'root',
+  role: 'super_admin',
+  views: ['overview', 'users', 'vm', 'settings', 'wrap', 'keys', 'logs'],
 }
 
 let storage: Map<string, string>
 
-beforeEach(() => {
+beforeEach(async () => {
   storage = new Map([[LS_TOKEN, 'panel-token']])
   vi.stubGlobal('location', { hostname: 'console.example' })
   vi.stubGlobal('document', { cookie: '' })
@@ -31,6 +37,7 @@ beforeEach(() => {
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
   })
+  await i18n.changeLanguage('zh-CN')
 })
 
 afterEach(() => {
@@ -67,9 +74,12 @@ function meResponse(status: number, body: unknown) {
 
 describe('panel route guard', () => {
   it('lets a role into its pages and their sub-routes', async () => {
-    const queryClient = client(TENANT)
-    await expect(guard(queryClient, '/vm')).resolves.toEqual(TENANT)
+    const queryClient = client(SUPER)
+    await expect(guard(queryClient, '/vm')).resolves.toEqual(SUPER)
     await expect(guard(queryClient, '/vm/vm-01?tab=usage')).resolves.toEqual(
+      SUPER
+    )
+    await expect(guard(client(TENANT), '/subscriptions')).resolves.toEqual(
       TENANT
     )
     expect(toastError).not.toHaveBeenCalled()
@@ -77,7 +87,7 @@ describe('panel route guard', () => {
 
   it('sends a blocked page to the role home with one warning', async () => {
     const options = await redirectOf(guard(client(TENANT), '/users'))
-    expect(options).toMatchObject({ to: '/vm', replace: true })
+    expect(options).toMatchObject({ to: '/keys', replace: true })
     expect(toastError).toHaveBeenCalledTimes(1)
     expect(toastError).toHaveBeenCalledWith('无权访问该页面', {
       id: 'panel-route-forbidden',
@@ -85,19 +95,19 @@ describe('panel route guard', () => {
   })
 
   it('blocks sub-routes of a blocked parent', async () => {
-    const options = await redirectOf(guard(client(SUPER), '/settings/about'))
-    expect(options).toMatchObject({ to: '/overview' })
+    const options = await redirectOf(guard(client(ADMIN), '/settings/about'))
+    expect(options).toMatchObject({ to: '/users' })
   })
 
   it('stays quiet while preloading a link', async () => {
     const options = await redirectOf(guard(client(TENANT), '/wrap', true))
-    expect(options).toMatchObject({ to: '/vm' })
+    expect(options).toMatchObject({ to: '/keys' })
     expect(toastError).not.toHaveBeenCalled()
   })
 
   it('moves roles without 总览 from the console entry without a warning', async () => {
     const options = await redirectOf(guard(client(TENANT), '/overview'))
-    expect(options).toMatchObject({ to: '/vm' })
+    expect(options).toMatchObject({ to: '/keys' })
     expect(toastError).not.toHaveBeenCalled()
     await expect(guard(client(SUPER), '/overview')).resolves.toEqual(SUPER)
   })
@@ -121,7 +131,7 @@ describe('panel route guard', () => {
 
     answer(meResponse(200, TENANT))
     await expect(pending).resolves.toEqual(TENANT)
-    await expect(guard(queryClient, '/proxies')).resolves.toEqual(TENANT)
+    await expect(guard(queryClient, '/billing')).resolves.toEqual(TENANT)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(String(fetchMock.mock.calls[0])).toContain('/api/panel/me')
   })

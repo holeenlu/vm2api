@@ -1,10 +1,10 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { redirect, type ParsedLocation } from '@tanstack/react-router'
-import { canOpenPath } from '@/config/nav'
+import { canOpenPath, firstAllowedPath } from '@/config/nav'
+import { t } from '@/i18n'
 import type { MeResponse } from '@/types/panel-auth'
 import { toast } from 'sonner'
 import { ApiError } from '@/lib/api'
-import { homePathFor } from '@/components/layout/data/sidebar-data'
 import { meQueryOptions } from './queries'
 
 // Welcome, the sidebar logo and the error pages all link here as the console
@@ -37,7 +37,7 @@ export async function guardPanelRoute({
   }
   if (canOpenPath(me.views, location.pathname)) return me
   if (!preload && location.pathname !== CONSOLE_ENTRY) {
-    toast.error('无权访问该页面', { id: 'panel-route-forbidden' })
+    toast.error(t('common:pageForbidden'), { id: 'panel-route-forbidden' })
   }
-  throw redirect({ to: homePathFor(me.views), replace: true })
+  throw redirect({ to: firstAllowedPath(me.views), replace: true })
 }

@@ -21,6 +21,11 @@ export const EMPTY_RESPONSE_REASON = 'empty_response'
 
 const SESSION_WINDOW_MIN_AGE_MS = WINDOW_5H_MS
 const SESSION_WINDOW_MAX_AHEAD_MS = 7 * 24 * 3600_000
+// 平台级过载判定：60 秒内至少 3 个不同账号收到 529；平台过载时只停放 30 秒；停放时长加 0–20% 抖动
+const OVERLOAD_POOL_WINDOW_MS = 60_000
+const OVERLOAD_POOL_ACCOUNTS = 3
+const PLATFORM_OVERLOAD_COOLDOWN_MS = 30_000
+const OVERLOAD_JITTER = 0.2
 
 function positive(value, fallback) {
   const n = Number(value)
@@ -83,11 +88,19 @@ export function anthropic429Reset(headers = {}, now = Date.now()) {
 }
 
 export class RateLimitService {
-  constructor({ runtimeRepo = null, accountQuota = null, config = {}, onUsageProbe = null } = {}) {
+  constructor({
+    runtimeRepo = null,
+    accountQuota = null,
+    config = {},
+    onUsageProbe = null,
+    random = Math.random,
+  } = {}) {
     this.runtimeRepo = runtimeRepo
     this.accountQuota = accountQuota
     this.config = normalizeRateLimitConfig(config)
     this.onUsageProbe = onUsageProbe
+    this.random = random
+    this.recent529 = new Map()
   }
 
   setConfig(config = {}) {
@@ -100,7 +113,7 @@ export class RateLimitService {
    * An unknown bare 429 writes no hard block: the scope is unproven, so one
    * bounded usage probe decides whether the account window is really spent.
    */
-  handleUpstreamError({ accountId, vmId, result = {}, policy = null, now = Date.now() } = {}) {
+  async handleUpstreamError({ accountId, vmId, result = {}, policy = null, now = Date.now() } = {}) {
     if (!accountId || !this.runtimeRepo || result?.committed) return null
     const reason = String(policy?.reason || '')
     if (policy?.scope === 'account' && reason === 'account_quota_exhausted') {
@@ -123,13 +136,13 @@ export class RateLimitService {
     } catch {}
   }
 
-  handle429({ accountId, vmId, result = {}, now = Date.now() }) {
+  async handle429({ accountId, vmId, result = {}, now = Date.now() }) {
     const headers = extraHeadersFromLimitError(bodyMessage(result.body), result.headers || {}, now)
     const parsed = anthropic429Reset(headers, now)
     const fallback = !parsed
     const resetAt = parsed?.resetAt || now + this.config.fallback_cooldown_min * 60_000
     const windowEnd = parsed?.fiveHourReset || (parsed?.window === '7d' ? null : resetAt)
-    this.runtimeRepo.updateWindow?.(accountId, {
+    await this.runtimeRepo.updateWindow?.(accountId, {
       vmId,
       rateLimitedAt: now,
       rateLimitResetAt: resetAt,
@@ -137,7 +150,7 @@ export class RateLimitService {
       sessionWindowStatus: 'rejected',
     })
     try {
-      this.accountQuota?.ingestHeaders?.(accountId, headers, null, {
+      await this.accountQuota?.ingestHeaders?.(accountId, headers, null, {
         exhausted: true,
         status: 429,
         countRequest: false,
@@ -147,17 +160,23 @@ export class RateLimitService {
     return { kind: 'rate_limited', until: resetAt, window: parsed?.window || null, fallback }
   }
 
-  handle529({ accountId, vmId, now = Date.now() }) {
-    const until = now + this.config.overload_cooldown_min * 60_000
-    this.runtimeRepo.updateWindow?.(accountId, { vmId, overloadUntil: until })
-    return { kind: 'overloaded', until }
+  async handle529({ accountId, vmId, now = Date.now() }) {
+    // 529 是平台过载，不是账号问题（审计 P1-R4）：短时间内多个账号都收到 529 时只短暂停放，
+    // 否则 failover 逐个碰到、逐个停 10 分钟，整池停摆；单账号离群仍按配置。两种都加抖动，避免同时到期同时涌入
+    for (const [id, at] of this.recent529) if (now - at > OVERLOAD_POOL_WINDOW_MS) this.recent529.delete(id)
+    this.recent529.set(accountId, now)
+    const platform = this.recent529.size >= OVERLOAD_POOL_ACCOUNTS
+    const base = platform ? PLATFORM_OVERLOAD_COOLDOWN_MS : this.config.overload_cooldown_min * 60_000
+    const until = now + Math.round(base * (1 + OVERLOAD_JITTER * this.random()))
+    await this.runtimeRepo.updateWindow?.(accountId, { vmId, overloadUntil: until })
+    return { kind: 'overloaded', until, platform }
   }
 
   /**
    * sub2api UpdateSessionWindow: every response with live headers.
    * An out-of-range reset is ignored. `allowed` is the only early unblock.
    */
-  updateSessionWindow({ accountId, vmId = null, headers = {}, now = Date.now() } = {}) {
+  async updateSessionWindow({ accountId, vmId = null, headers = {}, now = Date.now() } = {}) {
     if (!accountId || !this.runtimeRepo) return false
     const status = String(header(headers, 'anthropic-ratelimit-unified-5h-status') || '').toLowerCase()
     if (!status) return false
@@ -171,13 +190,17 @@ export class RateLimitService {
       patch.sessionWindowStart = resetMs - WINDOW_5H_MS
       patch.sessionWindowEnd = resetMs
     }
-    const current = this.runtimeRepo.get?.(accountId) || null
-    const limited = Number(current?.rate_limit_reset_at) > now
     const sevenDayOpen = !isRejected(header(headers, 'anthropic-ratelimit-unified-7d-status'))
-    if (status === 'allowed' && sevenDayOpen && limited) {
-      patch.rateLimitResetAt = null
+    // 读、判定、写放进同一事务（R6 B7 复审 P2-2）：否则判定之后另一个请求的 handle429 刚写入的重置时间会被这里清掉
+    const apply = async () => {
+      const current = (await this.runtimeRepo.get?.(accountId)) || null
+      const limited = Number(current?.rate_limit_reset_at) > now
+      if (status === 'allowed' && sevenDayOpen && limited) patch.rateLimitResetAt = null
+      await this.runtimeRepo.updateWindow?.(accountId, patch)
     }
-    this.runtimeRepo.updateWindow?.(accountId, patch)
+    const client = this.runtimeRepo.client
+    if (typeof client?.tx === 'function') await client.tx(apply)
+    else await apply()
     return patch.rateLimitResetAt === null
   }
 }

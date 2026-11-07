@@ -100,8 +100,8 @@ export function createCredentialRefreshMonitor(opts = {}) {
   let lastRun = null
   const nowFn = opts.now || (() => Date.now())
 
-  const listDue = () => {
-    const vms = typeof opts.listTargets === 'function' ? opts.listTargets() || [] : []
+  const listDue = async () => {
+    const vms = typeof opts.listTargets === 'function' ? (await opts.listTargets()) || [] : []
     return vms.filter((vm) => isCredentialRefreshTarget(vm) && needsScheduledRefresh(vm, nowFn()))
   }
 
@@ -109,7 +109,7 @@ export function createCredentialRefreshMonitor(opts = {}) {
     if (inflight) return inflight
     inflight = (async () => {
       const started = nowFn()
-      const due = listDue()
+      const due = await listDue()
       const items = []
       if (due.length && typeof opts.refreshOne === 'function') {
         await mapPool(due, config.concurrency, async (vm) => {

@@ -19,6 +19,9 @@ import (
 
 const DefaultClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+// refreshRequestTimeout 是单次换票 HTTP 请求的上限（不随调用方取消提前结束）
+const refreshRequestTimeout = 30 * time.Second
+
 type Refresher struct {
 	Store     *credential.Store
 	Client    *http.Client
@@ -161,8 +164,19 @@ func (r *Refresher) ensureLocked(ctx context.Context, force bool) (Result, error
 			}
 			return refreshErr
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
+		// 上游已轮换成功：调用方取消也必须落盘，丢掉新票等于废掉旧 RT（审计 P1-C2）。落盘前重读一次：
+		// 期间写进来的是另一份授权（刷新令牌不同：导入、另一路刷新）时放弃本次结果，不覆盖较新的凭据；
+		// 同一份授权只改了元数据（认证方式、订阅类型）时，把新票合并进最新文档，否则旧 RT 已被上游作废。
+		if latest, latestDocument, latestErr := r.Store.Load(); latestErr == nil {
+			if latest.Generation != current.Generation && latest.RefreshToken != current.RefreshToken {
+				result.Credential = latest
+				result.Shared = true
+				return nil
+			}
+			document = latestDocument
+			if latest.Generation > current.Generation {
+				current.Generation = latest.Generation
+			}
 		}
 		refreshed.Generation = current.Generation
 		saved, saveErr := r.Store.Save(refreshed, document)
@@ -217,7 +231,10 @@ func (r *Refresher) request(ctx context.Context, current credential.Credential) 
 	if err != nil {
 		return credential.Credential{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, r.TokenURL, bytes.NewReader(body))
+	// 换票请求与调用方取消脱钩、独立限时：请求发出后被取消时上游可能已轮换 RT，响应必须读完并落盘（审计 P1-C2）
+	requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshRequestTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, r.TokenURL, bytes.NewReader(body))
 	if err != nil {
 		return credential.Credential{}, fmt.Errorf("build OAuth refresh request: %w", err)
 	}

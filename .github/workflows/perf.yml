@@ -1,0 +1,42 @@
+# 主线程性能回退门槛（审计阶段 2 W16）：起真实网关进程 + 进程内 Anthropic 假上游（不连外网、无凭据），
+# 按固定速率压 tiny / long 两种请求。同一个 job 里把 baseline.json 固定的基线提交也检出一份，和当前代码
+# 交替跑 5 轮，比同机同时段的两组中位数——runner 之间的快慢差别比代码差别大得多，跟存档的绝对数字比会误判
+# （依据写在 baseline.json 的 rule.basis）。超过 max(基线×1.15, 基线+绝对余量) 失败；轮间波动过大，或准备不出
+# 基线树时退回存档数字并只告警。只做测试，不发布、不部署。
+name: perf
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'server.mjs', 'scripts/bench/**', 'test/harness.mjs', 'package-lock.json', '.github/workflows/perf.yml']
+  pull_request:
+    paths: ['src/**', 'server.mjs', 'scripts/bench/**', 'test/harness.mjs', 'package-lock.json', '.github/workflows/perf.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  perf-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 基线树按 SHA 单独取（见 prepareBaselineTree）；这里不需要全量历史
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: ELU and p99 regression gate (5 rounds, A/B against the pinned baseline commit)
+        run: node scripts/bench/gate.mjs --rounds 5

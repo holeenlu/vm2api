@@ -84,7 +84,7 @@ const out = {
     SUM(COALESCE(input_tokens,0)) AS in_tok,
     SUM(COALESCE(output_tokens,0)) AS out_tok
     FROM usage_logs
-    WHERE created_at >= datetime('now', '+8 hours', 'start of day', '-8 hours')
+    WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%f', 'now', '+8 hours', 'start of day') || '+08:00'
     GROUP BY ua_class
   `),
 }

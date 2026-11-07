@@ -342,10 +342,12 @@ function migrateQuestions(stored) {
   if (!stored) return null
   const retired = stored.filter((item) => RETIRED_BUILTIN_IDS.has(item.id))
   const custom = stored.filter((item) => !RETIRED_BUILTIN_IDS.has(item.id) && item.id !== 'nsfw')
-  if (!retired.length || custom.length || retired.some((item) => !uneditedRetired(item))) {
+  const nsfw = stored.find((item) => item.id === 'nsfw')
+  const editedNsfw =
+    nsfw && nsfw.instructions !== NSFW_INSTRUCTION && !LEGACY_BUILTIN_INSTRUCTIONS.get('nsfw')?.has(nsfw.instructions)
+  if (!retired.length || custom.length || editedNsfw || retired.some((item) => !uneditedRetired(item))) {
     return stored.map(refreshBuiltinQuestion)
   }
-  const nsfw = stored.find((item) => item.id === 'nsfw')
   return POLICY_QUESTION_BANK.map((item) => ({
     id: item.id,
     label: item.label,
@@ -1013,7 +1015,7 @@ export function validateJevPatch(body = {}) {
 }
 
 /** Apply a panel PUT. Omitted keys stay. An empty api_key, or api_keys: [], clears them. */
-export function applyJevPatch(settings, body = {}) {
+export async function applyJevPatch(settings, body = {}) {
   const problems = validateJevPatch(body)
   if (problems.length) return { ok: false, problems }
   const current = normalizeJevConfig(settings.get(JEV_SETTING, null))
@@ -1034,7 +1036,7 @@ export function applyJevPatch(settings, body = {}) {
     patterns: Object.hasOwn(body, 'patterns') ? body.patterns : current.patterns,
     rules: Object.hasOwn(body, 'rules') ? body.rules : current.rules,
   })
-  settings.set(JEV_SETTING, next)
+  await settings.set(JEV_SETTING, next)
   if (flat || Object.hasOwn(body, 'api_keys') || Object.hasOwn(body, 'api_key')) rearmJevKeys(next)
   return { ok: true, config: publicJevConfig(next) }
 }

@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { t } from '@/i18n'
 import type {
   JevEndpointKey,
   JevInterceptConfig,
   PolicyQuestion,
 } from '@/types/panel-routing'
 import type { StatusTone } from '@/types/status'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -29,14 +31,62 @@ const EXAMPLES = [
 ] as const
 
 const KEY_STATUS: Record<string, StatusTone> = {
-  normal: { key: 'ok', cls: 'ok', text: '正常' },
-  unrequested: { key: 'none', cls: 'none', text: '未请求' },
-  paused: { key: 'off', cls: 'off', text: '已暂停' },
-  auth_error: { key: 'bad', cls: 'bad', text: '鉴权失败' },
-  insufficient_balance: { key: 'bad', cls: 'bad', text: '额度用尽' },
-  rate_limited: { key: 'warn', cls: 'warn', text: '限流' },
-  request_error: { key: 'caution', cls: 'caution', text: '异常' },
-  unsupported: { key: 'caution', cls: 'caution', text: '无余额接口' },
+  normal: {
+    key: 'ok',
+    cls: 'ok',
+    get text() {
+      return t('risk:keyStatusNormal')
+    },
+  },
+  unrequested: {
+    key: 'none',
+    cls: 'none',
+    get text() {
+      return t('risk:keyStatusUnrequested')
+    },
+  },
+  paused: {
+    key: 'off',
+    cls: 'off',
+    get text() {
+      return t('risk:keyStatusPaused')
+    },
+  },
+  auth_error: {
+    key: 'bad',
+    cls: 'bad',
+    get text() {
+      return t('risk:keyStatusAuthError')
+    },
+  },
+  insufficient_balance: {
+    key: 'bad',
+    cls: 'bad',
+    get text() {
+      return t('risk:keyStatusInsufficientBalance')
+    },
+  },
+  rate_limited: {
+    key: 'warn',
+    cls: 'warn',
+    get text() {
+      return t('risk:keyStatusRateLimited')
+    },
+  },
+  request_error: {
+    key: 'caution',
+    cls: 'caution',
+    get text() {
+      return t('risk:keyStatusRequestError')
+    },
+  },
+  unsupported: {
+    key: 'caution',
+    cls: 'caution',
+    get text() {
+      return t('risk:keyStatusUnsupported')
+    },
+  },
 }
 
 /** Fields this stage owns. Hard-regex fields on the same config stay untouched. */
@@ -193,6 +243,8 @@ export function ModelSettings({
 }: {
   onDirtyChange: (dirty: boolean) => void
 }) {
+  const { t: translate } = useTranslation('risk')
+
   const qc = useQueryClient()
   const q = useQuery(jevInterceptQueryOptions())
   // 只同步本块字段：别的块保存会改写同一份缓存，本块有未保存改动时保留草稿。
@@ -239,7 +291,7 @@ export function ModelSettings({
 
   const save = useMutation({
     mutationFn: () => {
-      if (!draft || !forms) throw new Error('没有可保存的配置')
+      if (!draft || !forms) throw new Error(translate('risk:noConfigToSave'))
       const filled = forms.filter((form) => form.base_url.trim())
       const body: Record<string, unknown> = {
         enabled: draft.enabled,
@@ -286,7 +338,7 @@ export function ModelSettings({
       })
     },
     onSuccess: (data) => {
-      toast.success('已保存决策模型关')
+      toast.success(translate('risk:decisionModelSaved'))
       load(data)
       qc.setQueryData(jevInterceptQueryOptions().queryKey, data)
     },
@@ -297,7 +349,7 @@ export function ModelSettings({
     if (!draft) return
     const base = form.base_url.trim()
     if (!base) {
-      toast.error('先填模型地址')
+      toast.error(translate('risk:modelUrlRequired'))
       return
     }
     setPending((prev) => ({ ...prev, [form.uid]: kind }))
@@ -320,7 +372,9 @@ export function ModelSettings({
         }),
       })
       const results = data.results || []
-      const omitted = data.omitted ? `\n还有 ${data.omitted} 把这次没测。` : ''
+      const omitted = data.omitted
+        ? `\n${translate('risk:keysNotTested', { count: data.omitted })}`
+        : ''
       if (kind === 'probe') {
         const rows = results as ProbeRow[]
         setLive((prev) => {
@@ -340,12 +394,19 @@ export function ModelSettings({
             text:
               rows
                 .map((row) => {
-                  const name = row.masked_key || '无 Key'
+                  const name = row.masked_key || translate('risk:noKey')
                   const scores =
                     row.safe_score == null && row.unsafe_score == null
                       ? ''
-                      : `（安全 ${scoreOf(row.safe_score)}，违规 ${scoreOf(row.unsafe_score)}）`
-                  return `${name}：${row.message}${scores}`
+                      : translate('risk:probeScores', {
+                          safe: scoreOf(row.safe_score),
+                          unsafe: scoreOf(row.unsafe_score),
+                        })
+                  return translate('risk:probeResultLine', {
+                    name,
+                    message: row.message,
+                    scores,
+                  })
                 })
                 .join('\n') + omitted,
           },
@@ -373,12 +434,18 @@ export function ModelSettings({
             text:
               rows
                 .map((row) => {
-                  const name = row.masked_key || '无 Key'
+                  const name = row.masked_key || translate('risk:noKey')
                   const money =
                     row.remaining == null
                       ? row.message
-                      : `剩余 ${row.remaining}${row.unit ? ` ${row.unit}` : ''}`
-                  return `${name}：${money}`
+                      : translate('risk:quotaRemaining', {
+                          amount: `${row.remaining}${row.unit ? ` ${row.unit}` : ''}`,
+                        })
+                  return translate('risk:probeResultLine', {
+                    name,
+                    message: money,
+                    scores: '',
+                  })
                 })
                 .join('\n') + omitted,
           },
@@ -390,7 +457,8 @@ export function ModelSettings({
           queryKey: jevInterceptQueryOptions().queryKey,
         })
     } catch (error) {
-      const message = error instanceof Error ? error.message : '测试失败'
+      const message =
+        error instanceof Error ? error.message : translate('risk:testFailed')
       setChecks((prev) => ({
         ...prev,
         [form.uid]: { ok: false, text: message },
@@ -404,7 +472,7 @@ export function ModelSettings({
   const fetchModels = useMutation({
     mutationFn: () => {
       const base = forms?.[0]?.base_url.trim() || ''
-      if (!base) throw new Error('先填模型地址')
+      if (!base) throw new Error(translate('risk:modelUrlRequired'))
       const typed =
         forms?.[0]?.keys.map((key) => key.trim()).find(Boolean) || ''
       return api<{ models: string[] }>('/api/panel/jev-intercept/models', {
@@ -425,7 +493,9 @@ export function ModelSettings({
         return pick ? { ...prev, model: pick } : prev
       })
       toast.success(
-        ids.length ? `拉到 ${ids.length} 个模型` : '上游没有返回模型'
+        ids.length
+          ? translate('risk:modelsFetched', { count: ids.length })
+          : translate('risk:noModelsReturned')
       )
     },
     onError: (error: Error) => toast.error(error.message),
@@ -436,7 +506,7 @@ export function ModelSettings({
       if (!prev) return prev
       const key = decisionKey(base)
       if (key && prev.some((form) => decisionKey(form.base_url) === key)) {
-        toast.message('这个地址已经在列表里')
+        toast.message(translate('risk:addressAlreadyListed'))
         return prev
       }
       if (
@@ -476,19 +546,19 @@ export function ModelSettings({
     setDraft({ ...draft, question_bank: rows })
   const enabledQuestions = questions.filter((row) => row.enabled).length
   const modelPlaceholder = isTypeSafe(forms[0]?.base_url || '')
-    ? 'jev-latest'
-    : '留空则由上游路由'
+    ? /* i18n-exempt "jev-latest" -- Example model ID; the API identifier must be preserved. */ 'jev-latest'
+    : translate('risk:modelEmptyHint')
 
   return (
     <div className='space-y-8 p-4'>
       <Group
-        title='何时拦截'
-        hint='前三关都没拦的正文才会送到这里。没配地址时这一关跳过。'
+        title={translate('risk:whenToBlock')}
+        hint={translate('risk:decisionModelDescription')}
       >
         <ToggleList>
           <ToggleItem
-            label='决策模型'
-            desc='三题各自打分，任一题低于阈值就拦。色情命中会封设备'
+            label={translate('risk:decisionModel')}
+            desc={translate('risk:scoreAllQuestionsHint')}
           >
             <Switch
               checked={draft.enabled}
@@ -496,15 +566,18 @@ export function ModelSettings({
             />
           </ToggleItem>
           <ToggleItem
-            label='失败放行'
-            desc='打分失败照常出站，记为「模型故障放行」。关掉后只拦截这一次，不封禁设备'
+            label={translate('risk:failOpen')}
+            desc={translate('risk:failOpenSettingHint')}
           >
             <Switch
               checked={draft.fail_open !== false}
               onCheckedChange={(v) => setDraft({ ...draft, fail_open: v })}
             />
           </ToggleItem>
-          <ToggleItem label='低于阈值拦截' desc='关掉则高于阈值才拦'>
+          <ToggleItem
+            label={translate('risk:blockBelowThreshold')}
+            desc={translate('risk:blockThresholdHint')}
+          >
             <Switch
               checked={draft.block_if_below !== false}
               onCheckedChange={(v) => setDraft({ ...draft, block_if_below: v })}
@@ -514,8 +587,8 @@ export function ModelSettings({
       </Group>
 
       <Group
-        title='连接'
-        hint='按地址管理，不再切换 Jev / Laya / ModernBERT。默认示例是 TypeSafe。同一地址下填写的 Key 会追加；勾选清除才替换。判断基准用的是已保存的题库和阈值。'
+        title={translate('risk:connection')}
+        hint={translate('risk:connectionByAddressHint')}
       >
         <div className='space-y-4'>
           {forms.map((form, index) => {
@@ -529,13 +602,16 @@ export function ModelSettings({
               .map(
                 (row) => toneOf(live[row.key_fingerprint] || row.status).text
               )
-              .join('、')
+              .join(translate('risk:listSeparator'))
             const adding = savedKeys.length > 0
             const extra = adding ? form.keys : form.keys.slice(1)
             const check = checks[form.uid]
             return (
               <div key={form.uid} className='space-y-3 rounded-xl border p-4'>
-                <FieldLine label='地址' htmlFor={`jev-base-${form.uid}`}>
+                <FieldLine
+                  label={translate('risk:url')}
+                  htmlFor={`jev-base-${form.uid}`}
+                >
                   <div className='flex flex-wrap gap-2'>
                     <Input
                       id={`jev-base-${form.uid}`}
@@ -557,7 +633,7 @@ export function ModelSettings({
                           })
                         }
                       >
-                        默认
+                        {translate('risk:default')}
                       </Button>
                     ) : null}
                     {forms.length > 1 ? (
@@ -573,19 +649,22 @@ export function ModelSettings({
                           )
                         }
                       >
-                        移除
+                        {translate('risk:remove')}
                       </Button>
                     ) : null}
                   </div>
                 </FieldLine>
-                <FieldLine label='Key' htmlFor={`jev-key-${form.uid}`}>
+                <FieldLine
+                  label={translate('risk:key')}
+                  htmlFor={`jev-key-${form.uid}`}
+                >
                   <div className='space-y-2'>
                     <div className='flex flex-wrap gap-2'>
                       {adding ? (
                         <SavedKey
                           row={shownSaved[0]}
                           live={live}
-                          placeholder='还没有 Key'
+                          placeholder={translate('risk:noKeysYet')}
                         />
                       ) : (
                         <Input
@@ -594,7 +673,7 @@ export function ModelSettings({
                           autoComplete='off'
                           className='min-w-40 flex-1'
                           value={form.keys[0] || ''}
-                          placeholder='本地服务可留空'
+                          placeholder={translate('risk:localServiceKeyHint')}
                           onChange={(e) =>
                             patchForm(form.uid, {
                               keys: form.keys.map((key, i) =>
@@ -616,7 +695,9 @@ export function ModelSettings({
                           patchForm(form.uid, { expanded: !form.expanded })
                         }
                       >
-                        {form.expanded ? '收起' : '展开更多'}
+                        {form.expanded
+                          ? translate('risk:collapse')
+                          : translate('risk:expandMore')}
                       </Button>
                       <Button
                         type='button'
@@ -626,7 +707,7 @@ export function ModelSettings({
                         disabled={!!pending[form.uid]}
                         onClick={() => void runCheck(form, 'probe')}
                       >
-                        一键测试
+                        {translate('risk:oneClickTest')}
                       </Button>
                       <Button
                         type='button'
@@ -636,7 +717,7 @@ export function ModelSettings({
                         disabled={!!pending[form.uid]}
                         onClick={() => void runCheck(form, 'quota')}
                       >
-                        检查剩余额度
+                        {translate('risk:checkRemainingQuota')}
                       </Button>
                     </div>
                     {shownSaved.length ? (
@@ -651,9 +732,14 @@ export function ModelSettings({
                               <Input
                                 type='password'
                                 autoComplete='off'
-                                aria-label={`追加 Key ${realIndex + 1}`}
+                                aria-label={translate(
+                                  'risk:additionalKeyNumber',
+                                  {
+                                    number: realIndex + 1,
+                                  }
+                                )}
                                 value={value}
-                                placeholder='再添加一把'
+                                placeholder={translate('risk:addAnotherKey')}
                                 onChange={(e) =>
                                   patchForm(form.uid, {
                                     keys: form.keys.map((key, i) =>
@@ -674,7 +760,7 @@ export function ModelSettings({
                                   })
                                 }
                               >
-                                删除
+                                {translate('risk:delete')}
                               </Button>
                             </div>
                           )
@@ -690,12 +776,12 @@ export function ModelSettings({
                               patchForm(form.uid, { keys: [...form.keys, ''] })
                             }
                           >
-                            再加一把
+                            {translate('risk:addOneMoreKey')}
                           </Button>
                           {savedKeys.length ? (
                             <ToggleItem
-                              label='清除已存 Key'
-                              desc='保存后换成这次填写的；没填就是删掉'
+                              label={translate('risk:clearSavedKeys')}
+                              desc={translate('risk:replaceSavedKeysHint')}
                             >
                               <Switch
                                 checked={form.clearSaved}
@@ -721,10 +807,16 @@ export function ModelSettings({
                     ) : (
                       <p className='text-xs text-muted-foreground'>
                         {savedKeys.length
-                          ? `已存 ${savedKeys.length} 把${hiddenSummary ? `，未展开 ${hiddenSummary}` : ''}。展开后可继续添加。`
-                          : '还没有 Key。'}
-                        一键测试先看模型是否可连，再用一句普通说明和一句入侵请求核对判断基准。官方
-                        TypeSafe 没有余额接口，用尽时调用会返回 402。
+                          ? hiddenSummary
+                            ? translate('risk:savedKeysSummaryHidden', {
+                                count: savedKeys.length,
+                                hidden: hiddenSummary,
+                              })
+                            : translate('risk:savedKeysSummary', {
+                                count: savedKeys.length,
+                              })
+                          : translate('risk:noKeysYetSentence')}{' '}
+                        {translate('risk:probeHelp')}
                       </p>
                     )}
                   </div>
@@ -742,7 +834,7 @@ export function ModelSettings({
                 className='cursor-pointer'
                 onClick={() => addExample(example.base_url)}
               >
-                添加 {example.label}
+                {translate('risk:addExample', { label: example.label })}
               </Button>
             ))}
             <Button
@@ -754,17 +846,15 @@ export function ModelSettings({
                 setForms((prev) => (prev ? [...prev, blankForm()] : prev))
               }
             >
-              添加自定义地址
+              {translate('risk:addCustomAddress')}
             </Button>
           </div>
           <p className='text-xs text-muted-foreground'>
-            Laya 和 ModernBERT
-            的示例地址相同，已在列表里就不会再加一行。TypeSafe 常用
-            jev-latest，ModernBERT 常用 english，Laya 可以留空。
+            {translate('risk:exampleAddressesHint')}
           </p>
         </div>
         <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]'>
-          <FieldLine label='模型' htmlFor='jev-model'>
+          <FieldLine label={translate('risk:model')} htmlFor='jev-model'>
             <div className='flex gap-2'>
               <Input
                 id='jev-model'
@@ -781,12 +871,14 @@ export function ModelSettings({
                 disabled={fetchModels.isPending || !forms[0]?.base_url.trim()}
                 onClick={() => fetchModels.mutate()}
               >
-                获取模型
+                {translate('risk:fetchModels')}
               </Button>
             </div>
           </FieldLine>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-timeout'>超时 ms</Label>
+            <Label htmlFor='jev-timeout'>
+              {translate('risk:timeoutMilliseconds')}
+            </Label>
             <Input
               id='jev-timeout'
               type='number'
@@ -822,21 +914,21 @@ export function ModelSettings({
       </Group>
 
       <Group
-        title='打分'
-        hint='高分表示安全。相同正文在去重窗口内不再打模型。阈值越低越不容易误伤。'
+        title={translate('risk:scoring')}
+        hint={translate('risk:scoringHint')}
         action={
           <button
             type='button'
             className='cursor-pointer text-xs text-muted-foreground underline-offset-4 transition-colors duration-200 hover:text-foreground hover:underline'
             onClick={restoreScore}
           >
-            恢复默认
+            {translate('risk:restoreDefaults')}
           </button>
         }
       >
         <div className='grid gap-3 sm:grid-cols-3'>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-threshold'>阈值</Label>
+            <Label htmlFor='jev-threshold'>{translate('risk:threshold')}</Label>
             <Input
               id='jev-threshold'
               type='number'
@@ -851,7 +943,9 @@ export function ModelSettings({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-dedup'>去重（秒）</Label>
+            <Label htmlFor='jev-dedup'>
+              {translate('risk:deduplicationSeconds')}
+            </Label>
             <Input
               id='jev-dedup'
               type='number'
@@ -865,7 +959,9 @@ export function ModelSettings({
             />
           </div>
           <div className='space-y-1.5'>
-            <Label htmlFor='jev-state'>送模上限（字）</Label>
+            <Label htmlFor='jev-state'>
+              {translate('risk:modelCharacterLimit')}
+            </Label>
             <Input
               id='jev-state'
               type='number'
@@ -880,12 +976,14 @@ export function ModelSettings({
           </div>
         </div>
         <div className='space-y-1.5'>
-          <Label htmlFor='jev-instruction'>自定义要求</Label>
+          <Label htmlFor='jev-instruction'>
+            {translate('risk:customRequirement')}
+          </Label>
           <Textarea
             id='jev-instruction'
             rows={2}
             value={draft.safety_instruction || ''}
-            placeholder='留空则只用题库。填写后会多问这一题'
+            placeholder={translate('risk:customRequirementHint')}
             onChange={(e) =>
               setDraft({ ...draft, safety_instruction: e.target.value })
             }
@@ -894,8 +992,11 @@ export function ModelSettings({
       </Group>
 
       <Group
-        title='题库'
-        hint={`启用的题在同一次请求里一起问。当前启用 ${enabledQuestions} / ${questions.length} 题。`}
+        title={translate('risk:questionBank')}
+        hint={translate('risk:enabledQuestionsHint', {
+          p0: enabledQuestions,
+          p1: questions.length,
+        })}
         action={
           <Button
             size='sm'
@@ -903,7 +1004,7 @@ export function ModelSettings({
             className='cursor-pointer'
             onClick={() => setQuestions(q.data?.builtin_questions || [])}
           >
-            恢复内置
+            {translate('risk:restoreBuiltIn')}
           </Button>
         }
       >

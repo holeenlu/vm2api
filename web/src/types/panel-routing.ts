@@ -1,8 +1,7 @@
 import type { RuntimeType } from '@/types/panel-vm'
 
 /** `routing.compatibility.persona_preset`。PUT 严格匹配，不做别名归一化。 */
-export type PersonaPreset =
-  'official' | 'official_full' | 'zero' | 'custom' | 'official_303'
+export type PersonaPreset = 'official' | 'official_full' | 'zero' | 'custom'
 
 /** `routing.compatibility.overlay_preset`。`off` 没有模板体。 */
 export type OverlayPreset = 'off' | 'official' | 'minimal' | 'custom'
@@ -17,7 +16,7 @@ export const SESSION_IDLE_TTL_SECONDS_DEFAULT = 600
 
 /**
  * persona / overlay 模板的一个 system 块。
- * `id` / `note` / `drop_if_empty` / `hide` 是 meta，渲染时被剥离；
+ * `id` / `note` / `drop_if_empty` / `role` 是 meta，渲染时被剥离；
  * 只有 `type` / `text` / `cache_control` 会到达 Anthropic。
  */
 export type PersonaBlock = {
@@ -26,8 +25,8 @@ export type PersonaBlock = {
   /** persona 只能是 'text'（或缺省）；overlay 必须是 'wrapper' 或 'body'。 */
   type?: 'text' | 'wrapper' | 'body'
   text: string
-  /** 任一块为 true → 对调用方遮罩这部分 usage。 */
-  hide?: boolean
+  /** 'system' 写入 messages 的 role=system（环境注入）。 */
+  role?: 'system'
   /** 渲染后 text.trim() 为空则整块丢弃。 */
   drop_if_empty?: boolean
   cache_control?: { type?: string; ttl?: string; [key: string]: unknown }
@@ -225,6 +224,7 @@ export type NotifyEvents = {
   account_down: boolean
   account_up: boolean
   vm_down: boolean
+  billing_reconcile: boolean
 }
 
 export type NotifyTelegramConfig = {

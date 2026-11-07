@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { i18n } from '@/i18n'
 import type { StatisticsData, StatsRange } from '@/types/panel-statistics'
 import type { UsageLogsOverview } from '@/types/panel-usage-logs'
+import type { TFunction } from 'i18next'
+import { useTranslation } from 'react-i18next'
+import { SYSTEM_TIMEZONE_LABEL } from '@/lib/system-time'
 import {
   formatCurrency,
   formatDuration,
@@ -15,9 +19,24 @@ import { statisticsQueryOptions, usageOverviewQueryOptions } from './queries'
 type HistoryRange = Exclude<StatsRange, 'today'>
 
 const HISTORY_RANGES: { id: HistoryRange; label: string }[] = [
-  { id: '7days', label: '7天' },
-  { id: '30days', label: '30天' },
-  { id: 'thisMonth', label: '本月' },
+  {
+    id: '7days',
+    get label() {
+      return i18n.t('statistics:sevenDays')
+    },
+  },
+  {
+    id: '30days',
+    get label() {
+      return i18n.t('statistics:thirtyDays')
+    },
+  },
+  {
+    id: 'thisMonth',
+    get label() {
+      return i18n.t('statistics:thisMonth')
+    },
+  },
 ]
 
 type UsageSnapshot = {
@@ -43,38 +62,50 @@ function hitClass(pct: number) {
 }
 
 function ttft(ms: number | null) {
-  return ms && ms > 0 ? `${Math.round(ms).toLocaleString()} ms` : '-'
+  return ms && ms > 0
+    ? `${Math.round(ms).toLocaleString(i18n.language)} ms`
+    : '-'
 }
 
-function parameterRows(snapshot: UsageSnapshot) {
+function parameterRows(snapshot: UsageSnapshot, t: TFunction<'statistics'>) {
   const hit = snapshot.cacheHitRate * 100
+  const count = (value: number) => value.toLocaleString(i18n.language)
   return [
-    { label: '请求', value: snapshot.requests.toLocaleString() },
-    { label: '失败', value: snapshot.errors.toLocaleString() },
-    { label: '费用', value: formatCurrency(snapshot.cost) },
-    { label: '总 Token', value: formatTokenAmount(snapshot.tokens) },
-    { label: '输入', value: formatTokenAmount(snapshot.inputTokens) },
-    { label: '输出', value: formatTokenAmount(snapshot.outputTokens) },
+    { label: t('requests'), value: count(snapshot.requests) },
+    { label: t('failures'), value: count(snapshot.errors) },
+    { label: t('cost'), value: formatCurrency(snapshot.cost) },
+    { label: t('totalTokensShort'), value: formatTokenAmount(snapshot.tokens) },
+    { label: t('inputTokens'), value: formatTokenAmount(snapshot.inputTokens) },
     {
-      label: '缓存写入',
+      label: t('outputTokens'),
+      value: formatTokenAmount(snapshot.outputTokens),
+    },
+    {
+      label: t('cacheWrite'),
       value: formatTokenAmount(snapshot.cacheCreationTokens),
     },
     {
-      label: '缓存写入 5m',
+      label: t('cacheWrite5m'),
       value: formatTokenAmount(snapshot.cacheCreation5mTokens),
     },
     {
-      label: '缓存写入 1h',
+      label: t('cacheWrite1h'),
       value: formatTokenAmount(snapshot.cacheCreation1hTokens),
     },
-    { label: '缓存读取', value: formatTokenAmount(snapshot.cacheReadTokens) },
     {
-      label: '缓存命中率',
+      label: t('cacheRead'),
+      value: formatTokenAmount(snapshot.cacheReadTokens),
+    },
+    {
+      label: t('cacheHitRate'),
       value: `${hit.toFixed(1)}%`,
       className: hitClass(hit),
     },
-    { label: '平均响应', value: formatDuration(snapshot.avgDurationMs) },
-    { label: '平均 TTFT', value: ttft(snapshot.avgTtftMs) },
+    {
+      label: t('averageResponse'),
+      value: formatDuration(snapshot.avgDurationMs),
+    },
+    { label: t('averageTtft'), value: ttft(snapshot.avgTtftMs) },
   ]
 }
 
@@ -115,9 +146,10 @@ function fromTotals(totals: StatisticsData['totals']): UsageSnapshot {
 }
 
 function ParameterGrid({ snapshot }: { snapshot: UsageSnapshot }) {
+  const { t } = useTranslation('statistics')
   return (
     <dl className='grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3'>
-      {parameterRows(snapshot).map((row) => (
+      {parameterRows(snapshot, t).map((row) => (
         <div key={row.label} className='min-w-0'>
           <dt className='text-xs text-muted-foreground'>{row.label}</dt>
           <dd
@@ -146,6 +178,7 @@ function LoadingGrid() {
 
 /** 租户统计：今日明细，以及 7 天 / 30 天 / 本月的同一组参数。 */
 export function TenantUsage({ tz }: { tz: string }) {
+  const { t } = useTranslation('statistics')
   const [history, setHistory] = useState<HistoryRange>('7days')
   const overview = useQuery(usageOverviewQueryOptions(tz))
   const past = useQuery(statisticsQueryOptions(history, 'model', tz))
@@ -156,13 +189,17 @@ export function TenantUsage({ tz }: { tz: string }) {
     <div className='grid gap-6 lg:grid-cols-2'>
       <BentoCard>
         <div className='mb-3'>
-          <h3 className='text-sm font-semibold'>今日用量</h3>
-          <p className='text-xs text-muted-foreground'>按浏览器时区的自然日</p>
+          <h3 className='text-sm font-semibold'>{t('todayUsage')}</h3>
+          <p className='text-xs text-muted-foreground'>
+            {t('todayUsageHint', { zone: SYSTEM_TIMEZONE_LABEL })}
+          </p>
         </div>
         {today ? (
           <ParameterGrid snapshot={today} />
         ) : overview.isError ? (
-          <p className='text-sm text-muted-foreground'>今日用量加载失败</p>
+          <p className='text-sm text-muted-foreground'>
+            {t('todayUsageFailed')}
+          </p>
         ) : (
           <LoadingGrid />
         )}
@@ -170,9 +207,9 @@ export function TenantUsage({ tz }: { tz: string }) {
       <BentoCard>
         <div className='mb-3 flex flex-wrap items-start justify-between gap-2'>
           <div>
-            <h3 className='text-sm font-semibold'>历史用量</h3>
+            <h3 className='text-sm font-semibold'>{t('historyUsage')}</h3>
             <p className='text-xs text-muted-foreground'>
-              同一组参数，按所选窗口合计
+              {t('historyUsageHint')}
             </p>
           </div>
           <div className='inline-flex rounded-md border bg-muted/30 p-0.5'>
@@ -197,7 +234,9 @@ export function TenantUsage({ tz }: { tz: string }) {
         {historySnapshot ? (
           <ParameterGrid snapshot={historySnapshot} />
         ) : past.isError ? (
-          <p className='text-sm text-muted-foreground'>历史用量加载失败</p>
+          <p className='text-sm text-muted-foreground'>
+            {t('historyUsageFailed')}
+          </p>
         ) : (
           <LoadingGrid />
         )}

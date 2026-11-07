@@ -1,8 +1,9 @@
+import { validateIpRules, permitsIp } from './key-ip-rules.mjs'
 /**
  * Multi API-key store (sub2api-inspired, SQLite-backed).
  *
  * Fields aligned to sub2api basics:
- *   name, status, expires_at, quota (+ used), rate windows → rpm,
+ *   name, status, expires_at, quota (+ used), spend windows,
  *   concurrency (per-key, sub2api puts this on User).
  *
  * Master env key KIN_API_KEY is separate and unlimited.
@@ -15,13 +16,14 @@
  * the panel can re-reveal a key for copying after creation.
  */
 
-import { keyScopeFromRecord, normalizeKeyScope } from './key-scope.mjs'
-import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
+import { keyScopeFromRecord, refreshAuthenticatedKey } from './key-scope.mjs'
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
 import { ApiKeysRepo } from '../db/repos/api-keys-repo.mjs'
 import { maybeEncrypt, maybeDecrypt } from '../db/secure.mjs'
 import { calculateCost, normalizeUsage } from './pricing.mjs'
+import { applyRate, fromMicros, microsOf, toMicros } from '../core/money.mjs'
 import { UsersRepo } from '../db/repos/users-repo.mjs'
 
 const KEY_PREFIX = 'sk-vm-'
@@ -33,25 +35,45 @@ const RATE_WINDOWS = [
   { name: '7d', limit: 'rate_limit_7d', usage: 'usage_7d', start: 'window_7d_start', ms: 7 * 24 * 3600_000 },
 ]
 
-/** A window is open while now - start < size; a closed one counts 0 until the next spend reopens it. */
+/** 窗口开启时 now - start < 窗口长度；已关闭的窗口计 0，下一次消费重新开启。金额为整数微单位（M6）。 */
 function rateWindow(rec, win, now) {
-  const limit = Number(rec[win.limit]) || 0
+  const limit = microsOf(rec[win.limit + '_micros']) ?? 0
   const start = rec[win.start] ? Date.parse(rec[win.start]) : NaN
   const open = Number.isFinite(start) && now - start < win.ms
-  return { limit, open, start, used: open ? Number(rec[win.usage]) || 0 : 0 }
+  return { limit, open, start, used: open ? (microsOf(rec[win.usage + '_micros']) ?? 0) : 0 }
 }
 
-// Six decimals is below any billed unit and hides float noise (8.300000000000001).
-const money = (n) => Math.round(n * 1e6) / 1e6
+/** 0 表示不限：limit / remaining 为 null。金额入参是整数微单位，出口换算成美元。 */
+function usdView(limitMicros, usedMicros) {
+  return {
+    limit: limitMicros > 0 ? fromMicros(limitMicros) : null,
+    used: fromMicros(usedMicros),
+    remaining: limitMicros > 0 ? fromMicros(Math.max(0, limitMicros - usedMicros)) : null,
+    exceeded: limitMicros > 0 && usedMicros >= limitMicros,
+  }
+}
 
-/** 0 means unlimited: limit / remaining read null. */
-function limitView(limit, used) {
+/** 计数类额度（请求数）：0 表示不限。 */
+function countView(limit, used) {
   return {
     limit: limit > 0 ? limit : null,
-    used: money(used),
-    remaining: limit > 0 ? money(Math.max(0, limit - used)) : null,
+    used,
+    remaining: limit > 0 ? Math.max(0, limit - used) : null,
     exceeded: limit > 0 && used >= limit,
   }
+}
+
+/** USD 额度字段：同时写整数微单位（权威值）与 REAL 镜像（M6）。 */
+function setUsd(rec, key, value) {
+  const micros = Math.max(0, toMicros(Number(value) || 0) ?? 0)
+  rec[key + '_micros'] = micros
+  rec[key] = fromMicros(micros)
+}
+
+/** USD 额度已用尽：比较整数微单位。 */
+function usdQuotaReached(rec) {
+  const quota = microsOf(rec.quota_micros) ?? 0
+  return quota > 0 && (microsOf(rec.quota_used_micros) ?? 0) >= quota
 }
 
 function clampInt(n, min, max, fallback) {
@@ -62,13 +84,6 @@ function clampInt(n, min, max, fallback) {
 
 function nowIso() {
   return new Date().toISOString()
-}
-function storedKeyScope(scope) {
-  return {
-    group_type: scope.group_type,
-    allowed_vms: JSON.stringify(scope.allowed_vms),
-    vm_pool_id: scope.vm_pool_id || null,
-  }
 }
 
 export function generateApiKey(prefix = KEY_PREFIX) {
@@ -109,10 +124,12 @@ export function publicKeyView(rec, { reveal = false } = {}) {
     name: rec.name,
     key: reveal && plain ? plain : masked,
     revealable: !!plain,
+    secret_status: plain ? 'available' : rec.key_secret ? 'decrypt_failed' : 'hash_only',
     key_prefix: rec.key_prefix || String(plain || KEY_PREFIX).slice(0, 10),
     status: rec.status,
     user_id: rec.user_id ?? null,
     group_id: rec.group_id ?? null,
+    created_by_user_id: rec.created_by_user_id ?? null,
     max_concurrency: rec.max_concurrency,
     quota_requests: rec.quota_requests,
     // panel view keeps the historical name: quota_used = request count
@@ -134,16 +151,20 @@ export function publicKeyView(rec, { reveal = false } = {}) {
     tokens_in: rec.tokens_in || 0,
     tokens_out: rec.tokens_out || 0,
     category: rec.category === 'api' ? 'api' : 'oauth',
-    ...keyScopeFromRecord(rec),
+    ip_whitelist: JSON.parse(rec.ip_whitelist || '[]'),
+    ip_blacklist: JSON.parse(rec.ip_blacklist || '[]'),
     inflight: undefined, // filled by store.snapshot
   }
 }
 
-function timingSafeEqualStr(a, b) {
-  const x = Buffer.from(String(a || ''))
-  const y = Buffer.from(String(b || ''))
-  if (x.length !== y.length) return false
-  return crypto.timingSafeEqual(x, y)
+// 开发回退密钥只用于本地与测试（审计 P2）：生产（NODE_ENV=production）缺少哈希密钥时拒绝启动，
+// 避免 Key 哈希用公开的固定值计算。生产入口 scripts/start-server.mjs 会先准备运行时密钥。
+function developmentHashSecret() {
+  if (process.env.NODE_ENV === 'production')
+    throw new Error(
+      'API key hash secret missing: set TAPMODELS_API_KEY_HASH_SECRET or start via scripts/start-server.mjs',
+    )
+  return 'kin-development-api-key-hash-secret'
 }
 
 export class ApiKeyStore {
@@ -152,24 +173,26 @@ export class ApiKeyStore {
     this.repo = new ApiKeysRepo(this.db)
     this.hashSecret = String(
       hashSecret ||
-        process.env.VM2API_API_KEY_HASH_SECRET ||
+        process.env.TAPMODELS_API_KEY_HASH_SECRET ||
         process.env.KIN_API_KEY_HASH_SECRET ||
-        process.env.VM2API_DB_SECRET ||
+        process.env.TAPMODELS_DB_SECRET ||
         process.env.KIN_DB_SECRET ||
-        process.env.VM2API_API_KEY ||
+        process.env.TAPMODELS_API_KEY ||
         process.env.KIN_API_KEY ||
-        'kin-development-api-key-hash-secret',
+        developmentHashSecret(),
     )
+    this.userInflight = new Map()
+    this.inflightOwners = new Map()
     this.inflight = new Map() // id → count
     this.rpmBuckets = new Map() // id → number[] timestamps ms
     this.users = new UsersRepo(this.db)
   }
 
   /** sub2api: an api key of a disabled/deleted user must not authenticate. */
-  _ownerActive(rec) {
+  async _ownerActive(rec) {
     if (!rec?.user_id) return true // legacy unowned keys keep working
     try {
-      const owner = this.users.getById(rec.user_id)
+      const owner = await this.users.getById(rec.user_id)
       // soft-deleted owner is invisible here → key is revoked with them
       return !!owner && owner.status === 'active'
     } catch {
@@ -180,56 +203,79 @@ export class ApiKeyStore {
   /** Re-read from DB (no-op cache-wise; kept for API compat + post-restore). */
   reload() {}
 
-  /** Re-bind to a fresh DB connection (after backup restore). */
-  rebind(db) {
+  /** Re-bind to a fresh DB connection (after backup restore). 恢复的旧库可能带明文 Key，同样哈希化。 */
+  async rebind(db) {
     this.db = db
     this.repo = new ApiKeysRepo(db)
     this.users = new UsersRepo(db)
+    await this.hashLegacyPlaintextKeys()
   }
 
-  list({ reveal = false } = {}) {
-    const names = new Map()
-    try {
-      for (const pool of new VmPoolsRepo(this.db).list()) names.set(pool.id, pool.name)
-    } catch {
-      // A database opened before migration 034 still lists keys.
+  /**
+   * 残留明文 Key 一次性哈希化（审计阶段 1 W5，P1 未鉴权放大）：启动与备份恢复后各跑一次，之后鉴权只按 key_hash 查索引。
+   * 原来哈希未命中时每次都把全表逐行与令牌比较（任意错误 Key 都触发一次全表扫描），已删除。
+   * 同一明文已有哈希行（唯一索引冲突）时跳过该行并告警：它本来也鉴权不到（按哈希先命中已有行）。
+   */
+  async hashLegacyPlaintextKeys() {
+    let hashed = 0
+    for (const { id, key } of await this.repo.listPlaintextKeys()) {
+      const token = String(key || '')
+      if (!token.trim()) continue
+      const keyHash = this._hash(token)
+      try {
+        const changed = await this.repo.hashPlaintextKey(id, token, {
+          key: HASH_MARKER + keyHash,
+          keyHash,
+          keyPrefix: token.slice(0, 10),
+          keySuffix: token.slice(-4),
+          keySecret: maybeEncrypt(token),
+          updatedAt: nowIso(),
+        })
+        if (changed) hashed += 1
+      } catch (error) {
+        console.warn(`[api-keys] plaintext key ${id} not hashed: ${error?.message || error}`)
+      }
     }
-    return this.repo.list().map((k) => {
-      const v = publicKeyView(k, { reveal })
-      v.inflight = this.inflight.get(k.id) || 0
-      if (v.vm_pool_id) v.vm_pool_name = names.get(v.vm_pool_id) || null
-      return v
-    })
+    if (hashed) console.log(`[api-keys] hashed ${hashed} legacy plaintext key(s)`)
+    return hashed
   }
 
-  getById(id) {
+  async list({ reveal = false } = {}) {
+    const groups = new GroupsRepo(this.db)
+    const out = []
+    for (const k of await this.repo.list())
+      out.push({
+        ...publicKeyView(k, { reveal }),
+        inflight: this.inflight.get(k.id) || 0,
+        group_name: k.group_id ? (await groups.getById(k.group_id))?.name || null : '平台服务',
+      })
+    return out
+  }
+
+  async getById(id) {
     return this.repo.getById(id)
   }
 
-  authenticate(token) {
+  async authenticate(token) {
     if (!token) return { ok: false, reason: 'missing' }
     const hash = this._hash(token)
-    const indexed = this.repo.getByHash(hash)
+    const indexed = await this.repo.getByHash(hash)
     if (indexed) {
-      if (!this._ownerActive(indexed)) return { ok: false, reason: 'user_disabled' }
-      return { ok: true, record: indexed }
-    }
-    // One-time migration for legacy plaintext rows.
-    for (const rec of this.repo.list()) {
-      if (String(rec.key || '').startsWith(HASH_MARKER)) continue
-      if (timingSafeEqualStr(token, rec.key)) {
-        rec.key_hash = hash
-        rec.key_prefix = String(token).slice(0, 10)
-        rec.key_suffix = String(token).slice(-4)
-        rec.key_secret = maybeEncrypt(token)
-        rec.key = HASH_MARKER + hash
-        return { ok: true, record: this.repo.update(rec) }
+      if (!(await this._ownerActive(indexed))) return { ok: false, reason: 'user_disabled' }
+      if (!plainApiKey(indexed)) {
+        indexed.key_secret = maybeEncrypt(token)
+        // 补存密文：重新读取并整行写回在同一个 db.tx 里，不覆盖读取之后并发写入的用量
+        await this.repo.client.tx(async () => {
+          const current = await this.repo.getById(indexed.id)
+          if (current && !plainApiKey(current)) await this.repo.update({ ...current, key_secret: indexed.key_secret })
+        })
       }
+      return { ok: true, record: indexed }
     }
     return { ok: false, reason: 'invalid' }
   }
 
-  create(input = {}) {
+  async create(input = {}) {
     const name =
       String(input.name || 'default')
         .trim()
@@ -240,7 +286,7 @@ export class ApiKeyStore {
       throw Object.assign(new Error('key has invalid characters'), { code: 'key_invalid' })
     }
     const keyHash = this._hash(key)
-    if (this.repo.getByHash(keyHash) || this.repo.getByKey(key)) {
+    if (await this.repo.getByHash(keyHash)) {
       throw Object.assign(new Error('key already exists'), { code: 'key_exists' })
     }
 
@@ -256,13 +302,11 @@ export class ApiKeyStore {
       max_concurrency: clampInt(input.max_concurrency, 0, 128, input.default_concurrency ?? 20),
       quota_requests: clampInt(input.quota_requests, 0, 1e9, 0),
       quota_requests_used: 0,
-      quota: Math.max(0, Number(input.quota) || 0),
-      quota_used: 0,
-      rate_limit_5h: Math.max(0, Number(input.rate_limit_5h) || 0),
-      rate_limit_1d: Math.max(0, Number(input.rate_limit_1d) || 0),
-      rate_limit_7d: Math.max(0, Number(input.rate_limit_7d) || 0),
       user_id: input.user_id ?? null,
-      group_id: input.group_id ?? 1,
+      group_id: input.group_id ?? null,
+      created_by_user_id: input.created_by_user_id ?? null,
+      ip_whitelist: JSON.stringify(validateIpRules(input.ip_whitelist || [])),
+      ip_blacklist: JSON.stringify(validateIpRules(input.ip_blacklist || [])),
       rpm: clampInt(input.rpm, 0, 1e6, 0),
       expires_at: input.expires_at ? new Date(input.expires_at).toISOString() : null,
       created_at: nowIso(),
@@ -272,27 +316,24 @@ export class ApiKeyStore {
       tokens_in: 0,
       tokens_out: 0,
       category: String(input.category || 'oauth').toLowerCase() === 'api' ? 'api' : 'oauth',
-      ...storedKeyScope(
-        normalizeKeyScope(
-          {
-            group_type: input.group_type,
-            allowed_vms: input.allowed_vms,
-            category: String(input.category || 'oauth').toLowerCase() === 'api' ? 'api' : 'oauth',
-            ...(Object.prototype.hasOwnProperty.call(input, 'vm_pool_id') ? { vm_pool_id: input.vm_pool_id } : {}),
-          },
-          { isApi: String(input.category || 'oauth').toLowerCase() === 'api' },
-        ),
-      ),
     }
+    setUsd(rec, 'quota', input.quota)
+    setUsd(rec, 'quota_used', 0)
+    for (const key of ['rate_limit_5h', 'rate_limit_1d', 'rate_limit_7d']) setUsd(rec, key, input[key])
     if (rec.expires_at && Number.isNaN(Date.parse(rec.expires_at))) {
       throw Object.assign(new Error('invalid expires_at'), { code: 'invalid_expires_at' })
     }
-    const stored = this.repo.insert(rec)
+    const stored = await this.repo.insert(rec)
     return { ...stored, key, _plain_key: key }
   }
 
-  update(id, patch = {}) {
-    const rec = this.repo.getById(id)
+  /** 整行读改写放在同一个 db.tx 里（R6 B7a）：异步化后不与并发的用量累加交错、不写回过期的计数。 */
+  async update(id, patch = {}) {
+    return this.repo.client.tx(() => this._update(id, patch))
+  }
+
+  async _update(id, patch) {
+    const rec = await this.repo.getById(id)
     if (!rec) return null
     if (patch.name != null) rec.name = String(patch.name).trim().slice(0, 100) || rec.name
     if (patch.status != null) {
@@ -305,12 +346,9 @@ export class ApiKeyStore {
     if (patch.max_concurrency != null)
       rec.max_concurrency = clampInt(patch.max_concurrency, 0, 128, rec.max_concurrency)
     if (patch.quota_requests != null) rec.quota_requests = clampInt(patch.quota_requests, 0, 1e9, rec.quota_requests)
-    if (patch.quota != null) rec.quota = Math.max(0, Number(patch.quota) || 0)
-    if (patch.rate_limit_5h != null) rec.rate_limit_5h = Math.max(0, Number(patch.rate_limit_5h) || 0)
-    if (patch.rate_limit_1d != null) rec.rate_limit_1d = Math.max(0, Number(patch.rate_limit_1d) || 0)
-    if (patch.rate_limit_7d != null) rec.rate_limit_7d = Math.max(0, Number(patch.rate_limit_7d) || 0)
-    if (patch.group_id != null) rec.group_id = Number(patch.group_id) || 1
-    if (patch.user_id != null) rec.user_id = patch.user_id
+    for (const key of ['quota', 'rate_limit_5h', 'rate_limit_1d', 'rate_limit_7d'])
+      if (patch[key] != null) setUsd(rec, key, patch[key])
+    if (Object.hasOwn(patch, 'group_id')) rec.group_id = patch.group_id == null ? null : Number(patch.group_id)
     if (patch.rpm != null) rec.rpm = clampInt(patch.rpm, 0, 1e6, rec.rpm)
     if (patch.expires_at === null) rec.expires_at = null
     else if (patch.expires_at != null) {
@@ -321,12 +359,12 @@ export class ApiKeyStore {
     }
     if (patch.reset_quota === true) {
       rec.quota_requests_used = 0
-      rec.quota_used = 0
+      setUsd(rec, 'quota_used', 0)
     }
     // recover from quota_exhausted whenever spend is back under the cap
     if (
       rec.status === 'quota_exhausted' &&
-      !((rec.quota ?? 0) > 0 && (rec.quota_used ?? 0) >= rec.quota) &&
+      !usdQuotaReached(rec) &&
       !(rec.quota_requests > 0 && (rec.quota_requests_used ?? 0) >= rec.quota_requests)
     ) {
       rec.status = 'active'
@@ -334,8 +372,8 @@ export class ApiKeyStore {
     if (patch.category != null) {
       rec.category = String(patch.category).toLowerCase() === 'api' ? 'api' : 'oauth'
     }
-    const scope = normalizeKeyScope(patch, { partial: true, current: rec, isApi: rec.category === 'api' })
-    if (scope) Object.assign(rec, storedKeyScope(scope))
+    for (const field of ['ip_whitelist', 'ip_blacklist'])
+      if (patch[field] != null) rec[field] = JSON.stringify(validateIpRules(patch[field]))
     rec.updated_at = nowIso()
     return this.repo.update(rec)
   }
@@ -344,21 +382,25 @@ export class ApiKeyStore {
    * Plaintext of a managed key for panel copy.
    * @returns {null | { ok: false, code: string } | { ok: true, id, name, key }}
    */
-  reveal(id) {
-    const rec = this.repo.getById(id)
+  async reveal(id) {
+    const rec = await this.repo.getById(id)
     if (!rec) return null
     const key = plainApiKey(rec)
-    if (!key) return { ok: false, code: 'key_not_recoverable' }
+    if (!key) return { ok: false, code: rec.key_secret ? 'key_decryption_failed' : 'key_not_recoverable' }
     return { ok: true, id: rec.id, name: rec.name, key }
   }
 
   /** Issue a fresh plaintext on the same record; the old value stops working. */
-  rotate(id) {
-    const rec = this.repo.getById(id)
+  async rotate(id) {
+    return this.repo.client.tx(() => this._rotate(id))
+  }
+
+  async _rotate(id) {
+    const rec = await this.repo.getById(id)
     if (!rec) return null
     const key = generateApiKey()
     const keyHash = this._hash(key)
-    if (this.repo.getByHash(keyHash)) {
+    if (await this.repo.getByHash(keyHash)) {
       throw Object.assign(new Error('key already exists'), { code: 'key_exists' })
     }
     rec.key = HASH_MARKER + keyHash
@@ -367,15 +409,15 @@ export class ApiKeyStore {
     rec.key_suffix = key.slice(-4)
     rec.key_secret = maybeEncrypt(key)
     rec.updated_at = nowIso()
-    const stored = this.repo.update(rec)
+    const stored = await this.repo.update(rec)
     return { ...stored, key, _plain_key: key }
   }
 
-  remove(id) {
-    const removed = this.repo.remove(id)
+  async remove(id) {
+    const removed = await this.repo.remove(id)
     if (!removed) return false
-    this.inflight.delete(id)
-    this.rpmBuckets.delete(id)
+    // Live reservations survive deletion until their request releases them.
+    this.rpmBuckets.delete(`key:${id}`)
     return true
   }
 
@@ -393,11 +435,66 @@ export class ApiKeyStore {
   }
 
   /**
+   * 准入所需的库内数据（所属用户、分组、用户分组覆盖），先一次 await 读齐（竞态 R7）：
+   * 之后的内存计数检查与自增在同一个同步段里完成，中间没有 await。
+   */
+  async _limitFacts(rec) {
+    const groups = new GroupsRepo(this.db)
+    const owner = rec?.user_id ? await this.users.getById(rec.user_id) : null
+    const override = rec?.user_id && rec.group_id ? await groups.override(rec.user_id, rec.group_id) : null
+    const group = rec?.group_id && override?.rpm_limit == null ? await groups.getById(rec.group_id) : null
+    return { owner, override, group }
+  }
+
+  _rpmPolicies(rec, { owner, override, group }) {
+    const overrideRpm = override?.rpm_limit
+    return [
+      { bucket: `key:${rec.id}`, limit: rec.rpm || 0, code: 'api_key_rate_limit' },
+      {
+        bucket: rec.user_id ? `user:${rec.user_id}` : null,
+        limit: rec.user_id ? owner?.rpm_limit || 0 : 0,
+        code: 'user_rate_limit',
+      },
+      {
+        bucket: rec.group_id ? `group:${rec.group_id}:user:${rec.user_id || 'platform'}` : null,
+        limit: overrideRpm ?? (rec.group_id ? group?.rpm_limit || 0 : 0),
+        code: 'group_rate_limit',
+      },
+    ]
+  }
+
+  _userConcurrencyCap(rec, { owner }) {
+    if (!rec?.user_id) return 0
+    return owner?.role === 'super_admin' ? 0 : Number(owner?.concurrency) || 0
+  }
+
+  /**
    * Pre-flight gate for a managed key. Does not acquire concurrency.
    * @returns {{ ok: true } | { ok: false, code, message, status }}
    */
-  canAccept(rec, now = Date.now()) {
+  permitsIp(rec, address) {
+    return permitsIp(rec, address)
+  }
+
+  /**
+   * 准入的库内部分：复核 Key、分组与额度窗口，并读齐限流所需数据。返回的 `facts` 交给同步的 `_admitTransient`。
+   * @returns {Promise<{ ok: true, record, facts } | { ok: false, code, message, status }>}
+   */
+  async _admitStored(rec, now, address) {
+    const live = await refreshAuthenticatedKey(rec, this.db)
+    if (live.error)
+      return {
+        ok: false,
+        code: live.error,
+        message: 'API key is no longer valid; retry with current credentials',
+        status: 403,
+      }
+    rec = live.record
+    if (address !== undefined && !this.permitsIp(rec, address))
+      return { ok: false, code: 'ip_not_allowed', message: 'Client IP is not allowed', status: 403 }
     if (!rec) return { ok: false, code: 'invalid_api_key', message: 'Invalid credentials', status: 401 }
+    const scope = await keyScopeFromRecord(rec, this.db)
+    if (scope.error) return { ok: false, code: scope.error, message: '分组不可用或无权调用', status: 403 }
     if (rec.status !== 'active') {
       if (rec.status === 'quota_exhausted') {
         return { ok: false, code: 'api_key_quota_exhausted', message: 'API key quota exhausted', status: 429 }
@@ -416,7 +513,7 @@ export class ApiKeyStore {
         detail: { quota_requests: rec.quota_requests, quota_used: rec.quota_requests_used },
       }
     }
-    if ((rec.quota ?? 0) > 0 && (rec.quota_used ?? 0) >= rec.quota) {
+    if (usdQuotaReached(rec)) {
       return {
         ok: false,
         code: 'api_key_quota_exhausted',
@@ -434,19 +531,23 @@ export class ApiKeyStore {
           code: 'api_key_rate_limit',
           message: `API key ${win.name} spend limit exceeded`,
           status: 429,
-          detail: { limit: w.limit, used: w.used },
+          detail: { limit: fromMicros(w.limit), used: fromMicros(w.used) },
         }
       }
     }
-    if (rec.rpm > 0) {
-      const n = this._rpmCount(rec.id, now)
-      if (n >= rec.rpm) {
+    return { ok: true, record: rec, facts: await this._limitFacts(rec) }
+  }
+
+  /** 准入的内存部分（RPM、Key 并发、用户并发）：同步执行，不读库。 */
+  _admitTransient(rec, facts, now) {
+    for (const { bucket, limit, code } of this._rpmPolicies(rec, facts)) {
+      if (bucket && limit > 0 && this._rpmCount(bucket, now) >= limit) {
         return {
           ok: false,
-          code: 'api_key_rate_limit',
-          message: `API key rate limit exceeded (${rec.rpm}/min)`,
+          code,
+          message: '每分钟请求上限已达到',
           status: 429,
-          detail: { rpm: rec.rpm, current: n },
+          detail: { limit, current: this._rpmCount(bucket, now) },
         }
       }
     }
@@ -463,9 +564,9 @@ export class ApiKeyStore {
     // sub2api user-level cap: sum of inflight across all of the owner's keys.
     // The operator (admin) is never capped: its traffic is the platform's own.
     if (rec.user_id) {
-      const cap = this._userConcurrencyCap(rec.user_id)
+      const cap = this._userConcurrencyCap(rec, facts)
       if (cap > 0) {
-        const total = this._userInflight(rec.user_id)
+        const total = this.userInflight.get(rec.user_id) || 0
         if (total >= cap) {
           return {
             ok: false,
@@ -477,51 +578,38 @@ export class ApiKeyStore {
         }
       }
     }
-    return { ok: true }
+    return { ok: true, record: rec }
   }
 
-  /** users.concurrency of the key owner; 0 = none. The admin operator is never capped. */
-  _userConcurrencyCap(userId) {
-    let owner = null
-    try {
-      owner = this.users.getById(userId)
-    } catch {
-      return 0
-    }
-    return owner?.role === 'admin' ? 0 : Number(owner?.concurrency) || 0
-  }
-
-  _userInflight(userId) {
-    let total = 0
-    for (const k of this.repo.list()) {
-      if (k.user_id === userId) total += this.inflight.get(k.id) || 0
-    }
-    return total
+  async canAccept(rec, now = Date.now(), address) {
+    const stored = await this._admitStored(rec, now, address)
+    if (!stored.ok) return stored
+    return this._admitTransient(stored.record, stored.facts, now)
   }
 
   /**
-   * The holder's view of one key (GET /v1/me/quota): the numbers canAccept
-   * reads and its verdict. Never the owner, slot, pool or other keys.
+   * 持有者看到的这把 Key（GET /v1/me/quota）：canAccept 读到的数字与结论。
+   * 不含所属用户、槽位、账号池或其他 Key。
    */
-  selfQuota(rec, now = Date.now()) {
-    const gate = this.canAccept(rec, now)
+  async selfQuota(rec, now = Date.now()) {
+    const gate = await this.canAccept(rec, now)
     const windows = {}
     for (const win of RATE_WINDOWS) {
       const w = rateWindow(rec, win, now)
       windows[win.name] = {
-        ...limitView(w.limit, w.used),
+        ...usdView(w.limit, w.used),
         window_start: w.open ? new Date(w.start).toISOString() : null,
         reset_at: w.open ? new Date(w.start + win.ms).toISOString() : null,
       }
     }
     const rpm = Number(rec.rpm) || 0
-    const rpmNow = this._rpmCount(rec.id, now)
+    const rpmNow = this._rpmCount(`key:${rec.id}`, now)
     const maxConcurrency = Number(rec.max_concurrency) || 0
     const inflight = this.inflight.get(rec.id) || 0
     let user = null
     if (rec.user_id) {
-      const cap = this._userConcurrencyCap(rec.user_id)
-      const total = this._userInflight(rec.user_id)
+      const cap = this._userConcurrencyCap(rec, await this._limitFacts(rec))
+      const total = this.userInflight.get(rec.user_id) || 0
       user = { limit: cap > 0 ? cap : null, inflight: total, exceeded: cap > 0 && total >= cap }
     }
     return {
@@ -536,9 +624,9 @@ export class ApiKeyStore {
       },
       accepting: gate.ok,
       blocked_by: gate.ok ? null : { code: gate.code, message: gate.message, status: gate.status },
-      usd: limitView(Number(rec.quota) || 0, Number(rec.quota_used) || 0),
+      usd: usdView(microsOf(rec.quota_micros) ?? 0, microsOf(rec.quota_used_micros) ?? 0),
       windows,
-      requests: limitView(Number(rec.quota_requests) || 0, Number(rec.quota_requests_used) || 0),
+      requests: countView(Number(rec.quota_requests) || 0, Number(rec.quota_requests_used) || 0),
       rpm: { limit: rpm > 0 ? rpm : null, current: rpmNow, exceeded: rpm > 0 && rpmNow >= rpm },
       concurrency: {
         limit: maxConcurrency > 0 ? maxConcurrency : null,
@@ -549,57 +637,85 @@ export class ApiKeyStore {
     }
   }
 
-  acquire(rec, now = Date.now()) {
-    const gate = this.canAccept(rec, now)
+  async acquire(rec, now = Date.now(), address) {
+    const stored = await this._admitStored(rec, now, address)
+    if (!stored.ok) return stored
+    // 竞态 R7：从这里到返回是一个同步段（检查内存计数 + 自增，中间没有 await），并发请求不会同时通过上限检查
+    const gate = this._admitTransient(stored.record, stored.facts, now)
     if (!gate.ok) return gate
+    rec = gate.record
     const id = rec.id
     this.inflight.set(id, (this.inflight.get(id) || 0) + 1)
-    const arr = this.rpmBuckets.get(id) || []
-    arr.push(now)
-    this.rpmBuckets.set(id, arr)
+    if (rec.user_id) {
+      this.inflightOwners.set(id, rec.user_id)
+      this.userInflight.set(rec.user_id, (this.userInflight.get(rec.user_id) || 0) + 1)
+    }
+    for (const { bucket } of this._rpmPolicies(rec, stored.facts)) {
+      if (!bucket) continue
+      this._rpmCount(bucket, now)
+      const values = this.rpmBuckets.get(bucket)
+      values.push(now)
+    }
     return { ok: true }
   }
 
   release(recOrId) {
     const id = typeof recOrId === 'string' ? recOrId : recOrId?.id
-    if (!id) return
+    if (!id || !this.inflight.has(id)) return
+    const owner = this.inflightOwners.get(id)
+    if (owner) {
+      const remaining = (this.userInflight.get(owner) || 0) - 1
+      if (remaining > 0) this.userInflight.set(owner, remaining)
+      else this.userInflight.delete(owner)
+    }
     const n = (this.inflight.get(id) || 0) - 1
-    if (n <= 0) this.inflight.delete(id)
-    else this.inflight.set(id, n)
+    if (n <= 0) {
+      this.inflight.delete(id)
+      this.inflightOwners.delete(id)
+    } else this.inflight.set(id, n)
   }
 
-  recordUsage(recOrId, usage = {}, { model = null, rateMultiplier = 1, officialCost } = {}) {
+  /**
+   * 金额参数为整数微单位（M6）：`actualCostMicros` 是结算的实际扣费，`officialCostMicros` 是官方价；
+   * 没有实际扣费时按官方价 × 倍率（applyRate，四舍五入一次）。
+   */
+  async recordUsage(
+    recOrId,
+    usage = {},
+    { model = null, rateMultiplier = 1, officialCostMicros, actualCostMicros } = {},
+  ) {
     const id = typeof recOrId === 'string' ? recOrId : recOrId?.id
-    if (!this.repo.getById(id)) return null
+    if (!(await this.repo.getById(id))) return null
     const normalized = normalizeUsage(usage)
-    let billed = officialCost
-    if (billed == null) billed = usage.total_cost
+    let billed = microsOf(officialCostMicros)
+    if (billed == null) billed = microsOf(usage.total_cost_micros) ?? toMicros(usage.total_cost)
     if (billed == null && model) {
       try {
         const c = calculateCost(normalized, model)
-        if (c?.known) billed = c.total_cost
+        if (c?.known) billed = c.total_cost_micros
       } catch {}
     }
-    if (billed == null) billed = Number(usage.cost ?? usage.actual_cost) || 0
+    if (billed == null) billed = toMicros(usage.cost ?? usage.actual_cost) || 0
     // key quota/windows track actual (group-rated) spend, sub2api-style
     const rate = Number.isFinite(Number(rateMultiplier)) ? Number(rateMultiplier) : 1
-    const cost = billed * rate
-    const rec = this.repo.recordUsage(id, {
+    const cost = microsOf(actualCostMicros) ?? applyRate(billed, rate) ?? 0
+    const rec = await this.repo.recordUsage(id, {
       tokens_in: Number(normalized.input_tokens) || Number(normalized.tokens_in) || 0,
       tokens_out: Number(normalized.output_tokens) || Number(normalized.tokens_out) || 0,
       cache_read_tokens: Number(normalized.cache_read_input_tokens ?? normalized.cache_read_tokens) || 0,
       cache_creation_tokens: Number(normalized.cache_creation_input_tokens ?? normalized.cache_creation_tokens) || 0,
-      cost,
+      cost_micros: cost,
     })
-    // sub2api: the billing write flips the key when the USD quota runs out
-    if (rec && rec.status === 'active' && (rec.quota ?? 0) > 0 && (rec.quota_used ?? 0) >= rec.quota) {
-      this.repo.update({ ...rec, status: 'quota_exhausted', updated_at: nowIso() })
+    // sub2api: the billing write flips the key when the USD quota runs out.
+    // 竞态 R8：条件更新（仍为 active 且已用达到上限才翻转），不整行写回覆盖并发修改的其他字段
+    if (rec && rec.status === 'active' && usdQuotaReached(rec)) {
+      await this.repo.markQuotaExhausted(id, nowIso())
     }
     return rec
   }
 
-  snapshot() {
-    const keys = this.list({ reveal: false })
+  async snapshot() {
+    const keys = await this.list({ reveal: false })
     return {
       total: keys.length,
       active: keys.filter((k) => k.status === 'active').length,

@@ -7,7 +7,8 @@
  */
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import { createRateLimiter } from '../core/security.mjs'
-import { reportTimezone, zonedDayStartMs } from '../core/timezone.mjs'
+import { zonedDayStartMs } from '../core/timezone.mjs'
+import { SYSTEM_TIMEZONE } from '../../shared/system-time.mjs'
 import { usagePoolEnabled, usageRead } from '../db/sqlite-pool.mjs'
 
 export const KEY_SELF_PATHS = new Set(['/v1/me/quota', '/v1/me/usage'])
@@ -76,9 +77,9 @@ export function createKeySelfHandler({ json, requireAuth, apiKeyStore, getUsageL
     return getUsageLogs()[method](args)
   }
 
-  function authorize(req, res) {
+  async function authorize(req, res) {
     // Skip the key gate: expired / exhausted keys must still read why they are refused.
-    if (!requireAuth(req, res, { keyGate: false })) return null
+    if (!(await requireAuth(req, res, { keyGate: false }))) return null
     const rec = req.apiKeyKind === 'managed' ? req.apiKeyRecord : null
     if (!rec) {
       fail(
@@ -121,13 +122,13 @@ export function createKeySelfHandler({ json, requireAuth, apiKeyStore, getUsageL
   }
 
   return async function handleKeySelf(req, res, url, now = Date.now()) {
-    const rec = authorize(req, res)
+    const rec = await authorize(req, res)
     if (!rec) return
     if (url.pathname === '/v1/me/quota') {
       return json(res, 200, {
         object: 'api_key_quota',
         checked_at: new Date(now).toISOString(),
-        ...apiKeyStore.selfQuota(rec, now),
+        ...(await apiKeyStore.selfQuota(rec, now)),
       })
     }
     const q = url.searchParams
@@ -144,7 +145,8 @@ export function createKeySelfHandler({ json, requireAuth, apiKeyStore, getUsageL
         }),
       )
     }
-    const zone = reportTimezone(q.get('tz'))
+    // 报表日界固定为系统时区（UTC+8）：本地统计不接受调用方时区，`tz` 参数被忽略
+    const zone = SYSTEM_TIMEZONE
     const periods = PERIODS.map(([name, days]) => ({
       name,
       since: new Date(zonedDayStartMs(now, zone, 1 - days)).toISOString(),

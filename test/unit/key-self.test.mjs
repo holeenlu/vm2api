@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { closeDatabase, createDatabase, getDb, openDatabase } from '../../src/lib/db/database.mjs'
+import { GroupsRepo } from '../../src/lib/db/repos/groups-repo.mjs'
 import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
 import { zonedDayStartMs } from '../../src/lib/core/timezone.mjs'
 import { createKeySelfHandler, decodeCursor, encodeCursor } from '../../src/lib/protocol/key-self.mjs'
@@ -25,7 +26,7 @@ function freshDb(t) {
 
 /** Same identity rules as server.mjs requireAuth: master, panel session, managed key (+ canAccept unless keyGate is off). */
 function fakeRequireAuth(store) {
-  return (req, res, { keyGate = true } = {}) => {
+  return async (req, res, { keyGate = true } = {}) => {
     if (req.panelSession) {
       req.panelUser = 'boss'
       req.panelRole = 'admin'
@@ -38,13 +39,13 @@ function fakeRequireAuth(store) {
       req.panelRole = 'admin'
       return true
     }
-    const managed = store.authenticate(token)
+    const managed = await store.authenticate(token)
     if (!managed.ok) {
       res.status = 401
       res.body = { error: { type: 'authentication_error', code: 'invalid_api_key' } }
       return false
     }
-    const gate = keyGate ? store.canAccept(managed.record) : { ok: true }
+    const gate = keyGate ? await store.canAccept(managed.record) : { ok: true }
     if (!gate.ok) {
       res.status = gate.status
       res.body = { error: { code: gate.code } }
@@ -84,15 +85,17 @@ function setup(t, { db = freshDb(t), rate, localReads = true } = {}) {
   return { db, store, logs, call }
 }
 
-function addUser(store, id, { role = 'user', concurrency = 5 } = {}) {
+async function addUser(store, id, { role = 'user', concurrency = 5 } = {}) {
   const at = new Date(NOW).toISOString()
-  store.users.insert({ id, username: id, password_hash: 'x', role, concurrency, created_at: at, updated_at: at })
+  await store.users.insert({ id, username: id, password_hash: 'x', role, concurrency, created_at: at, updated_at: at })
+  // 本地属主为普通用户的 Key 必须绑定其被授权的分组
+  if (role === 'user') await new GroupsRepo(store.db).setGrants(id, [1])
 }
 
 let seq = 0
-function seedLog(logs, rec) {
+async function seedLog(logs, rec) {
   seq += 1
-  logs.insertSummary({
+  await logs.insertSummary({
     id: `log_${String(seq).padStart(6, '0')}`,
     request_id: `req-${seq}`,
     created_at: new Date(NOW - 60_000).toISOString(),
@@ -119,9 +122,10 @@ function assertNoLeak(body) {
 
 test('quota returns the key limits, usage and the canAccept verdict', async (t) => {
   const { store, call } = setup(t)
-  addUser(store, 'u-owner', { concurrency: 3 })
-  const rec = store.create({
+  await addUser(store, 'u-owner', { concurrency: 3 })
+  const rec = await store.create({
     name: 'client-a',
+    group_id: 1,
     user_id: 'u-owner',
     max_concurrency: 4,
     quota: 10,
@@ -132,10 +136,10 @@ test('quota returns the key limits, usage and the canAccept verdict', async (t) 
     rpm: 30,
     expires_at: '2027-01-01T00:00:00.000Z',
   })
-  store.recordUsage(rec.id, { total_cost: 2.5 })
-  const sibling = store.create({ name: 'sibling', user_id: 'u-owner', max_concurrency: 0 })
-  assert.equal(store.acquire(store.getById(rec.id)).ok, true)
-  assert.equal(store.acquire(sibling).ok, true)
+  await store.recordUsage(rec.id, { total_cost: 2.5 })
+  const sibling = await store.create({ name: 'sibling', group_id: 1, user_id: 'u-owner', max_concurrency: 0 })
+  assert.equal((await store.acquire(await store.getById(rec.id))).ok, true)
+  assert.equal((await store.acquire(sibling)).ok, true)
 
   const res = await call('/v1/me/quota', { key: rec.key, now: Date.now() })
   assert.equal(res.status, 200, JSON.stringify(res.body))
@@ -151,7 +155,7 @@ test('quota returns the key limits, usage and the canAccept verdict', async (t) 
   assert.equal(body.blocked_by, null)
   assert.deepEqual(body.usd, { limit: 10, used: 2.5, remaining: 7.5, exceeded: false })
   assert.deepEqual(body.requests, { limit: 100, used: 1, remaining: 99, exceeded: false })
-  const stored = store.getById(rec.id)
+  const stored = await store.getById(rec.id)
   assert.equal(body.windows['5h'].used, 2.5)
   assert.equal(body.windows['5h'].remaining, 2.5)
   assert.equal(body.windows['5h'].window_start, stored.window_5h_start)
@@ -170,7 +174,7 @@ test('quota returns the key limits, usage and the canAccept verdict', async (t) 
 
 test('quota limits read null when unlimited; keys without an owner have no user concurrency', async (t) => {
   const { store, call } = setup(t)
-  const rec = store.create({ name: 'free', max_concurrency: 0 })
+  const rec = await store.create({ name: 'free', max_concurrency: 0 })
   const { body } = await call('/v1/me/quota', { key: rec.key })
   assert.deepEqual(body.usd, { limit: null, used: 0, remaining: null, exceeded: false })
   assert.deepEqual(body.requests, { limit: null, used: 0, remaining: null, exceeded: false })
@@ -190,11 +194,11 @@ test('quota limits read null when unlimited; keys without an owner have no user 
 
 test('admin owners show no user concurrency cap, same as canAccept', async (t) => {
   const { store, call } = setup(t)
-  addUser(store, 'u-admin', { role: 'admin', concurrency: 1 })
-  const rec = store.create({ name: 'ops', user_id: 'u-admin', max_concurrency: 0 })
-  store.acquire(rec)
-  store.acquire(rec)
-  assert.equal(store.canAccept(rec).ok, true)
+  await addUser(store, 'u-admin', { role: 'super_admin', concurrency: 1 })
+  const rec = await store.create({ name: 'ops', group_id: 1, user_id: 'u-admin', max_concurrency: 0 })
+  await store.acquire(rec)
+  await store.acquire(rec)
+  assert.equal((await store.canAccept(rec)).ok, true)
   const { body } = await call('/v1/me/quota', { key: rec.key })
   assert.deepEqual(body.user_concurrency, { limit: null, inflight: 2, exceeded: false })
   assert.equal(body.accepting, true)
@@ -211,8 +215,8 @@ test('master key and panel sessions get 400; disabled, deleted and disabled-owne
     assert.equal(panel.body.error.code, 'managed_key_required')
   }
 
-  const disabled = store.create({ name: 'off' })
-  store.update(disabled.id, { status: 'disabled' })
+  const disabled = await store.create({ name: 'off' })
+  await store.update(disabled.id, { status: 'disabled' })
   for (const p of ['/v1/me/quota', '/v1/me/usage']) {
     const res = await call(p, { key: disabled.key })
     assert.equal(res.status, 401)
@@ -220,13 +224,13 @@ test('master key and panel sessions get 400; disabled, deleted and disabled-owne
     assert.equal(res.body.error.code, 'api_key_disabled')
   }
 
-  const gone = store.create({ name: 'gone' })
-  store.remove(gone.id)
+  const gone = await store.create({ name: 'gone' })
+  await store.remove(gone.id)
   assert.equal((await call('/v1/me/quota', { key: gone.key })).status, 401)
 
-  addUser(store, 'u-banned')
-  const orphan = store.create({ name: 'banned-owner', user_id: 'u-banned' })
-  store.users.update({ ...store.users.getById('u-banned'), enabled: false })
+  await addUser(store, 'u-banned')
+  const orphan = await store.create({ name: 'banned-owner', group_id: 1, user_id: 'u-banned' })
+  await store.users.update({ ...(await store.users.getById('u-banned')), enabled: false })
   assert.equal((await call('/v1/me/quota', { key: orphan.key })).status, 401)
 
   assert.equal((await call('/v1/me/quota', { key: 'sk-vm-not-a-real-key-0000' })).status, 401)
@@ -235,7 +239,7 @@ test('master key and panel sessions get 400; disabled, deleted and disabled-owne
 
 test('expired and exhausted keys still read their quota and see why they are refused', async (t) => {
   const { store, call } = setup(t)
-  const expired = store.create({ name: 'old', expires_at: new Date(Date.now() - 1000).toISOString() })
+  const expired = await store.create({ name: 'old', expires_at: new Date(Date.now() - 1000).toISOString() })
   let res = await call('/v1/me/quota', { key: expired.key, now: Date.now() })
   assert.equal(res.status, 200)
   assert.equal(res.body.key.expired, true)
@@ -243,9 +247,9 @@ test('expired and exhausted keys still read their quota and see why they are ref
   assert.deepEqual(res.body.blocked_by, { code: 'api_key_expired', message: 'API key has expired', status: 403 })
   assert.equal((await call('/v1/me/usage', { key: expired.key })).status, 200)
 
-  const usd = store.create({ name: 'broke', quota: 1 })
-  store.recordUsage(usd.id, { total_cost: 1.25 })
-  assert.equal(store.getById(usd.id).status, 'quota_exhausted')
+  const usd = await store.create({ name: 'broke', quota: 1 })
+  await store.recordUsage(usd.id, { total_cost: 1.25 })
+  assert.equal((await store.getById(usd.id)).status, 'quota_exhausted')
   res = await call('/v1/me/quota', { key: usd.key })
   assert.equal(res.status, 200)
   assert.equal(res.body.key.status, 'quota_exhausted')
@@ -253,8 +257,8 @@ test('expired and exhausted keys still read their quota and see why they are ref
   assert.equal(res.body.blocked_by.code, 'api_key_quota_exhausted')
   assert.equal((await call('/v1/me/usage', { key: usd.key })).status, 200)
 
-  const counted = store.create({ name: 'counted', quota_requests: 1 })
-  store.recordUsage(counted.id, {})
+  const counted = await store.create({ name: 'counted', quota_requests: 1 })
+  await store.recordUsage(counted.id, {})
   res = await call('/v1/me/quota', { key: counted.key })
   assert.equal(res.status, 200)
   assert.deepEqual(res.body.requests, { limit: 1, used: 1, remaining: 0, exceeded: true })
@@ -263,27 +267,27 @@ test('expired and exhausted keys still read their quota and see why they are ref
 
 test('every limit flag agrees with canAccept', async (t) => {
   const { db, store, call } = setup(t)
-  addUser(store, 'u-cap', { concurrency: 1 })
+  await addUser(store, 'u-cap', { concurrency: 1 })
   const now = Date.now()
   const scenarios = [
-    ['open', {}, () => {}],
+    ['open', {}, async () => {}],
     [
       'window 5h spent',
       { rate_limit_5h: 1 },
-      (rec) => store.recordUsage(rec.id, { total_cost: 1 }),
+      async (rec) => store.recordUsage(rec.id, { total_cost: 1 }),
       (b) => b.windows['5h'].exceeded,
     ],
     [
       'window 7d spent',
       { rate_limit_7d: 2 },
-      (rec) => store.recordUsage(rec.id, { total_cost: 3 }),
+      async (rec) => store.recordUsage(rec.id, { total_cost: 3 }),
       (b) => b.windows['7d'].exceeded,
     ],
     [
       'window 5h closed',
       { rate_limit_5h: 1 },
-      (rec) => {
-        store.recordUsage(rec.id, { total_cost: 5 })
+      async (rec) => {
+        await store.recordUsage(rec.id, { total_cost: 5 })
         const stale = new Date(now - 5 * 3600_000).toISOString()
         db.prepare('UPDATE api_keys SET window_5h_start = ? WHERE id = ?').run(stale, rec.id)
       },
@@ -292,27 +296,28 @@ test('every limit flag agrees with canAccept', async (t) => {
     [
       'rpm full',
       { rpm: 2, max_concurrency: 0 },
-      (rec) => {
-        store.acquire(rec, now)
+      async (rec) => {
+        await store.acquire(rec, now)
         store.release(rec)
-        store.acquire(rec, now)
+        await store.acquire(rec, now)
         store.release(rec)
       },
       (b) => b.rpm.exceeded && b.rpm.current === 2,
     ],
-    ['key concurrency full', { max_concurrency: 1 }, (rec) => store.acquire(rec), (b) => b.concurrency.exceeded],
+    ['key concurrency full', { max_concurrency: 1 }, async (rec) => store.acquire(rec), (b) => b.concurrency.exceeded],
     [
       'user concurrency full',
       { max_concurrency: 0, user_id: 'u-cap' },
-      (rec) => store.acquire(store.create({ name: 'peer', user_id: 'u-cap', max_concurrency: 0 })),
+      async (rec) =>
+        store.acquire(await store.create({ name: 'peer', group_id: 1, user_id: 'u-cap', max_concurrency: 0 })),
       (b) => b.user_concurrency.exceeded && b.user_concurrency.inflight === 1,
     ],
   ]
   for (const [label, input, arrange, flagged] of scenarios) {
-    const rec = store.create({ name: label, ...input })
-    arrange(rec)
-    const fresh = store.getById(rec.id)
-    const gate = store.canAccept(fresh, now)
+    const rec = await store.create({ name: label, ...input })
+    await arrange(rec)
+    const fresh = await store.getById(rec.id)
+    const gate = await store.canAccept(fresh, now)
     const { body } = await call('/v1/me/quota', { key: rec.key, now })
     assert.equal(body.accepting, gate.ok, label)
     assert.equal(body.blocked_by?.code ?? null, gate.ok ? null : gate.code, label)
@@ -322,28 +327,28 @@ test('every limit flag agrees with canAccept', async (t) => {
 
 test('self queries take no concurrency, RPM or usage', async (t) => {
   const { store, logs, call } = setup(t)
-  const rec = store.create({ name: 'quiet', rpm: 1, max_concurrency: 1 })
+  const rec = await store.create({ name: 'quiet', rpm: 1, max_concurrency: 1 })
   for (let i = 0; i < 5; i++) {
     assert.equal((await call('/v1/me/quota', { key: rec.key })).status, 200)
     assert.equal((await call('/v1/me/usage', { key: rec.key })).status, 200)
   }
-  const after = store.getById(rec.id)
+  const after = await store.getById(rec.id)
   assert.equal(after.requests, 0)
   assert.equal(after.quota_requests_used, 0)
   assert.equal(after.last_used_at, null)
   assert.equal(store.inflight.get(rec.id) || 0, 0)
   assert.equal(store._rpmCount(rec.id), 0)
-  assert.equal(logs.count(), 0)
-  assert.equal(store.canAccept(after).ok, true)
+  assert.equal(await logs.count(), 0)
+  assert.equal((await store.canAccept(after)).ok, true)
 })
 
 test('usage sums today / 7d / 30d by client model and sees only this key', async (t) => {
   const { store, logs, call } = setup(t)
-  addUser(store, 'u-owner')
-  addUser(store, 'u-other')
-  const mine = store.create({ name: 'mine', user_id: 'u-owner' })
-  const sibling = store.create({ name: 'sibling', user_id: 'u-owner' })
-  const stranger = store.create({ name: 'stranger', user_id: 'u-other' })
+  await addUser(store, 'u-owner')
+  await addUser(store, 'u-other')
+  const mine = await store.create({ name: 'mine', group_id: 1, user_id: 'u-owner' })
+  const sibling = await store.create({ name: 'sibling', group_id: 1, user_id: 'u-owner' })
+  const stranger = await store.create({ name: 'stranger', group_id: 1, user_id: 'u-other' })
   const at = (ms) => new Date(ms).toISOString()
   const leaky = {
     vm_id: 'vm-secret-slot',
@@ -355,7 +360,7 @@ test('usage sums today / 7d / 30d by client model and sees only this key', async
     upstream_model: 'claude-mapped-target',
   }
   const row = (key, ms, extra) => seedLog(logs, { api_key_id: key.id, created_at: at(ms), ...leaky, ...extra })
-  row(mine, NOW - 60_000, {
+  await row(mine, NOW - 60_000, {
     model: 'claude-sonnet-5',
     input_tokens: 10,
     output_tokens: 20,
@@ -364,22 +369,22 @@ test('usage sums today / 7d / 30d by client model and sees only this key', async
     total_cost: 1,
     actual_cost: 0.5,
   })
-  row(mine, NOW - 3 * DAY, { model: 'claude-opus-5', input_tokens: 1, output_tokens: 2, actual_cost: 2 })
-  row(mine, NOW - 20 * DAY, { model: 'claude-sonnet-5', input_tokens: 5, actual_cost: 0.25 })
-  row(mine, NOW - 40 * DAY, { model: 'claude-sonnet-5', input_tokens: 999, actual_cost: 99 })
-  row(mine, NOW - 2 * 3600_000, { model: 'claude-sonnet-5', status: 429, error_code: 'upstream_rate_limit' })
-  row(sibling, NOW - 60_000, { model: 'claude-sonnet-5', input_tokens: 7777, actual_cost: 7 })
-  row(stranger, NOW - 60_000, { model: 'gpt-6', input_tokens: 8888, actual_cost: 8 })
-  seedLog(logs, { api_key_id: null, api_key_kind: 'master', created_at: at(NOW - 60_000), actual_cost: 9 })
+  await row(mine, NOW - 3 * DAY, { model: 'claude-opus-5', input_tokens: 1, output_tokens: 2, actual_cost: 2 })
+  await row(mine, NOW - 20 * DAY, { model: 'claude-sonnet-5', input_tokens: 5, actual_cost: 0.25 })
+  await row(mine, NOW - 40 * DAY, { model: 'claude-sonnet-5', input_tokens: 999, actual_cost: 99 })
+  await row(mine, NOW - 2 * 3600_000, { model: 'claude-sonnet-5', status: 429, error_code: 'upstream_rate_limit' })
+  await row(sibling, NOW - 60_000, { model: 'claude-sonnet-5', input_tokens: 7777, actual_cost: 7 })
+  await row(stranger, NOW - 60_000, { model: 'gpt-6', input_tokens: 8888, actual_cost: 8 })
+  await seedLog(logs, { api_key_id: null, api_key_kind: 'master', created_at: at(NOW - 60_000), actual_cost: 9 })
 
   const res = await call('/v1/me/usage', { key: mine.key })
   assert.equal(res.status, 200, JSON.stringify(res.body))
   const { periods, recent, timezone } = res.body
   assert.equal(res.body.object, 'api_key_usage')
-  assert.equal(timezone, 'UTC')
-  assert.equal(periods.today.since, '2026-11-06T00:00:00.000Z')
-  assert.equal(periods['7d'].since, '2026-10-31T00:00:00.000Z')
-  assert.equal(periods['30d'].since, '2026-10-08T00:00:00.000Z')
+  assert.equal(timezone, 'Asia/Shanghai')
+  assert.equal(periods.today.since, '2026-11-05T16:00:00.000Z')
+  assert.equal(periods['7d'].since, '2026-10-30T16:00:00.000Z')
+  assert.equal(periods['30d'].since, '2026-10-07T16:00:00.000Z')
 
   assert.equal(periods.today.requests, 2)
   assert.equal(periods.today.input_tokens, 10)
@@ -431,27 +436,27 @@ test('usage sums today / 7d / 30d by client model and sees only this key', async
   assert.equal(other.body.recent.items.length, 1)
 })
 
-test('usage today follows tz; unknown tz falls back to UTC', async (t) => {
+test('usage days are fixed to the system timezone; the tz parameter is ignored', async (t) => {
   const { store, call } = setup(t)
-  const rec = store.create({ name: 'tz' })
-  const sh = await call('/v1/me/usage?tz=Asia/Shanghai', { key: rec.key })
-  assert.equal(sh.body.timezone, 'Asia/Shanghai')
-  assert.equal(sh.body.periods.today.since, new Date(zonedDayStartMs(NOW, 'Asia/Shanghai')).toISOString())
-  assert.equal(sh.body.periods.today.since, '2026-11-05T16:00:00.000Z')
-  const bad = await call('/v1/me/usage?tz=Mars/Base', { key: rec.key })
-  assert.equal(bad.body.timezone, 'UTC')
+  const rec = await store.create({ name: 'tz' })
+  for (const query of ['', '?tz=UTC', '?tz=America/New_York', '?tz=Mars/Base']) {
+    const res = await call(`/v1/me/usage${query}`, { key: rec.key })
+    assert.equal(res.body.timezone, 'Asia/Shanghai', query)
+    assert.equal(res.body.periods.today.since, new Date(zonedDayStartMs(NOW, 'Asia/Shanghai')).toISOString(), query)
+    assert.equal(res.body.periods.today.since, '2026-11-05T16:00:00.000Z', query)
+  }
 })
 
 test('recent requests page by cursor without gaps or repeats, capped at 100', async (t) => {
   const { store, logs, call } = setup(t)
-  const rec = store.create({ name: 'pager' })
-  const other = store.create({ name: 'noise' })
+  const rec = await store.create({ name: 'pager' })
+  const other = await store.create({ name: 'noise' })
   const tied = new Date(NOW - 10 * 60_000).toISOString()
   for (let i = 0; i < 25; i++) {
     // five rows share a timestamp so the id tiebreak is exercised
     const created_at = i < 5 ? tied : new Date(NOW - (i + 20) * 60_000).toISOString()
-    seedLog(logs, { api_key_id: rec.id, created_at, request_id: `mine-${i}` })
-    seedLog(logs, { api_key_id: other.id, created_at, request_id: `noise-${i}` })
+    await seedLog(logs, { api_key_id: rec.id, created_at, request_id: `mine-${i}` })
+    await seedLog(logs, { api_key_id: other.id, created_at, request_id: `noise-${i}` })
   }
 
   const first = await call('/v1/me/usage', { key: rec.key })
@@ -486,11 +491,12 @@ test('recent requests page by cursor without gaps or repeats, capped at 100', as
   assert.equal(byTime.body.recent.items.length, 20, 'plain ISO time keeps rows strictly older')
 
   for (const i of [0, 1]) {
-    seedLog(logs, { api_key_id: rec.id, created_at: new Date(NOW - (i + 1) * 1000).toISOString() })
+    await seedLog(logs, { api_key_id: rec.id, created_at: new Date(NOW - (i + 1) * 1000).toISOString() })
   }
   const capped = await call('/v1/me/usage?limit=500', { key: rec.key })
   assert.equal(capped.body.recent.items.length, 27)
-  for (let i = 0; i < 100; i++) seedLog(logs, { api_key_id: rec.id, created_at: new Date(NOW - 5000).toISOString() })
+  for (let i = 0; i < 100; i++)
+    await seedLog(logs, { api_key_id: rec.id, created_at: new Date(NOW - 5000).toISOString() })
   const max = await call('/v1/me/usage?limit=500', { key: rec.key })
   assert.equal(max.body.recent.items.length, 100)
   assert.equal(max.body.recent.has_more, true)
@@ -501,7 +507,7 @@ test('recent requests page by cursor without gaps or repeats, capped at 100', as
   assert.equal(bad.body.error.param, 'before')
 })
 
-test('key self-service reads seek the existing api_key_id index', (t) => {
+test('key self-service reads seek the existing api_key_id index', async (t) => {
   const db = freshDb(t)
   const plan = (sql, ...params) =>
     db
@@ -516,8 +522,8 @@ test('key self-service reads seek the existing api_key_id index', (t) => {
     if (/FROM usage_logs\s+WHERE api_key_id/.test(sql)) seen.push(sql)
     return prepare(sql)
   }
-  logs.keyUsagePeriods({ apiKeyId: 'k', periods: [{ name: 'today', since: NOW }] })
-  logs.keyRecentRequests({ apiKeyId: 'k', before: { created_at: new Date(NOW).toISOString(), id: 'log_x' } })
+  await logs.keyUsagePeriods({ apiKeyId: 'k', periods: [{ name: 'today', since: NOW }] })
+  await logs.keyRecentRequests({ apiKeyId: 'k', before: { created_at: new Date(NOW).toISOString(), id: 'log_x' } })
   db.prepare = prepare
   assert.equal(seen.length, 2)
   for (const sql of seen) {
@@ -542,8 +548,8 @@ test('cursor round-trips and rejects junk', () => {
 
 test('self queries are rate limited per key with Retry-After', async (t) => {
   const { store, call } = setup(t, { rate: { capacity: 3, refillPerSec: 1 / 20 } })
-  const a = store.create({ name: 'a' })
-  const b = store.create({ name: 'b' })
+  const a = await store.create({ name: 'a' })
+  const b = await store.create({ name: 'b' })
   assert.equal((await call('/v1/me/quota', { key: a.key })).status, 200)
   assert.equal((await call('/v1/me/usage', { key: a.key })).status, 200)
   assert.equal((await call('/v1/me/quota', { key: a.key })).status, 200)
@@ -552,7 +558,7 @@ test('self queries are rate limited per key with Retry-After', async (t) => {
   assert.equal(limited.body.error.code, 'gateway_rate_limit')
   assert.equal(limited.headers['retry-after'], '20')
   assert.equal((await call('/v1/me/quota', { key: b.key })).status, 200, 'other keys keep their own bucket')
-  assert.equal(store.canAccept(store.getById(a.id)).ok, true, 'inference gate is untouched')
+  assert.equal((await store.canAccept(await store.getById(a.id))).ok, true, 'inference gate is untouched')
 })
 
 test('usage reads go through the read-only worker pool when it runs', async (t) => {
@@ -563,12 +569,15 @@ test('usage reads go through the read-only worker pool when it runs', async (t) 
     fs.rmSync(dir, { recursive: true, force: true })
   })
   const { store, logs, call } = setup(t, { db: getDb(), localReads: false })
-  const rec = store.create({ name: 'pooled' })
-  seedLog(logs, { api_key_id: rec.id, created_at: new Date(NOW - 60_000).toISOString(), actual_cost: 1.5 })
+  const rec = await store.create({ name: 'pooled' })
+  await seedLog(logs, { api_key_id: rec.id, created_at: new Date(NOW - 60_000).toISOString(), actual_cost: 1.5 })
   const pooled = await call('/v1/me/usage', { key: rec.key })
   assert.equal(pooled.status, 200)
   assert.equal(pooled.body.periods.today.cost, 1.5)
   assert.equal(pooled.body.recent.items.length, 1)
-  const local = logs.keyUsagePeriods({ apiKeyId: rec.id, periods: [{ name: 'today', since: '2026-11-06T00:00:00Z' }] })
+  const local = await logs.keyUsagePeriods({
+    apiKeyId: rec.id,
+    periods: [{ name: 'today', since: '2026-11-05T16:00:00Z' }],
+  })
   assert.deepEqual(pooled.body.periods.today, local.today)
 })

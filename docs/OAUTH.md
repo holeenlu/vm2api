@@ -12,8 +12,8 @@ sessionKey（默认 Setup Token）或授权码
    │ 控制面接收完整凭证，不在 helper 返回后再次 bootstrap 或套一层代理
    ▼
 槽 ~/.claude/credentials.json   ← 活票只在这里（含 email / account_uuid / org_uuid）
-   │ host RefreshIfNeeded（推理临期 或 面板显式 refresh）
-   │ 无后台定时器；401 不强制换票
+   │ host RefreshIfNeeded（推理临期、面板显式 refresh，或后台定时扫描临期的槽）
+   │ 401 不强制换票
    ▼
 https://platform.claude.com/v1/oauth/token
    │
@@ -43,7 +43,7 @@ SSH 扩展槽同样由控制面经绑定出口换票。拿到授权后，提交�
 
 ## 刷新规则
 
-**只有 host `RefreshIfNeeded` 决定是否换票**，没有第二套定时器。Go worker 不再 Ensure。
+**只有 host `RefreshIfNeeded` 决定是否换票**。Go worker 不再 Ensure。控制面另有后台定时扫描（`credential-refresh-monitor.mjs`，routing 配置 `credential_refresh`，默认每 300 秒、启动时先跑一次、并发 3）：只对带 refresh token、进入刷新窗口且没有致命刷新错误的槽（含调度关）发起同一个 Ensure，未到期的票不强制换。
 
 1. 推理（Messages / usage）或面板「刷新凭证」调用 Ensure。
 2. access 到期前 5 分钟进入刷新窗口；未进窗口则只读现票。新票未过期，导入后不强制 refresh。
@@ -51,9 +51,9 @@ SSH 扩展槽同样由控制面经绑定出口换票。拿到授权后，提交�
 4. 锁内重读 credential 与 generation，二次确认仍需刷新。
 5. refresh 必须走该 VM 绑定的 SOCKS5。
 6. 成功后原子写 access、轮换后的 refresh、expiry、新 generation。
-7. context/deadline 已取消的迟到响应不得落盘。
+7. 换票请求与调用方的 context 脱钩（独立 30 秒上限）。上游返回 200 即已轮换 RT，调用方已取消也必须落盘；落盘前重读一次，代次已被其他写入者改过时放弃本次结果，不覆盖较新的凭据。
 8. `invalid_grant` 先重读 generation，识别其他路径已完成的竞争刷新。
-9. 上游 401 **不** force-refresh（端点拒票 ≠ 过期；硬刷会把还能用的 grant 烧成 `invalid_grant`）。
+9. 上游 401 引起的 force-refresh 按槽限频：每槽 5 分钟最多一次（端点拒票 ≠ 过期，被吊销的账号不能让每个请求都去换票）。冷却期内只做普通 Ensure（令牌临期才刷新），未刷新就不重发，401 交给 failover 冷却换号。kernel 明确返回 `needs_refresh`（本地判定临期）不受限频。
 10. 目录 / 模型列表 **不** hop worker `/v1/models`。
 11. 槽内 cli-node（kernel 拉起的 native 槽、面板运维终端里的 `claude`、初装 hello / `/usage` / 常驻、`setup-token`）带 `CLAUDE_CODE_HOST_REFRESH=1` 和 `CLAUDE_CODE_VERSION`：临期或 401 时只重读 `credentials.json`，不请求 token 端点，不写回凭证。否则它与 host 同用一个轮换 RT，后到的一方拿 `invalid_grant`，且其写回会丢掉 `kinGeneration`。
 

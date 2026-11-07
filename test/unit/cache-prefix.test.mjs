@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
   cachePrefixSessionCountsForTest,
+  cachePrefixStampedMessagesForTest,
   clearCachePrefixSessions,
   confirmCachePrefix,
   describeCacheContinuity,
@@ -600,6 +601,105 @@ test('an anchor reads the newest entry an earlier turn wrote, not an unwritten u
   assert.equal(anchor, 0)
 })
 
+// Per-message records are carried over from the previous turn's snapshot when
+// the message hash is unchanged. These cover the cases where the record at an
+// index must NOT be the one the index held last turn.
+const lines = (length, edits = {}) =>
+  Array.from({ length }, (_, i) => ({
+    role: i % 2 ? 'assistant' : 'user',
+    content: [{ type: 'text', text: edits[i] ?? `m${i}` }],
+  }))
+
+test('an edit deep in history is still located after many unchanged turns', () => {
+  clearCachePrefixSessions()
+  let now = 0
+  prepareCachePrefix('deep', { messages: lines(20) }, now)
+  // Thirty turns that reuse every record before the tail.
+  for (let i = 0; i < 30; i++) {
+    now += 1
+    assert.equal(prepareCachePrefix('deep', { messages: lines(20 + i + 1) }, now).break, null)
+  }
+  now += 1
+  // Only the stamped tail keeps field stamps in the stored snapshot.
+  assert.equal(cachePrefixStampedMessagesForTest('deep'), 24)
+  const broke = prepareCachePrefix('deep', { messages: lines(51, { 3: 'EDITED' }) }, now).break
+  assert.equal(broke.section, 'messages')
+  assert.equal(broke.index, 3)
+  assert.equal(broke.kind, 'text')
+  assert.equal(broke.diff.reason, 'part')
+  assert.equal(broke.diff.part, 0)
+  // The stored side of index 3 has no stamp left: field detail falls back to digest.
+  assert.deepEqual(broke.diff.fields, { change: 'digest' })
+})
+
+test('an edit inside the stamped tail keeps its field detail', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('tail', { messages: lines(60) }, 0)
+  const broke = prepareCachePrefix('tail', { messages: lines(61, { 50: 'EDITED' }) }, 1).break
+  assert.equal(broke.index, 50)
+  assert.deepEqual(
+    broke.diff.fields.changed.map((item) => `${item.key}:${item.change}`),
+    ['text:length'],
+  )
+})
+
+test('a same-request diff restores field detail deep in history from both bodies', () => {
+  const inbound = { messages: lines(60) }
+  const outbound = { messages: lines(60, { 3: 'EDITED' }) }
+  const diff = firstHistoryDiff(inbound, outbound)
+  assert.equal(diff.index, 3)
+  assert.deepEqual(
+    diff.diff.fields.changed.map((item) => `${item.key}:${item.change}`),
+    ['text:length'],
+  )
+})
+
+test('an insertion at the front shifts every index and reuses no record', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('shift', { messages: lines(12) }, 0)
+  assert.equal(prepareCachePrefix('shift', { messages: lines(14) }, 1).break, null)
+  const shifted = [{ role: 'user', content: [{ type: 'text', text: 'front' }] }, ...lines(14)]
+  const broke = prepareCachePrefix('shift', { messages: shifted }, 2).break
+  assert.equal(broke.index, 0)
+  // Index 0 is compared against the message that used to sit there, not against
+  // the record the previous snapshot stored for it.
+  assert.equal(broke.diff.reason, 'part')
+  assert.deepEqual(
+    broke.diff.fields.changed.map((item) => `${item.key}:${item.change}`),
+    ['text:length'],
+  )
+  // The shifted history is now the baseline: growing it again is clean.
+  assert.equal(
+    prepareCachePrefix('shift', { messages: [...shifted, { role: 'user', content: [{ type: 'text', text: 'n' }] }] }, 3)
+      .break,
+    null,
+  )
+})
+
+test('a truncated history breaks at its new tail and the shorter history becomes the baseline', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('cut', { messages: lines(20) }, 0)
+  const broke = prepareCachePrefix('cut', { messages: lines(8) }, 1).break
+  assert.equal(broke.section, 'messages')
+  assert.equal(broke.index, 8)
+  assert.equal(broke.diff.reason, 'missing')
+  assert.equal(prepareCachePrefix('cut', { messages: lines(9) }, 2).break, null)
+})
+
+test('a reused record still reports the right role change at a shifted index', () => {
+  clearCachePrefixSessions()
+  prepareCachePrefix('role', { messages: lines(10) }, 0)
+  const flipped = lines(10)
+  // 7 is an assistant turn; flipping it changes the hash without touching text.
+  flipped[7] = { ...flipped[7], role: 'user' }
+  const broke = prepareCachePrefix('role', { messages: flipped }, 1).break
+  assert.equal(broke.index, 7)
+  assert.equal(broke.kind, 'structure')
+  assert.equal(broke.diff.reason, 'role')
+  assert.equal(broke.diff.prev, 'assistant')
+  assert.equal(broke.diff.next, 'user')
+})
+
 test('persona Environment injection does not break the prefix when each turn ends with a caller reminder', async () => {
   const { applyCrsUnofficialPersona } = await import('../../src/lib/identity/crs-persona.mjs')
   const { prepareCliHopBody } = await import('../../src/lib/protocol/outbound-attempt.mjs')
@@ -622,5 +722,76 @@ test('persona Environment injection does not break the prefix when each turn end
     assert.equal(br, null, `turn ${turn} broke at messages[${br?.index}] ${br?.diff?.reason}`)
     confirmCachePrefix('acct:persona-env', turn)
     history.push({ role: 'assistant', content: [{ type: 'text', text: `answer ${turn}` }] })
+  }
+})
+
+test('peek hashes each message once and reports the same break as a full snapshot', () => {
+  const text = (n) => ({ type: 'text', text: `message ${n} ${'x'.repeat(200)}` })
+  const base = Array.from({ length: 40 }, (_, i) => ({
+    role: i % 2 ? 'assistant' : 'user',
+    content: [text(i), { type: 'tool_result', tool_use_id: `t${i}`, content: `out ${i}` }],
+  }))
+  const tools = [{ name: 'Read', input_schema: { type: 'object' } }]
+  const variants = {
+    appended: { tools, messages: [...base, { role: 'user', content: [text('next')] }] },
+    edited: {
+      tools,
+      messages: base.map((m, i) =>
+        i === 7 ? { ...m, content: [m.content[0], { ...m.content[1], content: 'changed' }] } : m,
+      ),
+    },
+    tools: { tools: [...tools, { name: 'Write', input_schema: { type: 'object' } }], messages: base },
+    shorter: { tools, messages: base.slice(0, 30) },
+  }
+  for (const [name, body] of Object.entries(variants)) {
+    clearCachePrefixSessions()
+    prepareCachePrefix(`acct:${name}`, structuredClone({ tools, messages: base }), 1)
+    confirmCachePrefix(`acct:${name}`, 1)
+    const known = new Map()
+    const peeked = peekCachePrefix(`acct:${name}`, body, 2, { known })
+    const again = peekCachePrefix(`acct:${name}`, body, 2, { known })
+    assert.deepEqual(again, peeked, `${name}: memoized peek`)
+    assert.ok(known.size >= body.messages.length, `${name}: hashes are shared through known`)
+    const full = prepareCachePrefix(`acct:${name}`, body, 2)
+    assert.equal(peeked.turn, full.turn, name)
+    assert.deepEqual(peeked.break, full.break, `${name}: break matches the full snapshot`)
+  }
+  clearCachePrefixSessions()
+  assert.equal(peekCachePrefix('acct:first', variants.appended, 1).turn, 1)
+})
+
+test('describe reuses the hashes prepare took for its own body and reports the same diff', () => {
+  const history = (edited) =>
+    Array.from({ length: 12 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      // string content: a marker moved onto it becomes a new array-content object
+      content: i % 4 === 0 ? `plain ${i}` : [{ type: 'text', text: i === 5 && edited ? 'edited' : `m${i}` }],
+    }))
+  const withTail = (messages) => {
+    const last = messages.at(-1)
+    return [
+      ...messages.slice(0, -1),
+      { ...last, content: [{ type: 'text', text: 'tail', cache_control: { type: 'ephemeral' } }] },
+    ]
+  }
+  for (const edited of [false, true]) {
+    clearCachePrefixSessions()
+    prepareCachePrefix('reuse', { tools: [{ name: 'Read' }], messages: withTail(history(false)) }, 0)
+    const inbound = {
+      tools: [{ name: 'Read' }],
+      system: [{ type: 'text', text: 's' }],
+      messages: withTail(history(edited)),
+    }
+    const outbound = {
+      ...inbound,
+      messages: inbound.messages.map((m, i) => (i === 2 ? { ...m, content: 'scrubbed' } : m)),
+    }
+    const { body: sent } = prepareCachePrefix('reuse', outbound, 1)
+    const reused = describeCacheContinuity({ inbound, outbound: sent })
+    const fresh = describeCacheContinuity({ inbound: structuredClone(inbound), outbound: structuredClone(sent) })
+    assert.deepEqual(reused, fresh, `edited=${edited}`)
+    assert.equal(reused.inbound_to_outbound.index, 2)
+    // the hand-off is one-shot: a second describe of the same body recomputes and still agrees
+    assert.deepEqual(describeCacheContinuity({ inbound, outbound: sent }), fresh)
   }
 })

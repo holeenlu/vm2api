@@ -126,11 +126,12 @@ func TestEnsurePreservesSetupTokenTypeAndFullScopes(t *testing.T) {
 	}
 }
 
-func TestEnsureDoesNotPersistAfterCancellation(t *testing.T) {
+// 上游已轮换 RT 后调用方才取消：新票必须落盘，否则旧 RT 已失效、新 RT 丢失，账号只能重新授权（审计 P1-C2）
+func TestEnsurePersistsALateRotationAfterCancellation(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"access_token":"too-late","refresh_token":"too-late","expires_in":28800}`))
+		_, _ = writer.Write([]byte(`{"access_token":"late-access","refresh_token":"late-refresh","expires_in":28800}`))
 	}))
 	defer upstream.Close()
 	store := credential.NewStore(filepath.Join(t.TempDir(), "credentials.json"))
@@ -145,14 +146,75 @@ func TestEnsureDoesNotPersistAfterCancellation(t *testing.T) {
 	refresher := &Refresher{Store: store, Client: upstream.Client(), TokenURL: upstream.URL, MaxTries: 1}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err = refresher.Ensure(ctx, true); err == nil {
-		t.Fatal("expected cancellation error")
+	_, _ = refresher.Ensure(ctx, true)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		current, statusErr := store.Status()
+		if statusErr != nil {
+			t.Fatal(statusErr)
+		}
+		if current.AccessToken == "late-access" && current.RefreshToken == "late-refresh" && current.Generation != original.Generation {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("late rotation was dropped: before=%#v after=%#v", original, current)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 换票期间凭据被其他写入者改过（导入新账号）：迟到的结果不覆盖较新的凭据
+func TestEnsureDoesNotOverwriteACredentialWrittenDuringTheExchange(t *testing.T) {
+	store := credential.NewStore(filepath.Join(t.TempDir(), "credentials.json"))
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if _, err := store.Save(credential.Credential{AccessToken: "imported", RefreshToken: "imported-refresh", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, nil); err != nil {
+			t.Error(err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"access_token":"stale-access","refresh_token":"stale-refresh","expires_in":28800}`))
+	}))
+	defer upstream.Close()
+	if _, err := store.Save(credential.Credential{AccessToken: "access-old", RefreshToken: "refresh-old", ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	refresher := &Refresher{Store: store, Client: upstream.Client(), TokenURL: upstream.URL, MaxTries: 1}
+	result, err := refresher.Ensure(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
 	}
 	current, err := store.Status()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Generation != original.Generation || current.AccessToken != original.AccessToken {
-		t.Fatalf("credential changed after cancellation: before=%#v after=%#v", original, current)
+	if current.AccessToken != "imported" || !result.Shared || result.Refreshed {
+		t.Fatalf("exchange overwrote a newer credential: result=%#v current=%#v", result, current)
+	}
+}
+
+// 换票期间同一份授权只被改了元数据（刷新令牌不变，代次变了）：新票必须落盘，否则旧 RT 已被上游作废
+func TestEnsureKeepsTheRotationWhenOnlyMetadataChangedDuringTheExchange(t *testing.T) {
+	store := credential.NewStore(filepath.Join(t.TempDir(), "credentials.json"))
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if _, err := store.Save(credential.Credential{AccessToken: "access-old", RefreshToken: "refresh-old", ExpiresAt: time.Now().Add(-time.Minute).UnixMilli(), Generation: time.Now().UnixMilli() + 1000}, nil); err != nil {
+			t.Error(err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":28800}`))
+	}))
+	defer upstream.Close()
+	if _, err := store.Save(credential.Credential{AccessToken: "access-old", RefreshToken: "refresh-old", ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	refresher := &Refresher{Store: store, Client: upstream.Client(), TokenURL: upstream.URL, MaxTries: 1}
+	result, err := refresher.Ensure(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.AccessToken != "rotated-access" || current.RefreshToken != "rotated-refresh" || !result.Refreshed {
+		t.Fatalf("rotation dropped after a same-grant rewrite: result=%#v current=%#v", result, current)
 	}
 }

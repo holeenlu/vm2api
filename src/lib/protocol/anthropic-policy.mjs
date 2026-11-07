@@ -623,7 +623,10 @@ export function wireToolName(name, { official = false, rewriteTools = true } = {
  */
 export function scrubUpstreamClientBody(body, { official = false, rewriteTools = true } = {}) {
   if (!body || typeof body !== 'object') return { body, reverse: {} }
-  const out = clone(body)
+  // Copy-on-write: every field changed below is replaced, never edited in place. The result shares
+  // untouched nested objects with `body`; a caller that keeps `body` and edits the result must copy first
+  // (toStandardAnthropicBody does, because the inbound body stays in use).
+  const out = { ...body }
   const reverse = {}
   const used = new Set()
   const assigned = new Map()
@@ -723,7 +726,8 @@ export function composeToolNames(front = {}, hop = {}) {
  */
 export function toStandardAnthropicBody(body, { official = false, rewriteTools = true } = {}) {
   const shaped = sanitizeAnthropicBody(stripCallerBilling(body), { preserveContentShape: false })
-  return scrubUpstreamClientBody(shaped, { official, rewriteTools })
+  // The caller's inbound body stays in use (usage, logs, retries); later stages edit the standard body in place.
+  return scrubUpstreamClientBody(clone(shaped), { official, rewriteTools })
 }
 
 function stripBillingText(text) {

@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createDatabase } from '../../src/lib/db/database.mjs'
+import { dbTime } from '../../src/shared/system-time.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const MIGRATIONS = path.join(__dirname, '../../src/lib/db/migrations')
@@ -120,7 +121,7 @@ test('legacy 001-013 db upgrades with data intact', () => {
     id: 'pu1',
     email: 'admin@panel.local',
     username: 'admin',
-    role: 'admin',
+    role: 'super_admin',
     status: 'active',
   })
   assert.equal(users[1].status, 'disabled')
@@ -149,7 +150,7 @@ test('legacy 001-013 db upgrades with data intact', () => {
   assert.equal(a1.max_rpm, 80)
   assert.equal(a1.rpm_override, 1)
   assert.equal(a1.concurrency_override, 1)
-  assert.equal(a1.temp_unschedulable_until, '2026-01-01T00:00:00.000Z')
+  assert.equal(a1.temp_unschedulable_until, dbTime('2026-01-01T00:00:00.000Z'))
   assert.equal(a1.temp_unschedulable_reason, 'rate_limited')
   assert.equal(JSON.parse(a1.extra).unified['5h'].util, 0.5)
   assert.equal(JSON.parse(a1.extra).last_blocked.reason, '429')
@@ -190,7 +191,7 @@ test('legacy 001-013 db upgrades with data intact', () => {
     )
     .all()
   assert.equal(logs.length, 2)
-  assert.equal(logs[0].created_at, '2026-01-01T00:00:00Z')
+  assert.equal(logs[0].created_at, dbTime('2026-01-01T00:00:00Z'))
   assert.equal(logs[0].output_tokens, 0)
   assert.equal(logs[1].input_tokens, 0)
   assert.equal(logs[0].group_id, 1)
@@ -250,7 +251,7 @@ test('legacy 001-010 db upgrades through 011-013 then 014-018', () => {
 
   const log = db.prepare('SELECT api_key_presented, created_at FROM usage_logs WHERE id = ?').get('l1')
   assert.equal(log.api_key_presented, null)
-  assert.equal(log.created_at, '2026-01-01T00:00:00Z')
+  assert.equal(log.created_at, dbTime('2026-01-01T00:00:00Z'))
 
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='panel_users_legacy'").get())
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts_legacy'").get())
@@ -321,7 +322,7 @@ test('published 001 proxy schema upgrades through 018 with LF or CRLF checksum',
         bound_vm_id: 'vm-old',
         consecutive_failures: 3,
         latency_ms: 42,
-        last_probe_at: '2026-08-18T00:01:00Z',
+        last_probe_at: dbTime('2026-08-18T00:01:00Z'),
         last_error: 'probe failed',
         name: '10.0.0.8:1080',
       },

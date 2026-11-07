@@ -18,6 +18,16 @@ import {
   CLIENT_POOL_UNAVAILABLE_MESSAGE,
 } from '../../src/lib/core/errors.mjs'
 
+test('a slot cli_error echoing the account Authorization header reaches the client masked', () => {
+  const token = 'sk-ant-oat01-' + 'c'.repeat(60) + '_t GX-\u0445\u00d7'
+  const mapped = mapUpstreamError(502, {
+    error: { type: 'api_error', code: 'cli_error', message: `Header '14' has invalid value: 'Bearer ${token}'` },
+  })
+  assert.equal(mapped.status, 502)
+  assert.equal(mapped.body.error.code, 'cli_error')
+  assert.equal(mapped.body.error.message, "Header '14' has invalid value: 'Bearer ***REDACTED***'")
+})
+
 test('an empty pool is a 503 "no available account", never a load message', () => {
   const mapped = mapUpstreamError(503, {
     error: { type: 'api_error', code: 'account_pool_exhausted', message: 'No eligible Claude accounts remain' },
@@ -390,4 +400,20 @@ test('poolErrorKind separates capacity from nothing-eligible and leaves upstream
   assert.equal(poolErrorKind('upstream_error', 'No eligible Claude accounts remain'), 'unavailable')
   assert.equal(poolErrorKind('upstream_rate_limit', 'Rate limit exceeded'), null)
   assert.equal(poolErrorKind('incomplete_response'), null)
+})
+
+test('upstream error text never forwards organization identifiers to the client (audit P2)', () => {
+  const org = '3f2c9a1e-7b4d-4c8e-9a10-2b3c4d5e6f70'
+  const mapped = mapUpstreamError(
+    403,
+    {
+      error: { type: 'permission_error', message: `This organization ${org} has been disabled (org-AbCdEf123456).` },
+      request_id: 'req_011abc',
+    },
+    {},
+  )
+  const text = JSON.stringify(mapped.body)
+  assert.ok(!text.includes(org))
+  assert.ok(!text.includes('org-AbCdEf123456'))
+  assert.match(mapped.body.error.message, /organization \[redacted\] has been disabled/)
 })

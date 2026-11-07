@@ -31,14 +31,14 @@ function upstream(status, payload, headers = {}) {
   return { status, headers: new Map(Object.entries(headers)), text: async () => JSON.stringify(payload) }
 }
 
-async function search(root, { body, headers = {}, ops = {} } = {}) {
+async function search(root, { body, headers = {}, ops = {}, gatewayWorker = null } = {}) {
   const res = { statusCode: 0, body: null, setHeader() {} }
   const logBag = {}
   const stats = { errors: 0, requests: 0, by_route: {} }
   await handleCodexSearch({
     req: { headers: { 'user-agent': 'codex_exec/0.160.1 (Windows 10.0.26100; x86_64)', ...headers } },
     res,
-    body: body ?? { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'vm2api' }] } },
+    body: body ?? { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'tapmodels' }] } },
     logBag,
     stats,
     json: (_res, status, payload) => {
@@ -49,6 +49,7 @@ async function search(root, { body, headers = {}, ops = {} } = {}) {
     routing: {},
     projectRoot: root,
     ops,
+    gatewayWorker,
   })
   return { res, logBag, stats }
 }
@@ -70,7 +71,7 @@ test('search posts to the Codex backend as the slot and returns the backend JSON
     body: {
       id: 'sess-1',
       model: 'gpt-6.1-sol',
-      commands: { search_query: [{ q: 'vm2api' }] },
+      commands: { search_query: [{ q: 'tapmodels' }] },
       prompt_cache_key: 'pck',
       prompt_cache_retention: '24h',
       store: false,
@@ -89,7 +90,7 @@ test('search posts to the Codex backend as the slot and returns the backend JSON
   assert.equal(sent.version, CODEX_APP_VERSION)
   assert.equal(sent['x-codex-turn-metadata'], '{"turn_id":"t-1"}')
   const payload = JSON.parse(calls[0].init.body)
-  assert.deepEqual(payload, { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'vm2api' }] } })
+  assert.deepEqual(payload, { id: 'sess-1', model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'tapmodels' }] } })
   assert.equal(res.statusCode, 200)
   assert.equal(res.body.output, 'found it')
   assert.equal(logBag.via, 'codex-search')
@@ -201,6 +202,41 @@ test('search passes a backend 404 through without trying other slots', async () 
   fs.rmSync(root, { recursive: true, force: true })
 })
 
+test('a Gateway Worker search rejection is counted and keeps the upstream error for the usage log', async () => {
+  const root = tempRoot('gateway-error')
+  const upstreamError = {
+    type: 'invalid_request_error',
+    code: 'unknown_parameter',
+    message: "Unknown parameter: 'client_metadata'.",
+    param: 'client_metadata',
+  }
+  const gatewayWorker = {
+    shouldUse: () => true,
+    execute: async () => ({
+      ok: false,
+      status: 400,
+      headers: {},
+      instance_id: 'gw-01',
+      body: { error: upstreamError },
+    }),
+    repo: { findAccountByRuntime: () => null },
+  }
+  const { res, logBag, stats } = await search(root, { gatewayWorker })
+  assert.equal(res.statusCode, 400)
+  assert.deepEqual(res.body, { error: upstreamError })
+  assert.equal(logBag.via, 'gateway-worker')
+  assert.equal(logBag.final_state, 'upstream_error')
+  assert.equal(logBag.error_code, 'unknown_parameter')
+  assert.deepEqual(logBag.upstream_error, {
+    code: 'unknown_parameter',
+    type: 'invalid_request_error',
+    message: "Unknown parameter: 'client_metadata'.",
+    param: 'client_metadata',
+  })
+  assert.equal(stats.errors, 1)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
 test('the alpha/search route authenticates, logs and reaches the Codex search hop', async () => {
   const root = tempRoot('route')
   writeGptVm(root, 'vm-gpt-a') // no SOCKS5 bound: the hop must stop at proxy_required
@@ -234,6 +270,7 @@ test('the alpha/search route authenticates, logs and reaches the Codex search ho
   }
   await handleSearch(req, res, '/v1/alpha/search')
   res.finish()
+  await new Promise((resolve) => setImmediate(resolve))
   assert.equal(res.statusCode, 502)
   assert.equal(res.body.error.code, 'proxy_required')
   assert.equal(rows.length, 1)

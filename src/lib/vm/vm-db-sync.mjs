@@ -15,15 +15,37 @@
  * All entry points no-op safely when the global DB is not open, so unit
  * tests that exercise oauth-credentials/vm-registry against bare temp dirs
  * keep working without a database.
+ *
+ * R6 B6c: reconcile, watch and delete paths read and write through the async
+ * VmsRepo methods.
+ *
+ * R6 B8: the write-through hook no longer touches the database. The file write
+ * stays synchronous (atomicWriteJson, ~140 callers incl. the inference hot
+ * path); the hook only queues the file path. An async mirror queue, coalesced
+ * per file (only the latest write of a VM is mirrored), re-reads the file and
+ * upserts what the file holds now. It runs outside the writer's transaction
+ * context (DbClient detached): statements wait for an open transaction to end
+ * instead of joining it. The mirror therefore no longer commits or rolls back
+ * with the transaction the file was written in — files are not transactional,
+ * so the row now always follows the file (a rolled-back transaction that has
+ * already rewritten a vm.json used to leave the row behind the file). Readers of
+ * the `vms` table (usage-log VM names / ids, request-log owner attribution,
+ * reconcile) tolerate the lag of a few microtasks; nothing reads the row inside
+ * the transaction that wrote the file. A file that is gone by the time the queue
+ * reaches it is skipped (deletes go through removeVmFromDb). flushVmMirror()
+ * waits for the queue; flushWrites()/closeDatabase() wait for it as well
+ * (trackBackgroundWrite). The fs.watch reconcile stays as the fallback.
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { isDbOpen, getDb } from '../db/database.mjs'
+import { dbClient } from '../db/db-client.mjs'
+import { assertOutsideTransaction, trackBackgroundWrite } from '../db/write-behind.mjs'
 import { VmsRepo } from '../db/repos/vms-repo.mjs'
-import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
 import { setVmWriteHook, atomicWriteJson, isVmRecordFile } from './vm-file.mjs'
-import { migrateScheduleFields, reclaimAssignedVms, repairSlotSmbios, repairVmProxyCliEnabled } from './vm-registry.mjs'
+import { migrateScheduleFields, repairSlotSmbios, repairVmProxyCliEnabled } from './vm-registry.mjs'
+import { backfillSlotNames } from './slot-name.mjs'
 
 let _repo = null
 let _watcher = null
@@ -43,56 +65,79 @@ export function isVmJsonPath(filePath) {
   return isVmRecordFile(base) || base === 'active.json'
 }
 
-/** Mirror one vms/*.json file into the DB (safe no-op without DB). */
-export function syncVmFile(filePath) {
+/** Mirror one vms/*.json file into the DB as it is now (safe no-op without DB or once the file is gone). */
+export async function syncVmFile(filePath) {
   const r = repo()
   if (!r) return false
   try {
     const base = path.basename(filePath)
     if (base === 'active.json') {
       const a = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-      if (a?.active_vm) r.setActiveVmId(a.active_vm)
+      if (a?.active_vm) await r.setActiveVmId(a.active_vm)
       return true
     }
     const vm = JSON.parse(fs.readFileSync(filePath, 'utf8'))
     if (!vm?.id) return false
     const st = fs.statSync(filePath)
-    r.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
+    await r.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
     return true
   } catch {
     return false
   }
 }
 
+// 写入钩子的异步镜像队列：文件路径按到达顺序，同一文件只保留一项（之后的写入覆盖之前的）
+const mirrorPending = new Set()
+let mirrorRunning = null
+
+/** Queue a written vms/*.json for mirroring (called by the vm-file write hook; returns at once). */
+export function queueVmMirror(filePath) {
+  if (!isDbOpen()) return false
+  mirrorPending.delete(filePath)
+  mirrorPending.add(filePath)
+  if (!mirrorRunning) {
+    // 脱离写入方的事务上下文：镜像语句排在对方事务之后，不落进对方事务
+    mirrorRunning = trackBackgroundWrite(dbClient(getDb()).detached(drainVmMirror))
+  }
+  return true
+}
+
+async function drainVmMirror() {
+  try {
+    // 先让写入方当前的同步步骤跑完：同一步里对同一 VM 的多次写入只镜像最后一次
+    await null
+    while (mirrorPending.size) {
+      const [file] = mirrorPending
+      mirrorPending.delete(file)
+      await syncVmFile(file)
+    }
+  } finally {
+    mirrorRunning = null
+  }
+}
+
+/** Wait until every queued vm.json write is mirrored (tests, shutdown, before reads that need the row now). */
+export async function flushVmMirror() {
+  if (isDbOpen()) assertOutsideTransaction('flushVmMirror()', getDb())
+  while (mirrorRunning) await mirrorRunning
+}
+
 /** Remove a VM row (called when the vm.json file is deleted). */
-export function removeVmFromDb(id) {
+export async function removeVmFromDb(id, actor) {
   const r = repo()
   if (!r || !id) return false
-  const removed = r.remove(id)
-  // A deleted slot must not linger in named pools: the panel cannot render or
-  // uncheck an unknown id, and every save of that pool used to fail.
-  if (isDbOpen()) {
-    try {
-      new VmPoolsRepo(getDb()).removeVm(id)
-    } catch {}
-  }
+  // 已排队、尚未镜像的写入不再写回这个 VM 的行；正在执行的一项先结束，避免删除后又被写回
+  for (const file of mirrorPending) if (path.basename(file) === `${id}.json`) mirrorPending.delete(file)
+  await flushVmMirror()
+  const removed = await r.remove(id, actor)
   return removed
 }
 
-function pruneVmPools(knownIds) {
-  if (!isDbOpen()) return []
-  try {
-    return new VmPoolsRepo(getDb()).pruneUnknown(knownIds)
-  } catch {
-    return []
-  }
-}
-
 /** Forget settings.active_vm so startup reconcile does not rewrite active.json. */
-export function clearActiveVmFromDb() {
+export async function clearActiveVmFromDb() {
   const r = repo()
   if (!r) return false
-  r.clearActiveVmId()
+  await r.clearActiveVmId()
   return true
 }
 
@@ -102,7 +147,7 @@ export function clearActiveVmFromDb() {
  *   - DB row exists but file missing → rebuild file from vm_json
  * @returns {{ upserted: number, rebuilt: number, active: string|null }}
  */
-export function reconcileVms(projectRoot) {
+export async function reconcileVms(projectRoot) {
   const r = repo()
   if (!r) return { upserted: 0, rebuilt: 0, active: null }
   const dir = path.join(projectRoot, 'vms')
@@ -118,9 +163,9 @@ export function reconcileVms(projectRoot) {
         if (!vm?.id) continue
         seen.add(vm.id)
         const st = fs.statSync(file)
-        const row = r.get(vm.id)
+        const row = await r.get(vm.id)
         if (!row || (row.file_mtime_ms || 0) < Math.floor(st.mtimeMs)) {
-          r.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
+          await r.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
           out.upserted += 1
         }
       } catch {}
@@ -128,7 +173,7 @@ export function reconcileVms(projectRoot) {
   }
 
   // DB rows without files → rebuild files (restore / disaster pull-up)
-  for (const row of r.list()) {
+  for (const row of await r.list()) {
     if (seen.has(row.id) || !row.vm) continue
     try {
       fs.mkdirSync(dir, { recursive: true })
@@ -138,19 +183,13 @@ export function reconcileVms(projectRoot) {
     } catch {}
   }
 
-  // Pool memberships for slots that exist nowhere any more (file deleted outside
-  // the panel, or DB row gone). Rebuilt rows above count as alive.
-  const known = new Set(seen)
-  for (const row of r.list()) if (row?.id && row.vm) known.add(row.id)
-  out.pruned_pool_members = pruneVmPools(known)
-
   // active.json ↔ settings.active_vm
   const activeFile = path.join(dir, 'active.json')
   try {
     if (fs.existsSync(activeFile)) {
       const a = JSON.parse(fs.readFileSync(activeFile, 'utf8'))
       if (a?.active_vm) {
-        r.setActiveVmId(a.active_vm)
+        await r.setActiveVmId(a.active_vm)
         out.active = a.active_vm
       }
     } else {
@@ -170,27 +209,27 @@ export function reconcileVms(projectRoot) {
  * Install the write-through hook + directory watcher.
  * Call once at server startup, after openDatabase().
  */
-export function initVmDbSync(projectRoot, { watch = true } = {}) {
+export async function initVmDbSync(projectRoot, { watch = true } = {}) {
   _projectRoot = projectRoot
+  // 名称回填先于对账：改名后的记录由 reconcileVms 一次性同步进库，不必再等镜像队列。
+  let renamedSlots = []
+  let slotNameError = null
+  try {
+    renamedSlots = backfillSlotNames(projectRoot)
+  } catch (error) {
+    slotNameError = error
+  }
   setVmWriteHook((filePath) => {
-    if (isVmJsonPath(filePath)) syncVmFile(filePath)
+    if (isVmJsonPath(filePath)) queueVmMirror(filePath)
   })
-  const result = reconcileVms(projectRoot)
-  // Older releases soft-deleted tenants without releasing their assigned slots.
-  // Only confirmed deletions qualify; disabled/missing users and private slots stay isolated.
-  const deletedOwners = isDbOpen()
-    ? new Set(
-        getDb()
-          .prepare('SELECT id FROM users WHERE deleted_at IS NOT NULL')
-          .all()
-          .map((row) => row.id),
-      )
-    : new Set()
-  result.reclaimed_vm_ids = reclaimAssignedVms(projectRoot, deletedOwners, {
-    onError: (error, name) => {
-      console.warn(`[vm] ownership recovery skipped ${name}: ${error.code || error.name}`)
-    },
-  })
+  const result = await reconcileVms(projectRoot)
+  if (slotNameError) {
+    console.warn(`[vm] slot name backfill failed: ${slotNameError?.message || slotNameError}`)
+    result.slot_names_backfilled = 0
+  } else {
+    result.slot_names_backfilled = renamedSlots.length
+    for (const row of renamedSlots) console.warn(`[vm] slot name ${row.id}: ${row.from || '-'} -> ${row.to}`)
+  }
   try {
     result.proxy_cli_repaired = repairVmProxyCliEnabled(projectRoot).length
   } catch {
@@ -227,9 +266,7 @@ export function startVmWatch(projectRoot) {
       if (_watchTimer) clearTimeout(_watchTimer)
       _watchTimer = setTimeout(() => {
         _watchTimer = null
-        try {
-          reconcileDeletionsAndChanges(projectRoot)
-        } catch {}
+        reconcileDeletionsAndChanges(projectRoot).catch(() => {})
       }, 500)
       if (typeof _watchTimer.unref === 'function') _watchTimer.unref()
     })
@@ -241,15 +278,15 @@ export function startVmWatch(projectRoot) {
   }
 }
 
-function reconcileDeletionsAndChanges(projectRoot) {
+async function reconcileDeletionsAndChanges(projectRoot) {
   const r = repo()
   if (!r) return
-  reconcileVmsChangesOnly(projectRoot, r)
+  await reconcileVmsChangesOnly(projectRoot, r)
 }
 
 /** Watch-triggered pass: upsert changed files; DO NOT rebuild deleted files
  *  (a panel-initiated VM delete must stay deleted — server removes the row). */
-function reconcileVmsChangesOnly(projectRoot, r) {
+async function reconcileVmsChangesOnly(projectRoot, r) {
   const dir = path.join(projectRoot, 'vms')
   if (!fs.existsSync(dir)) return
   for (const f of fs.readdirSync(dir)) {
@@ -259,9 +296,9 @@ function reconcileVmsChangesOnly(projectRoot, r) {
       const st = fs.statSync(file)
       const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
       if (!vm?.id) continue
-      const row = r.get(vm.id)
+      const row = await r.get(vm.id)
       if (!row || (row.file_mtime_ms || 0) < Math.floor(st.mtimeMs)) {
-        r.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
+        await r.upsertFromVmJson(vm, { mtimeMs: st.mtimeMs })
       }
     } catch {}
   }
@@ -269,7 +306,7 @@ function reconcileVmsChangesOnly(projectRoot, r) {
   try {
     if (fs.existsSync(activeFile)) {
       const a = JSON.parse(fs.readFileSync(activeFile, 'utf8'))
-      if (a?.active_vm && a.active_vm !== r.getActiveVmId()) r.setActiveVmId(a.active_vm)
+      if (a?.active_vm && a.active_vm !== r.getActiveVmId()) await r.setActiveVmId(a.active_vm)
     }
   } catch {}
 }

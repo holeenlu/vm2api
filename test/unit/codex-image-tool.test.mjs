@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { handleCodexProtocol, imageGenUsageFromSseLine } from '../../src/lib/protocol/handle-codex.mjs'
+import { handleCodexProtocol, imageGenUsageFromEvent } from '../../src/lib/protocol/handle-codex.mjs'
+import { sseDataEvent } from '../../src/lib/protocol/sse-events.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { loadGptModelPolicy, saveGptModelPolicy } from '../../src/lib/protocol/gpt-model-policy.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
@@ -41,8 +42,8 @@ beforeEach(() => {
   )
 })
 
-afterEach(() => {
-  closeDatabase()
+afterEach(async () => {
+  await closeDatabase()
   loadGptModelPolicy({ force: true })
   fs.rmSync(root, { recursive: true, force: true })
 })
@@ -57,7 +58,7 @@ async function run(
   const res = { headersSent: false, statusCode: 0, body: null, write() {}, end() {} }
   const logBag = {}
   await handleCodexProtocol({
-    req: { headers: {}, apiKeyKind: 'user' },
+    req: { headers: {}, apiKeyKind: 'master' },
     res,
     protocol: 'openai.responses',
     ctx: { body, path: '/v1/responses' },
@@ -91,7 +92,7 @@ const tool = (model) => ({ type: 'image_generation', ...(model ? { model } : {})
 const request = (model) => ({ model: 'gpt-6-luna', input: 'draw a cat', stream: false, tools: [tool(model)] })
 
 test('a disabled image model is rejected locally with no upstream hop', async () => {
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
   for (const model of ['gpt-image-2.5-sunburst', 'gpt-image-2.5-sunburst-2026-09-08']) {
     const { res, logBag, hops } = await run(request(model))
     assert.equal(res.statusCode, 400)
@@ -103,7 +104,7 @@ test('a disabled image model is rejected locally with no upstream hop', async ()
 })
 
 test('disabling GPT Image 2 also rejects a Responses image tool snapshot', async () => {
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2': { enabled: false } } })
   const { res, hops } = await run(request('gpt-image-2-2026-04-21'))
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'model_disabled')
@@ -111,7 +112,7 @@ test('disabling GPT Image 2 also rejects a Responses image tool snapshot', async
 })
 
 test('an enabled, omitted or unknown image model reaches the upstream unchanged', async () => {
-  saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
+  await saveGptModelPolicy({ image_tools: { 'gpt-image-2.5-sunburst': { enabled: false } } })
   for (const model of ['gpt-image-2.5-flare', null, 'gpt-image-9']) {
     const { res, hops } = await run(request(model))
     assert.equal(res.statusCode, 200, String(model))
@@ -144,11 +145,12 @@ test('no image tool usage leaves the image columns empty', async () => {
   assert.equal(logBag.image_model, undefined)
 })
 
-test('imageGenUsageFromSseLine only reads terminal response frames', () => {
-  assert.deepEqual(imageGenUsageFromSseLine(completed({ tool_usage: { image_gen: IMAGE_GEN } })), IMAGE_GEN)
+test('imageGenUsageFromEvent only reads terminal response frames', () => {
+  const read = (line) => imageGenUsageFromEvent(sseDataEvent(line))
+  assert.deepEqual(read(completed({ tool_usage: { image_gen: IMAGE_GEN } })), IMAGE_GEN)
   const incomplete = `data: ${JSON.stringify({ type: 'response.incomplete', response: { tool_usage: { image_gen: IMAGE_GEN } } })}\n`
-  assert.deepEqual(imageGenUsageFromSseLine(incomplete), IMAGE_GEN)
-  assert.equal(imageGenUsageFromSseLine('data: {"type":"response.output_text.delta","delta":"tool_usage"}\n'), null)
-  assert.equal(imageGenUsageFromSseLine(completed({ tool_usage: {} })), null)
-  assert.equal(imageGenUsageFromSseLine('event: x'), null)
+  assert.deepEqual(read(incomplete), IMAGE_GEN)
+  assert.equal(read('data: {"type":"response.output_text.delta","delta":"tool_usage"}\n'), null)
+  assert.equal(read(completed({ tool_usage: {} })), null)
+  assert.equal(read('event: x'), null)
 })

@@ -52,11 +52,11 @@ test('attempt normalization strips all secret and content fields', () => {
   assert.equal(event.estimated_cost_nano_usd, 42000)
   assert.equal(event.output_nano_usd_per_token, 0)
 })
-test('failed responses without usage remain unknown, not free', (t) => {
+test('failed responses without usage remain unknown, not free', async (t) => {
   const repo = fixture(t)
-  repo.record(normalizeJevUsage(value({ http_status: 402, outcome: 'http_error', usage: null })))
-  const overview = repo.overview(),
-    event = repo.list().rows[0]
+  await repo.record(normalizeJevUsage(value({ http_status: 402, outcome: 'http_error', usage: null })))
+  const overview = await repo.overview(),
+    event = (await repo.list()).rows[0]
   assert.equal(event.input_tokens, null)
   assert.equal(event.estimated_cost_nano_usd, null)
   assert.equal(overview.total.requests, 1)
@@ -64,11 +64,11 @@ test('failed responses without usage remain unknown, not free', (t) => {
   assert.equal(overview.total.unknown_usage_requests, 1)
   assert.equal(overview.total.unknown_cost_requests, 1)
 })
-test('lifetime and Shanghai-day totals both count every actual call', (t) => {
+test('lifetime and Shanghai-day totals both count every actual call', async (t) => {
   const repo = fixture(t)
-  repo.record(normalizeJevUsage(value()))
-  repo.record(normalizeJevUsage(value({ created_at: '2026-10-24T12:00:00.000Z' })))
-  const s = repo.overview()
+  await repo.record(normalizeJevUsage(value()))
+  await repo.record(normalizeJevUsage(value({ created_at: '2026-10-24T12:00:00.000Z' })))
+  const s = await repo.overview()
   assert.equal(s.day, '2026-10-25')
   assert.equal(s.total.requests, 2)
   assert.equal(s.total.input_tokens, 2000)
@@ -78,39 +78,39 @@ test('Shanghai daily boundary is used rather than host timezone', () => {
   assert.equal(shanghaiUsageDay('2026-10-24T15:59:59.000Z'), '2026-10-24')
   assert.equal(shanghaiUsageDay('2026-10-24T16:00:00.000Z'), '2026-10-25')
 })
-test('same-time pagination is stable and does not double count', (t) => {
+test('same-time pagination is stable and does not double count', async (t) => {
   const repo = fixture(t)
-  for (let i = 0; i < 7; i++) repo.record(normalizeJevUsage(value()))
-  const first = repo.list({ limit: 3 }),
-    next = repo.list({
+  for (let i = 0; i < 7; i++) await repo.record(normalizeJevUsage(value()))
+  const first = await repo.list({ limit: 3 }),
+    next = await repo.list({
       limit: 3,
       cursor_created_at: first.next_cursor.created_at,
       cursor_id: first.next_cursor.id,
     })
   assert.equal(first.has_more, true)
   assert.equal(new Set([...first.rows, ...next.rows].map((x) => x.id)).size, 6)
-  assert.equal(repo.overview().total.requests, 7)
+  assert.equal((await repo.overview()).total.requests, 7)
 })
-test('fingerprint filters and malformed cursors are bounded and validated', (t) => {
+test('fingerprint filters and malformed cursors are bounded and validated', async (t) => {
   const repo = fixture(t)
-  repo.record(normalizeJevUsage(value()))
-  assert.equal(repo.list({ key_fingerprint: '000000000000' }).rows.length, 0)
-  assert.throws(() => repo.list({ cursor_id: 'wrong' }), TypeError)
-  assert.throws(() => repo.list({ key_fingerprint: 'not-an-id' }), TypeError)
+  await repo.record(normalizeJevUsage(value()))
+  assert.equal((await repo.list({ key_fingerprint: '000000000000' })).rows.length, 0)
+  await assert.rejects(() => repo.list({ cursor_id: 'wrong' }), TypeError)
+  await assert.rejects(() => repo.list({ key_fingerprint: 'not-an-id' }), TypeError)
 })
-test('detail retention does not erase lifetime accounting', (t) => {
+test('detail retention does not erase lifetime accounting', async (t) => {
   const repo = fixture(t)
-  repo.record(normalizeJevUsage(value({ created_at: new Date(NOW - 31 * 86400000).toISOString() })))
-  assert.equal(repo.list().rows.length, 0)
-  assert.equal(repo.overview().total.requests, 1)
-  assert.equal(repo.overview().today.requests, 0)
+  await repo.record(normalizeJevUsage(value({ created_at: new Date(NOW - 31 * 86400000).toISOString() })))
+  assert.equal((await repo.list()).rows.length, 0)
+  assert.equal((await repo.overview()).total.requests, 1)
+  assert.equal((await repo.overview()).today.requests, 0)
 })
-test('duplicate persistence rolls back without doubling aggregates', (t) => {
+test('duplicate persistence rolls back without doubling aggregates', async (t) => {
   const repo = fixture(t),
     event = normalizeJevUsage(value())
-  repo.record(event)
-  assert.throws(() => repo.record(event))
-  assert.equal(repo.overview().total.requests, 1)
+  await repo.record(event)
+  await assert.rejects(() => repo.record(event))
+  assert.equal((await repo.overview()).total.requests, 1)
 })
 test('unknown endpoints and malformed tokens do not fabricate prices', () => {
   assert.equal(isOfficialTypeSafeUrl('https://api.typesafe.ai/v1/systemone'), true)
@@ -129,13 +129,14 @@ test('telemetry storage errors are visible but cannot change classification flow
   assert.equal(jevUsageStorageErrors(), before + 1)
 })
 
-test('the additive migration preserves old schema/data and permits old-version reopening', (t) => {
+test('the additive migration preserves old schema/data and permits old-version reopening', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-upgrade-'))
   const migrationDir = path.join(dir, 'baseline-migrations')
   fs.mkdirSync(migrationDir)
   const original = path.resolve(import.meta.dirname, '../../src/lib/db/migrations')
+  // 135 只改写 jev 表的时间戳，与 052 同属可缺席的附加模块，一并排除
   for (const name of fs.readdirSync(original))
-    if (name.endsWith('.sql') && name !== '045_jev_usage.sql')
+    if (name.endsWith('.sql') && name !== '052_jev_usage.sql' && name !== '135_db_time_utc8_jev.sql')
       fs.copyFileSync(path.join(original, name), path.join(migrationDir, name))
   const file = path.join(dir, 'kin.db')
   let db
@@ -152,7 +153,7 @@ test('the additive migration preserves old schema/data and permits old-version r
   const beforeSchema = db
     .prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
     .all()
-  const beforeSettings = db.prepare('SELECT * FROM settings').all()
+  const beforeSettings = await db.prepare('SELECT * FROM settings').all()
   const beforeMigrations = db.prepare('SELECT * FROM schema_migrations ORDER BY name').all()
   db.close()
   db = null
@@ -163,25 +164,29 @@ test('the additive migration preserves old schema/data and permits old-version r
     )
     .all()
   assert.deepEqual(afterSchema, beforeSchema)
-  assert.deepEqual(db.prepare('SELECT * FROM settings').all(), beforeSettings)
+  assert.deepEqual(await db.prepare('SELECT * FROM settings').all(), beforeSettings)
   assert.deepEqual(
-    db.prepare("SELECT * FROM schema_migrations WHERE name <> '045_jev_usage.sql' ORDER BY name").all(),
+    db
+      .prepare(
+        "SELECT * FROM schema_migrations WHERE name NOT IN ('052_jev_usage.sql','135_db_time_utc8_jev.sql') ORDER BY name",
+      )
+      .all(),
     beforeMigrations,
   )
   const started = db.prepare('SELECT started_at FROM jev_usage_meta').get().started_at
   db.close()
   db = null
   db = createDatabase({ dbPath: file, migrationsDir: migrationDir })
-  assert.deepEqual(db.prepare('SELECT * FROM settings').all(), beforeSettings)
+  assert.deepEqual(await db.prepare('SELECT * FROM settings').all(), beforeSettings)
   assert.equal(db.prepare('SELECT started_at FROM jev_usage_meta').get().started_at, started)
 })
 
-test('configured keys aggregate separately, include unused keys, and distinguish quota from throttling', (t) => {
+test('configured keys aggregate separately, include unused keys, and distinguish quota from throttling', async (t) => {
   const repo = fixture(t)
   const a = jevKeyFingerprint('synthetic-a'),
     b = jevKeyFingerprint('synthetic-b')
-  repo.record(normalizeJevUsage(value({ key_fingerprint: a })))
-  repo.record(
+  await repo.record(normalizeJevUsage(value({ key_fingerprint: a })))
+  await repo.record(
     normalizeJevUsage(
       value({
         key_fingerprint: a,
@@ -192,7 +197,7 @@ test('configured keys aggregate separately, include unused keys, and distinguish
       }),
     ),
   )
-  repo.record(
+  await repo.record(
     normalizeJevUsage(
       value({
         key_fingerprint: b,
@@ -202,7 +207,7 @@ test('configured keys aggregate separately, include unused keys, and distinguish
       }),
     ),
   )
-  const keys = repo.configuredKeys([
+  const keys = await repo.configuredKeys([
     { number: 1, key_fingerprint: a, retired: false },
     { number: 2, key_fingerprint: b, retired: true },
     { number: 3, key_fingerprint: '000000000000', retired: false },

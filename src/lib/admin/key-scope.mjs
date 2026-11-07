@@ -1,181 +1,164 @@
-/**
- * Managed-key schedule scope.
- * group_type all schedules every VM. anthropic/openai only schedule the checked VMs of that platform.
- * vm_pool_id schedules the pool's current members instead of a copied allowlist.
- * group_id (coding/other) is a rate multiplier and is not this field.
+import { permitsIp } from './key-ip-rules.mjs'
+import { ApiKeysRepo } from '../db/repos/api-keys-repo.mjs'
+/** A managed key has one commercial group; resource selection is always read live. */
+import { getDb, isDbOpen } from '../db/database.mjs'
+import { GroupsRepo } from '../db/repos/groups-repo.mjs'
+import { UsersRepo } from '../db/repos/users-repo.mjs'
+import { groupResourceIds, normalizeGroupPolicy } from '../pool/group-policy.mjs'
+import { groupScopeDenial, keyAllowsEndpoint, keyAllowsModel, keyAllowsVm, vmGroupType } from './key-scope-policy.mjs'
+
+export { groupScopeDenial, keyAllowsEndpoint, keyAllowsModel, keyAllowsVm, vmGroupType }
+
+/*
+ * 推理热路径的 Key 作用域经 DbClient 异步读取：keyScopeFromRecord、refreshAuthenticatedKey、keyScopeFromRequest（R6 B7a）、
+ * refreshKeyScope（Claude 调度，R6 B7b）；Codex 候选准入同样 await keyScopeFromRequest（R6 B7c）。
  */
-import { isDbOpen, getDb } from '../db/database.mjs'
-import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
-import { isCodexVm } from '../vm/vm-kind.mjs'
+const PLATFORM_OWNER = { id: null, role: 'super_admin', status: 'active' }
 
-const POOL_DENIAL = {
-  missing: '账号池不存在',
-  disabled: '账号池已停用',
-  empty: '账号池没有槽位',
+function groupRequiredScope() {
+  return { error: 'group_required', group_type: 'all', allowed_vms: [], allowed_endpoints: [], models: [] }
 }
 
-export function vmGroupType(vm) {
-  return isCodexVm(vm) ? 'openai' : 'anthropic'
+function platformScope(record) {
+  return {
+    key_id: record?.id,
+    platform: true,
+    group_id: null,
+    group_type: 'all',
+    allowed_vms: [],
+    allowed_endpoints: [],
+    models: [],
+  }
 }
 
-export function parseAllowedVms(value) {
-  if (Array.isArray(value)) {
-    return [...new Set(value.map((id) => String(id || '').trim()).filter(Boolean))]
+function failedScope(record, code) {
+  return {
+    group_id: record.group_id,
+    group_type: 'all',
+    allowed_vms: [],
+    allowed_endpoints: [],
+    models: [],
+    error: code || 'group_unavailable',
   }
-  if (value == null || value === '') return []
-  const text = String(value).trim()
-  if (!text) return []
-  if (text.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(text)
-      if (Array.isArray(parsed)) return parseAllowedVms(parsed)
-    } catch {
-      return []
-    }
-  }
-  return [
-    ...new Set(
-      text
-        .split(',')
-        .map((id) => id.trim())
-        .filter(Boolean),
+}
+
+function groupScope(record, group, rate, resources) {
+  const policy = normalizeGroupPolicy(group)
+  return {
+    key_id: record.id,
+    group_id: group.id,
+    group_type: group.platform === 'mixed' ? 'all' : group.platform === 'claude' ? 'anthropic' : group.platform,
+    allowed_vms: groupResourceIds(resources, 'vm'),
+    allowed_endpoints: groupResourceIds(resources, 'api_endpoint'),
+    allowed_gateway_accounts: groupResourceIds(resources, 'gateway_worker_account'),
+    resource_priorities: Object.fromEntries(
+      resources.filter((r) => r.resource_kind === 'vm').map((r) => [r.resource_id, r.priority]),
     ),
-  ]
-}
-
-/** null when the value is present but not all/anthropic/openai. Empty uses fallback. */
-export function normalizeGroupType(value, { fallback = 'all' } = {}) {
-  if (value == null || value === '') return fallback
-  if (value === 'pool') return null
-  const v = String(value).trim().toLowerCase()
-  if (v === 'all') return 'all'
-  if (v === 'anthropic' || v === 'claude') return 'anthropic'
-  if (v === 'openai' || v === 'gpt' || v === 'codex') return 'openai'
-  return null
-}
-
-function parsePoolId(value) {
-  if (value == null || value === '') return null
-  const id = String(value).trim()
-  if (!/^pool_[a-f0-9]{8}$/.test(id)) {
-    throw Object.assign(new Error('账号池 id 无效'), { code: 'invalid_vm_pool_id' })
+    models: policy.models,
+    allow_image_generation: group.allow_image_generation !== false,
+    codex_fast_mode: group.codex_fast_mode || 'default',
+    rate_multiplier: rate,
+    version: group.version,
   }
-  return id
 }
 
-function poolIdOf(value) {
-  const id = String(value || '').trim()
-  return /^pool_[a-f0-9]{8}$/.test(id) ? id : null
+export async function keyScopeFromRecord(record, db = isDbOpen() ? getDb() : null) {
+  if (
+    record?.user_id &&
+    !record.group_id &&
+    db &&
+    ['admin', 'user'].includes((await new UsersRepo(db).getById(record.user_id))?.role)
+  )
+    return groupRequiredScope()
+  if (!record?.group_id) return platformScope(record)
+  if (!db) return failedScope(record, 'group_unavailable')
+  const groups = new GroupsRepo(db)
+  try {
+    const user = record.user_id ? await new UsersRepo(db).getById(record.user_id) : PLATFORM_OWNER
+    if (record.status && record.status !== 'active') throw { code: 'api_key_disabled' }
+    const { group, rate } = await groups.access(user, record.group_id)
+    return groupScope(record, group, rate, await groups.resources(group.id))
+  } catch (error) {
+    return failedScope(record, error.code)
+  }
 }
 
-export function keyScopeFromRecord(rec) {
-  if (!rec) return { group_type: 'all', allowed_vms: [], vm_pool_id: null }
-  const group_type = normalizeGroupType(rec.group_type) || 'all'
-  const vm_pool_id = poolIdOf(rec.vm_pool_id)
+/** 复核结果：current 为库里的最新记录，owner 为其所属用户（无主 Key 为 null）。 */
+function authenticatedKeyDecision(record, current, owner) {
+  if (!current || current.key_hash !== record.key_hash) return { error: 'invalid_api_key' }
+  if (current.user_id && owner?.status !== 'active') return { error: 'user_disabled' }
+  // An in-flight admission must not silently change billing owner/backend/group.
+  if (
+    current.user_id !== record.user_id ||
+    current.group_id !== record.group_id ||
+    current.category !== record.category
+  )
+    return { error: 'api_key_scope_changed' }
+  return { record: current }
+}
+
+export async function refreshAuthenticatedKey(record, db) {
+  const current = record?.id && db ? await new ApiKeysRepo(db).getById(record.id) : null
+  const owner =
+    current?.user_id && current.key_hash === record.key_hash ? await new UsersRepo(db).getById(current.user_id) : null
+  return authenticatedKeyDecision(record, current, owner)
+}
+
+function requestScope(req, live, scope) {
+  const unavailable =
+    live.record &&
+    ((live.record.status && live.record.status !== 'active') ||
+      (live.record.expires_at && Date.parse(live.record.expires_at) <= Date.now()))
+  const error =
+    live.error ||
+    (unavailable ? 'key_unavailable' : null) ||
+    (live.record && !permitsIp(live.record, req.socket?.remoteAddress) ? 'ip_not_allowed' : null)
+  if (error) return { ...scope, platform: false, error, allowed_vms: [], allowed_endpoints: [] }
   return {
-    group_type,
-    allowed_vms: vm_pool_id || group_type === 'all' ? [] : parseAllowedVms(rec.allowed_vms),
-    vm_pool_id,
+    ...scope,
+    key_hash: live.record?.key_hash,
+    key_category: live.record?.category,
+    client_ip: req.socket?.remoteAddress,
   }
 }
 
-function defaultPoolLookup(id) {
-  if (!isDbOpen()) return null
-  return new VmPoolsRepo(getDb()).get(id)
-}
+const MASTER_SCOPE = () => ({ platform: true, group_type: 'all', allowed_vms: [], allowed_endpoints: [], models: [] })
 
-/** Live membership. A missing, disabled, or empty pool never widens to the global set. */
-export function applyVmPool(scope, lookup = defaultPoolLookup) {
-  if (!scope?.vm_pool_id) return scope
-  const pool = lookup?.(scope.vm_pool_id) || null
-  if (!pool) return { ...scope, allowed_vms: [], vm_pool_error: 'missing' }
-  if (!pool.enabled) return { ...scope, allowed_vms: [], vm_pool_error: 'disabled' }
-  const ids = Array.isArray(pool.vm_ids) ? pool.vm_ids.map((id) => String(id || '').trim()).filter(Boolean) : []
-  if (!ids.length) return { ...scope, allowed_vms: [], vm_pool_error: 'empty' }
-  return { ...scope, allowed_vms: ids, vm_pool_error: null }
-}
-
-export function keyScopeFromRequest(req, lookup = defaultPoolLookup) {
-  if (!req || req.apiKeyKind === 'master') return { group_type: 'all', allowed_vms: [], vm_pool_id: null }
-  return applyVmPool(keyScopeFromRecord(req.apiKeyRecord), lookup)
-}
-
-export function vmPoolDenial(scope) {
-  if (!scope?.vm_pool_error) return null
-  return {
-    code: 'vm_pool_unavailable',
-    message: POOL_DENIAL[scope.vm_pool_error] || '账号池不可用',
-  }
-}
-
-export function keyAllowsVm(scope, vm) {
-  if (scope?.vm_pool_id) {
-    if (scope.vm_pool_error) return false
-    if (!vm?.id || !(scope.allowed_vms || []).includes(vm.id)) return false
-    const group = scope.group_type || 'all'
-    if (group !== 'all' && vmGroupType(vm) !== group) return false
-    return true
-  }
-  const group = scope?.group_type || 'all'
-  if (group === 'all') return true
-  if (!vm?.id) return false
-  if (vmGroupType(vm) !== group) return false
-  return (scope.allowed_vms || []).includes(vm.id)
+export async function keyScopeFromRequest(req) {
+  if (!req || req.apiKeyKind === 'master') return MASTER_SCOPE()
+  const db = isDbOpen() ? getDb() : null
+  const live = db ? await refreshAuthenticatedKey(req.apiKeyRecord, db) : { record: req.apiKeyRecord }
+  return requestScope(req, live, await keyScopeFromRecord(live.record, db))
 }
 
 /**
- * Write-side scope. Unknown group_type throws instead of widening to all.
- * partial + neither field → null (leave the row alone).
- * A named pool replaces the copied allowlist. An explicit platform list
- * clears a previously bound pool. Does not check that the VM or pool exists.
+ * 复核 Key 作用域（Claude 调度的资格计算、授予后复核与 failover 每次尝试前）：重读 Key、所属用户与分组（R6 B7b）。
+ * `PoolScheduler.reserve()` 的同步段不再读库，用调用方刚复核过的作用域。
  */
-export function normalizeKeyScope(input = {}, { partial = false, current = null, isApi = false } = {}) {
-  const hasType = input.group_type != null && input.group_type !== ''
-  const hasVms = input.allowed_vms != null
-  const hasPool = Object.prototype.hasOwnProperty.call(input, 'vm_pool_id')
-  if (partial && !hasType && !hasVms && !hasPool) return null
-
-  const base = current ? keyScopeFromRecord(current) : { group_type: 'all', allowed_vms: [], vm_pool_id: null }
-  let group_type = !partial && !hasType ? 'all' : base.group_type
-  if (hasType) {
-    const parsed = normalizeGroupType(input.group_type, { fallback: null })
-    if (!parsed) {
-      throw Object.assign(new Error('group_type 只能是 all、anthropic 或 openai'), { code: 'invalid_group_type' })
-    }
-    group_type = parsed
+export async function refreshKeyScope(scope) {
+  if (!scope?.key_id || !isDbOpen()) return scope
+  const record = await new ApiKeysRepo(getDb()).getById(scope.key_id)
+  if (!record || record.status !== 'active' || (record.expires_at && Date.parse(record.expires_at) <= Date.now()))
+    return { ...scope, platform: false, error: 'key_unavailable', allowed_vms: [], allowed_endpoints: [] }
+  if (record.user_id && (await new UsersRepo(getDb()).getById(record.user_id))?.status !== 'active')
+    return { ...scope, platform: false, error: 'user_disabled', allowed_vms: [], allowed_endpoints: [] }
+  if (scope.key_hash && record.key_hash !== scope.key_hash)
+    return { ...scope, platform: false, error: 'key_unavailable', allowed_vms: [], allowed_endpoints: [] }
+  if (scope.key_category && record.category !== scope.key_category)
+    return { ...scope, platform: false, error: 'key_unavailable', allowed_vms: [], allowed_endpoints: [] }
+  if (scope.client_ip && !permitsIp(record, scope.client_ip))
+    return { ...scope, platform: false, error: 'ip_not_allowed', allowed_vms: [], allowed_endpoints: [] }
+  if (Number(record.group_id) !== Number(scope.group_id))
+    return { ...scope, platform: false, error: 'group_changed', allowed_vms: [], allowed_endpoints: [] }
+  return {
+    ...(await keyScopeFromRecord(record)),
+    key_hash: scope.key_hash,
+    key_category: scope.key_category,
+    client_ip: scope.client_ip,
   }
-  const apiMode =
-    isApi ||
-    String(input.category || current?.category || '')
-      .trim()
-      .toLowerCase() === 'api'
-  let allowed_vms = hasVms ? parseAllowedVms(input.allowed_vms) : !partial && !hasType ? [] : base.allowed_vms
-  let vm_pool_id = hasPool ? parsePoolId(input.vm_pool_id) : base.vm_pool_id
-  if (apiMode) {
-    return { group_type, allowed_vms: [], vm_pool_id: null }
-  }
-  const manual = (hasType && group_type !== 'all') || (hasVms && allowed_vms.length > 0)
-  if (!hasPool && manual) vm_pool_id = null
-  if (vm_pool_id) {
-    return { group_type, allowed_vms: [], vm_pool_id }
-  }
-  if (group_type === 'all') allowed_vms = []
-  if (group_type !== 'all' && allowed_vms.length === 0) {
-    throw Object.assign(new Error('选择 anthropic 或 openai 时至少勾选一台 VM'), { code: 'key_vms_required' })
-  }
-  return { group_type, allowed_vms, vm_pool_id: null }
 }
 
-/** Panel check: every id is a live VM of the chosen platform. Pool membership is checked separately. */
-export function assertVmScope(vms, scope) {
-  if (!scope || scope.group_type === 'all' || scope.vm_pool_id) return []
-  const byId = new Map((vms || []).map((vm) => [vm.id, vm]))
-  for (const id of scope.allowed_vms) {
-    const vm = byId.get(id)
-    if (!vm) throw Object.assign(new Error('所选 VM 不存在'), { code: 'key_vm_unknown' })
-    if (vmGroupType(vm) !== scope.group_type) {
-      throw Object.assign(new Error('所选 VM 不属于该分组'), { code: 'key_vm_mismatch' })
-    }
-  }
-  return scope.allowed_vms
+/** Codex 独立网页搜索：OpenAI 账号后端可用，商业分组按分组搜索单价逐次计费。 */
+export function allowsStandaloneSearch(_record, { api = false, groupType = 'all' } = {}) {
+  return !api && ['openai', 'all'].includes(groupType)
 }

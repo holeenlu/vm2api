@@ -1,6 +1,8 @@
 import * as React from 'react'
+import { t } from '@/i18n'
 import { Command as CommandPrimitive } from 'cmdk'
 import { SearchIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import {
   Dialog,
@@ -27,8 +29,8 @@ function Command({
 }
 
 function CommandDialog({
-  title = 'Command Palette',
-  description = 'Search for a command to run...',
+  title = t('common:commandPalette'),
+  description = t('common:searchCommands'),
   children,
   className,
   showCloseButton = true,
@@ -39,6 +41,7 @@ function CommandDialog({
   className?: string
   showCloseButton?: boolean
 }) {
+  useTranslation('common')
   return (
     <Dialog {...props}>
       <DialogHeader className='sr-only'>

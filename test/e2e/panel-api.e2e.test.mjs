@@ -38,6 +38,12 @@ test('panel login → cookie → /api/panel/me', async () => {
 test('admin database metrics endpoint returns a safe SQLite snapshot', async () => {
   const gw = await startGateway()
   try {
+    const invalid = await fetch(gw.baseUrl + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-kin-test-sim-001', 'content-type': 'application/json' },
+      body: '{',
+    })
+    assert.equal(invalid.status, 400)
     const response = await api(gw, 'GET', '/api/panel/database/metrics')
     assert.equal(response.status, 200, response.text)
     const data = response.json.data || response.json
@@ -49,6 +55,13 @@ test('admin database metrics endpoint returns a safe SQLite snapshot', async () 
     assert.equal(typeof data.database.page_count, 'number')
     assert.equal(typeof data.usage_cache.requests, 'number')
     assert.ok(data.sampled_at)
+    assert.equal(data.runtime.enabled, true)
+    assert.equal(data.runtime.size_basis, 'decoded_inbound_bytes')
+    const parse = data.runtime.request_work_total.find(
+      (row) => row.stage === 'json_parse' && row.traffic === 'inference',
+    )
+    assert.equal(parse.errors, 1)
+    assert.equal(parse.size_bucket, 'le_16_kib')
 
     const serialized = JSON.stringify(data)
     assert.equal(serialized.includes(gw.project), false)
@@ -528,5 +541,37 @@ test('OpenAI scheduling HTTP panel status uses live OpenAI gates, not Claude thr
   } finally {
     await gw.stop()
     fs.rmSync(gw.project, { recursive: true, force: true })
+  }
+})
+
+test('#772 a Codex slot saves its selection weight through PATCH, validated 1–100', async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-weight-'))
+  seedVm({ project })
+  const id = 'vm-openai-weight'
+  fs.mkdirSync(path.join(project, 'vms', id), { recursive: true })
+  fs.writeFileSync(
+    path.join(project, 'vms', `${id}.json`),
+    JSON.stringify({ id, name: id, platform: 'openai', family: 'codex', status: 'running', schedulable: true }),
+  )
+  const gw = await startGateway({ project })
+  const weightOf = async () =>
+    (await api(gw, 'GET', '/api/panel/vms')).json.data.items.find((vm) => vm.id === id).weight
+  try {
+    assert.equal(await weightOf(), 1)
+    const weighted = await api(gw, 'PATCH', `/api/panel/vms/${id}`, { body: { weight: 20 } })
+    assert.equal(weighted.status, 200, weighted.text)
+    assert.equal(await weightOf(), 20)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(project, 'vms', `${id}.json`), 'utf8')).policy.weight, 20)
+    for (const weight of [0, 101, 2.5, '5']) {
+      const bad = await api(gw, 'PATCH', `/api/panel/vms/${id}`, { body: { weight } })
+      assert.equal(bad.status, 400, bad.text)
+    }
+    assert.equal(await weightOf(), 20)
+    const reset = await api(gw, 'PATCH', `/api/panel/vms/${id}`, { body: { weight: null } })
+    assert.equal(reset.status, 200, reset.text)
+    assert.equal(await weightOf(), 1)
+  } finally {
+    await gw.stop()
+    fs.rmSync(project, { recursive: true, force: true })
   }
 })

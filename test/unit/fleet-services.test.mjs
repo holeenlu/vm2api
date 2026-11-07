@@ -2,6 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { prepareRuntimeSecrets } from '../../src/lib/core/runtime-secrets.mjs'
 
 function runFleet(env) {
   return new Promise((resolve, reject) => {
@@ -60,9 +64,18 @@ const slots = {
 
 function kernelSync(items) {
   const failed = items.filter((item) => !item.ok).length
+  const changed = items.filter((item) => item.kernel_changed === true).length
   return {
     ok: true,
-    data: { ok: failed === 0, total: items.length, ok_count: items.length - failed, failed_count: failed, items },
+    data: {
+      ok: failed === 0,
+      changed: changed > 0,
+      total: items.length,
+      ok_count: items.length - failed,
+      failed_count: failed,
+      changed_count: changed,
+      items,
+    },
   }
 }
 
@@ -92,11 +105,18 @@ test('fleet refresh runs through the server after node links come up', async () 
         const state = linkChecks < 2 ? 'connecting' : 'ready'
         return { ok: true, data: { items: [{ id: 'node-1', link: { state } }] } }
       },
-      '/api/panel/wrap-cli/sync': () =>
-        kernelSync([
-          { id: 'local-a', ok: true, kernel_changed: true },
-          { id: 'node-b', node_id: 'node-1', ok: true, kernel_changed: true, image: 'vm2api/kin-slot:abc' },
-        ]),
+      '/api/panel/wrap-cli/sync': (body) =>
+        kernelSync(
+          JSON.parse(body).restart === false
+            ? [
+                { id: 'local-a', ok: true, kernel_changed: true },
+                { id: 'node-b', node_id: 'node-1', ok: true, kernel_changed: true, image: 'vm2api/kin-slot:abc' },
+              ]
+            : [
+                { id: 'local-a', ok: true, kernel_changed: true },
+                { id: 'node-b', node_id: 'node-1', ok: true, kernel_changed: true, image: 'vm2api/kin-slot:abc' },
+              ],
+        ),
       '/api/panel/vms/fleet-update': () =>
         telemetry([
           { id: 'local-a', ok: true },
@@ -104,7 +124,7 @@ test('fleet refresh runs through the server after node links come up', async () 
         ]),
     },
     async (base, requests) => {
-      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, TAPMODELS_API_KEY: 'test-key' })
       assert.equal(result.code, 0, result.stderr)
       assert.deepEqual(
         requests.map((request) => [request.method, request.url]),
@@ -114,12 +134,14 @@ test('fleet refresh runs through the server after node links come up', async () 
           ['GET', '/api/panel/cluster/nodes'],
           ['GET', '/api/panel/cluster/nodes'],
           ['POST', '/api/panel/wrap-cli/sync'],
+          ['POST', '/api/panel/wrap-cli/sync'],
           ['POST', '/api/panel/vms/fleet-update'],
         ],
       )
       for (const request of requests.slice(1)) assert.equal(request.authorization, 'Bearer test-key')
-      assert.deepEqual(JSON.parse(requests[4].body), { restart: true })
-      assert.deepEqual(JSON.parse(requests[5].body), { action: 'telemetry', concurrency: 4 })
+      assert.deepEqual(JSON.parse(requests[4].body), { restart: false })
+      assert.deepEqual(JSON.parse(requests[5].body), { restart: true })
+      assert.deepEqual(JSON.parse(requests[6].body), { action: 'telemetry', concurrency: 6 })
       const report = JSON.parse(result.stdout)
       assert.equal(report.ok_count, 2)
       assert.equal(report.kernel_sync.ok, true)
@@ -134,12 +156,13 @@ test('fleet refresh goes on past an offline node and fails on its slot', async (
       '/health': () => ({ status: 'ok' }),
       '/api/panel/vms': () => slots,
       '/api/panel/cluster/nodes': () => ({ ok: true, data: { items: [{ id: 'node-1', link: { state: 'backoff' } }] } }),
-      '/api/panel/wrap-cli/sync': () => {
-        const body = kernelSync([
+      '/api/panel/wrap-cli/sync': (body) => {
+        if (JSON.parse(body).restart === false) return [400, { ok: false, error: { message: 'node not ready' } }]
+        const syncBody = kernelSync([
           { id: 'local-a', ok: true },
           { id: 'node-b', node_id: 'node-1', ok: false, code: 'node_not_ready', error: '节点未连接（backoff）' },
         ])
-        return [400, body]
+        return [400, syncBody]
       },
       '/api/panel/vms/fleet-update': () =>
         telemetry([
@@ -150,7 +173,7 @@ test('fleet refresh goes on past an offline node and fails on its slot', async (
     async (base, requests) => {
       const result = await runFleet({
         KIN_AUTO_SYNC_BASE: base,
-        VM2API_API_KEY: 'test-key',
+        TAPMODELS_API_KEY: 'test-key',
         KIN_FLEET_LINK_WAIT_MS: '50',
       })
       assert.equal(result.code, 1)
@@ -175,13 +198,65 @@ test('fleet refresh with only local slots skips the node link wait', async () =>
     {
       '/health': () => ({ status: 'ok' }),
       '/api/panel/vms': () => ({ ok: true, data: [{ id: 'local-a', node_id: null }] }),
-      '/api/panel/wrap-cli/sync': () => kernelSync([{ id: 'local-a', ok: true }]),
+      '/api/panel/wrap-cli/sync': (body) =>
+        kernelSync([{ id: 'local-a', ok: true, kernel_changed: JSON.parse(body).restart !== false }]),
       '/api/panel/vms/fleet-update': () => telemetry([{ id: 'local-a', ok: true }]),
     },
     async (base, requests) => {
-      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, TAPMODELS_API_KEY: 'test-key' })
       assert.equal(result.code, 0, result.stderr)
       assert.ok(!requests.some((request) => request.url === '/api/panel/cluster/nodes'))
+    },
+  )
+})
+
+test('fleet refresh skips slot restart when payload inspection reports no changes', async () => {
+  await withServer(
+    {
+      '/health': () => ({ status: 'ok' }),
+      '/api/panel/vms': () => ({ ok: true, data: [{ id: 'local-a', node_id: null }] }),
+      '/api/panel/wrap-cli/sync': (body) => {
+        assert.deepEqual(JSON.parse(body), { restart: false })
+        return kernelSync([{ id: 'local-a', ok: true, kernel_changed: false }])
+      },
+      '/api/panel/vms/fleet-update': () => telemetry([{ id: 'local-a', ok: true }]),
+    },
+    async (base, requests) => {
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, TAPMODELS_API_KEY: 'test-key' })
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(requests.filter((request) => request.url === '/api/panel/wrap-cli/sync').length, 1)
+      assert.equal(JSON.parse(requests.at(-1).body).concurrency, 6)
+      assert.equal(JSON.parse(result.stdout).kernel_sync.skipped, true)
+    },
+  )
+})
+
+test('fleet refresh authenticates with the same persisted key as the running server', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-runtime-key-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const dataDir = path.join(root, 'persistent')
+  const serverEnv = { KIN_DATA_DIR: dataDir }
+  prepareRuntimeSecrets({ root, env: serverEnv })
+  fs.writeFileSync(path.join(root, '.env'), 'KIN_API_KEY=stale-source-key\n')
+  await withServer(
+    {
+      '/health': () => ({ status: 'ok' }),
+      '/api/panel/vms': () => ({ ok: true, data: [{ id: 'local-a' }] }),
+      '/api/panel/wrap-cli/sync': () => kernelSync([{ id: 'local-a', ok: true, kernel_changed: false }]),
+      '/api/panel/vms/fleet-update': () => telemetry([{ id: 'local-a', ok: true }]),
+    },
+    async (base, requests) => {
+      const result = await runFleet({
+        KIN_PROJECT_ROOT: root,
+        KIN_DATA_DIR: dataDir,
+        TAPMODELS_API_KEY: '',
+        KIN_API_KEY: '',
+        KIN_AUTO_SYNC_BASE: base,
+      })
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(requests.length, 4)
+      for (const req of requests.slice(1)) assert.equal(req.authorization, `Bearer ${serverEnv.TAPMODELS_API_KEY}`)
+      assert.ok(!result.stdout.includes(serverEnv.TAPMODELS_API_KEY))
     },
   )
 })

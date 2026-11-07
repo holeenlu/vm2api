@@ -17,20 +17,21 @@ import {
 } from 'lucide-react'
 
 export const SETTINGS_TABS = [
-  ['sticky', '粘性'],
-  ['pool', '账号池'],
-  ['quota', '配额'],
-  ['openai', 'OpenAI'],
-  ['logs', '日志'],
-  ['protocol', '协议'],
-  ['redaction', '脱敏'],
-  ['init', '初装'],
-  ['health', '探测'],
-  ['notify', '通知'],
-  ['telemetry', '遥测'],
-  ['socks5', 'SOCKS5'],
-  ['backup', '备份'],
-  ['about', '关于'],
+  ['branding', 'nav.branding'],
+  ['sticky', 'nav.sticky'],
+  ['pool', 'nav.pool'],
+  ['quota', 'nav.quota'],
+  ['openai', 'nav.openai'],
+  ['logs', 'logs.title'],
+  ['protocol', 'nav.protocol'],
+  ['redaction', 'nav.redaction'],
+  ['init', 'nav.init'],
+  ['health', 'nav.health'],
+  ['notify', 'nav.notify'],
+  ['telemetry', 'nav.telemetry'],
+  ['socks5', 'nav.socks5'],
+  ['backup', 'backup.title'],
+  ['about', 'nav.about'],
 ] as const
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number][0]
@@ -44,7 +45,7 @@ export const SETTINGS_NAV_GROUPS: {
   items: { id: SettingsTabId; icon: LucideIcon }[]
 }[] = [
   {
-    label: '调度',
+    label: 'nav.scheduling',
     items: [
       { id: 'sticky', icon: Magnet },
       { id: 'pool', icon: Layers },
@@ -53,14 +54,14 @@ export const SETTINGS_NAV_GROUPS: {
     ],
   },
   {
-    label: '协议',
+    label: 'nav.protocol',
     items: [
       { id: 'protocol', icon: Fingerprint },
       { id: 'redaction', icon: ShieldCheck },
     ],
   },
   {
-    label: '槽位',
+    label: 'nav.slots',
     items: [
       { id: 'init', icon: PackageCheck },
       { id: 'health', icon: Activity },
@@ -69,8 +70,9 @@ export const SETTINGS_NAV_GROUPS: {
     ],
   },
   {
-    label: '运维',
+    label: 'nav.operations',
     items: [
+      { id: 'branding', icon: Fingerprint },
       { id: 'notify', icon: BellRing },
       { id: 'logs', icon: ScrollText },
       { id: 'backup', icon: Archive },

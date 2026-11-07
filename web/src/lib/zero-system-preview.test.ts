@@ -17,7 +17,6 @@ describe('zero caller system preview', () => {
       {
         id: 'caller_system',
         text: caller,
-        hide: false,
         ttl: '',
         scope: '',
         placeholder: false,

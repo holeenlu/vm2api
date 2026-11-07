@@ -19,8 +19,11 @@ const PAGE_PATHS = Object.keys(
   .map((path) => path.replace(/\/index$/, '') || '/')
   .sort()
 
-// Mirror of ROLE_VIEWS in src/lib/admin/panel-acl.mjs.
+// Mirror of PANEL_VIEWS / ROLE_VIEWS in src/lib/admin/panel-role-policy.mjs.
 const PANEL_VIEWS: ViewId[] = [
+  'profile',
+  'groups',
+  'subscriptions',
   'overview',
   'cluster',
   'vm',
@@ -38,17 +41,24 @@ const PANEL_VIEWS: ViewId[] = [
   'database',
   'settings',
   'users',
+  'suppliers',
   'wrap',
   'billing',
+  'gateway-workers',
+  'codex-accounts',
+  'supplier-accounts',
 ]
-const ROLE_VIEWS: Record<'admin' | 'super' | 'user', ViewId[]> = {
-  admin: PANEL_VIEWS,
-  super: ['overview', 'cluster', 'logs', 'statistics', 'vm'],
-  user: ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'],
+const ROLE_VIEWS: Record<'super_admin' | 'admin' | 'user', ViewId[]> = {
+  super_admin: PANEL_VIEWS,
+  admin: ['profile', 'users', 'keys', 'billing', 'logs', 'statistics'],
+  user: ['profile', 'keys', 'subscriptions', 'billing', 'logs', 'statistics'],
 }
 
 const concrete = (path: string) =>
-  path.replace('$id', 'vm-01').replace('$tab', 'about')
+  path
+    .replace('$id', 'vm-01')
+    .replace('$tab', 'about')
+    .replace('$page', 'suppliers')
 const openPages = (views: string[] | null) =>
   PAGE_PATHS.filter((path) => canOpenPath(views, concrete(path)))
 
@@ -57,6 +67,8 @@ describe('route ↔ view table', () => {
     expect(PAGE_PATHS).toContain('/')
     expect(PAGE_PATHS).toContain('/vm/$id')
     expect(PAGE_PATHS).toContain('/settings/$tab')
+    expect(PAGE_PATHS).toContain('/codex-accounts/$id')
+    expect(PAGE_PATHS).toContain('/suppliers/$page')
     expect(PAGE_PATHS).not.toContain('/route')
   })
 
@@ -76,7 +88,10 @@ describe('route ↔ view table', () => {
   it('only names views the backend defines', () => {
     const named = Object.values(ROUTE_VIEWS).filter((view) => view !== null)
     expect(named.filter((view) => !PANEL_VIEWS.includes(view))).toEqual([])
-    expect([...new Set(named)].sort()).toEqual([...PANEL_VIEWS].sort())
+    // supplier-accounts is a sub-page of /suppliers (see viewForPath).
+    expect([...new Set([...named, 'supplier-accounts'])].sort()).toEqual(
+      [...PANEL_VIEWS].sort()
+    )
   })
 
   it('maps every sidebar link through the same table', () => {
@@ -94,6 +109,10 @@ describe('nested pages follow their parent view', () => {
     ['/vm/', 'vm'],
     ['/settings/about', 'settings'],
     ['/settings/', 'settings'],
+    ['/codex-accounts/acc-01', 'codex-accounts'],
+    ['/suppliers/settlements', 'suppliers'],
+    ['/suppliers/accounts', 'supplier-accounts'],
+    ['/suppliers/accounts?vendor_id=all', 'supplier-accounts'],
     ['/', null],
   ] as const)('%s → %s', (path, view) => {
     expect(viewForPath(path)).toBe(view)
@@ -110,24 +129,27 @@ describe('nested pages follow their parent view', () => {
       expect(canOpenPath(views, '/settings/about')).toBe(
         canOpenPath(views, '/settings')
       )
+      expect(canOpenPath(views, '/codex-accounts/acc-01')).toBe(
+        canOpenPath(views, '/codex-accounts')
+      )
     }
   })
 })
 
 describe('pages each role can open', () => {
-  it('admin opens every page', () => {
-    expect(openPages(ROLE_VIEWS.admin)).toEqual(PAGE_PATHS)
+  it('super_admin opens every page', () => {
+    expect(openPages(ROLE_VIEWS.super_admin)).toEqual(PAGE_PATHS)
   })
 
-  it('super opens monitoring and the VM pages only', () => {
-    expect(openPages(ROLE_VIEWS.super)).toEqual([
+  it('admin opens its user, key and usage pages only', () => {
+    expect(openPages(ROLE_VIEWS.admin)).toEqual([
       '/',
-      '/cluster',
+      '/billing',
+      '/keys',
       '/logs',
-      '/overview',
+      '/profile',
       '/statistics',
-      '/vm',
-      '/vm/$id',
+      '/users',
     ])
   })
 
@@ -137,22 +159,30 @@ describe('pages each role can open', () => {
       '/billing',
       '/keys',
       '/logs',
-      '/proxies',
+      '/profile',
       '/statistics',
-      '/vm',
-      '/vm/$id',
+      '/subscriptions',
     ])
   })
 
-  it('keeps the sidebar and the guard in agreement', () => {
-    const all = navGroupsFor(null).flatMap((group) =>
-      group.items.map((item) => String(item.url))
-    )
-    for (const views of Object.values(ROLE_VIEWS)) {
-      const shown = navGroupsFor(views).flatMap((group) =>
+  it('opens only the supplier account pool with the resource grant', () => {
+    const views = [
+      ...ROLE_VIEWS.admin,
+      'vm',
+      'codex-accounts',
+      'supplier-accounts',
+    ]
+    expect(canOpenPath(views, '/suppliers/accounts')).toBe(true)
+    expect(canOpenPath(views, '/suppliers/settlements')).toBe(false)
+    expect(canOpenPath(views, '/vm/vm-01')).toBe(true)
+  })
+
+  it('never shows a sidebar link the guard would refuse', () => {
+    for (const [role, views] of Object.entries(ROLE_VIEWS)) {
+      const shown = navGroupsFor(views, role).flatMap((group) =>
         group.items.map((item) => String(item.url))
       )
-      expect(all.filter((url) => canOpenPath(views, url))).toEqual(shown)
+      expect(shown.filter((url) => !canOpenPath(views, url))).toEqual([])
     }
   })
 

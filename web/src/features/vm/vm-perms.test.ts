@@ -1,3 +1,4 @@
+import type { MeResponse, ResourcePermission } from '@/types/panel-auth'
 import { describe, expect, it } from 'vitest'
 import {
   pickBindTarget,
@@ -6,52 +7,58 @@ import {
   vmPermsFor,
 } from './vm-perms'
 
-describe('vmPermsFor follows panel-acl roles', () => {
-  it('admin can do everything', () => {
-    expect(vmPermsFor('admin')).toEqual({
+const ALL: ResourcePermission[] = [
+  'resources.read',
+  'resources.create',
+  'resources.edit',
+  'resources.manage',
+]
+const me = (
+  role: MeResponse['role'],
+  resource_permissions: ResourcePermission[] = []
+): MeResponse => ({ user: 'u', role, resource_permissions })
+
+describe('vmPermsFor follows server-provided resource permissions', () => {
+  it('super admin receives every level from the server', () => {
+    expect(vmPermsFor(me('super_admin', ALL))).toEqual({
       known: true,
-      admin: true,
+      read: true,
+      create: true,
+      edit: true,
+      manage: true,
       dashboard: true,
-      power: true,
-      test: true,
-      testModels: true,
-      credential: true,
-      proxy: true,
-      remove: true,
     })
   })
 
-  it('tenant can power and test a slot, but cannot reauth, manage proxies, or delete it', () => {
-    const p = vmPermsFor('user')
-    expect(p.known).toBe(true)
-    expect(p.admin).toBe(false)
-    expect(p.dashboard).toBe(false)
-    expect(p.power).toBe(true)
-    expect(p.test).toBe(true)
-    // The backend only serves GET /api/panel/test-models to admins.
-    expect(p.testModels).toBe(false)
-    expect(p.credential).toBe(false)
-    expect(p.proxy).toBe(false)
-    expect(p.remove).toBe(false)
-  })
-
-  it('super only reads dashboard and toggles scheduling', () => {
-    const p = vmPermsFor('super')
-    expect(p).toMatchObject({
+  it('a granted admin gets exactly the grant, never the platform dashboard', () => {
+    const p = vmPermsFor(me('admin', ['resources.read', 'resources.edit']))
+    expect(p).toEqual({
       known: true,
-      admin: false,
-      dashboard: true,
-      power: false,
-      test: false,
-      credential: false,
-      proxy: true,
-      remove: false,
+      read: true,
+      create: false,
+      edit: true,
+      manage: false,
+      dashboard: false,
     })
   })
 
-  it('unknown role (me still loading) grants nothing so no 403 is fired', () => {
-    for (const role of [undefined, null, '', 'root']) {
-      expect(Object.values(vmPermsFor(role)).every((v) => v === false)).toBe(
+  it('customer and ungranted admin have no resource privileges', () => {
+    for (const role of ['user', 'admin'] as const) {
+      const p = vmPermsFor(me(role))
+      expect(p.known).toBe(true)
+      expect([p.read, p.create, p.edit, p.manage, p.dashboard]).toEqual([
+        false,
+        false,
+        false,
+        false,
+        false,
+      ])
+    }
+  })
+
+  it('me still loading grants nothing so no 403 is fired', () => {
+    for (const value of [undefined, null]) {
+      expect(Object.values(vmPermsFor(value)).every((v) => v === false)).toBe(
         true
       )
     }
@@ -59,8 +66,8 @@ describe('vmPermsFor follows panel-acl roles', () => {
 })
 
 describe('vmDetailTabs', () => {
-  it('ops and seed are admin only; test needs test permission', () => {
-    expect(vmDetailTabs(vmPermsFor('admin'))).toEqual([
+  it('test needs edit; ops and seed need manage', () => {
+    expect(vmDetailTabs(vmPermsFor(me('super_admin', ALL)))).toEqual([
       'overview',
       'account',
       'proxy',
@@ -68,24 +75,25 @@ describe('vmDetailTabs', () => {
       'ops',
       'seed',
     ])
-    expect(vmDetailTabs(vmPermsFor('user'))).toEqual([
-      'overview',
-      'account',
-      'test',
-    ])
-    expect(vmDetailTabs(vmPermsFor('super'))).toEqual([
+    expect(
+      vmDetailTabs(
+        vmPermsFor(me('admin', ['resources.read', 'resources.edit']))
+      )
+    ).toEqual(['overview', 'account', 'proxy', 'test'])
+    expect(vmDetailTabs(vmPermsFor(me('admin', ['resources.read'])))).toEqual([
       'overview',
       'account',
       'proxy',
     ])
+    expect(vmDetailTabs(vmPermsFor(me('user')))).toEqual([])
   })
 
   it('falls back to overview when the remembered tab is hidden', () => {
-    const tabs = vmDetailTabs(vmPermsFor('user'))
+    const tabs = vmDetailTabs(vmPermsFor(me('admin', ['resources.read'])))
     expect(visibleTab('ops', tabs)).toBe('overview')
     expect(visibleTab('seed', tabs)).toBe('overview')
-    expect(visibleTab('test', tabs)).toBe('test')
-    expect(visibleTab('proxy', tabs)).toBe('overview')
+    expect(visibleTab('test', tabs)).toBe('overview')
+    expect(visibleTab('proxy', tabs)).toBe('proxy')
   })
 })
 

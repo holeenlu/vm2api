@@ -444,7 +444,9 @@ export class SeatPlanner {
     for (const kind of ['conc', 'seat']) {
       for (const ticket of [...(this.vmQueues.get(vmId) || [])]) {
         if (!ticket.queued || ticket.kind !== kind) continue
-        if (!this.grant(ticket, vmId)) break
+        // 队头因自身原因（模型上限、刷新后的准入门）被拒时不挡住后面的票（审计 P2 队头阻塞）；
+        // 容量不足时后面的票同样被拒，只多几次判断
+        this.grant(ticket, vmId)
       }
     }
     for (const ticket of [...this.globalQueue]) {
@@ -467,6 +469,32 @@ export class SeatPlanner {
     this.changed()
     ticket.wake?.()
     return true
+  }
+
+  /**
+   * Tickets served before `self` on these VMs, in grant order: seated requests
+   * (`conc`) go first on their VM, then seat waits, then global tickets by
+   * arrival. A `conc` ticket only waits behind earlier `conc` tickets.
+   */
+  queuedAhead(vmIds, self = null) {
+    const ids = new Set([...(vmIds || [])].map(String))
+    const kind = self?.kind || 'global'
+    const before = self?.enqueuedAt ?? Number.POSITIVE_INFINITY
+    const earlier = (ticket) => ticket.enqueuedAt < before
+    let count = 0
+    for (const id of ids) {
+      for (const ticket of this.vmQueues.get(id) || []) {
+        if (ticket === self || !ticket.queued) continue
+        if (ticket.kind === 'conc') count += kind !== 'conc' || earlier(ticket) ? 1 : 0
+        else if (kind !== 'conc') count += kind === 'global' || earlier(ticket) ? 1 : 0
+      }
+    }
+    if (kind === 'conc') return count
+    for (const ticket of this.globalQueue) {
+      if (ticket === self || !ticket.queued || !earlier(ticket)) continue
+      if ((ticket.vmIds?.() || []).some((id) => ids.has(String(id)))) count += 1
+    }
+    return count
   }
 
   pending() {

@@ -192,12 +192,27 @@ export function withVmLock(key, fn) {
   return run
 }
 
-export function atomicWriteJson(filePath, obj, { mode } = {}) {
+/**
+ * 原子写 JSON：临时文件 + rename。`durable: true` 时写入后 fsync 文件，rename 后 fsync 目录，
+ * 用于凭据这类唯一副本（审计 P1-C9：掉电后不能留下空文件或回到旧刷新令牌）；
+ * vms/*.json 等高频写保持不 fsync（生产磁盘弱）。
+ */
+export function atomicWriteJson(filePath, obj, { mode, durable = false } = {}) {
   const dir = path.dirname(filePath)
   const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`)
   const data = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2)
   const opts = mode ? { mode } : undefined
-  fs.writeFileSync(tmp, data, opts)
+  if (durable) {
+    const fd = fs.openSync(tmp, 'w', mode || 0o600)
+    try {
+      fs.writeSync(fd, data)
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+  } else {
+    fs.writeFileSync(tmp, data, opts)
+  }
   try {
     fs.renameSync(tmp, filePath)
   } catch (e) {
@@ -205,6 +220,16 @@ export function atomicWriteJson(filePath, obj, { mode } = {}) {
       fs.rmSync(tmp, { force: true })
     } catch {}
     throw e
+  }
+  if (durable) {
+    try {
+      const dirFd = fs.openSync(dir, 'r')
+      try {
+        fs.fsyncSync(dirFd)
+      } finally {
+        fs.closeSync(dirFd)
+      }
+    } catch {}
   }
   if (mode) {
     try {

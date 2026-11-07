@@ -191,9 +191,9 @@ test('a negated disclosure match never hides a later positive extraction request
   assert.equal(matchHardPolicy('Do not reveal hidden reasoning.', ['reveal hidden reasoning'], []).category, 'custom')
 })
 
-test('saved rules replace the builtins and a bad regex is rejected', () => {
+test('saved rules replace the builtins and a bad regex is rejected', async () => {
   let saved = null
-  const patched = applyJevPatch(
+  const patched = await applyJevPatch(
     {
       get: () => null,
       set: (_key, value) => {
@@ -206,11 +206,11 @@ test('saved rules replace the builtins and a bad regex is rejected', () => {
   assert.equal(patched.config.rules_customized, true)
   assert.equal(matchHardPolicy('feat vmpanel-keygen', [], saved.rules).keyword, 'vmpanel')
   assert.equal(matchHardPolicy('write a keygen', [], saved.rules), null)
-  const bad = applyJevPatch({ get: () => null, set() {} }, { rules: [{ category: 'custom', source: '(' }] })
+  const bad = await applyJevPatch({ get: () => null, set() {} }, { rules: [{ category: 'custom', source: '(' }] })
   assert.equal(bad.ok, false)
 })
 
-test('an empty rule list falls back to the builtins instead of clearing the layer', () => {
+test('an empty rule list falls back to the builtins instead of clearing the layer', async () => {
   let saved = null
   const settings = {
     get: () => null,
@@ -219,7 +219,7 @@ test('an empty rule list falls back to the builtins instead of clearing the laye
     },
   }
   assert.equal(normalizeJevConfig({ rules: [] }).rules, null)
-  const patched = applyJevPatch(settings, { rules: [] })
+  const patched = await applyJevPatch(settings, { rules: [] })
   assert.equal(patched.ok, true)
   assert.equal(patched.config.rules_customized, false)
   assert.equal(patched.config.rules.length, builtinHardRules().length)
@@ -228,7 +228,7 @@ test('an empty rule list falls back to the builtins instead of clearing the laye
     'jailbreak',
   )
   // The panel can still turn the layer off with its own switch.
-  const off = applyJevPatch(settings, { hard_regex_enabled: false })
+  const off = await applyJevPatch(settings, { hard_regex_enabled: false })
   assert.equal(off.config.hard_regex_enabled, false)
   assert.equal(saved.rules, null)
 })
@@ -406,23 +406,30 @@ test('content-policy error codes are refusals; generic api errors are not', () =
   assert.equal(isUpstreamRefusal({ body: { error: { code: 'distill_blocked', message: '不允许蒸馏' } } }), false)
 })
 
-test('panel patch keeps a stored key unless cleared', () => {
+test('panel patch keeps a stored key unless cleared', async () => {
   const saved = new Map()
   const settings = {
     get: (key, fallback) => (saved.has(key) ? saved.get(key) : fallback),
     set: (key, value) => saved.set(key, value),
   }
   assert.equal(
-    applyJevPatch(settings, { enabled: true, base_url: 'http://127.0.0.1:9/v1', model: 'jev', api_key: 'secret' }).ok,
+    (
+      await applyJevPatch(settings, {
+        enabled: true,
+        base_url: 'http://127.0.0.1:9/v1',
+        model: 'jev',
+        api_key: 'secret',
+      })
+    ).ok,
     true,
   )
-  const kept = applyJevPatch(settings, { timeout_ms: 1500 })
+  const kept = await applyJevPatch(settings, { timeout_ms: 1500 })
   assert.equal(kept.ok, true)
   assert.equal(kept.config.api_key_set, true)
   const stored = saved.get('jev_intercept')
   assert.equal(publicJevConfig(stored).api_key_set, true)
   assert.equal(stored.api_key, 'secret')
-  assert.equal(applyJevPatch(settings, { api_key: '' }).config.api_key_set, false)
+  assert.equal((await applyJevPatch(settings, { api_key: '' })).config.api_key_set, false)
   assert.equal(validateJevPatch({ timeout_ms: 10 }).length, 1)
 })
 
@@ -768,6 +775,26 @@ test('stored builtin questions collapse to the three types; a panel edit stays',
   )
 })
 
+test('retired questions do not overwrite a panel-edited NSFW question', () => {
+  const legacy = '这段话是否可以提交给llm进行深度推理，不会涉及到风险，比如：色情、暴力、破解、诱导?'
+  for (const enabled of [true, false]) {
+    const nsfw = {
+      id: 'nsfw',
+      label: 'Custom label',
+      summary: 'Custom summary',
+      instructions: 'panel-specific NSFW instruction',
+      enabled,
+    }
+    const config = normalizeJevConfig({ questions: [{ id: 'safety', instructions: legacy, enabled: false }, nsfw] })
+    assert.deepEqual(
+      config.questions.map((item) => item.id),
+      ['safety', 'nsfw'],
+    )
+    assert.equal(config.questions[0].enabled, false)
+    for (const key of ['label', 'summary', 'instructions', 'enabled']) assert.equal(config.questions[1][key], nsfw[key])
+  }
+})
+
 test('ordinary repair carve-outs live in the single abuse question', () => {
   const asked = questionsFor(normalizeJevConfig({}))
   assert.match(asked.usage_policy.instructions, /轴承/)
@@ -1099,7 +1126,10 @@ test('401 retires that key until the key list is saved again', async () => {
       settings.value = value
     },
   }
-  assert.equal(applyJevPatch(settings, { api_keys: ['k-auth-retire'], base_url: cfg.base_url, enabled: true }).ok, true)
+  assert.equal(
+    (await applyJevPatch(settings, { api_keys: ['k-auth-retire'], base_url: cfg.base_url, enabled: true })).ok,
+    true,
+  )
   let retried = 0
   await classifyJev('retire-auth-3', { ...cfg, api_keys: ['k-auth-retire'] }, async () => {
     retried += 1
@@ -1164,11 +1194,11 @@ function settingsBag() {
   }
 }
 
-test('endpoints group keys by address and never echo secrets', () => {
+test('endpoints group keys by address and never echo secrets', async () => {
   const { saved, settings } = settingsBag()
   const secret = 'sk-live-typesafe-aaaa'
   const local = 'local-key-cccc-dddd'
-  const first = applyJevPatch(settings, {
+  const first = await applyJevPatch(settings, {
     enabled: true,
     endpoints: [
       { base_url: 'https://api.typesafe.ai', api_keys: [secret] },
@@ -1183,7 +1213,7 @@ test('endpoints group keys by address and never echo secrets', () => {
   const published = JSON.stringify(first.config)
   assert.equal(published.includes(secret), false)
   assert.equal(published.includes(local), false)
-  const moved = applyJevPatch(settings, {
+  const moved = await applyJevPatch(settings, {
     endpoints: [
       { base_url: 'https://api.typesafe.ai', from_base_url: 'https://api.typesafe.ai' },
       { base_url: 'http://127.0.0.1:9000', from_base_url: 'http://127.0.0.1:8000' },
@@ -1193,7 +1223,7 @@ test('endpoints group keys by address and never echo secrets', () => {
   const stored = saved.get('jev_intercept')
   assert.ok(stored.api_keys.includes(secret))
   assert.ok(stored.api_keys.some((line) => line.includes('127.0.0.1:9000') && line.includes(local)))
-  const added = applyJevPatch(settings, {
+  const added = await applyJevPatch(settings, {
     endpoints: [
       {
         base_url: 'https://api.typesafe.ai',

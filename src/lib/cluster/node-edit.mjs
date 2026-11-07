@@ -2,6 +2,7 @@
 import { inspectContainerOrNull, sshDocker } from './docker-remote.mjs'
 import { shellQuote } from './remote-fs.mjs'
 import { ClusterError, execCollect } from './ssh-link.mjs'
+import { dbTimeParam } from '../../shared/system-time.mjs'
 
 const EDIT_FIELDS = new Set([
   'label',
@@ -33,7 +34,8 @@ export function validateNodeEditPatch(node, patch) {
   if (typeof patch.expected_updated_at !== 'string' || !patch.expected_updated_at) {
     throw new ClusterError(400, 'invalid_node_patch', '缺少节点配置版本，请刷新后重试')
   }
-  if (patch.expected_updated_at !== node.updated_at) throw nodeEditConflict()
+  // 客户端可能回传切换前读到的 UTC-Z 形式：两边归一成存储形式再比（system-time.mjs dbTime）
+  if (dbTimeParam(patch.expected_updated_at) !== dbTimeParam(node.updated_at)) throw nodeEditConflict()
   for (const key of EDIT_FIELDS) {
     if (has(patch, key) && key !== 'port' && typeof patch[key] !== 'string') {
       throw new ClusterError(400, 'invalid_node_patch', '节点更新字段类型不合法')
@@ -96,7 +98,7 @@ export async function readNodeHost(client) {
     uid: Number(uid),
     gid: Number(gid),
     home,
-    root: `${home.replace(/\/+$/, '')}/.vm2api`,
+    root: `${home.replace(/\/+$/, '')}/.tapmodels`,
     sudo: sudo === 'sudo',
     platform: nodePlatformOf(kernel),
   }
@@ -140,7 +142,7 @@ export async function verifyNodeRuntimes(client, host, vms, previousHost) {
       !info ||
       (runtime.container_id && info.Id !== runtime.container_id) ||
       info.Config?.Labels?.['kin.vm.id'] !== vm.id ||
-      info.Config?.Labels?.['vm2api.cluster'] !== '1'
+      info.Config?.Labels?.['tapmodels.cluster'] !== '1'
     )
       throw runtimeMismatch()
     if (host.uid !== 0 && runtime.user !== `${host.uid}:${host.gid}`) throw runtimeMismatch()

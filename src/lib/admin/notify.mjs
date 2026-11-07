@@ -28,6 +28,7 @@ export const DEFAULT_NOTIFY = Object.freeze({
     account_down: false,
     account_up: false,
     vm_down: true,
+    billing_reconcile: true,
   }),
   email: Object.freeze({
     enabled: false,
@@ -128,6 +129,7 @@ export function normalizeNotifyConfig(raw = {}) {
       account_down: asBool(evSrc.account_down, false),
       account_up: asBool(evSrc.account_up, false),
       vm_down: asBool(evSrc.vm_down, true),
+      billing_reconcile: asBool(evSrc.billing_reconcile, true),
     },
     email: {
       enabled: asBool(emailSrc.enabled, false),

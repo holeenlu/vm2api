@@ -28,7 +28,7 @@ const logs = db
     ROUND(SUM(COALESCE(total_cost,0)),4) AS cost,
     SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_creation_tokens,0)) AS toks
   FROM usage_logs
-  WHERE created_at >= datetime('now', '-7 days')
+  WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%f', 'now', '-7 days', '+8 hours') || '+08:00'
   GROUP BY fam
   ORDER BY cost DESC
 `)

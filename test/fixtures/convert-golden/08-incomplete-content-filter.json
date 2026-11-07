@@ -1,0 +1,102 @@
+{
+  "scenario": "08-incomplete-content-filter",
+  "description": "Upstream stops for safety with no visible output (Anthropic stop_reason refusal / Responses incomplete content_filter).",
+  "requests": {
+    "anthropic.messages": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Something disallowed"
+        }
+      ],
+      "stream": true
+    },
+    "openai.chat": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Something disallowed"
+        }
+      ],
+      "stream": true
+    },
+    "openai.responses": {
+      "input": "Something disallowed",
+      "stream": true
+    }
+  },
+  "upstream": {
+    "claude": [
+      {
+        "type": "message_start",
+        "message": {
+          "id": "msg_01",
+          "type": "message",
+          "role": "assistant",
+          "model": "claude-sonnet-4-5-20250929",
+          "content": [],
+          "stop_reason": null,
+          "stop_sequence": null,
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 1
+          }
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "refusal",
+          "stop_sequence": null
+        },
+        "usage": {
+          "output_tokens": 0
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "codex": [
+      {
+        "type": "response.created",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "in_progress",
+          "output": []
+        }
+      },
+      {
+        "type": "response.in_progress",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "in_progress",
+          "output": []
+        }
+      },
+      {
+        "type": "response.incomplete",
+        "response": {
+          "id": "resp_01",
+          "object": "response",
+          "model": "gpt-5.4",
+          "status": "incomplete",
+          "output": [],
+          "incomplete_details": {
+            "reason": "content_filter"
+          },
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 0,
+            "total_tokens": 12
+          }
+        }
+      }
+    ]
+  }
+}

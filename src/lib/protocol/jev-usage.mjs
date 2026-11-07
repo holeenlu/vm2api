@@ -31,7 +31,7 @@ export function normalizeJevUsage(value = {}) {
   const priced = provider === 'jev' && value.official_typesafe === true
   const iso =
     typeof value.created_at === 'string' &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.created_at) &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:Z|[+-]\d{2}:\d{2})$/.test(value.created_at) &&
     Number.isFinite(Date.parse(value.created_at))
       ? value.created_at
       : new Date().toISOString()
@@ -61,7 +61,12 @@ export function normalizeJevUsage(value = {}) {
 export function recordJevUsage(value) {
   if (!recorder) return
   try {
-    recorder(normalizeJevUsage(value))
+    // 记录器可以是 async（R6 B6b：JevUsageRepo.record 经 DbClient 事务写入），拒绝同样计入存储错误
+    const pending = recorder(normalizeJevUsage(value))
+    if (typeof pending?.catch === 'function')
+      pending.catch(() => {
+        storageErrors++
+      })
   } catch {
     storageErrors++
   }

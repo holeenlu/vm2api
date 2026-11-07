@@ -3,9 +3,17 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildUsage, buildVmList, indexBillingAccounts, lookupBilling } from '../../src/lib/admin/panel-api.mjs'
+import {
+  buildDashboard,
+  buildUsage,
+  buildVmList,
+  buildVmDetail,
+  indexBillingAccounts,
+  lookupBilling,
+  quotaFromAccount,
+} from '../../src/lib/admin/panel-api.mjs'
 
-test('billing index keeps UUID row when leftover vm-id account is empty', () => {
+test('billing index keeps UUID row when leftover vm-id account is empty', async () => {
   const leftover = {
     account_id: 'vm-50',
     vm_id: 'vm-50',
@@ -30,7 +38,7 @@ test('billing index keeps UUID row when leftover vm-id account is empty', () => 
   assert.equal(lookupBilling(index, { id: 'vm-50' }), real)
 })
 
-test('billing rows of an older account on a reused slot keep their own email', (t) => {
+test('billing rows of an older account on a reused slot keep their own email', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-billing-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const billing = {
@@ -48,13 +56,57 @@ test('billing rows of an older account on a reused slot keep their own email', (
       ],
     }),
   }
-  const usage = buildUsage({
+  const usage = await buildUsage({
     accountQuota,
     cfg: { paths: { project: root } },
     requestLog: { billingStats: () => billing },
   })
   const emails = usage.data.billing.accounts.map((row) => row.email)
   assert.deepEqual(emails, ['old@example.com', 'new@example.com', 'three@example.com'])
+})
+
+test('usage estimates show the sampled window capacity from the billing row next to the window spend', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-billing-coverage-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const now = Date.now()
+  const start = new Date(now - 3600000).toISOString()
+  const reset = new Date(now + 4 * 3600000).toISOString()
+  const accountQuota = {
+    snapshot: () => ({
+      accounts: [
+        { account_id: 'account', unified: { headers: { '5h': { utilization: 0.4, reset, status: 'allowed' } } } },
+      ],
+    }),
+  }
+  const billing = {
+    log_coverage_start: start,
+    accounts: [
+      {
+        account_id: 'account',
+        window_5h_cost: 12,
+        window_5h_tokens: 3000000,
+        window_5h_start: start,
+        forecast_5h: { status: 'ok', capacity_usd: 30, capacity_tokens: 7500000 },
+      },
+    ],
+  }
+  const readEstimate = async () =>
+    (
+      await buildUsage({
+        accountQuota,
+        cfg: { paths: { project: root } },
+        requestLog: { billingStats: () => billing },
+      })
+    ).data.accounts[0].estimate_5h
+
+  const ok = await readEstimate()
+  assert.equal(ok.status, 'ok')
+  assert.equal(ok.total_usd, 30)
+  assert.equal(ok.remaining_usd, 18)
+  assert.equal(ok.used_ratio, 0.4)
+  billing.accounts[0].forecast_5h = { status: 'log_gap', capacity_usd: null, capacity_tokens: null }
+  assert.equal((await readEstimate()).status, 'log_gap')
+  assert.equal((await readEstimate()).total_usd, null)
 })
 
 test('VM list carries lifetime tokens from the same billing row as total_cost', async (t) => {
@@ -95,12 +147,57 @@ test('VM list carries lifetime tokens from the same billing row as total_cost', 
   assert.equal(byId['vm-08'].total_tokens, 0)
 })
 
-test('usage rows of a deleted VM are not listed', (t) => {
+test('panel builders read the account snapshot once per request', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-snapshot-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
+  const accounts = []
+  for (let i = 1; i <= 6; i++) {
+    const id = `vm-0${i}`
+    fs.writeFileSync(
+      path.join(root, 'vms', `${id}.json`),
+      JSON.stringify({ id, claude: { account_uuid: `acct-${i}` } }),
+    )
+    accounts.push({ account_id: `acct-${i}`, vm_id: id, email: `${id}@test` })
+  }
+  // Each snapshot is one query per account; per-VM lookups must reuse the request's copy.
+  let snapshots = 0
+  const args = {
+    cfg: { paths: { project: root } },
+    accountQuota: {
+      config: {},
+      snapshot: () => {
+        snapshots++
+        return { accounts }
+      },
+    },
+    routingConfig: {},
+    requestLog: { billingStats: () => ({ accounts: [] }) },
+  }
+  for (const [name, build] of [
+    ['buildVmList', () => buildVmList(args)],
+    ['buildVmDetail', () => buildVmDetail({ ...args, id: 'vm-03' })],
+    ['buildUsage', () => buildUsage(args)],
+    [
+      'buildDashboard',
+      () => buildDashboard({ ...args, stats: {}, stickyRouter: { activeCount: () => 0, stats: () => ({}) } }),
+    ],
+  ]) {
+    snapshots = 0
+    const result = await build()
+    assert.ok(result.ok, name)
+    assert.equal(snapshots, 1, name)
+  }
+  const listed = (await buildVmList(args)).data.items
+  assert.equal(listed.find((vm) => vm.id === 'vm-02').email, 'vm-02@test')
+})
+
+test('usage rows of a deleted VM are not listed', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-usage-deleted-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   fs.writeFileSync(path.join(root, 'vms', 'vm-02.json'), JSON.stringify({ id: 'vm-02' }))
-  const usage = buildUsage({
+  const usage = await buildUsage({
     accountQuota: {
       snapshot: () => ({
         accounts: [
@@ -122,7 +219,7 @@ test('usage rows of a deleted VM are not listed', (t) => {
   assert.equal(usage.data.billing.accounts[0].email, 'three@example.com')
 })
 
-test('GPT usage row without pool email takes slot email', (t) => {
+test('GPT usage row without pool email takes slot email', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-gpt-usage-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
@@ -137,7 +234,7 @@ test('GPT usage row without pool email takes slot email', (t) => {
       codex: { email: 'lemeryvorhees@gmail.com' },
     }),
   )
-  const usage = buildUsage({
+  const usage = await buildUsage({
     accountQuota: {
       snapshot: () => ({
         accounts: [{ account_id: 'vm-codex-01', vm_id: 'vm-codex-01', email: null }],
@@ -153,4 +250,27 @@ test('GPT usage row without pool email takes slot email', (t) => {
   const row = usage.data.accounts.find((a) => a.vm_id === 'vm-codex-01')
   assert.equal(row?.email, 'lemeryvorhees@gmail.com')
   assert.equal(row?.total_cost, 139.87)
+})
+
+test('fresh live headers supersede an older official rejected display per window', async () => {
+  const official = {
+    utilization: 1,
+    status: 'rejected',
+    reset: '2099-01-02T00:00:00Z',
+    sampled_at: '2030-01-01T00:00:00Z',
+  }
+  const live = {
+    utilization: 0.25,
+    status: 'allowed',
+    reset: '2099-01-02T00:00:00Z',
+    sampled_at: '2030-01-01T00:00:01Z',
+  }
+  const q = quotaFromAccount({ unified: { official: { '5h': official, '7d': official }, headers: { '5h': live } } })
+  assert.equal(q.utilization_5h, 0.25)
+  assert.equal(q.status_5h, 'allowed')
+  assert.equal(q.utilization_7d, 1)
+  const historical = quotaFromAccount({
+    unified: { official: { '5h': { ...official, sampled_at: undefined } }, headers: { '5h': live } },
+  })
+  assert.equal(historical.utilization_5h, 1)
 })

@@ -307,12 +307,12 @@ function readOverrides() {
   return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
 }
 
-function persistOverrides(next) {
-  settingsRepo().set(SETTINGS_OVERRIDES, next)
+async function persistOverrides(next) {
+  await settingsRepo().set(SETTINGS_OVERRIDES, next)
 }
 
-function persistSnapshot(next) {
-  settingsRepo().set(SETTINGS_SNAPSHOT, next)
+async function persistSnapshot(next) {
+  await settingsRepo().set(SETTINGS_SNAPSHOT, next)
 }
 
 function statusOf(snap) {
@@ -377,7 +377,7 @@ export async function syncModelsDev({ fetchImpl } = {}) {
       anthropic: parsed.anthropic,
       openai: parsed.openai,
     }
-    persistSnapshot(snap)
+    await persistSnapshot(snap)
     invalidatePriceCatalog()
     return statusOf(snap)
   } catch (e) {
@@ -388,7 +388,7 @@ export async function syncModelsDev({ fetchImpl } = {}) {
       anthropic: prev.anthropic || {},
       openai: prev.openai || {},
     }
-    persistSnapshot(snap)
+    await persistSnapshot(snap)
     invalidatePriceCatalog()
     return statusOf(snap)
   }
@@ -405,7 +405,8 @@ function canPersist() {
 }
 
 export function maybeRefreshModelsDev({ now } = {}) {
-  if (!backgroundRefresh) return
+  // tapmodels：KIN_CRS_MOCK 测试环境承诺不访问外网（server.mjs 同样不启动目录同步），查价时也不后台刷新 models.dev
+  if (!backgroundRefresh || process.env.KIN_CRS_MOCK === '1') return
   if (!canPersist()) return
   if (refreshInflight) return
   const snap = readSnapshot()
@@ -596,7 +597,7 @@ export function listPriceOverrides() {
   return clone(readOverrides())
 }
 
-export function setPriceOverride(key, price) {
+export async function setPriceOverride(key, price) {
   const k = String(key || '').trim()
   if (!OVERRIDE_KEY_RE.test(k) || k === '*/*') {
     return { ok: false, error: 'invalid override key' }
@@ -604,7 +605,7 @@ export function setPriceOverride(key, price) {
   const overrides = { ...readOverrides() }
   if (price == null) {
     delete overrides[k]
-    persistOverrides(overrides)
+    await persistOverrides(overrides)
     invalidatePriceCatalog()
     return { ok: true }
   }
@@ -612,7 +613,7 @@ export function setPriceOverride(key, price) {
   const v = validatePrice(price, { platform: plat })
   if (!v.ok) return { ok: false, error: v.error }
   overrides[k] = { ...v.price, updated_at: new Date().toISOString() }
-  persistOverrides(overrides)
+  await persistOverrides(overrides)
   invalidatePriceCatalog()
   return { ok: true }
 }

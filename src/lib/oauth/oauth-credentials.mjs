@@ -10,7 +10,9 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { atomicWriteJson } from '../vm/vm-file.mjs'
+import { resolveVendorAccountName } from '../vendor/vendor-account-name.mjs'
+import { atomicWriteJson, readJsonCached } from '../vm/vm-file.mjs'
+import { applySlotNameFromAuthorization } from '../vm/slot-name.mjs'
 import { applyClearUnschedulable, applyUnschedulable, migrateScheduleRecord } from '../pool/schedule-state.mjs'
 import {
   credentialModeFromOauth,
@@ -20,7 +22,7 @@ import {
   isSetupTokenMode,
 } from './credential-mode.mjs'
 import { resolveAuthScheme } from './auth-scheme.mjs'
-import { flattenOauthIdentity, normalizeSubscriptionType } from './oauth-identity.mjs'
+import { flattenOauthIdentity, normalizeSubscriptionType, SUBSCRIPTION_METADATA_KEYS } from './oauth-identity.mjs'
 
 export const REFRESH_SKEW_MS = 5 * 60 * 1000
 
@@ -436,7 +438,7 @@ export function writeWorkerCredentialFile(homeDir, cred) {
           baseUrl: cred.base_url || cred.baseUrl || 'https://api.anthropic.com',
         },
       },
-      { mode: 0o600 },
+      { mode: 0o600, durable: true },
     )
     chownSlotCredentialFile(homeDir, file)
     sealSlotCredentialFile(file)
@@ -485,7 +487,11 @@ export function writeWorkerCredentialFile(homeDir, cred) {
   try {
     if (fs.existsSync(file)) fs.chmodSync(file, 0o600)
   } catch {}
-  atomicWriteJson(file, { type: mode, authScheme, kinGeneration: generation, claudeAiOauth: oauth }, { mode: 0o600 })
+  atomicWriteJson(
+    file,
+    { type: mode, authScheme, kinGeneration: generation, claudeAiOauth: oauth },
+    { mode: 0o600, durable: true },
+  )
   chownSlotCredentialFile(homeDir, file)
   sealSlotCredentialFile(file)
   ensureOfficialCredentialLink(homeDir)
@@ -568,7 +574,7 @@ export function readSlotCredentialIdentity(homeDir) {
 /**
  * After the Go worker rotates tokens, mirror metadata (not secrets) into vm.json.
  */
-export function mirrorWorkerCredentialsToVm(vmPath, homeDir, opts = {}) {
+export async function mirrorWorkerCredentialsToVm(vmPath, homeDir, opts = {}) {
   const cred = readWorkerCredentialFile(homeDir)
   if (!cred?.access_token && !cred?.refresh_token) return null
   return persistOauthToVm(vmPath, cred, opts)
@@ -591,7 +597,11 @@ export function restoreScheduleAfterLiveCredential(vm, { operatorImport = false 
   return vm
 }
 
-export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operatorImport = false } = {}) {
+/**
+ * The record is written synchronously when called; the supplier account is named from the
+ * authorization email after it (async, R6 B7c).
+ */
+export async function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operatorImport = false } = {}) {
   if (!vmPath || !fs.existsSync(vmPath)) return null
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   const prev = vm.claude || {}
@@ -606,12 +616,22 @@ export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operat
     !!(n._token_version && prev._token_version && Number(n._token_version) > Number(prev._token_version))
   const mode = credentialModeFromOauth({ ...cred, mode: cred?.mode || cred?.type || prev.mode })
   vm.claude = stripCredentialSecrets({ ...prev })
+  if (operatorImport) for (const key of ['email', 'account_uuid', 'org_uuid', 'scope']) delete vm.claude[key]
   if (n.access_token || cred.has_access || cred.has_api_key || cred.api_key) vm.claude.has_access = true
   if (n.refresh_token || cred.has_refresh) vm.claude.has_refresh = true
   if (n.expires_at) vm.claude.expires_at = n.expires_at
   if (n.email) vm.claude.email = n.email
   if (n.account_uuid) vm.claude.account_uuid = n.account_uuid
   if (n.org_uuid) vm.claude.org_uuid = n.org_uuid
+  // Display metadata follows the observed identity; never keep another account's plan.
+  const identityChanged = ['account_uuid', 'org_uuid'].some((key) => n[key] && prev[key] && n[key] !== prev[key])
+  const keepProfileSnapshot =
+    cred.source === 'go-slot-worker' && prev.subscription_updated_at && !operatorImport && !identityChanged
+  for (const key of SUBSCRIPTION_METADATA_KEYS) {
+    if (keepProfileSnapshot && mode !== 'apikey') continue
+    if (mode === 'apikey' || operatorImport || identityChanged || Object.hasOwn(cred, key)) delete vm.claude[key]
+    if (mode !== 'apikey' && typeof cred[key] === 'string' && cred[key].trim()) vm.claude[key] = cred[key].trim()
+  }
   if (isOfficialSetupTokenMode(mode)) {
     vm.claude.scope = 'user:inference'
   } else if (n.scope) {
@@ -652,7 +672,9 @@ export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operat
   clearClaudeAuthCooldown(vm.claude)
   restoreScheduleAfterLiveCredential(vm, { operatorImport })
   vm.updated_at = new Date().toISOString()
+  applySlotNameFromAuthorization(path.resolve(path.dirname(vmPath), '..'), vm, vm.claude.email)
   atomicWriteJson(vmPath, vm, { mode: 0o600 })
+  await resolveVendorAccountName(vm, vm.claude.email)
   return vm
 }
 
@@ -671,13 +693,23 @@ function clearClaudeAuthCooldown(claude = {}) {
 export function markVmRestriction(vmPath, { until, reason } = {}) {
   if (!vmPath || !fs.existsSync(vmPath)) return null
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-  vm.claude = { ...(vm.claude || {}) }
   const untilMs = Number(until) || 0
-  if (untilMs > Date.now()) {
+  const why = reason || 'restricted'
+  // Codex admission re-asserts every restricted slot on each request. Rewriting
+  // an unchanged file (only updated_at moves) cost a write, rename, fs.watch DB
+  // sync and JSON cache miss per slot per request in production (2026-11-03).
+  const hasUntil = untilMs > Date.now()
+  if (
+    vm.claude?.temp_unschedulable_reason === why &&
+    vm.temp_unschedulable_reason === why &&
+    (!hasUntil || (vm.claude?.temp_unschedulable_until === untilMs && vm.temp_unschedulable_until === untilMs))
+  )
+    return vm
+  vm.claude = { ...(vm.claude || {}) }
+  if (hasUntil) {
     vm.claude.temp_unschedulable_until = untilMs
     vm.temp_unschedulable_until = untilMs
   }
-  const why = reason || 'restricted'
   vm.claude.temp_unschedulable_reason = why
   vm.temp_unschedulable_reason = why
   vm.updated_at = new Date().toISOString()
@@ -687,8 +719,9 @@ export function markVmRestriction(vmPath, { until, reason } = {}) {
 
 /** Drop quota/429 restriction only. Auth parks stay. */
 export function clearVmQuotaRestriction(vmPath) {
-  if (!vmPath || !fs.existsSync(vmPath)) return null
-  const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+  // Runs after every successful request; usually nothing to clear, so read through the stat-validated cache.
+  const vm = vmPath ? readJsonCached(vmPath) : null
+  if (!vm) return null
   const reason = vm.claude?.temp_unschedulable_reason || vm.temp_unschedulable_reason
   if (!isQuotaParkReason(reason)) return vm
   vm.claude = { ...(vm.claude || {}) }
@@ -769,8 +802,9 @@ export function healLeftoverAuthState(vmPath) {
 
 /** Ensure / import / later success: drop the 401 park so the next 401 is first-hit again. */
 export function clearVmAuthCooldown(vmPath) {
-  if (!vmPath || !fs.existsSync(vmPath)) return null
-  const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+  // Runs after every successful request; usually nothing to clear, so read through the stat-validated cache.
+  const vm = vmPath ? readJsonCached(vmPath) : null
+  if (!vm) return null
   if (!vm.claude) return vm
   if (isQuotaParkReason(vm.claude.temp_unschedulable_reason || vm.temp_unschedulable_reason)) return vm
   const had =

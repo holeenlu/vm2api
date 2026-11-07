@@ -1,5 +1,6 @@
+import { i18n } from '@/i18n'
 import type { VmProxySnap } from '@/types/panel-vm'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import {
   REGION_ANY,
   REGION_LOCAL,
@@ -107,4 +108,47 @@ describe('regionGroups', () => {
     const us = regionGroups(list, 2, () => true).find((g) => g.country === 'US')
     expect(us?.cities).toEqual([])
   })
+})
+
+const initialLanguage = i18n.language
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN')
+})
+afterEach(async () => {
+  await i18n.changeLanguage(initialLanguage)
+})
+
+it('keeps retained group labels live across locale changes without changing seats or region IDs', async () => {
+  await i18n.changeLanguage('en-US')
+  const groups = regionGroups(
+    [local, socks('jp', { country_code: 'JP' }), socks('unknown', null)],
+    2,
+    () => true
+  )
+  const stable = groups.map(({ country, total, count, free, cities }) => ({
+    country,
+    total,
+    count,
+    free,
+    cities,
+  }))
+  const labels = {
+    'en-US': ['Local exit', 'Japan', 'Location untested'],
+    'zh-CN': ['本地出口', '日本', '未测地理'],
+    'zh-TW': ['本機出口', '日本', '尚未檢測地理'],
+    'ja-JP': ['ローカル出口', '日本', '位置情報未検査'],
+  }
+  for (const [language, expected] of Object.entries(labels)) {
+    await i18n.changeLanguage(language)
+    expect(groups.map((g) => g.label)).toEqual(expected)
+    expect(
+      groups.map(({ country, total, count, free, cities }) => ({
+        country,
+        total,
+        count,
+        free,
+        cities,
+      }))
+    ).toEqual(stable)
+  }
 })

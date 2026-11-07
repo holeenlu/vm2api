@@ -27,12 +27,12 @@ function fakeDb(values = {}, failures = new Set()) {
   }
 }
 
-test('snapshot reports the live SQLite/WAL state without exposing its path', () => {
+test('snapshot reports the live SQLite/WAL state without exposing its path', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-db-metrics-'))
   const dbPath = path.join(tmp, 'private-name.db')
   const db = createDatabase({ dbPath })
   try {
-    const snapshot = snapshotDatabaseMetrics({
+    const snapshot = await snapshotDatabaseMetrics({
       db,
       dbPath,
       usageCache: { stats: () => ({ requests: 0, hit_rate: null }) },
@@ -65,7 +65,7 @@ test('snapshot reports the live SQLite/WAL state without exposing its path', () 
   }
 })
 
-test('snapshot derives page usage and treats absent database files as real zeroes', () => {
+test('snapshot derives page usage and treats absent database files as real zeroes', async () => {
   const db = fakeDb({
     'PRAGMA journal_mode': 'wal',
     'PRAGMA synchronous': 1,
@@ -78,7 +78,7 @@ test('snapshot derives page usage and treats absent database files as real zeroe
     latest: { version: '002', applied_at: '2026-08-30T00:00:00.000Z' },
   })
   const missing = path.join(os.tmpdir(), `missing-kin-${process.pid}-${Date.now()}.db`)
-  const snapshot = snapshotDatabaseMetrics({ db, dbPath: missing, usageCache: null, clock: () => 1 })
+  const snapshot = await snapshotDatabaseMetrics({ db, dbPath: missing, usageCache: null, clock: () => 1 })
 
   assert.equal(snapshot.database.used_pages, 7)
   assert.equal(snapshot.database.used_bytes, 28_672)
@@ -91,7 +91,7 @@ test('snapshot derives page usage and treats absent database files as real zeroe
   assert.ok(db.statements.every((sql) => !/(checkpoint|vacuum|optimize|integrity|quick_check)/i.test(sql)))
 })
 
-test('snapshot preserves partial results when the probe or a metric read fails', () => {
+test('snapshot preserves partial results when the probe or a metric read fails', async () => {
   const db = fakeDb(
     {
       'PRAGMA journal_mode': 'wal',
@@ -104,7 +104,7 @@ test('snapshot preserves partial results when the probe or a metric read fails',
     },
     new Set(['SELECT 1 AS ok', 'PRAGMA synchronous']),
   )
-  const snapshot = snapshotDatabaseMetrics({ db, dbPath: null, usageCache: { stats: () => null } })
+  const snapshot = await snapshotDatabaseMetrics({ db, dbPath: null, usageCache: { stats: () => null } })
 
   assert.equal(snapshot.database.ok, false)
   assert.equal(snapshot.database.probe_latency_ms, null)
@@ -117,10 +117,10 @@ test('snapshot preserves partial results when the probe or a metric read fails',
   assert.equal(snapshot.database.file_size_bytes, null)
 })
 
-test('snapshot returns null for unavailable page inputs and cache stats failures', () => {
+test('snapshot returns null for unavailable page inputs and cache stats failures', async () => {
   const db = new DatabaseSync(':memory:')
   try {
-    const snapshot = snapshotDatabaseMetrics({
+    const snapshot = await snapshotDatabaseMetrics({
       db,
       dbPath: null,
       usageCache: {

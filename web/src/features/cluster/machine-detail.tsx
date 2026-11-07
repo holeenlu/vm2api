@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import type { Vm } from '@/types/panel-vm'
+import { Trans, useTranslation } from 'react-i18next'
 import { fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { proxyHostLabel } from '@/lib/vm-status'
@@ -67,6 +68,7 @@ function MachineTabs({
 }
 
 function CapacityBar({ m }: { m: ClusterMachine }) {
+  const { t } = useTranslation('cluster')
   const c = m.capacity
   if (!c) return null
   const pct = (x: number) => `${Math.min(100, (x / c.total) * 100)}%`
@@ -88,38 +90,92 @@ function CapacityBar({ m }: { m: ClusterMachine }) {
       <div className='mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-muted-foreground'>
         <span className='inline-flex items-center gap-1.5'>
           <i className='inline-block size-2 rounded-[2px] bg-[color:var(--tier-pro-solid)]' />
-          槽用满 <b className='field-metric text-foreground'>{gib(c.quota)}G</b>
+          <Trans
+            t={t}
+            i18nKey='capacity.quota'
+            values={{ value1: gib(c.quota) }}
+            components={{
+              part1: <b className='field-metric text-foreground' />,
+            }}
+          />
         </span>
         <span className='inline-flex items-center gap-1.5'>
           <i className='inline-block size-2 rounded-[2px] bg-[color:var(--status-none)] opacity-55' />
-          系统{' '}
-          <b className='field-metric text-foreground'>
-            {c.reserve == null ? '—' : `${gib(c.reserve)}G`}
-          </b>
+          {c.reserve == null ? (
+            <Trans
+              t={t}
+              i18nKey='capacity.systemUnknown'
+              components={{
+                part1: <b className='field-metric text-foreground' />,
+              }}
+            />
+          ) : (
+            <Trans
+              t={t}
+              i18nKey='capacity.system'
+              values={{ value1: gib(c.reserve) }}
+              components={{
+                part1: <b className='field-metric text-foreground' />,
+              }}
+            />
+          )}
         </span>
         <span className='inline-flex items-center gap-1.5'>
           <i className='inline-block size-2 rounded-[2px] bg-muted' />
-          空余{' '}
-          <b className='field-metric text-foreground'>
-            {c.free == null ? '—' : `${gibFloor(c.free)}G`}
-          </b>
+          {c.free == null ? (
+            <Trans
+              t={t}
+              i18nKey='capacity.freeUnknown'
+              components={{
+                part1: <b className='field-metric text-foreground' />,
+              }}
+            />
+          ) : (
+            <Trans
+              t={t}
+              i18nKey='capacity.free'
+              values={{ value1: gibFloor(c.free) }}
+              components={{
+                part1: <b className='field-metric text-foreground' />,
+              }}
+            />
+          )}
         </span>
         <span>
-          此刻实际已用{' '}
-          <b className='field-metric text-foreground'>{gib(c.used)}G</b>
+          <Trans
+            t={t}
+            i18nKey='capacity.used'
+            values={{ value1: gib(c.used) }}
+            components={{
+              part1: <b className='field-metric text-foreground' />,
+            }}
+          />
         </span>
         <span>
-          共 <b className='field-metric text-foreground'>{gib(c.total)}G</b>
+          <Trans
+            t={t}
+            i18nKey='capacity.total'
+            values={{ value1: gib(c.total) }}
+            components={{
+              part1: <b className='field-metric text-foreground' />,
+            }}
+          />
           {fit == null ? null : fit === 0 ? (
             <span className='text-[color:var(--status-caution)]'>
               {' '}
-              · 放不下新的 2G 槽
+              {t('capacity.noRoom')}
             </span>
           ) : (
             <>
               {' '}
-              · 还能放 <b className='field-metric text-foreground'>{fit}</b> 台
-              2G 槽
+              <Trans
+                t={t}
+                i18nKey='capacity.fitMore'
+                count={fit}
+                components={{
+                  part1: <b className='field-metric text-foreground' />,
+                }}
+              />
             </>
           )}
         </span>
@@ -133,7 +189,10 @@ const SLOT_GRID =
 
 function memText(vm: Vm): string {
   const b = memoryBytes(vm.machine?.memory)
-  return b == null ? '—' : `${gib(b, b % 1024 ** 3 === 0 ? 0 : 1)}G`
+  return b == null
+    ? '—'
+    : // i18n-exempt "{{expression}}G" -- GiB size with the G unit symbol; identical in every locale.
+      `${gib(b, b % 1024 ** 3 === 0 ? 0 : 1)}G`
 }
 
 function SlotTable({
@@ -149,21 +208,27 @@ function SlotTable({
   onCreate: () => void
   onMigrate: (vm: Vm) => void
 }) {
+  const { t } = useTranslation('cluster')
   if (!m.slots.length) {
     const fit = m.capacity?.fit
     return (
       <div className='border-t px-4 pt-7 pb-8 text-center text-[13px] text-muted-foreground'>
-        这台机器上还没有槽。
         {fit != null ? (
-          <>
-            按内存还能放约 <b className='field-metric text-foreground'>{fit}</b>{' '}
-            台 2G 槽。
-          </>
-        ) : null}
+          <Trans
+            t={t}
+            i18nKey='slot.emptyFit'
+            count={fit}
+            components={{
+              part1: <b className='field-metric text-foreground' />,
+            }}
+          />
+        ) : (
+          t('slot.empty')
+        )}
         {canManage ? (
           <div className='mt-2.5'>
             <Button size='sm' variant='outline' onClick={onCreate}>
-              在这台机器上新建槽
+              {t('slot.create')}
             </Button>
           </div>
         ) : null}
@@ -178,15 +243,15 @@ function SlotTable({
           className='col-span-full grid h-[30px] grid-cols-subgrid items-center border-y bg-muted/30 px-4 text-[11px] font-medium tracking-wide text-muted-foreground/80'
         >
           {[
-            '槽位',
-            '套餐',
-            '内存',
-            '账号池',
-            '出口',
-            '状态',
-            '在途',
-            '今日',
-            '操作',
+            t('slots'),
+            t('slot.plan'),
+            t('memory'),
+            t('slot.groups'),
+            t('slot.egress'),
+            t('status'),
+            t('slot.inflight'),
+            t('table.today'),
+            t('slot.actions'),
           ].map((h, i) => (
             <div
               key={h}
@@ -263,12 +328,12 @@ function SlotTable({
                     disabled={!vm.node_id || vm.runtime_type !== 'kvm'}
                     title={
                       !vm.node_id || vm.runtime_type !== 'kvm'
-                        ? '首版仅支持远程 Linux KVM 槽'
-                        : '迁移到其他节点，或在原节点扩内存'
+                        ? t('migration.kvmOnly')
+                        : t('migration.buttonHint')
                     }
                     onClick={() => onMigrate(vm)}
                   >
-                    迁移 / 扩容
+                    {t('migration.button')}
                   </Button>
                 ) : (
                   '—'
@@ -293,13 +358,14 @@ function ConnectionDetails({
   checkedAt: string | null
   error?: string | null
 }) {
+  const { t } = useTranslation('cluster')
   return (
     <details className='group border-t'>
       <summary className='flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden'>
         <span className='text-[10px] transition-transform group-open:rotate-90'>
           ▸
         </span>
-        连接详情
+        {t('localDetail.title')}
         {summary ? (
           <span className='truncate text-muted-foreground/80'>· {summary}</span>
         ) : null}
@@ -313,7 +379,9 @@ function ConnectionDetails({
           {error}
         </p>
       ) : !rows ? (
-        <p className='px-4 pb-3 pl-9 text-xs text-muted-foreground'>加载中…</p>
+        <p className='px-4 pb-3 pl-9 text-xs text-muted-foreground'>
+          {t('loading')}
+        </p>
       ) : (
         <dl className='grid grid-cols-[92px_1fr] gap-x-3.5 gap-y-1.5 px-4 pb-3.5 pl-9 text-xs'>
           {rows.map((row) => (
@@ -375,6 +443,7 @@ export function MachineDetail({
   onCreate: (m: ClusterMachine) => void
   onMigrate: (vm: Vm) => void
 }) {
+  const { t } = useTranslation('cluster')
   const m = machines.find((x) => x.id === selectedId) || machines[0]
   if (!m) return null
   return (
@@ -396,7 +465,9 @@ export function MachineDetail({
               disabled={localRefresh.pending}
               onClick={localRefresh.run}
             >
-              {localRefresh.pending ? '观测中…' : '重新观测'}
+              {localRefresh.pending
+                ? t('localLink.observing')
+                : t('localLink.observeAgain')}
             </Button>
           ) : canManage && m.remote ? (
             <>
@@ -407,7 +478,7 @@ export function MachineDetail({
                 disabled={m.remote.link.state !== 'ready'}
                 onClick={() => onOpenNode(m.id, 'terminal')}
               >
-                终端
+                {t('terminal')}
               </Button>
               {m.remote.platform !== 'darwin' ? (
                 <Button
@@ -425,7 +496,7 @@ export function MachineDetail({
                 className='h-7 px-2.5 text-xs'
                 onClick={() => onOpenNode(m.id, 'link')}
               >
-                连接设置
+                {t('machine.connectionSettings')}
               </Button>
               <span className='w-2' />
               <Button
@@ -435,12 +506,12 @@ export function MachineDetail({
                 disabled={m.slots.length > 0}
                 title={
                   m.slots.length
-                    ? `这台上还有 ${m.slots.length} 个槽，先删掉或挪走才能移除`
-                    : '断开 SSH、删除本地凭证与 Docker 桥；远端容器保持运行'
+                    ? t('machine.removeBlocked', { count: m.slots.length })
+                    : t('machine.removeHint')
                 }
                 onClick={() => onRemove(m)}
               >
-                移除节点
+                {t('removeTitle')}
               </Button>
             </>
           ) : null}

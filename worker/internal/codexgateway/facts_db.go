@@ -1,0 +1,587 @@
+package codexgateway
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/url"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	_ "modernc.org/sqlite" // 纯 Go 驱动：镜像 CGO_ENABLED=0
+)
+
+// Gateway 事实直读（设计第 19 节）：Worker 同机以只读方式直读控制面 SQLite（kin.db）里的账号事实。
+// 只读迁移 124 定义的视图 gateway_account_facts_v1（读取契约）；刷新后的凭据由单独的读写连接写回凭据库（facts_write.go）。
+// 变更感知：同一条连接上轮询 PRAGMA data_version，变化后在一个短读事务里按事实版本增量读取；
+// 解密放在事务外，读事务不能挡住控制面的 WAL checkpoint。每 10 分钟全量对账一次。
+// 读到的事实合并进账号表（facts_apply.go），配置、分组与凭据以库为准；G4 起控制面不再推送投影。
+
+const (
+	// 契约版本 2（迁移 133）：视图只含原生授权的凭据列
+	factsContractMin   = 2
+	factsContractMax   = 2
+	factsPollInterval  = 500 * time.Millisecond
+	factsFullReconcile = 10 * time.Minute
+)
+
+// FactCredential 是凭据库里原生授权的令牌与代次。
+type FactCredential struct {
+	Revision     int64
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	APIKey       string
+	ExpiresAt    string
+	Fingerprint  string
+}
+
+// AccountFacts 是一个 Gateway 账号在控制面的事实（已解密）。
+type AccountFacts struct {
+	ResourceID       string
+	RuntimeID        string
+	VendorID         string
+	Name             string
+	Status           string
+	Archived         bool
+	Deleted          bool
+	Email            string
+	Plan             string
+	ChatGPTAccountID string
+	MaxConcurrency   int
+	MaxRPM           int
+	Weight           int
+	Models           []string
+	DeniedModels     []string
+	ResetCreditAuto  bool
+	InstallationID   string
+	ProxyID          string
+	// VendorInactive 是供应商（或其上级）停用、或平台授权不含 OpenAI（迁移 129 的 vendor_active=0）；
+	// 旧库没有这一列时按启用处理
+	VendorInactive  bool
+	ProxyURL        string
+	ProxyMaxWS      int
+	RequestLocation *RequestLocation
+	Groups          []string
+	Native          *FactCredential
+	FactRevision    int64
+	// Errors 是该账号读不出的部分（主密钥缺失、密文校验失败等）；有错误的账号不能以库为准调度
+	Errors []string
+}
+
+// Schedulable 是账号在控制面的启停：只有 active 才接单（与投影的 enabled/paused 同一口径）。
+// 供应商停用或收回平台授权的账号同样不接单（与 VM 选号时的 vendorRuntimeBlock 一致）。
+func (f AccountFacts) Schedulable() bool {
+	return f.Status == "active" && !f.Archived && !f.Deleted && !f.VendorInactive
+}
+
+// factsRow 是视图的一行原始值（事务内只做扫描，解密在事务外）。
+type factsRow map[string]any
+
+// FactsReader 持有最近一次完好的事实快照；读失败时保留上一份快照并记录错误。
+type FactsReader struct {
+	db *sql.DB
+	// dsn 与 file 用于库文件被替换后重开（reopenIfReplaced）；file 是当前连接打开的文件（设备号与 inode）
+	dsn     string
+	file    os.FileInfo
+	keyring *factsKeyring
+	secret  string
+	path    string
+	// writeDB 是刷新后写回凭据库的读写连接（facts_write.go），首次写回时打开
+	writeMu sync.Mutex
+	writeDB *sql.DB
+
+	mu          sync.RWMutex
+	accounts    map[string]AccountFacts // 按资源 ID
+	seq         int64
+	contract    int
+	dataVersion int64
+	loadedAt    time.Time
+	fullAt      time.Time
+	// okAt 是最近一次成功读取（含没有变化的轮询）的时刻，startedAt 是读取器启动时刻（陈旧判断，Stale）
+	okAt      time.Time
+	startedAt time.Time
+	lastErr   string
+	keyStamp  string // 主密钥文件的修改时间与大小，变化时全量重读
+	loads     int64
+	// onChange 在快照更新后调用（primary 模式把事实合并进账号表）；在读取循环里同步执行
+	onChange func(map[string]AccountFacts)
+}
+
+// OpenFactsReader 以只读方式打开 kin.db（mode=ro + query_only），不执行任何迁移。
+func OpenFactsReader(path, keyFile, secret string) (*FactsReader, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("facts database path is required")
+	}
+	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() + "?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// 固定一条连接：PRAGMA data_version 只在同一条连接上可比较
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	reader := &FactsReader{db: db, dsn: dsn, keyring: newFactsKeyring(keyFile), secret: secret, path: path, accounts: map[string]AccountFacts{}, startedAt: time.Now()}
+	reader.file, _ = os.Stat(path)
+	return reader, nil
+}
+
+func (r *FactsReader) Close() error {
+	r.closeWriter()
+	return r.db.Close()
+}
+
+func (r *FactsReader) closeWriter() {
+	r.writeMu.Lock()
+	if r.writeDB != nil {
+		_ = r.writeDB.Close()
+		r.writeDB = nil
+	}
+	r.writeMu.Unlock()
+}
+
+// reopenIfReplaced 比对数据库文件的设备号与 inode（os.SameFile）：控制面恢复备份或重建库后文件被换掉，
+// 已打开的连接仍读着旧文件（已解除链接的 inode），此时关闭并重开只读连接与写连接，并按新库全量重读（审计 P1-C7）。
+// 返回 true 表示已换到新文件。文件暂时不存在（恢复中途）时返回错误，本轮按读取失败计。
+func (r *FactsReader) reopenIfReplaced() (bool, error) {
+	current, err := os.Stat(r.path)
+	if err != nil {
+		return false, fmt.Errorf("facts database: %w", err)
+	}
+	if r.file == nil {
+		r.file = current
+		return false, nil
+	}
+	if os.SameFile(r.file, current) {
+		return false, nil
+	}
+	db, err := sql.Open("sqlite", r.dsn)
+	if err != nil {
+		return false, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	old := r.db
+	r.db, r.file = db, current
+	_ = old.Close()
+	r.closeWriter()
+	log.Printf("codex-gateway: control-plane database file was replaced; reopened the facts connections")
+	return true, nil
+}
+
+// factsStaleAfter：距最近一次成功读取超过它，事实视为陈旧，Worker 拒绝调度（503 gateway_facts_stale）。
+const factsStaleAfter = 2 * time.Minute
+
+// staleFor 返回距最近一次成功读取（含“没有变化”的轮询）的时长；从未成功时从读取器启动算起。
+func (r *FactsReader) staleFor(now time.Time) time.Duration {
+	r.mu.RLock()
+	last := r.okAt
+	if last.IsZero() {
+		last = r.startedAt
+	}
+	r.mu.RUnlock()
+	return max(now.Sub(last), 0)
+}
+
+// Stale：事实已陈旧（读取持续失败或库不可读超过 factsStaleAfter），不能据此调度。
+func (r *FactsReader) Stale(now time.Time) bool { return r.staleFor(now) > factsStaleAfter }
+
+// Run 轮询事实变化直到 ctx 结束。
+func (r *FactsReader) Run(ctx context.Context) {
+	_ = r.Refresh(ctx, true) // 出错时 Refresh 已记日志
+	ticker := time.NewTicker(factsPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_ = r.Close()
+			return
+		case <-ticker.C:
+			r.mu.RLock()
+			full := time.Since(r.fullAt) >= factsFullReconcile
+			r.mu.RUnlock()
+			_ = r.Refresh(ctx, full)
+		}
+	}
+}
+
+// Refresh 读取变化（full 为真时全量）。没有变化时只执行一次 PRAGMA data_version。
+func (r *FactsReader) Refresh(ctx context.Context, full bool) error {
+	// 主密钥文件变化（恢复、轮换）后全量重读：此前读不出的凭据不必等 10 分钟的全量对账
+	if stamp := r.keyring.stamp(); stamp != r.keyStamp {
+		r.keyStamp = stamp
+		full = full || r.loads > 0
+	}
+	// 库文件被替换（恢复备份）：换到新文件并全量重读，data_version 只在同一连接上可比
+	replaced, err := r.reopenIfReplaced()
+	if err == nil {
+		err = r.refresh(ctx, full || replaced)
+	}
+	r.mu.Lock()
+	previous := r.lastErr
+	if err != nil {
+		r.lastErr = err.Error()
+	} else {
+		r.lastErr = ""
+		r.okAt = time.Now()
+	}
+	current := r.lastErr
+	r.mu.Unlock()
+	// 读取状态切换时记一行日志（持续出错不刷屏）
+	if current != previous {
+		if current != "" {
+			log.Printf("codex-gateway: reading control-plane facts failed: %s", current)
+		} else {
+			log.Printf("codex-gateway: reading control-plane facts recovered")
+		}
+	}
+	return err
+}
+
+func (r *FactsReader) refresh(ctx context.Context, full bool) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var version int64
+	if err := r.db.QueryRowContext(ctx, "PRAGMA data_version").Scan(&version); err != nil {
+		return fmt.Errorf("facts data_version: %w", err)
+	}
+	r.mu.RLock()
+	unchanged := !full && r.loads > 0 && version == r.dataVersion
+	lastSeq := r.seq
+	r.mu.RUnlock()
+	if unchanged {
+		return nil
+	}
+	contract, seq, rows, changed, err := r.read(ctx, full, lastSeq)
+	if err != nil {
+		return err
+	}
+	if contract < factsContractMin || contract > factsContractMax {
+		return fmt.Errorf("facts contract version %d is outside the supported range %d-%d", contract, factsContractMin, factsContractMax)
+	}
+	decoded := make(map[string]AccountFacts, len(rows))
+	for _, row := range rows {
+		facts := r.decode(row)
+		decoded[facts.ResourceID] = facts
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if full {
+		r.accounts = decoded
+		r.fullAt = time.Now()
+	} else {
+		for _, id := range changed {
+			if facts, ok := decoded[id]; ok {
+				r.accounts[id] = facts
+			} else {
+				delete(r.accounts, id) // 视图里已没有（物理删除或不再是 Gateway 账号）
+			}
+		}
+	}
+	r.seq, r.contract, r.dataVersion, r.loadedAt = seq, contract, version, time.Now()
+	r.loads++
+	if r.onChange != nil && (full || len(changed) > 0) {
+		snapshot := make(map[string]AccountFacts, len(r.accounts))
+		for id, facts := range r.accounts {
+			snapshot[id] = facts
+		}
+		r.mu.Unlock()
+		r.onChange(snapshot)
+		r.mu.Lock()
+	}
+	return nil
+}
+
+// read 在一个只读事务里读契约版本、事实序列与（变化的）账号行；只扫描，不解密。
+func (r *FactsReader) read(ctx context.Context, full bool, lastSeq int64) (int, int64, []factsRow, []string, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var contract int
+	if err := tx.QueryRowContext(ctx, "SELECT version FROM gateway_fact_contract WHERE id=1").Scan(&contract); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("facts contract: %w", err)
+	}
+	// 契约版本不在支持区间时不读账号行（不按不认识的视图解码，也不每次轮询都全量扫描）
+	if contract < factsContractMin || contract > factsContractMax {
+		return contract, 0, nil, nil, tx.Commit()
+	}
+	var seq int64
+	if err := tx.QueryRowContext(ctx, "SELECT value FROM gateway_fact_seq WHERE id=1").Scan(&seq); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("facts seq: %w", err)
+	}
+	var changed []string
+	query := "SELECT * FROM gateway_account_facts_v1"
+	args := []any{}
+	if !full {
+		if seq == lastSeq {
+			return contract, seq, nil, nil, tx.Commit()
+		}
+		ids, err := tx.QueryContext(ctx, "SELECT account_resource_id FROM gateway_account_fact_revisions WHERE revision > ?", lastSeq)
+		if err != nil {
+			return 0, 0, nil, nil, err
+		}
+		for ids.Next() {
+			var id string
+			if err := ids.Scan(&id); err != nil {
+				_ = ids.Close()
+				return 0, 0, nil, nil, err
+			}
+			changed = append(changed, id)
+		}
+		if err := ids.Close(); err != nil {
+			return 0, 0, nil, nil, err
+		}
+		if len(changed) == 0 {
+			return contract, seq, nil, nil, tx.Commit()
+		}
+		query += " WHERE account_resource_id IN (SELECT account_resource_id FROM gateway_account_fact_revisions WHERE revision > ?)"
+		args = append(args, lastSeq)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("facts view: %w", err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return 0, 0, nil, nil, err
+	}
+	var out []factsRow
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+		if err := rows.Scan(pointers...); err != nil {
+			return 0, 0, nil, nil, err
+		}
+		row := make(factsRow, len(columns))
+		for i, name := range columns {
+			if b, ok := values[i].([]byte); ok {
+				row[name] = string(b)
+			} else {
+				row[name] = values[i]
+			}
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, nil, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, nil, nil, err
+	}
+	return contract, seq, out, changed, tx.Commit()
+}
+
+func (row factsRow) str(name string) string {
+	switch value := row[name].(type) {
+	case nil:
+		return ""
+	case string:
+		return value
+	case int64:
+		return strconv.FormatInt(value, 10)
+	case float64:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	default:
+		return fmt.Sprint(value)
+	}
+}
+
+func (row factsRow) int(name string) (int64, bool) {
+	switch value := row[name].(type) {
+	case int64:
+		return value, true
+	case float64:
+		return int64(value), true
+	case string:
+		n, err := strconv.ParseInt(value, 10, 64)
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// decode 把一行原始值转成事实：口径与控制面账号配置一致（缺省并发 4、权重 1）。
+func (r *FactsReader) decode(row factsRow) AccountFacts {
+	f := AccountFacts{
+		ResourceID:       row.str("account_resource_id"),
+		RuntimeID:        row.str("runtime_account_id"),
+		VendorID:         row.str("vendor_id"),
+		Name:             row.str("name"),
+		Status:           row.str("status"),
+		Archived:         row.str("archived_at") != "",
+		Deleted:          row.str("deleted_at") != "",
+		Email:            row.str("email"),
+		Plan:             row.str("plan"),
+		ChatGPTAccountID: row.str("chatgpt_account_id"),
+		InstallationID:   row.str("installation_id"),
+		ProxyID:          row.str("proxy_id"),
+	}
+	if n, ok := row.int("vendor_active"); ok && n == 0 {
+		f.VendorInactive = true
+	}
+	if f.RuntimeID == "" {
+		f.Errors = append(f.Errors, "runtime_account_id_missing")
+	}
+	if n, ok := row.int("max_concurrency"); ok && n > 0 {
+		f.MaxConcurrency = int(n)
+	} else {
+		f.MaxConcurrency = 4
+	}
+	if n, ok := row.int("max_rpm"); ok && n > 0 {
+		f.MaxRPM = int(n)
+	}
+	if n, ok := row.int("weight"); ok && n > 0 {
+		f.Weight = int(n)
+	} else {
+		f.Weight = 1
+	}
+	var access struct {
+		Mode   string   `json:"mode"`
+		Models []string `json:"models"`
+	}
+	if raw := row.str("model_access_json"); raw != "" && json.Unmarshal([]byte(raw), &access) == nil {
+		switch access.Mode {
+		case "allowlist":
+			f.Models = access.Models
+		case "denylist":
+			f.DeniedModels = access.Models
+		}
+	}
+	if n, ok := row.int("reset_credit_auto"); ok && n != 0 {
+		f.ResetCreditAuto = true
+	}
+	if n, ok := row.int("proxy_max_websocket_connections"); ok && n > 0 {
+		f.ProxyMaxWS = int(n)
+	}
+	f.RequestLocation = proxyRequestLocation(row)
+	var groups []int64
+	if raw := row.str("group_ids_json"); raw != "" && json.Unmarshal([]byte(raw), &groups) == nil {
+		sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
+		for _, id := range groups {
+			f.Groups = append(f.Groups, strconv.FormatInt(id, 10))
+		}
+	}
+	if n, ok := row.int("fact_revision"); ok {
+		f.FactRevision = n
+	}
+	if secret := row.str("secret_json"); secret != "" {
+		plain, err := decryptDBField(secret, r.secret)
+		if err != nil {
+			f.Errors = append(f.Errors, "secret_unreadable")
+		} else {
+			var parsed struct {
+				ProxyURL string `json:"proxy_url"`
+			}
+			if json.Unmarshal([]byte(plain), &parsed) == nil {
+				f.ProxyURL = parsed.ProxyURL
+			}
+		}
+	}
+	// Gateway 账号必须经代理出站：解不出代理时按读取出错处理（保留上一份配置），不能退回本机直连
+	if f.ProxyURL == "" && !f.Deleted && !contains(f.Errors, "secret_unreadable") {
+		f.Errors = append(f.Errors, "proxy_missing")
+	}
+	f.Native = r.credential(row, &f)
+	return f
+}
+
+// credential 解出视图里的原生授权（native_* 列）。
+func (r *FactsReader) credential(row factsRow, f *AccountFacts) *FactCredential {
+	const grant = refreshGrantNative
+	revision, ok := row.int(grant + "_revision")
+	if !ok || revision <= 0 {
+		return nil
+	}
+	secrets, err := openVaultRecord(r.keyring, f.ResourceID, grant, revision, row.str(grant+"_master_key_id"), row.str(grant+"_wrapped_key"), row.str(grant+"_ciphertext"))
+	if err != nil {
+		code := grant + "_credential_unreadable"
+		if errors.Is(err, errMasterKeyMissing) || errors.Is(err, errMasterKeyFile) {
+			code = grant + "_master_key_missing"
+		}
+		f.Errors = append(f.Errors, code)
+		return nil
+	}
+	return &FactCredential{Revision: revision, AccessToken: secrets.AccessToken, RefreshToken: secrets.RefreshToken, IDToken: secrets.IDToken, APIKey: secrets.APIKey,
+		ExpiresAt: row.str(grant + "_expires_at"), Fingerprint: row.str("native_fingerprint")}
+}
+
+// proxyRequestLocation 与控制面 request-location.mjs 的 proxyRequestLocation 一致：manual 用手动字段；
+// auto 用代理池探测的出口（IPv4 与 IPv6 时区冲突时撤销）；inherit 或信息不完整时为空（账号回退全局位置）。
+func proxyRequestLocation(row factsRow) *RequestLocation {
+	detected := func(country, region, city, timezone string) *RequestLocation {
+		location, err := RequestLocation{Country: row.str(country), Region: row.str(region), City: row.str(city), Timezone: row.str(timezone)}.normalized()
+		if err != nil {
+			return nil
+		}
+		return &location
+	}
+	switch row.str("proxy_request_location_mode") {
+	case "manual":
+		return detected("proxy_location_country", "proxy_location_region", "proxy_location_city", "proxy_location_timezone")
+	case "auto":
+		v4 := detected("proxy_geo_country_code", "proxy_geo_region", "proxy_geo_city", "proxy_geo_timezone")
+		v6 := detected("proxy_geo_v6_country_code", "proxy_geo_v6_region", "proxy_geo_v6_city", "proxy_geo_v6_timezone")
+		if v4 != nil && v6 != nil && v4.Timezone != v6.Timezone {
+			return nil
+		}
+		if v4 != nil {
+			return v4
+		}
+		return v6
+	}
+	return nil
+}
+
+// FactsStatus 是读取器的运行状态（健康接口与心跳）。
+type FactsStatus struct {
+	Contract   int    `json:"contract"`
+	Seq        int64  `json:"seq"`
+	Accounts   int    `json:"accounts"`
+	WithErrors int    `json:"with_errors"`
+	LoadedAt   string `json:"loaded_at,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	// StaleSeconds 是距最近一次成功读取的秒数；Stale 为真时 Worker 拒绝调度（gateway_facts_stale）
+	StaleSeconds int64 `json:"stale_seconds"`
+	Stale        bool  `json:"stale"`
+}
+
+// Snapshot 返回事实快照的拷贝与状态。
+func (r *FactsReader) Snapshot() (map[string]AccountFacts, FactsStatus) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]AccountFacts, len(r.accounts))
+	status := FactsStatus{Contract: r.contract, Seq: r.seq, Accounts: len(r.accounts), LastError: r.lastErr}
+	for id, facts := range r.accounts {
+		out[id] = facts
+		if len(facts.Errors) > 0 {
+			status.WithErrors++
+		}
+	}
+	if !r.loadedAt.IsZero() {
+		status.LoadedAt = r.loadedAt.UTC().Format(time.RFC3339)
+	}
+	last := r.okAt
+	if last.IsZero() {
+		last = r.startedAt
+	}
+	stale := max(time.Since(last), 0)
+	status.StaleSeconds, status.Stale = int64(stale/time.Second), stale > factsStaleAfter
+	return out, status
+}
